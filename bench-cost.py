@@ -2,18 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# WHERE A RUN'S TIME WENT, from the committed artifacts. No box, no stopwatch, no re-run.
+# Where a run's time went, from the committed artifacts - no box, no stopwatch, no re-run.
 #
-# A run that is slower than the last one is a question a wall-clock total cannot answer: "thirteen
-# minutes a cell" might be the TTFT sample set, a stream ladder reaching a higher rung, or a gateway
-# that simply got slower, and those have nothing in common as responses. The engine records seconds
-# per metric group per cell (`cell.timings_s`); this reads them back and says what to cut.
+# Reads seconds per metric group per cell (`cell.timings_s`) and says what to cut, since a
+# wall-clock total can't tell a bigger TTFT sample set from a gateway that just got slower.
 #
 #   ./bench-cost.py                 every gateway on the newest engine
 #   ./bench-cost.py agentgateway    one gateway
 #   ./bench-cost.py --engine 8f2af5d   a specific engine, to compare two runs
 #
-# Runnable from any directory, and pinned to ONE engine, for the same two reasons bench-audit is: see
+# Runnable from any directory, and pinned to ONE engine, for the same reasons as bench-audit: see
 # the notes on `_audit` and on the default `engine` in main().
 import collections
 import importlib.util
@@ -21,12 +19,10 @@ import json
 import os
 import sys
 
-# ONE DECLARATION OF "WHERE THE SNAPSHOTS ARE" AND "WHICH ENGINE IS CURRENT", BORROWED RATHER THAN
-# RETYPED. Both facts already live in bench-audit.py, which is the tool whose whole job is to be right
-# about the board; a second copy here would be a second thing to keep in step, and the ledger already
-# has an entry (TOOL-02) about what happens to a rule that exists twice. The import is by path because
-# the filename is hyphenated, and it is side-effect free: bench-audit's argparse lives under
-# `if __name__ == "__main__"`.
+# Snapshot location and "which engine is current" are borrowed from bench-audit.py, the tool
+# responsible for being right about the board, rather than retyped (see TOOL-02 on rules that
+# exist twice). Imported by path since the filename is hyphenated; side-effect free because
+# bench-audit's argparse lives under `if __name__ == "__main__"`.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SPEC = importlib.util.spec_from_file_location("bench_audit", os.path.join(_HERE, "bench-audit.py"))
 _audit = importlib.util.module_from_spec(_SPEC)
@@ -63,14 +59,9 @@ def main():
         del args[i : i + 2]
     gw_filter = args[0] if args else None
 
-    # DEFAULT TO ONE ENGINE, because the header of this file promises "every gateway on the newest
-    # engine" and the code used to leave `engine` as None, which means "every gateway's newest
-    # snapshot, whatever engine produced it". Those differ the moment a rerun covers part of the
-    # field: the per-group shares, the "slowest groups" ranking and every "halving it saves N minutes"
-    # line would then be arithmetic over two different engines' timings, presented as one run's cost
-    # profile. The whole point of this tool is to answer "what got slower", and mixing engines is the
-    # one way to get a confident wrong answer to it. Same recency rule bench-audit uses (the
-    # snapshot's own measured_at, not filename order), from the same function.
+    # Default to one engine: without pinning, a rerun that covers only part of the field would mix
+    # two engines' timings into one cost profile and answer "what got slower" confidently wrong.
+    # Same recency rule as bench-audit (snapshot's own measured_at, not filename order).
     if engine is None:
         engine = _audit.newest_engine()
         if engine is None:
@@ -122,8 +113,7 @@ def main():
         print(f"{group:22s} {secs/60:9.1f}m {secs/total*100:6.1f}% {secs/cells_seen:9.1f}s")
     print(f"{'TOTAL':22s} {total/60:9.1f}m {100.0:6.1f}% {total/cells_seen:9.1f}s")
 
-    # The actionable part: what a change to the most expensive group would actually buy, stated as
-    # wall clock rather than as a percentage nobody can plan against.
+    # What a change to the most expensive group would buy, in wall clock rather than percentage.
     if grand:
         worst, secs = grand.most_common(1)[0]
         print()

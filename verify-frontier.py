@@ -2,38 +2,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# RE-DERIVE THE FRONTIER FROM THE RAW RUNGS, INDEPENDENTLY OF THE ENGINE AND OF bench-audit.py.
+# Re-derives the frontier from raw rungs, independently of the engine AND of bench-audit.py, using
+# the PUBLISHED DEFINITION (`ResultSnapshot.definitions["perf.frontier"]`) rather than `frontier.rs` -
+# so a divergence between the published prose and the implementation gets caught, not just a
+# divergence between the engine and a sibling audit written by the same hand.
 #
-# bench-audit.py already re-derives each reading from `sweep_max_proxy`. This exists anyway, and the
-# reason is not redundancy: that audit and the engine were written by the same hand in the same
-# sitting, so an agreement between them is one mind checking its own arithmetic. This file is written
-# from the PUBLISHED DEFINITION - `ResultSnapshot.definitions["perf.frontier"]`, the prose the board
-# shows a reader - rather than from `frontier.rs`. If the definition and the implementation ever say
-# different things, this is what notices.
-#
-# It is also the operator's tool during a run: point it at a snapshot the moment it harvests and it
-# prints the curve, the per-bound arithmetic, and anything that does not add up - which is how the
-# `lower_bound` semantics bug was caught on the first live run rather than on the published board.
+# Also usable live: point it at a snapshot mid-run to print the curve and anything that fails to
+# re-derive.
 #
 # THE RULE, quoted from the published definition: for each declared bound, the most requests/sec the
-# cell carried while 99% of requests finished under that bound AND it failed none it accepted. Plus
-# one reading with no latency bound at all. Monotone non-decreasing across the bounds, because
-# relaxing a bound only ADDS rungs to the set the maximum is taken over.
+# cell carried while 99% of requests finished under that bound AND it failed none it accepted, plus
+# one unbounded reading. Monotone non-decreasing across bounds (relaxing a bound only adds rungs).
 #
-# WHERE THIS IS DELIBERATELY LESS PRECISE THAN THE ENGINE, and why that is safe: a published
-# `SweepPoint` carries no `ok` count, so "served cleanly" cannot be spelled `ok > 0 and fail == 0` as
-# the engine spells it. It is approximated as `rps > 0 and fail == 0`. The approximation can only ever
-# be WIDER than the engine's (a window with ok == 0 also has rps == 0), so a reading this file accepts
-# and the engine rejected would be reported here as a disagreement to investigate, never hidden.
+# DELIBERATELY WIDER THAN THE ENGINE: a published `SweepPoint` has no `ok` count, so "served cleanly"
+# is approximated as `rps > 0 and fail == 0` rather than the engine's `ok > 0 and fail == 0`. This can
+# only accept more than the engine would, so any disagreement is real, never hidden by the approximation.
 
 import glob
 import os
 import json
 import sys
 
-# Mirrors frontier::P99_BOUNDS_US. Parsed from the engine rather than hardcoded, so this cannot
-# quietly police a different axis than the one that ran - the same anti-drift reasoning bench-audit.py
-# uses for its own mirrors, and going blind counts as a failure rather than a pass.
+# Mirrors frontier::P99_BOUNDS_US. Parsed from the engine rather than hardcoded, so this can't
+# quietly police a different axis than the one that ran; going blind counts as a failure, not a pass.
 ENGINE_FRONTIER = "engine/src/frontier.rs"
 
 
@@ -53,9 +44,8 @@ def declared_bounds_us():
 
 
 def _rate(v):
-    """A rate as text for a PROBLEM message. `:.0f` printed a genuine 0.25 as "0", so an operator read
-    the tool's own finding as "the re-derived reading is nothing" and dismissed it as noise - the
-    message describing a caught defect made the defect invisible."""
+    """Rate as text for a PROBLEM message. `:.0f` would print a genuine 0.25 as "0", making a caught
+    defect read as noise, so sub-1 rates get two decimals."""
     if v is None:
         return "none"
     return f"{v:.2f}" if v < 1 else f"{v:,.0f}"
@@ -85,15 +75,10 @@ def rungs_of(perf):
 def clean(r):
     """Did this rung serve everything it accepted? Approximates the engine's `ok > 0 and fail == 0`.
 
-    A P99 COUNTS AS PROOF OF COMPLETION. `rps > 0` alone was wrong, and it cost a real catch: plano at
-    c=256 published `rps: 0, p99_us: 3398432, fail: 0`, which `rps > 0` reads as dirty - but a percentile
-    cannot exist without a completed, timed request, so ok >= 1 and the rate merely rounded down through
-    the engine's `as i64` (one request over four seconds is 0.25 rps). Treating it as dirty makes this
-    tool disagree with a correct engine.
-
-    `ok` is the one input `SweepPoint` does not publish, so this stays an approximation - but a wider one
-    than the engine's rule rather than a narrower one, which means its residual error is a missed catch
-    rather than a false alarm.
+    A p99 counts as proof of completion even when `rps` rounds down to 0 (e.g. one request over four
+    seconds truncates through the engine's `as i64` to 0 rps but still has a p99) - `rps > 0` alone
+    would wrongly call such a rung dirty. `ok` isn't published, so this stays an approximation, but a
+    wider one than the engine's rule, so any residual error is a missed catch, not a false alarm.
     """
     if r["fail"] != 0:
         return False
@@ -112,30 +97,18 @@ def derive(rungs, bound_us):
     ok = [r for r in rungs if qualifies(r, bound_us)]
     if not ok:
         return None
-    # THE TIE-BREAK IS PART OF THE RULE, so it is spelled out here rather than left to `max`.
+    # THE TIE-BREAK IS PART OF THE RULE: highest rate wins; among rungs tied on rate, the lowest
+    # concurrency wins. Spelled out explicitly rather than left to `max`, because Python's `max` and
+    # Rust's `max_by` break ties at opposite ends - relying on either language's default would agree
+    # only by coincidence of input order.
     #
-    # This read `max(ok, key=lambda r: r["rps"])`, which returns the FIRST maximum, while the engine used
-    # `max_by` in Rust, which returns the LAST. On gomodel that disagreement surfaced as "published
-    # c=512, re-derived c=256" on a cell where four rungs tied at 109 rps - and it was the ENGINE that
-    # was wrong: naming a higher concurrency claims the rate needs more connections than it does.
-    #
-    # Both sides now state the same rule: highest rate, and among rungs tied on rate, the lowest
-    # concurrency. Relying on either language's max-adapter would leave this agreeing by coincidence of
-    # input order, which is not agreement at all.
-    # A RUNG CAN QUALIFY WITH NO RATE, so the tie-break must not assume one.
-    #
-    # `clean()` deliberately admits a rung carrying a p99 but no rps - its docstring says a percentile
-    # cannot exist without a completed request, so a null rate there means the rate rounded away, not
-    # that nothing was served. The key then did `-r["rps"]`, which raises TypeError on None and takes
-    # the whole tool down mid-board. Treating an absent rate as the lowest candidate keeps the rung
-    # eligible (which is the point of admitting it) without letting it win a maximum it cannot state.
+    # A rung can qualify with no rate (see `clean()`: a null rate there means the rate rounded away,
+    # not that nothing was served), so the key treats an absent rate as the lowest candidate rather
+    # than crashing on `-None`.
     best = min(ok, key=lambda r: (-(r["rps"] if r["rps"] is not None else 0.0), r["conc"]))
-    # A CONCURRENCY IS DISQUALIFIED, NOT A RUNG. Rungs are recorded PER WINDOW (WINDOWS_PER_RUNG=3),
-    # so every concurrency appears three times and one unlucky window is not a verdict on the level.
-    # Asking "is there any failing rung above best" condemned concurrencies that two of their three
-    # windows carried cleanly - the engine and bench-audit.py were both corrected to ask instead
-    # "did NO window at this concurrency qualify", and this oracle was left behind on the old rule.
-    # It re-derived 2 where the engine published 4 on portkey and called the engine wrong.
+    # A CONCURRENCY is disqualified, not a rung: each concurrency is sampled across WINDOWS_PER_RUNG=3
+    # windows, so one unlucky window shouldn't condemn the level. Disqualify only if NO window at that
+    # concurrency qualified.
     above = [c for c in sorted({r["conc"] for r in rungs if r["conc"] > best["conc"]})
              if not any(r["conc"] == c and qualifies(r, bound_us) for r in rungs)]
     top = max((r["conc"] for r in rungs), default=0)
@@ -194,13 +167,10 @@ def check(path, bounds_us, verbose):
                     continue
                 if mine is None:
                     continue
-                # EXACT, NOT WITHIN 1.0 req/s. No arithmetic happens on either side - `derive` returns
-                # a published rung's rate verbatim and `pub_rps` is the published reading - so these are
-                # the same float or the engine disagrees with its own rungs. The old tolerance of 1.0
-                # made this oracle UNABLE TO FAIL anywhere below 1 req/s, which is the entire domain the
-                # fractional rate was introduced for: a regression republishing 0.25 as 0 scored
-                # abs(0.25) < 1.0 and passed. bench-audit.py compares exactly, so the two independent
-                # re-derivations disagreed about the rule - the same signature as both engine bugs.
+                # Compared EXACTLY, not within tolerance: `derive` returns a published rung's rate
+                # verbatim, so a mismatch means the engine disagrees with its own rungs. A prior 1.0 rps
+                # tolerance made this unable to fail below 1 req/s - exactly the domain fractional rates
+                # matter for.
                 if mine["rps"] is None or pub_rps is None or mine["rps"] != pub_rps:
                     problems.append(f"{at} {label}: published {pub_rps} rps, re-derived {_rate(mine['rps'])}")
                 if num(r.get("concurrency")) != mine["conc"]:
@@ -211,12 +181,9 @@ def check(path, bounds_us, verbose):
                     problems.append(
                         f"{at} {label}: lower_bound={r.get('lower_bound')}, re-derived {mine['lower_bound']}"
                     )
-                # THE BOUNDARY PROOF, which this tool did not check at all and should have.
-                #
-                # bench-audit.py caught a first_disqualified_conc disagreement on plano that this file
-                # walked straight past, because it compared the rate, the concurrency, the tail and the
-                # floor flag - and not the one field that makes a reading a BOUNDARY rather than just a
-                # maximum. Two independent checkers are only worth two if they check the same claims.
+                # first_disqualified_conc is the field that proves a reading is a BOUNDARY rather than
+                # just a maximum; comparing rate/concurrency/tail/floor alone would miss disagreements
+                # here.
                 pub_disq = num(r.get("first_disqualified_conc"))
                 if pub_disq != mine["disq"]:
                     problems.append(
@@ -263,18 +230,11 @@ def equivalent_instrument(engines):
 
 
 def published_paths():
-    """The snapshots the BOARD publishes - not every artifact that has ever landed in the directory.
-
-    This globbed `results/snapshots/*.json`, which mixes the current board in with every superseded
-    run still on disk. The 2026-07-31 field run was measured before `first_disqualified_conc` was
-    corrected from a per-RUNG to a per-CONCURRENCY rule, so its snapshots genuinely carry the old
-    wrong value - 36 of them. Re-deriving those against the corrected rule made this tool fail
-    permanently on data no reader can see, which trains the operator to treat FAIL as background
-    noise. That is worse than no oracle: the next real problem arrives into a channel already
-    dismissed.
-
-    Superseded files are not deleted and not silently skipped - the count is printed, and any path
-    passed explicitly on the command line is still checked, so the old run stays auditable on demand.
+    """The snapshots the BOARD publishes, not every artifact that has ever landed on disk. Globbing
+    everything would mix in superseded runs measured under rules since corrected (e.g. an old
+    per-RUNG vs per-CONCURRENCY `first_disqualified_conc`), which would fail permanently on data no
+    reader can see and train the operator to treat FAIL as noise. Superseded files aren't deleted or
+    silently skipped: the count is printed, and an explicit path on the command line is still checked.
     """
     board = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site", "data.json")
     every = sorted(glob.glob("results/snapshots/*.json"))
@@ -319,10 +279,9 @@ def main():
     print(f"\n{'=' * 78}")
     print(f"re-derived {total_cells} cell(s) carrying a frontier")
     if len(engines) > 1:
-        # DIFFERENT COMMITS ARE NOT AUTOMATICALLY DIFFERENT INSTRUMENTS. `instrument-equivalence.json`
-        # admits several commits as one instrument only on identical `otb --release` sha256 - a built
-        # binary, not a reasoned diff. Calling an attested set "not comparable" would contradict the
-        # board's own C8 evidence and read as a defect where there is none.
+        # Different commits aren't automatically different instruments: instrument-equivalence.json
+        # admits several commits as one instrument only on identical `otb --release` sha256 (a built
+        # binary), per C8.
         if equivalent_instrument(engines):
             print(f"engines {sorted(engines)} - one instrument by attested identical binary (C8)")
         else:

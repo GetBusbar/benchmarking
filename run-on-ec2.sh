@@ -29,13 +29,9 @@ CREATED_KEY=0; CREATED_SG=0   # only delete the shared key/SG on exit if THIS in
 # first) so the box clock leads the matrix clock by that same startup lead. This is the ONLY ceiling on
 # a run: the engine has no wall-clock cap of its own, so whatever this says is how long a grid gets.
 #
-# WHY IT IS 720 AND NOT 480. It was 480, sized for a 36-cell grid at the pace the field ran in 2026-07.
-# busbar 1.5.0 measures at ~15-17 min/cell, so its grid needs ~9-10 h, and on 2026-08-02 the box hit
-# `shutdown -h` at exactly 8 h with 24 of 36 cells done - the run was over before it started and nobody
-# compared the ETA to the box's own lifetime. A ceiling only protects against a LEAKED box; sizing it
-# under the work it is meant to survive turns the cost net into the thing that kills the measurement.
-# So: keep it comfortably above the slowest grid the field runs, and let `watch-busbar.sh` be the thing
-# that shouts when a run's ETA crosses it. Raise it further, do not lower it, for a slower entrant.
+# 720, not 480: a 36-cell grid at busbar's ~15-17 min/cell pace needs ~9-10h, and 480 killed an
+# in-progress run before it finished. Size this above the slowest grid the field runs and let
+# `watch-busbar.sh` flag an ETA that crosses it; raise it further (never lower it) for a slower entrant.
 BENCH_MAX_MIN="${BENCH_MAX_MIN:-720}"
 # How long a FINISHED box keeps itself alive so its results can still be pulled. The boot-time
 # backstop is sized for the work; this one is sized for the harvest, and the box swaps to it as soon as
@@ -56,45 +52,25 @@ _REPO_NAME="$(basename "${BENCH_REPO%.git}")"
 
 # ── LAUNCH PRECONDITIONS: two git facts, checked before a single box is created ───────────────────
 #
-# Both failures below happened on 2026-07-30, back to back, and each cost a full fan-out:
+# A dirty tree makes `engine.commit` not identify what ran (C8 rejects the whole board for it); an
+# unpushed HEAD means every box's by-SHA fetch from origin dies with FETCH FAILED (rc=22) ~90s in,
+# after N instances already exist and have been paid for. Both are one git command each - check them
+# here so a bad launch costs two lines of output instead of a full fan-out.
 #
-#   DIRTY TREE   Two agents held uncommitted edits when the run launched, so the snapshots recorded
-#                `engine.commit=<sha> with uncommitted edits`. C8 rejected the whole board on arrival
-#                - correctly, because a commit that does not describe the working tree does not
-#                identify the instrument, and an unidentifiable instrument is not reproducible. The
-#                measurement itself was fine; it was simply unusable.
-#
-#   UNPUSHED     HEAD was committed but not pushed. Every box fetches the harness BY SHA from origin,
-#                so all 14 died with `FETCH FAILED (rc=22)` about ninety seconds in. The comment above
-#                already said the commit "must be pushed" and that the failure is loud - it is, but it
-#                is loud AFTER fourteen instances exist and have been paid for.
-#
-# Both are one git command. Checking them here turns two lost fan-outs into two lines of output. Skip
-# with BENCH_SKIP_PREFLIGHT=1 for a deliberate experiment on a local revision.
+# Skip with BENCH_SKIP_PREFLIGHT=1 for a deliberate experiment on a local revision.
 if [ -z "${BENCH_SKIP_PREFLIGHT:-}" ] && [ -n "$BENCH_COMMIT" ]; then
   _here="$(dirname "${BASH_SOURCE[0]}")"
-  # DIRTY MEANS WHAT `BENCH_ENGINE_DIRTY` MEANS, not something stricter.
-  #
-  # This checked a bare `status --porcelain`, but the stamp it is protecting is computed at line ~311
-  # as `status --porcelain -- . ':(exclude)results'` - the repo has already decided that churn under
-  # results/ does NOT make `engine.commit` unidentifiable. Without that exclusion the preflight refused
-  # exactly the state the script itself creates: a `PUBLISH=0` run leaves results uncommitted BY DESIGN
-  # ("results are still pulled and left in the working tree for the operator to inspect"), and
-  # regenerating charts writes PNGs there. A gate that blocks its own documented workflow gets disabled,
-  # and then it protects nothing.
+  # Exclude results/ here too, matching the BENCH_ENGINE_DIRTY stamp computed below (~line 311): a
+  # PUBLISH=0 run leaves results/ uncommitted by design, and this must not refuse that workflow.
   if [ -n "$(git -C "$_here" status --porcelain -- . ':(exclude)results' 2>/dev/null)" ]; then
     echo "PREFLIGHT FAILED: the harness tree is DIRTY outside results/, so \`engine.commit\` would not identify what ran." >&2
     echo "  C8 rejects a board measured on a dirty tree - it is not reproducible. Commit or stash first:" >&2
     git -C "$_here" status --short -- . ':(exclude)results' 2>/dev/null | sed 's/^/    /' >&2
     exit 1
   fi
-  # CHECK THE COMMIT THE BOXES ACTUALLY FETCH, which is $BENCH_COMMIT and NOT necessarily HEAD.
-  #
-  # This tested HEAD while printing $BENCH_COMMIT in the failure, so the two could differ. That is not
-  # cosmetic: BENCH_COMMIT is an overridable env var, and the dangerous direction passes the gate -
-  # `BENCH_COMMIT=<local unpushed sha>` with a pushed HEAD would sail through here and then kill all
-  # fourteen boxes with FETCH FAILED ninety seconds in, which is the precise failure this exists to
-  # prevent. The harmless direction (an older pushed BENCH_COMMIT under an unpushed HEAD) was refused.
+  # Check $BENCH_COMMIT, not HEAD: BENCH_COMMIT is an overridable env var, and testing HEAD instead
+  # would let `BENCH_COMMIT=<local unpushed sha>` sail through with a pushed HEAD, then kill every box
+  # with FETCH FAILED - the exact failure this preflight exists to prevent.
   if ! git -C "$_here" branch -r --contains "$BENCH_COMMIT" 2>/dev/null | grep -q .; then
     echo "PREFLIGHT FAILED: BENCH_COMMIT ($BENCH_COMMIT) is not on any remote branch." >&2
     echo "  Every box fetches the harness BY SHA from $BENCH_REPO, so all of them would fail to fetch" >&2
@@ -307,59 +283,38 @@ fi
 ARCH="${ARCH:-arm64}"
 
 # ── THE ENGINE STAMP ──────────────────────────────────────────────────────────────────────────────
-# Every box in a field run must measure with the SAME harness, because a defect in the instrument is
-# a defect in all thirteen columns at once. Captured HERE, once, from the tree that is about to be
-# rsynced, and carried to each box as an env var: the copy that lands on the box has no .git, so it
-# cannot work its own commit out. lib/rig.sh folds this into each snapshot's rig provenance, and
-# scripts/check-engine.sh refuses a board whose snapshots disagree.
+# Every box in a field run must measure with the SAME harness, since a defect in the instrument is a
+# defect in every column at once. Captured HERE, once, from the tree about to be rsynced, and carried
+# to each box as an env var, because the copy that lands on the box has no .git to derive it from.
+# lib/rig.sh folds this into each snapshot's rig provenance; scripts/check-engine.sh refuses a board
+# whose snapshots disagree.
 #
-# A DIRTY TREE IS RECORDED AS DIRTY. Uncommitted edits mean the commit does not identify what ran, so
-# the run is marked non-reproducible rather than being filed under a commit it does not match. The
-# site's C8 check refuses to publish a dirty run, which is right: nobody can reproduce it.
+# Dirty tree -> recorded dirty (uncommitted edits mean the commit does not identify what ran; site's
+# C8 refuses to publish it). results/ is excluded from the dirty check because it holds this run's own
+# OUTPUT, not an input that changes what the engine does - including run-provenance dirs the operator
+# creates before launching. Everything else counts, including untracked files (e.g. a new
+# gateways/<name>/ dir absolutely changes what runs).
 #
-# results/ IS EXCLUDED, because it holds this run's own OUTPUT. A whole field run was stamped dirty -
-# and correctly refused by C8 - because the operator had created results/runlog-<stamp>/ to record
-# the run's provenance before launching it. The directory that existed to make the run reproducible
-# was the thing that marked it irreproducible. Run artefacts cannot change what the engine does, so
-# they cannot make a commit stop identifying it.
+# THE STAMP MUST NAME $BENCH_COMMIT - the tree the boxes actually fetch by `git ls-tree` - not this
+# machine's HEAD. The two match only when BENCH_COMMIT is left to default; overriding it to pin a run
+# to an older engine (re-measuring a lagging gateway on the harness the rest of the board used) makes
+# them diverge, and a stamp naming a commit the run never used is not provenance - C8 has no other
+# input, so a wrong stamp can make a genuinely-pinned row look mixed and get blanked while looking
+# fine everywhere else.
 #
-# Everything else still counts, including UNTRACKED files: a new gateways/<name>/ directory is
-# untracked and absolutely does change what runs.
-# THE STAMP MUST NAME THE COMMIT THE BOXES ACTUALLY RAN, which is $BENCH_COMMIT - the tree they fetch
-# by `git ls-tree` - and NOT this machine's HEAD.
+# BUT THE ENGINE IS `engine/` AND `mock/`, NOT THE WHOLE REPOSITORY. Deriving the stamp from the tree
+# commit means any commit counts as a new instrument, which is wrong in the costly direction: a commit
+# that only bumps one gateway's pinned version changes that gateway, not the harness. Under a
+# tree-commit-only rule, re-measuring that gateway alone would stamp a commit nobody else on the board
+# carries, making C8 call a fine board mixed and forcing a re-run of every gateway just to fix a label.
 #
-# These are the same value only when BENCH_COMMIT is left to default. Override it to pin a run to an
-# older engine (the whole point of pinning: re-measure lagging gateways on the harness the rest of the
-# board already used) and the two diverge silently: the boxes build the pinned tree and the artifact is
-# stamped with whatever the operator's checkout happened to be sitting on.
-#
-# That is not cosmetic. The engine stamp is C8's entire input. On 2026-08-03 thirteen gateways were
-# re-measured pinned to 80030c2f specifically so the board would be ONE instrument; they were stamped
-# 7fd350ed - a local commit that touched no engine file - and the board concluded it was mixed and
-# blanked the one row that was genuinely on the pinned engine. The measurements were right and the
-# label was wrong, which is the worst shape of this bug: nothing looks broken, and the conclusion is
-# inverted. A stamp that can name a commit the run never used is not provenance.
-#
-# BUT THE ENGINE IS `engine/` AND `mock/`, NOT THE REPOSITORY.
-#
-# Deriving the engine stamp from the tree commit says "any commit is a new instrument", and that is
-# false in the direction that costs the most. A commit that bumps one gateway's pinned version -
-# aisix v0.5.0 -> v0.7.0, busbar 1.5.1 -> 1.5.2 - changes what that ONE gateway is, and changes the
-# harness not at all. Under the old rule re-measuring that gateway stamped a commit nobody else on
-# the board carried, so C8 called a board mixed that was not mixed, and the only way to publish the
-# new version was to re-run all fourteen. That is a five-hundred-dollar accounting error: the board
-# would have been re-measuring an instrument that had not moved, to fix a label that was wrong.
-#
-# So the two are separate values. BENCH_COMMIT is the TREE the boxes fetch (gateway pins, configs,
-# harness scripts). BENCH_ENGINE_COMMIT is the INSTRUMENT, and it may lag the tree - that is the
-# normal case, because gateway updates land after an engine freeze and the whole point of the freeze
-# is that they do not disturb it.
-#
-# The decoupling is only safe if it is PROVEN rather than asserted, so when the two differ the engine
-# subtrees must be byte-identical. Git object ids are content hashes, so this is a proof, not a diff
-# read by a model or a human: identical tree ids mean identical bytes in every file underneath. If
-# they differ by so much as a comment the run is refused, because then the pinned binary genuinely is
-# not this tree's engine and the stamp would be the same lie in a new place.
+# So BENCH_COMMIT (the tree: gateway pins, configs, harness scripts) and BENCH_ENGINE_COMMIT (the
+# instrument) are separate values, and BENCH_ENGINE_COMMIT may legitimately lag BENCH_COMMIT - the
+# normal case, since gateway updates land after an engine freeze without disturbing it. This
+# decoupling is safe only because it's proven, not asserted: when the two differ, the engine subtrees
+# (engine/, mock/) must be byte-identical git tree ids - a content-hash proof, not a diff a human
+# skims - or the run is refused, because a pinned binary that doesn't match this tree's engine/ would
+# make the stamp the same lie in a new place.
 BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo '')}"
 # The frozen instrument, from ENGINE_PIN - so the common case (a gateway version bump, re-measured
 # against the board's engine) needs nothing passed on the command line. Falling back to the tree
@@ -450,20 +405,12 @@ case "$ARCH" in
   *) echo "unknown ARCH='$ARCH' (use arm64 or x86)"; exit 2 ;;
 esac
 HW_LABEL="AWS ${ITYPE} (${CPU_LABEL}, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway."
-# LONG-LIVED STATE DOES NOT LIVE IN $TMPDIR, BECAUSE THE OS REAPS IT MID-RUN.
-#
-# On 2026-07-30 macOS purged this directory DURING a ten-hour field run and took two things with it:
-#   - the ssh PRIVATE KEY, after which the last running box was unreachable. AWS never re-issues a
-#     private key, so its results were nearly stranded on a machine scheduled to self-terminate;
-#     recovery took EC2 Instance Connect to push a temporary key and re-authorise a fresh one.
-#   - the charts virtualenv, which it did not delete outright - it left the directory standing with a
-#     gutted pip and a hollow matplotlib, so the final publish logged "matplotlib not importable" and
-#     shipped YESTERDAY's charts beside today's numbers.
-#
-# Neither is temporary data. The keypair is reused across invocations BY DESIGN (see the keypair
-# comment below: recreating it invalidates every box a concurrent run launched), and the venv is a
-# build cache. $TMPDIR reaps by age, so the longer a run lasts the more likely it is to lose them -
-# it fails exactly when the stakes are highest. $BENCH_STATE_DIR is overridable for CI or a sandbox.
+# LONG-LIVED STATE DOES NOT LIVE IN $TMPDIR, BECAUSE THE OS REAPS IT BY AGE MID-RUN - and it fails
+# exactly when the stakes are highest, on the longest runs. The ssh private key is reused across
+# invocations by design (recreating it invalidates every box a concurrent run launched; see the
+# keypair comment below), so losing it strands live boxes with AWS never re-issuing the key. A build
+# cache (e.g. a venv) reaped mid-run can also be left partially gutted rather than cleanly absent.
+# $BENCH_STATE_DIR is overridable for CI or a sandbox.
 BENCH_STATE_DIR="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}"
 mkdir -p "$BENCH_STATE_DIR" 2>/dev/null || true
 KEYNAME="gateway-bench-key"; KEYFILE="$BENCH_STATE_DIR/${KEYNAME}.pem"; SGNAME="gateway-bench-sg"
@@ -474,24 +421,16 @@ if [[ ! -s "$KEYFILE" && -s "${TMPDIR:-/tmp}/${KEYNAME}.pem" ]]; then
 fi
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
 
-# NOTE ON PLACEMENT: `harvest` sits HERE, below KEYFILE/SSHOPT, not up with `kill`. It needs the ssh
-# identity to reach a box; `kill` only needs the AWS API and can therefore live earlier. The first
-# version of this block was written beside `kill` and would have run every rsync with an empty $SSHOPT
-# - the same shape as the dead gates this script's own audit keeps turning up.
+# NOTE ON PLACEMENT: `harvest` sits HERE, below KEYFILE/SSHOPT, not up with `kill` - it needs the ssh
+# identity to reach a box, while `kill` only needs the AWS API.
 # `run-on-ec2.sh harvest [gw ...]` - PULL FROM BOXES A DEAD ORCHESTRATOR LEFT BEHIND.
 #
-# Every pull in this script lives inside the foreground process that launched the boxes. The boxes do
-# not: they run detached under setsid, so they finish the grid and write their snapshots whether or not
-# anyone is still listening. If the orchestrator dies - a closed terminal, a slept laptop, a dropped
-# SSH session - nothing pulls, and the box's own shutdown timer eventually terminates it with
-# DeleteOnTermination=true on the root volume. Finished measurements, deleted on a timer.
-#
-# That happened on 2026-07-29: four gateways completed 36-cell runs and sat unharvested because the
-# publisher had stopped. There was no way to reattach, so they were pulled by hand with ad-hoc rsync.
-# This is that recovery, written down: find the live boxes by their shared tag, pull whatever each one
-# has on disk, and say plainly what it found. Safe to run at any time, including mid-run - it copies,
-# it never terminates, and a partial snapshot is worth having now that the engine writes them
-# incrementally.
+# Boxes run detached under setsid and finish the grid whether or not the orchestrator is still
+# listening; if the orchestrator dies (closed terminal, slept laptop, dropped SSH), nothing pulls the
+# results, and the box's own shutdown timer eventually terminates it with DeleteOnTermination=true on
+# the root volume - finished measurements deleted on a timer. This finds live boxes by their shared
+# tag and pulls whatever each has on disk. Safe to run at any time, including mid-run: it only copies,
+# never terminates, and a partial snapshot is worth having since the engine writes them incrementally.
 if [[ "${1:-}" == "harvest" ]]; then
   shift
   want=("$@")
@@ -556,18 +495,14 @@ if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"
 # happens when the keypair was cleaned up out-of-band (teardown, `kill`, manual) while the local .pem
 # lingered; reusing that stale local key launches every box into "key pair does not exist". Checking
 # AWS too keeps them in lockstep.
-# REGISTERED BEFORE THE FIRST AWS RESOURCE IS CREATED, not after.
-#
-# This trap used to sit ~70 lines below, past the key-pair and security-group creation and past two
-# `exit 1` paths (a checkip failure after 3 retries, and a fatal authorize-security-group-ingress).
-# Exiting through either of those left a freshly created key pair and SG on AWS with CREATED_KEY=1 /
-# CREATED_SG=1 set and nothing registered to act on them. They cost nothing, but the leaked KEY is not
-# harmless: the private half lives only in $TMPDIR, so once that is cleaned every later run finds the
-# pair in AWS, reuses it, and cannot ssh to anything until someone deletes it by hand.
+# REGISTERED BEFORE THE FIRST AWS RESOURCE IS CREATED, not after: an `exit 1` between here and
+# key/SG creation (checkip failure, fatal authorize-security-group-ingress) must not leave a freshly
+# created key pair or SG on AWS with nothing registered to clean it up. A leaked SG costs nothing, but
+# a leaked key is not harmless - once $TMPDIR is cleaned, every later run finds the stale pair in AWS,
+# reuses it, and cannot ssh to anything until someone deletes it by hand.
 #
 # Bash binds a function body at CALL time, so defining teardown here - while CREATED_KEY and CREATED_SG
-# are still 0 and $SG is unset - is safe: it is a no-op until those flip, and it becomes live the
-# instant they do. That is the whole point of moving it.
+# are still 0 and $SG is unset - is safe: it is a no-op until those flip.
 # TIDINESS + COST: on ANY exit (normal, error, Ctrl-C, SIGTERM) terminate ONLY the boxes THIS run
 # launched - filtered by tag:run=$RUN_ID, NOT the shared purpose=gateway-bench tag - so a second or
 # concurrent invocation never terminates another run's still-live boxes before their results are
@@ -582,14 +517,12 @@ teardown() {
     | tr '\t' '\n' | grep -E '^i-' | xargs -r -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1
   if [[ "$CREATED_KEY" == 1 ]]; then
     # ROBUST SHARED-KEY LIFETIME: the key must outlive every box that uses it, not merely this
-    # invocation. `CREATED_KEY` alone is not enough - a run that CREATES the key but finishes before a
-    # CONCURRENT run's boxes would delete it out from under them, rugging their ssh/rsync mid-grid with
-    # "Permission denied (publickey)". Observed 2026-08-21: a 6-cell aisix run created the key, a 36-cell
-    # busbar run 7 min later reused it (CREATED_KEY=0), aisix finished first and its teardown deleted the
-    # shared keypair + local .pem, orphaning the still-measuring busbar box. So: delete the shared key
-    # ONLY when no OTHER bench box is still alive (this run's own boxes were just terminated above and are
-    # `shutting-down`, hence excluded by state); otherwise leave the durable key for them. A leaked key
-    # costs nothing, and `run-on-ec2.sh kill` stays the global sweep for the shared key/SG.
+    # invocation. `CREATED_KEY` alone is not enough - a run that creates the key but finishes before a
+    # concurrent run's boxes would delete it out from under them, rugging their ssh/rsync mid-grid with
+    # "Permission denied (publickey)". So: delete the shared key ONLY when no OTHER bench box is still
+    # alive (this run's own boxes were just terminated above and are `shutting-down`, hence excluded by
+    # state); otherwise leave the durable key for them. A leaked key costs nothing, and
+    # `run-on-ec2.sh kill` stays the global sweep for the shared key/SG.
     _live_others="$(aws ec2 describe-instances \
       --filters "Name=tag:purpose,Values=gateway-bench" "Name=instance-state-name,Values=running,pending" \
       --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`run`]|[0].Value]' --output text 2>/dev/null \
@@ -623,19 +556,14 @@ teardown() {
 }
 trap teardown EXIT INT TERM
 
-# EXISTENCE IS NOT CORRESPONDENCE, and assuming it was cost a whole launch on 2026-07-31.
+# EXISTENCE IS NOT CORRESPONDENCE: checking only "local key file exists" and "AWS has a keypair of
+# that name" can pass while the two don't match (e.g. a recovery minted a fresh local key after
+# $TMPDIR was reaped, but AWS still carries the original public key) - every box then launches with a
+# public key whose private half exists nowhere, failing opaquely with "ssh never came up".
 #
-# The old test asked only whether the local key file exists and whether AWS still has a keypair of
-# that name. Both were true and they did not MATCH: an earlier recovery had minted a fresh local key
-# (after $TMPDIR was reaped) while the AWS keypair still carried the ORIGINAL public key. Fourteen
-# boxes launched with a public key whose private half no longer existed anywhere, and every one of
-# them failed with "ssh never came up" - a message that describes the symptom and hides the cause.
-#
-# The pair is now bound by the KeyPairId AWS assigned when we created it, recorded in a sidecar. If
-# the sidecar is missing (a key that arrived by some other route, like that recovery) or names a
-# different id (the AWS pair was deleted and recreated), the local key CANNOT open a box launched
-# with the current pair, so both are rebuilt. Rebuilding is safe here and destructive later, which is
-# why it happens once at startup rather than on a failure mid-run.
+# The pair is bound by the KeyPairId AWS assigned at creation, recorded in a sidecar. If the sidecar
+# is missing or names a different id, the local key cannot open a box launched with the current pair,
+# so both are rebuilt - safe here (startup, nothing yet launched) and destructive if done later.
 KEYID_FILE="$KEYFILE.awsid"
 _aws_keyid="$(aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text 2>/dev/null || true)"
 _local_keyid="$(cat "$KEYID_FILE" 2>/dev/null || true)"
@@ -948,12 +876,9 @@ bench_gateway_once() {
 
   glog_echo "installing deps (bare base: docker + psutil; the rig is a prebuilt download, and each"
   glog_echo "gateway installs its OWN prereqs via gw_prereqs - no blanket build toolchain on every box)"
-  # RETRIED ON A CONNECTION FAILURE, because one timed-out connect must not cost a healthy box.
-  #
-  # On 2026-07-31 three gateways died here to `ssh: connect to host ...: Operation timed out` - a
-  # single transient connect against boxes that were fine. The liveness probe above is already
-  # retried for exactly this reason; this call, which does the actual work, was one-shot, so the whole
-  # box was torn down on the strength of one answer from a machine still settling.
+  # RETRIED ON A CONNECTION FAILURE, because one timed-out connect must not cost a healthy box (a
+  # single transient `ssh: connect ... Operation timed out` against a box still settling used to tear
+  # down the whole box on the strength of one answer).
   #
   # ONLY rc=255 IS RETRIED. That is ssh's own "could not establish the session"; any other non-zero is
   # the REMOTE script failing, and re-running apt because docker refused to start would just fail the
@@ -962,34 +887,24 @@ bench_gateway_once() {
   local prov_rc=0
   for _try in 1 2 3; do
   ssh $SSHOPT ubuntu@"$ip" 'set -e
-    # WAIT FOR THE BOX TO FINISH BOOTING BEFORE ASKING IT FOR ROOT.
-    #
-    # sshd accepts connections before cloud-init has finished writing the sudoers drop-in that gives
-    # `ubuntu` passwordless sudo. `sudo -n` does not wait - it fails immediately - so a box that is
-    # still provisioning loses every apt step, ends up with no docker, and then reports each gateway
-    # as "failed to run docker: No such file or directory", which reads as a broken ENTRANT rather
-    # than a box that never finished coming up. It is a race, so it takes a random subset of the
-    # field each run: one of fourteen lost it on 2026-07-27.
-    #
-    # Same class as the un-retried ssh liveness probe (58293c3): a one-shot operation against a
-    # machine that is still settling, treated as though its first answer were final.
+    # WAIT FOR THE BOX TO FINISH BOOTING BEFORE ASKING IT FOR ROOT: sshd accepts connections before
+    # cloud-init finishes writing the sudoers drop-in that gives `ubuntu` passwordless sudo. `sudo -n`
+    # fails immediately rather than waiting, so a box still provisioning would lose every apt step, end
+    # up with no docker, and report "failed to run docker: No such file or directory" - reading as a
+    # broken entrant rather than a box that never finished coming up. It is a race, so it hits only a
+    # random subset of boxes per run.
     cloud-init status --wait >/dev/null 2>&1 || true
     # Belt and braces: cloud-init may be absent or already done, so confirm sudo actually works
     # before relying on it, rather than discovering it three commands later.
     for _ in 1 2 3 4 5 6 7 8 9 10; do sudo -n true 2>/dev/null && break; sleep 3; done
     sudo -n true 2>/dev/null || { echo "PROVISION FAILED: passwordless sudo never became available"; exit 1; }
 
-    # SUDO HERE IS INTERMITTENT, NOT MERELY LATE - AND A ONE-SHOT WAIT DOES NOT COVER THAT.
-    #
-    # Second attempt at the 2026-07-30 field wipe. The first fix waited for sudo once after apt, on
-    # the theory that it lapsed and stayed lapsed. The re-run proved otherwise: the wait PASSED
-    # (`sudo -n true` succeeded, no failure message) and the very next sudo failed anyway. So sudo
-    # works, then does not, then works - a race against something still mutating the box, most
-    # plausibly unattended-upgrades touching the sudo package or its sudoers.d drop-in while we are
-    # using it. Fourteen boxes provisioning at once hit it every time; one box alone never did.
-    #
-    # A value that flickers cannot be established by asking once, however carefully. Retry the CALL.
-    # This wrapper is used for every sudo whose failure costs the box; the throwaway probes stay bare.
+    # SUDO HERE IS INTERMITTENT, NOT MERELY LATE - a one-shot wait for `sudo -n true` to pass once is
+    # not enough, because sudo can pass and then the very next call fails: a race against
+    # unattended-upgrades mutating the sudo package / sudoers.d drop-in while it is in use, seen
+    # reliably with many boxes provisioning at once. A flickering value cannot be established by asking
+    # once, however carefully - retry the CALL. This wrapper covers every sudo whose failure costs the
+    # box; throwaway probes stay bare.
     sudoq() {
       local i
       for i in 1 2 3 4 5 6 7 8; do
@@ -1015,10 +930,10 @@ bench_gateway_once() {
     # apt itself is contended at boot (unattended-upgrades holds the dpkg lock), so retry rather
     # than fail the whole box on a lock we only had to wait for.
     # NEEDRESTART MUST NOT RESTART SERVICES UNDER A RUNNING PROVISION. Ubuntu 24.04 ships needrestart
-    # hooked into apt, and on 2026-07-30 it restarted polkit, dbus and ssh on all fourteen boxes
-    # mid-install - after which every sudo in this block failed for a password and the entire field
-    # was lost. `a` (automatic, no prompt) still lets it do its bookkeeping but stops it interrupting
-    # the session we are provisioning through. Exported so it covers every apt call below too.
+    # hooked into apt and, left default, will restart polkit/dbus/ssh mid-install - after which every
+    # sudo in this block fails for a password and the whole box is lost. `a` (automatic, no prompt)
+    # still lets it do its bookkeeping without interrupting the session we are provisioning through.
+    # Exported so it covers every apt call below too.
     for _ in 1 2 3; do sudoq NEEDRESTART_MODE=l apt-get update -q && break; sleep 10; done
     # BARE base only: docker (for the image gateways), curl (fetch the prebuilt rig), jq, and python3
     # + psutil (the memory suite reads RSS). NO build-essential/rust/go/node here - the mock+loadgen
@@ -1036,12 +951,11 @@ bench_gateway_once() {
     # than a box that never finished provisioning. Better to lose the box here than to publish its
     # verdicts.
     #
-    # RECOVER BEFORE GIVING UP. If the binary is absent after three attempts, the dpkg state is the
-    # usual reason (a half-finished install from unattended-upgrades leaves the lock released but the
-    # package unconfigured, and further `apt-get install` calls then no-op while returning 0 - which is
-    # how a box reaches the measurement phase with no docker and a provisioning step that reported
-    # success). `--fix-broken` and `dpkg --configure -a` are the two repairs that address exactly that,
-    # so try them once rather than losing the box to a condition that is routinely fixable.
+    # RECOVER BEFORE GIVING UP. If the binary is absent after three attempts, the usual cause is a
+    # half-finished install from unattended-upgrades: it leaves the dpkg lock released but the package
+    # unconfigured, so further `apt-get install` calls no-op while returning 0 - a box can reach the
+    # measurement phase with no docker and a provisioning step that reported success. `--fix-broken`
+    # and `dpkg --configure -a` address exactly that; try them once before losing the box.
     if ! command -v docker >/dev/null; then
       echo "docker missing after install; attempting dpkg repair"
       sudoq dpkg --configure -a >/dev/null 2>&1 || true
@@ -1055,15 +969,12 @@ bench_gateway_once() {
     # Installed here, at provision time, so no toolchain work happens inside a measurement window -
     # the same reason the source-built gateways build before the memory baseline is taken.
     command -v cargo >/dev/null || (curl -sSf https://sh.rustup.rs | sh -s -- -y -q >/dev/null 2>&1)
-    # PASSWORDLESS SUDO CAN LAPSE MID-PROVISION, AND IT TOOK THE WHOLE FIELD ON 2026-07-30.
-    #
-    # All fourteen boxes died here in the same second. `sudo -n` worked for apt, then every sudo below
-    # failed with "a terminal is required to read the password" - so the run reported
-    # "docker daemon never answered" on fourteen gateways when the daemon was never asked. The apt
-    # install triggers needrestart, which restarts polkit, dbus and ssh (the fanout logs show exactly
-    # that list); a sudo landing in that window can find PAM mid-restart. One box provisioned alone
-    # does NOT reproduce it, which is why fourteen-at-once found it and every prior single-box test
-    # did not.
+    # PASSWORDLESS SUDO CAN LAPSE MID-PROVISION. If the apt install triggers needrestart (restarting
+    # polkit/dbus/ssh despite the `a` mode above, or on a box where it is not fully honored), a sudo
+    # landing in that window can find PAM mid-restart and fail with "a terminal is required to read the
+    # password" - which then gets misreported as "docker daemon never answered" when the daemon was
+    # never actually asked. Reproduces reliably with many boxes provisioning simultaneously; rare
+    # single-box.
     #
     # Three defences, because the window is environmental and cannot be argued away:
     #   1. NEEDRESTART_MODE=l below stops apt restarting services underneath us at all.
@@ -1086,26 +997,19 @@ bench_gateway_once() {
     # that was retired the raise went with it while this comment kept citing it.
     echo "{ \"default-ulimits\": { \"nofile\": { \"Name\": \"nofile\", \"Hard\": 1048576, \"Soft\": 1048576 } } }" | sudoq tee /etc/docker/daemon.json >/dev/null
     sudoq systemctl restart docker || sudoq service docker restart || true
-    # THE BINARY EXISTING IS NOT EVIDENCE THE DAEMON WILL ANSWER, and it was the daemon that was
-    # missing when this last bit.
-    #
-    # litellm-python lost its box on 2026-07-30 to `chmod: cannot access /var/run/docker.sock` followed
-    # by `failed to run docker: No such file or directory`, ten seconds into its run - AFTER the
-    # `command -v docker` guard above had passed. That guard proves a file is on PATH; it proves
-    # nothing about whether dockerd is up and accepting connections on its socket. `systemctl restart
-    # docker` is asynchronous and the `|| true` on it means even an outright failure to restart is
-    # swallowed, so provisioning could report success while the socket never appeared.
-    #
-    # So wait for the thing actually needed - a daemon that answers - and fail the box here if it never
-    # does. Losing a box during provisioning costs one re-run; publishing INCOMPLETE for a gateway
-    # whose box had no docker reads as a broken ENTRANT, which is a false statement about software
-    # that somebody else wrote.
+    # THE BINARY EXISTING IS NOT EVIDENCE THE DAEMON WILL ANSWER. `command -v docker` only proves a
+    # file is on PATH, not that dockerd is up and accepting connections on its socket; `systemctl
+    # restart docker` is asynchronous and its `|| true` swallows even an outright restart failure, so
+    # provisioning could report success while the socket never appears (e.g. `chmod: cannot access
+    # /var/run/docker.sock` a few seconds into the run). So wait for the thing actually needed - a
+    # daemon that answers - and fail the box here if it never does; losing a box during provisioning
+    # costs one re-run, while publishing INCOMPLETE for a gateway whose box had no docker misreads it
+    # as a broken entrant.
     # And it RECOVERS rather than only detecting: three rounds of (wait 30s for the socket, then try a
-    # different way of starting it). `systemctl enable --now` is included because a daemon that is
-    # installed but not enabled comes back dead after any restart, and `service` covers a box where
-    # systemd is not the thing managing it. Only after all three rounds fail is the box lost - the
-    # earlier version failed on the first 30s timeout, which would have turned a slow-starting daemon
-    # into a discarded gateway.
+    # different way of starting it). `systemctl enable --now` covers a daemon installed but not
+    # enabled (comes back dead after any restart); `service` covers a box where systemd is not managing
+    # it. Only after all three rounds fail is the box lost, so a slow-starting daemon is not mistaken
+    # for a dead one.
     _dockok=0
     for _round in 1 2 3; do
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
@@ -1122,9 +1026,8 @@ bench_gateway_once() {
       # The box is lost either way, so spend a second saying WHY - a bare "the daemon never answered"
       # sends the next person to ssh into a machine that has already been terminated.
       # NAME THE RIGHT CULPRIT. Every probe below runs through sudo, so if sudo itself is refusing,
-      # "the daemon never answered" is a claim about docker built entirely from a failure to ASK it -
-      # which is how fourteen gateways were reported as docker failures on 2026-07-30. Check the tool
-      # before blaming the subject.
+      # "the daemon never answered" is really a claim about docker built entirely from a failure to
+      # ASK it. Check the tool before blaming the subject.
       if ! sudo -n true 2>/dev/null; then
         echo "PROVISION FAILED: passwordless sudo is refusing, so the docker daemon was never actually probed"
         echo "  this is a RIG failure. Do NOT read it as a docker or gateway fault."
@@ -1167,33 +1070,19 @@ bench_gateway_once() {
   # per-gateway sizecheck dst under a mktemp -d, removed right after we read --stats.
   #
   # THE BOX FETCHES THE FILES IT NEEDS, AT AN EXACT COMMIT - not a copy of this laptop's tree, and
-  # not the whole repository.
-  #
-  # Provenance first: every URL below names the pinned SHA, so a published number can always be
-  # traced to the revision that produced it. An rsync of the orchestrator's working tree could not
-  # be, which is why that was abandoned.
-  #
-  # But the tarball that replaced it downloads the ENTIRE repository to keep two directories. This
-  # tree carries ~46 MB of results/ - charts, reports, snapshots - and a box needs about 44 KB: its
-  # OWN gateway directory and lib/rig.sh. Every box paid for all of it, fourteen times a run, to
-  # extract a thousandth of it. It also downloaded the other thirteen gateways' manifests, which a
-  # box has no business holding.
-  #
-  # The file list comes from `git ls-tree` against BENCH_COMMIT - the commit itself, not the working
-  # tree - so a file staged locally but not committed cannot reach a box, and each raw URL is pinned
-  # to the same SHA, so a path that is not in that commit 404s rather than silently arriving from
-  # some other revision.
+  # not the whole repository. Each raw URL is pinned to BENCH_COMMIT (the commit, not the working
+  # tree), so a file staged locally but not committed cannot reach a box, and a path not in that
+  # commit 404s rather than silently arriving from another revision. Fetching only the gateway's own
+  # directory + lib/rig.sh (rather than the whole repo, which also carries results/ and every other
+  # gateway's manifest) keeps the per-box payload to ~44 KB instead of tens of MB.
   glog_echo "fetching $gw + rig.sh @ ${BENCH_COMMIT:0:12} ..."; local _t0=$SECONDS
   local _files
-  # MODE AND PATH, not path alone. A raw fetch writes whatever the umask says, and the executable
-  # bit is part of what the commit records: the three source-built entrants ship a build.sh the
-  # launcher runs directly, and fetching it 0644 kills the run with "build script ... is not
-  # executable". The tarball this replaced preserved modes for free, so dropping to a mode-blind
-  # copy lost them silently - it took out exactly the three native gateways and nothing else.
-    # SPLIT ON THE TAB, NOT ON WHITESPACE. `git ls-tree` emits "<mode> <type> <sha>\t<path>", so the path
-  # is everything after the TAB - `awk '{print $4}'` takes only the first whitespace-delimited word of
-  # it and silently truncates any gateway file whose name contains a space. The box then 404s fetching a
-  # path that does not exist, and the gateway is published INCOMPLETE as though its own run had failed.
+  # MODE AND PATH, not path alone. A raw fetch writes whatever the umask says, but the executable bit
+  # is part of what the commit records: the three source-built entrants ship a build.sh the launcher
+  # runs directly, and fetching it 0644 kills the run with "build script ... is not executable".
+  # SPLIT ON THE TAB, NOT ON WHITESPACE. `git ls-tree` emits "<mode> <type> <sha>\t<path>", so the path
+  # is everything after the TAB - splitting on whitespace instead would truncate any gateway file whose
+  # name contains a space, 404ing the fetch and publishing the gateway INCOMPLETE.
   _files="$(git -C "$HERE" ls-tree -r "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null \
     | awk -F'\t' '{split($1, a, " "); print a[1]"\t"$2}')"
   if [ -z "$_files" ]; then
@@ -1394,44 +1283,31 @@ sudoq() {
   echo "RIG: sudo -n $1 failed 8 times over ~16s (passwordless sudo is flapping on this box)" >&2
   return 1
 }
-# THE MEASURING INSTRUMENT NEEDS AS MANY SOCKETS AS THE THING IT MEASURES.
-#
-# The load generator opens ONE connection per unit of concurrency, so a sweep to c=4096 needs 4096
-# file descriptors in THIS process. Ubuntu's default soft limit is 1024, and the hard limit is
-# 1048576 - so the cap is ours to lift and costs nothing.
-#
-# Left unlifted this is not a slow measurement, it is a WRONG one: every connection past ~1020 fails
-# instantly with EMFILE, the generator counts those as failed requests, and the failure is
-# attributed to the gateway. A whole field run showed all ten gateways clean at c=512 and failing at
-# exactly c=1024 - ten unrelated projects in Go, Rust, Python and Lua do not share a ceiling, and
-# that number is the default this line raises. Every sustained@20ms figure in that run was our own
-# fd limit wearing the gateway's name.
-#
-# The unfairness was the sharpest part: the docker daemon config above already grants CONTAINERS
-# 1048576, so the gateways under test had a thousand times the sockets of the harness measuring them.
-# This restores what perf/run.sh used to do for the native side before it was retired in the Rust
-# rewrite (commit d7fc1f4), which removed the raise and left the comment describing it.
+# THE MEASURING INSTRUMENT NEEDS AS MANY SOCKETS AS THE THING IT MEASURES. The load generator opens
+# ONE connection per unit of concurrency, so a sweep to c=4096 needs 4096 fds in THIS process. Left at
+# Ubuntu's default soft limit (1024, hard 1048576), every connection past ~1020 fails instantly with
+# EMFILE and gets counted as a gateway failure rather than our own fd cap - and since the docker
+# daemon config above already grants containers 1048576, an unlifted harness would be measuring
+# itself, not the gateway, at any concurrency above ~1024.
 ulimit -n 1048576 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
 
-# EPHEMERAL PORTS ARE THE REAL CONCURRENCY CEILING, so widen them deliberately rather than inherit
-# a default nobody chose.
-#
-# A TCP connection needs a unique (src ip, src port, dst ip, dst port). Every load window drives ONE
-# destination, so simultaneous connections cannot exceed this host's ephemeral source ports. Stock
-# Linux gives 32768-60999, about 28,000 - below what a fast gateway can be driven to, and the moment
-# it is reached `connect` returns EADDRNOTAVAIL, which the generator used to count as the gateway
-# refusing. Raising fd limits alone never helped: descriptors were never the binding constraint.
+# EPHEMERAL PORTS ARE THE REAL CONCURRENCY CEILING, so widen them deliberately rather than inherit a
+# default nobody chose. A TCP connection needs a unique (src ip, src port, dst ip, dst port), and
+# every load window drives ONE destination, so simultaneous connections cannot exceed this host's
+# ephemeral source ports. Stock Linux gives ~28,000 (32768-60999) - below what a fast gateway can be
+# driven to - and hitting it makes `connect` return EADDRNOTAVAIL, which reads as the gateway
+# refusing. Raising fd limits alone does not help here; descriptors are never the binding constraint.
 #
 # 16384 as the floor because every port this rig binds is below it (mock 8000; gateways 3000, 8080,
 # 8101, 8102, 8787, 9080, 12000; plano's envoy internals up to 12001) - an ephemeral range reaching
-# down into those could steal a port before the service binds it, which would look like a gateway
-# that failed to start. The engine derives its search ceiling from whatever this ends up being
+# down into those could steal a port before the service binds it, looking like a gateway that failed
+# to start. The engine derives its search ceiling from whatever this ends up being
 # (`run::host_connection_ceiling`), so this is the only place the number is decided.
 #
-# tcp_tw_reuse because a closed connection holds its port through TIME_WAIT: without recycling, a
-# window that cycles connections exhausts the range well below its size. This is the safe direction
-# of that knob - it permits reuse for OUTBOUND connections only.
+# tcp_tw_reuse because a closed connection holds its port through TIME_WAIT; without recycling, a
+# window that cycles connections exhausts the range well below its size. This permits reuse for
+# OUTBOUND connections only (the safe direction of that knob).
 sudoq sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
 sudoq sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
 echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown))"
@@ -1474,18 +1350,14 @@ if [ ! -x ./otb ]; then
 fi
 # THE LABEL MUST BE WHAT WAS PULLED, AND THE BINARY IS ASKED RATHER THAN TRUSTED.
 #
-# This box DOWNLOADS the engine from the rolling `rig` release; it does not build it. The commit that
-# lands in every artifact came from BENCH_ENGINE_COMMIT, which the orchestrator set from its OWN
-# checkout - so the stamp recorded what the operator intended to run, and nothing compared it to the
-# binary that ran.
+# This box DOWNLOADS the engine from the rolling `rig` release rather than building it, and
+# BENCH_ENGINE_COMMIT records only what the orchestrator INTENDED to run. bench-rig.yml rebuilds the
+# release only on a push to `main`, so a fix pushed to a branch can leave every box fetching the
+# previous artifact while the stamp claims the new commit - a mismatch that is otherwise invisible
+# since the run still "succeeds".
 #
-# 2026-08-03: a snapshot was stamped 0ce7a907 and measured by an engine containing no line of it. The
-# fixes were pushed to a branch, bench-rig.yml only rebuilds the release on a push to `main`, and every
-# box fetched the previous artifact. Grepping the binary on the box for two strings that exist only in
-# the newer commit found neither. A whole validation run measured the wrong engine and said otherwise.
-#
-# The binary now carries the commit it was built from, so the two can be compared. A mismatch is fatal:
-# a run that cannot prove which engine it used cannot produce a comparable measurement, and publishing
+# The binary carries the commit it was built from, so the two are compared. A mismatch is fatal: a
+# run that cannot prove which engine it used cannot produce a comparable measurement, and publishing
 # one anyway is how a board ends up mixing instruments while every row claims the same stamp.
 _otb_built_from="$(./otb engine-commit 2>/dev/null | tr -d '[:space:]')"
 if [ -z "$_otb_built_from" ]; then
@@ -1520,14 +1392,12 @@ pkill -f "bin/mock-$BENCH_ARCH" 2>/dev/null; sleep 1
 # actually received matched that dialect's request shape, and the runner reads it off /__mock/state.
 # Without this the reverification is dead code and every capability verdict is a status-code guess.
 #
-# RECORDING IS NOT TURNED ON HERE. The mock boots quiet and the engine turns recording on around its
-# one re-verification request per cell, then off again (POST /__mock/record). That is deliberate:
-# this mock's own throughput is the reference every gateway's number is judged against, and a result
-# within 10% of it is SUPPRESSED as mock-bound. A recorded request takes a process-wide lock, so
-# leaving recording on for the millions of requests in the throughput and memory windows would slow
-# the reference instrument and quietly convert real gateway measurements into suppressed ones. The
-# mock is also the least-touched, most-trusted code in the harness; it stays in exactly the state
-# every previously published number was taken against, and pays the recording cost once per cell.
+# RECORDING IS NOT TURNED ON HERE. The mock boots quiet and the engine turns recording on only
+# around its one re-verification request per cell (POST /__mock/record), then off again. A recorded
+# request takes a process-wide lock, and this mock's own throughput is the reference every gateway's
+# number is judged against (a result within 10% of it is suppressed as mock-bound) - leaving
+# recording on for the millions of requests in the throughput/memory windows would slow the reference
+# instrument and silently convert real measurements into suppressed ones.
 setsid taskset -c $MOCKCORES ./bin/mock-$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
 # Give it a moment to bind, then refuse to measure anything if it did not: every not-served verdict
 # is conditioned on the mock being up, so a run against a dead mock publishes rig failures as
@@ -1544,21 +1414,13 @@ OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
   ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
 echo $? > .run-done
 
-# A FINISHED BOX MUST NOT BE DESTROYED BY A TIMER SIZED FOR THE WORK.
-#
-# The boot-time backstop is `shutdown -h +BENCH_MAX_MIN`, sized for the work. That is right for a
-# wedged box and wrong for a finished one: a gateway that uses most of its budget crosses the line
-# with almost no margin left, and the root volume is
-# DeleteOnTermination=true, so when the timer fires AWS deletes the disk carrying results nobody pulled.
-#
-# That is not hypothetical. On 2026-07-29 four gateways completed full 36-cell runs and sat unharvested
-# because the orchestrator process had stopped; they were found by hand. Had they not been, the timer
-# would have destroyed all four finished runs.
-#
-# So the moment the work is done, the deadline stops being about the work and starts being about the
-# harvest: cancel the boot timer and re-arm a bounded window. Cost stays capped either way, and a dead
-# orchestrator now has a known amount of time to come back (see `run-on-ec2.sh harvest`) instead of
-# racing whatever happened to be left of the work budget.
+# A FINISHED BOX MUST NOT BE DESTROYED BY A TIMER SIZED FOR THE WORK. The boot-time backstop
+# (`shutdown -h +BENCH_MAX_MIN`) is right for a wedged box and wrong for a finished one: a gateway
+# that used most of its budget crosses the line with little margin left, and the root volume is
+# DeleteOnTermination=true, so the timer firing deletes the disk carrying results nobody pulled yet
+# (e.g. because the orchestrator process had stopped). So once the work is done, cancel the boot timer
+# and re-arm a bounded harvest window - cost stays capped either way, and a dead orchestrator gets a
+# known amount of time to come back (see `run-on-ec2.sh harvest`) instead of racing the work budget.
 sudoq shutdown -c 2>/dev/null || true
 sudoq shutdown -h +__HARVEST_GRACE_MIN__ 2>/dev/null || true
 echo "[box] run finished; results held for __HARVEST_GRACE_MIN__ min for harvest, then self-terminate"
@@ -1581,19 +1443,13 @@ REMOTE
   local launch_conn_lost=0
   if [ "$launch_rc" -ne 0 ]; then
     if [ "$launch_rc" -eq 255 ]; then
-      # rc=255 IS SSH'S OWN "THE SESSION BROKE", NOT "THE RUN DID NOT START".
-      #
-      # helicone lost a full 36-cell run to this on 2026-07-31. The launch ssh hung for seventy
-      # minutes and then dropped with 255; the box had meanwhile finished every cell and written its
-      # snapshot, which the pull below retrieved successfully - and the orchestrator still declared
-      # "could not start the remote run" and discarded the gateway, with the contradicting evidence
-      # printed four lines later.
-      #
-      # The launch command backgrounds the work with `setsid nohup`, so the session dropping says
-      # nothing about whether the run started. What answers that is EVIDENCE: the .run-done sentinel
-      # and a fresh snapshot. So this is recorded and deferred rather than treated as fatal here -
-      # if the run truly never started there will be no sentinel and no fresh snapshot, and the
-      # existing checks below will fail it on those grounds instead.
+      # rc=255 IS SSH'S OWN "THE SESSION BROKE", NOT "THE RUN DID NOT START". The launch command
+      # backgrounds the work with `setsid nohup`, so a dropped launch ssh session says nothing about
+      # whether the run started - a box can finish every cell and write its snapshot after the launch
+      # connection itself dropped. What answers that is EVIDENCE: the .run-done sentinel and a fresh
+      # snapshot. So this is recorded and deferred rather than treated as fatal here - if the run truly
+      # never started there will be no sentinel and no fresh snapshot, and the checks below fail it on
+      # those grounds instead.
       glog_echo "detached otb launch ssh dropped (rc=255) - the session broke, which does not say whether the run started; deferring to the sentinel and the snapshot"
       launch_conn_lost=1
     else
@@ -1714,17 +1570,15 @@ REMOTE
   else
     glog_echo "INCOMPLETE (the run crashed, measured nothing, or failed to pull; this gateway did NOT refresh - re-run it)"
     # DO NOT LEAVE A DIRTY TRACKED FILE BEHIND. An INCOMPLETE gateway never calls publish_gateway, but
-    # pull_suite() may still have `mv -f`'d a fresh results/<suite>/$gw.json over a PREVIOUSLY-COMMITTED
-    # tracked file for whichever suites DID succeed before a later suite failed - that file is now
-    # modified-but-uncommitted in $HERE and nobody is ever going to commit it this run. Left in place, it
-    # sits there until the final publish sweep's `git rebase --autostash` runs, which stashes it, and if
-    # anything else (a peer box, the render-charts bot) touched that same path upstream in the meantime,
-    # the stash POP conflicts - a rebase that already finished reporting failure, misread by
-    # push_with_rebase as "could not start" and retried uselessly since the same conflict recurs every
-    # attempt, eventually failing the WHOLE run's push, stranding every OTHER gateway's already-committed
-    # result too. Revert it back to its last-committed state (exactly "did not refresh"): this path is
-    # this gateway's own, so no peer box ever writes it and no lock is needed, same as pull_suite's own
-    # unlocked mv -f above.
+    # pull_suite() may still have `mv -f`'d a fresh results/<suite>/$gw.json over a previously-committed
+    # tracked file for whichever suites DID succeed before a later suite failed - now modified-but-
+    # uncommitted and never committed this run. Left in place it survives until the final publish
+    # sweep's `git rebase --autostash`, and if a peer box or the render-charts bot touched the same path
+    # upstream meanwhile, the stash pop conflicts - which push_with_rebase misreads as "could not start"
+    # and retries uselessly (the conflict recurs every attempt), eventually failing the whole run's push
+    # and stranding every OTHER gateway's already-committed result too. So revert to last-committed
+    # state instead ("did not refresh"): this path is this gateway's own, so no lock is needed, same as
+    # pull_suite's own unlocked mv -f above.
     for suite in $ALL_SUITES; do
       if [ "${_pull_state[$suite]:-}" = ok ]; then
         git -C "$HERE" checkout -- "results/$suite/$gw.json" 2>/dev/null || true
@@ -1786,9 +1640,8 @@ fi
 # ── regenerate charts + reports locally from the collected JSONs ──────────────────────────────────
 # NO LOCAL CHART REGEN. The static pipeline (charts.py, 25 PNGs, the report pages) is retired: the
 # board draws its charts in the browser from the same bundle the tables read, so there is nothing to
-# redraw here and nothing that can ship a run behind the numbers beside it - which is exactly what
-# happened on 2026-07-31, when this step silently failed and published one run's images against
-# another run's data.
+# redraw here and nothing that can silently ship stale chart images against fresh numbers (as the old
+# pipeline once did when this step failed quietly).
 
 # ── final publish sweep: history + regenerated charts/reports ─────────────────────────────────────
 # The per-gateway incremental publishes above push each gateway's result as its box finishes, but the

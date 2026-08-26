@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Watch the already-running mutants box, pull its report, and TERMINATE it.
 #
-# Separate from run-mutants-ec2.sh because that script's box was rescued rather than restarted: it
-# had already paid for provisioning (rust + a from-source cargo-mutants build) when the baseline
-# failed on the descriptor limit, so the fix was applied in place. Killing its orchestrator with
-# SIGKILL kept the box alive by skipping the EXIT trap - which also means nothing is left holding the
-# terminate. That is what this is for. It runs the terminate on every exit path, including its own.
+# Separate from run-mutants-ec2.sh because a box whose orchestrator was killed with SIGKILL survives
+# (SIGKILL skips the EXIT trap that would otherwise terminate it) - this reattaches to that live box
+# and runs the terminate on every exit path, including its own, so nothing is left holding it.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

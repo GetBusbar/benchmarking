@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Side-by-side: busbar 1.4.1 (published board) vs busbar 1.5.0 (private evaluation).
 
-Reads the 1.4.1 numbers from its committed snapshot and the 1.5.0 numbers from whatever the
-evaluation box has written so far - the live `busbar-151.json`, pulled partial, or final snapshot -
-so a cell can be compared the moment it lands rather than at the end of an 11-hour grid.
+Reads 1.4.1 from its committed snapshot and 1.5.0 from whatever the evaluation box has written so
+far (live, partial, or final), so a cell can be compared the moment it lands.
 
-Every figure is printed with its own absence reason when it has one. A blank cell here means the
-engine published a reason, not that the comparison failed to find a number: the two are different
-findings and the whole board exists to keep them apart.
+A blank cell means the engine published an absence reason, not that the comparison failed to find
+a number - keep those two cases visually distinct.
 
   python3 compare-busbar-versions.py [ingress>egress ...]      default: openai>openai
 """
@@ -113,8 +111,8 @@ for pair in pairs:
         av, ar = num(a, block, field)
         bv, br = num(b, block, field)
         d = delta(av, bv)
-        # Sign the delta by whether it is an IMPROVEMENT, not by its arithmetic direction: for
-        # latency and memory lower is better, for sustained streams higher is.
+        # Sign by whether it's an improvement, not by arithmetic direction: lower is better for
+        # latency/memory, higher is better for sustained streams.
         note = ""
         if d is not None:
             good = (d > 0) if higher_better else (d < 0)

@@ -2,20 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# Live progress for an in-flight field run: what each box is doing RIGHT NOW, how far through the
-# grid it is, and roughly how much longer it has.
+# Live progress for an in-flight field run: what each box is doing right now, how far through the
+# grid it is, and roughly how much longer it has. The fanout log narrates setup and then says
+# nothing until DONE, so without this a wedged box and a nearly-finished box look identical.
 #
-# WHY IT EXISTS. A field run is 13 boxes billing by the hour and going quiet for long stretches. The
-# fanout log narrates setup and then says nothing until DONE, so a wedged box, a box grinding through
-# a slow sweep, and a box that finished ten minutes ago all look identical from here. That is how a
-# run burns hours before anyone notices - which is exactly what happened on the run this was written
-# after.
-#
-# ETA IS BUILT ON SERVED CELLS, NOT ON CELLS. Cell cost is wildly uneven: a not_configurable cell
-# prints in milliseconds while a served one runs a full throughput/stream/memory battery. Averaging
-# over all 36 would report a confident number that is simply wrong, and would swing wildly as the
-# grid walked through a block of greys. Each gateway's own definition.json declares how many cells it
-# claims to serve, so the estimate is (elapsed per served cell so far) x (served cells left).
+# ETA is built on served cells, not all cells: a not_configurable cell prints in milliseconds while
+# a served one runs a full metric battery, so averaging over every cell would be confidently wrong.
+# Each gateway's own definition.json declares how many cells it claims to serve, so the estimate is
+# (elapsed per served cell so far) x (served cells left).
 #
 # Usage:  python3 bench-dashboard.py            # one snapshot
 #         python3 bench-dashboard.py --watch    # refresh until every box is done
@@ -49,66 +43,27 @@ _configure_stdout()
 CELL_RE = re.compile(r"\[cell (\d+)/(\d+)\] (\S+): (.+)")
 PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
 
-# WHERE A CELL'S TIME ACTUALLY GOES, so an ETA exists before the first cell finishes.
+# Measured share of a cell's wall clock per metric group, so an ETA exists before the first cell
+# completes (dividing by a completed cell alone gives no estimate for the first several minutes,
+# exactly when an operator is deciding whether the run is healthy). This is one gateway's profile
+# used as a prior for all; it only affects how far along the CURRENT cell is assumed to be, and
+# real elapsed-per-cell takes over once a cell completes.
 #
-# The ETA used to need a completed SERVED cell to divide by, which on a gateway whose cells take ten
-# minutes means no estimate for the first ten minutes - exactly when an operator is deciding whether
-# the run is healthy. These weights are the measured share of a cell's wall clock per metric group,
-# from the per-cell cost breakdown the engine now records (agentgateway, 5 cells, 2026-07-28):
-# memory dominates at ~40%, and everything streaming-related is under 6% combined.
+# Keys must be the engine's own metric-group names, since the only lookup is `[phase] <cell>
+# <group>` off the engine's log. A test parses metric.rs's METRICS list and fails if this table
+# and the engine's groups ever diverge — a phantom or stale entry here silently adds weight to
+# `cell_fraction_done` and skews every ETA (this has happened twice: a `sustained_throughput`
+# entry for a group that no longer existed, and later a retired `cpu_fps`).
 #
-# They are one gateway's profile used as a prior for all, which is honest for an ETA and would not be
-# for a published number. It only ever affects how far along the CURRENT cell is assumed to be; once
-# a cell completes, real elapsed-per-cell takes over.
-#
-# THE KEYS ARE THE ENGINE'S GROUP NAMES, AND THEY HAVE TO BE, because the only thing that ever looks
-# them up is `[phase] <cell> <group>` off the engine's own log. This table used to carry a seventh
-# entry, `sustained_throughput` at 0.198, for a metric group `engine/src/metric.rs` does not have -
-# the sustained figure moved INTO `throughput` when it stopped being a search of its own and became a
-# summary of the same sweep (metric.rs says so in as many words, in the test that used to assert the
-# group existed). Nothing ever emitted `[phase] <cell> sustained_throughput`, so the entry was not
-# merely unused: `cell_fraction_done` walks PHASE_ORDER accumulating weight until it reaches the
-# phase it was given, so the phantom's 0.198 was ADDED to the progress of every cell that reached
-# `streams_sustained` or the since-retired `cpu_fps`. A cell reported 89.8% done when 70% of its declared
-# weight had elapsed, which shortened the ETA of every gateway in the last third of every cell - a
-# fabricated number, arrived at by counting work that does not exist.
-#
-# The 0.198 is folded back into `throughput`, which is where that wall clock is actually spent now,
-# rather than dropped: the sustained search did not get faster, it changed owners. bench-dashboard's
-# test parses metric.rs's METRICS list and fails if this table and the engine's groups ever diverge
-# again, because "the dashboard's phase table matches the engine" is exactly the kind of fact that is
-# true when written and silently false a refactor later.
-# RE-MEASURED, AND `cpu_fps` IS GONE - which is the same defect this comment block describes, recurring.
-#
-# `cpu_fps` was retired from the engine (see run.rs: of the 16 cells that published both it and
-# `streams_sustained_fps`, 4 had it INVERTED below the proven delivery boundary, 5 were redundant, and 7
-# were measured where the delivery gate did not hold). Its 0.102 then became exactly the phantom weight
-# described above: `cell_fraction_done` accumulates PHASE_ORDER weight until it reaches the given phase,
-# so a cell in `streams_sustained` would have reported progress including 10.2% of work that no longer
-# exists. The test that parses metric.rs's METRICS caught it, which is what it is for.
-#
-# The remaining five are re-derived from MEASURED wall clock on the new engine rather than by
-# redistributing the old guesses, because two things changed size at once: the sustained bisection was
-# deleted (its windows folded into the climb) and the memory phase became a FIXED duration instead of
-# stopping when the RSS trace looked flat. From a 2026-07-30 single-cell run:
-#
-#     memory 360.5s | throughput 162.2s | streams_sustained 12.3s | added_latency 12.0s | streaming 2.7s
-#     total 549.7s
-#
-# PROVISIONAL, and honestly so: that is one cell, on one box, with the mock standing in for the gateway,
-# so the throughput share in particular will move on a real gateway whose climb runs further. The
-# in-flight 14-gateway board emits a `[cost N/M] <cell>: ...` line per cell with exactly these
-# per-phase seconds, so the table can be re-derived from the real field distribution once it lands.
-# These are strictly better than what they replace either way: the old numbers predated both changes.
+# Re-derived from measured wall clock on the current engine (not redistributed old guesses), after
+# the sustained-search phase was folded into throughput and memory became a fixed duration. This is
+# provisional — measured on one mock-gateway cell — so shares, especially throughput's, will shift
+# once re-derived from real field runs (the board emits per-phase `[cost N/M]` seconds for exactly
+# that purpose).
 PHASE_COST = {
-    # RENORMALISED WHEN `cost` WAS ADDED, not appended to. The weights are a fraction of ONE cell and
-    # the self-test asserts they sum to exactly 1.0, so a sixth group cannot simply be bolted on -
-    # doing that would claim a cell is 101.1% of itself and quietly skew every ETA.
-    #
-    # `cost` runs ONE load window; `added_latency` runs TWO (gateway leg and direct leg) for 0.022, so
-    # one window is ~0.011. The other five keep their measured proportions exactly - each is its old
-    # weight over the new total - and the rounding drift is absorbed into the largest, `memory`,
-    # where a 1e-6 adjustment is far below the noise in the estimate it feeds.
+    # Renormalised (not appended to) when `cost` was added: the self-test asserts these sum to
+    # exactly 1.0, so a new group must be folded in rather than bolted on, or a cell would read as
+    # >100% of itself and skew every ETA.
     "throughput": 0.29179,
     "memory": 0.648862,
     "streaming": 0.004946,
@@ -124,11 +79,9 @@ PHASE_ORDER = ["throughput", "memory", "streaming", "added_latency", "streams_su
 def cell_fraction_done(phase_name):
     """How much of the current cell is behind us, given the phase it is in. 0.0 when unknown.
 
-    0.0 for an unrecognised phase is deliberate and is the safe direction: a group this table has
-    never heard of contributes no claimed progress, so a new metric group in the engine makes the ETA
-    pessimistic rather than making it confidently wrong. The reverse - guessing a fraction for a name
-    nobody declared - is how the retired `sustained_throughput` entry inflated every late-cell
-    estimate for as long as it sat in the table."""
+    0.0 for an unrecognised phase is deliberate: a group this table hasn't seen makes the ETA
+    pessimistic rather than confidently wrong (the reverse — guessing a fraction for an undeclared
+    name — is how a stale table entry once inflated every late-cell estimate)."""
     if not phase_name:
         return 0.0
     done = 0.0
@@ -140,14 +93,11 @@ def cell_fraction_done(phase_name):
 IP_RE = re.compile(r"ip=([0-9.]+)")
 TS_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 
-# A cell whose verdict is one of these was skipped or refused, and cost almost nothing. Anything else
-# was measured, and is what the remaining time is actually made of.
+# A cell whose verdict is one of these was skipped or refused, and cost almost nothing.
 CHEAP = ("not_configurable", "untestable", "unprobed_auth")
-# A CELL IS SERVED ONLY IF THE ENGINE SAID SO. This used to count anything whose verdict was not one
-# of CHEAP, which is fail-open: a new line shaped like `[cell N/M] <id>: <anything>` silently became a
-# served cell. That happened the day a per-cell cost breakdown was added under the same prefix - every
-# measured cell counted twice, gateways showed "10/8 served", and the ETA hit zero while they were
-# still running. Listing what DOES count means an unrecognised line is ignored rather than believed.
+# Served cells are an allowlist, not "anything not in CHEAP" — that was fail-open and let an
+# unrelated line shape (e.g. a per-cell cost breakdown under the same `[cell N/M]` prefix) get
+# double-counted as served, inflating the served count past the declared total.
 MEASURED = ("served", "failed")
 
 
@@ -164,15 +114,10 @@ def declared_served(gw):
 def fanout_logs():
     """The per-gateway logs of the current fanout, keyed by gateway.
 
-    A GATEWAY IS ONE THAT EXISTS, not one whose name happens to be in a filename. The log name is
-    chosen by whoever launched the run, so an orchestration log - `fanout-validate-agentgateway.log`,
-    `fanout-rerun-searchfix.log`, `fanout-field-<sha>.log` - used to appear as its own row, reported
-    DONE with no cells, and read exactly like a gateway that finished measuring nothing. Four phantom
-    rows in a 14-gateway table is not a cosmetic problem: it is the status board saying something
-    about a gateway that does not exist.
-
-    Discovered against gateways/*/definition.json, which is the same source the engine and the site
-    use, so a name only appears here if there is something to measure.
+    Filtered against gateways/*/definition.json (the same source the engine and site use) rather
+    than trusting the log filename: orchestration logs (`fanout-validate-*.log`,
+    `fanout-field-<sha>.log`, ...) are named like gateway logs and would otherwise show up as
+    phantom rows reporting DONE with no cells.
     """
     d = os.path.join(HERE, "results")
     if not os.path.isdir(d):
@@ -210,11 +155,9 @@ def local_state(path):
             if m:
                 h, mi, se = (int(x) for x in m.groups())
                 st["start"] = h * 3600 + mi * 60 + se
-        # WHEN MEASUREMENT ACTUALLY STARTED, which is not when the box was launched. Provisioning and
-        # a source build can take minutes, and charging those to the first cell made the per-cell rate
-        # look several times worse than it is - aisix read as 44 minutes a cell when its cells take
-        # eight to twelve. The ETA divides by measuring time; ELAPSED still shows wall clock, because
-        # that is what an operator is paying for.
+        # When measurement actually started, not when the box was launched: provisioning and a
+        # source build can take minutes, and charging those to the first cell inflates the per-cell
+        # rate several-fold. ETA divides by this; ELAPSED still shows wall clock (what's billed).
         if st["measuring"] is None and "running " in ln:
             m = TS_RE.match(ln)
             if m:
@@ -228,21 +171,13 @@ def local_state(path):
 
 
 def remote_tail(ip):
-    """The box's own run log, FILTERED to the lines this dashboard parses.
+    """The box's own run log, filtered to the lines this dashboard parses.
 
-    IT USED TO BE `tail -c 20000`, WHICH IS A CAP ON HISTORY, NOT ON NOISE. The engine narrates
-    heavily - probes, sweep rungs, restarts, cost breakdowns - and a 36-cell grid produces far more
-    than 20 KB of it. `parse_progress` counts served cells by counting `[cell N/M]` verdict lines, so
-    once the earliest ones scrolled out of that window the count silently fell: the SERVED column read
-    "3/8" on a gateway that had finished seven, and the ETA divided the elapsed time by a progress
-    figure it knew to be too small, reporting hours of remaining work on a run that was nearly done.
-    Both numbers are on the screen an operator uses to decide whether to kill a box.
-
-    Filtering server-side is the fix rather than raising the cap, because it bounds the transfer by
-    what is actually parsed (two line shapes, both anchored at column 0) instead of by bytes of prose.
-    A 36-cell grid emits 36-ish cell lines and about 430 phase lines, so `tail -n 4000` keeps the whole
-    history of any real run while still refusing to stream an unbounded file. The completeness check
-    in `parse_progress` is what catches it if that assumption is ever wrong."""
+    Filters server-side to the two line shapes actually parsed (`^[cell` / `^[phase]`) rather than
+    capping by raw byte count: a byte cap (previously `tail -c 20000`) can scroll early `[cell N/M]`
+    lines out of the window on a heavily-narrated grid, silently undercounting served cells and
+    inflating the ETA. `tail -n 4000` comfortably covers a 36-cell grid's ~460 matching lines;
+    `parse_progress`'s completeness check catches it if that assumption is ever wrong."""
     if not ip:
         return ""
     try:
@@ -259,18 +194,12 @@ def parse_progress(text):
     """Latest cell position, latest phase, how many measured cells completed, and whether the log we
     read covers the whole run.
 
-    `complete` is the guard on `served_done`. The count is derived by counting lines, so it is only a
-    count of cells if every cell's line is in front of us; if the log we read starts mid-grid, it is a
-    LOWER BOUND and everything computed from it (the SERVED column, the ETA) is wrong in the flattering
-    direction - fewer cells done than really are means a longer estimate and a run that looks less
-    finished than it is. The engine numbers its cells absolutely and contiguously from 1
-    (`[cell {done}/{total}]`, run.rs), so "did we see every position from 1 to the latest?" answers the
-    question exactly, with no heuristic about how chatty the log is. A cell can emit several `[cell …]`
-    lines (the mid-grid restart narrates under the same prefix), which is why this is a set of
-    positions and not a line count.
-
-    The caller marks the derived figures as bounds rather than dropping them: a floor on progress is
-    still worth showing, and silently presenting a floor as a measurement is the thing to avoid."""
+    `complete` guards `served_done`: the count comes from counting lines, so it's only accurate if
+    every cell's line is present. If the log starts mid-grid it's a LOWER BOUND, which understates
+    progress and overstates the ETA — the caller marks these as bounds rather than dropping them.
+    The engine numbers cells contiguously from 1, so checking that every position 1..latest was seen
+    detects a truncated log exactly, without guessing at how chatty it is. This is a set of positions
+    rather than a line count because a cell can emit several `[cell ...]` lines (e.g. a restart)."""
     cells, phase, served_done, total = None, None, 0, None
     positions = set()
     for ln in text.split("\n"):
@@ -325,8 +254,7 @@ def row_for(gw, path, now_s):
             measuring += 24 * 3600
     eta = None
     if measuring and expect:
-        # Progress in CELLS, including the fraction of the one in flight. Without the fraction there
-        # is no estimate at all until a cell completes.
+        # Include the fraction of the in-flight cell; otherwise there's no estimate until it completes.
         in_flight = cell_fraction_done(phase.split()[0] if phase else None)
         progress = served_done + in_flight
         if progress > 0:
@@ -337,25 +265,20 @@ def row_for(gw, path, now_s):
     if cells is None:
         phase = phase or ("booting/building" if st.get("ip") else "launching")
 
-    # WHEN THE HISTORY IS SHORT, SAY SO IN THE CELL RATHER THAN IN A COMMENT. `served_done` is a count
-    # of lines we saw; if the log did not reach back to cell 1 it is a floor, and so is the ETA built
-    # on it. "≥" is four pixels of honesty that stop an operator reading a lower bound as a reading.
+    # "≥" marks served/ETA as a lower bound when the log doesn't reach back to cell 1, so an
+    # operator doesn't mistake a floor for an exact reading.
     lb = "" if complete else "≥"
     served = f"{lb}{served_done}/{expect}" if expect is not None else f"{lb}{served_done}"
 
     return dict(
         gw=gw,
         phase=(phase or "-")[:34],
-        # `if cells is not None`, not `if cells`: the engine's counter is 1-based today so a 0 cannot
-        # appear, but the falsy-zero reading is the same bug the ETA column already had (an eta of
-        # exactly 0.0 rendering as "no estimate"), and a position of 0 would print "-" - "no cell
-        # information at all" - about a run that had told us exactly where it was.
+        # `is not None`, not truthiness: cell 0 is a valid position and must not print as "-".
         cells=f"{cells}/{total}" if cells is not None else "-",
         served=served,
         elapsed=hms(elapsed),
-        # An ETA built on a floor is itself a floor, so it carries the same mark as the count it came
-        # from. "~" still means "nothing to divide by yet", which is a different statement from "at
-        # least this long".
+        # An ETA built on a floor carries the same "≥" mark. "~" means "nothing to divide by yet",
+        # distinct from "at least this long".
         eta=(lb + hms(eta)) if eta is not None else ("~" if served_done == 0 else "-"),
         done=False, bad=False,
     )

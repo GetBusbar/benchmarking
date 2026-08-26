@@ -4,16 +4,13 @@
 #
 # THE FETCH MUST LAND FILES WITH THE MODE THE COMMIT RECORDS.
 #
-# A box used to receive its harness as a tarball, which carries modes for free. Replacing that with
-# per-file fetches - to stop every box downloading 46 MB of results/ to keep 44 KB - lost the
-# executable bit, because a raw download writes whatever the umask says. The three source-built
-# entrants ship a build.sh that the launcher runs directly, so all three died with
-# "build script gateways/<name>/build.sh is not executable" while the eleven container entrants ran
-# fine. A whole 14-box run was thrown away for it.
-#
-# The defect is invisible to every check that only asks "did the file arrive": the file arrived, with
-# the right bytes, and was useless. So this asserts the MODE, on both sides - an executable file
-# stays executable, and a plain file is not quietly made executable to paper over it.
+# run-on-ec2.sh fetches each file individually via curl (rather than a tarball, which preserves modes
+# for free) so a box downloads only its own gateway directory instead of the whole repo. A raw
+# download writes whatever the umask says, so the executable bit must be restored explicitly - a
+# source-built gateway's build.sh, run directly by the launcher, fails opaquely
+# ("... is not executable") if this is missed, while container gateways still work fine. The defect is
+# invisible to any check that only asks "did the file arrive" (bytes are fine, mode is wrong), so this
+# asserts the MODE on both sides - executable stays executable, plain stays plain.
 #
 # Self-contained: it reconstructs the same read/curl/chmod loop the orchestrator sends to the box,
 # against a local file:// source, so it needs no network and no EC2.

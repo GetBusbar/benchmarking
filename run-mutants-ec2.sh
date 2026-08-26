@@ -78,10 +78,9 @@ log "running mutants (-j $JOBS) - this is the long part"
 ssh $SSHOPT "ubuntu@$IP" bash -s <<REMOTE
 . "\$HOME/.cargo/env"
 # RAISE THE DESCRIPTOR LIMIT FIRST. Ubuntu ships nofile=1024, and this suite binds a listener per
-# socket test with many tests in flight; under cargo-mutants there are \$JOBS whole suites at once.
-# The first attempt died at the BASELINE with EMFILE across ~40 tests - "Too many open files" even
-# reading a manifest template - which reads exactly like a portability defect and is not one. The
-# bench boxes already do this for the same reason (run-on-ec2.sh sets 1048576).
+# socket test with \$JOBS whole test-suite processes in flight under cargo-mutants - unlifted, this
+# hits EMFILE ("Too many open files") even at the baseline run, before any mutant is tried. Same fix
+# as run-on-ec2.sh applies for the same reason.
 ulimit -n 1048576 2>/dev/null || ulimit -n "\$(ulimit -Hn)" 2>/dev/null || true
 echo "[mutants] nofile soft=\$(ulimit -Sn) hard=\$(ulimit -Hn)"
 cd ~/bench/engine

@@ -1,28 +1,13 @@
 #!/usr/bin/env bash
-# Pull busbar's partial snapshot off its box EVERY POLL, so a box that dies never costs the whole run -
-# and compare the run's ETA to the box's own lifetime, so a run that cannot finish says so while there
-# is still time to do something about it.
+# Pull busbar's partial snapshot off its box EVERY POLL, so a box that dies (or the orchestrator that
+# owns it exits) never costs the whole run - and compare the run's ETA to the box's own scheduled
+# `shutdown -h` lifetime, so a grid that cannot finish in time says so while there is still time to
+# raise BENCH_MAX_MIN or accept a partial grid. Reporting progress without checking it against the
+# box's own deadline is not enough: a run can show healthy progress every poll while being
+# mathematically certain to be killed by its own cost backstop before finishing.
 #
-# WHY THIS EXISTS, THREE TIMES OVER.
-#
-# First: the 2026-08-01 field run lost seven gateways at once to one network event on the operator's
-# machine, and the orchestrator - which does its own incremental pulls - exited with it. busbar was
-# left measuring with nothing holding its results.
-#
-# Then this script's first version made it worse. It pulled ONLY on completion, and busbar's box hit
-# its `shutdown -h` cost backstop at exactly 8h (BENCH_MAX_MIN=480) while 24 of 36 cells were done.
-# The box went, and 8 hours of measurement went with it, because the only copy lived on the box.
-#
-# Then, on 2026-08-02, it happened AGAIN, to busbar 1.5.0, with this script running and reporting
-# healthy progress every poll the whole way down. The pull worked - 24 cells survived - but the run
-# still died at 27/36, because 1.5.0 measures at ~16 min/cell and a 36-cell grid needs ~10 h inside a
-# box whose lifetime was 8 h. IT WAS NEVER GOING TO FINISH, and every single poll said so if anyone
-# had done the arithmetic. A monitor that reports progress and not the DEADLINE THAT PROGRESS IS
-# RACING is not monitoring the thing that kills runs. So this now reads the box's own scheduled
-# shutdown, projects completion from the measured cell rate, and shouts when the two cross.
-#
-# And: pull every poll, keep the newest partial, and NEVER terminate. Termination belongs to the
-# orchestrator that owns the run; this is insurance, and insurance that can destroy the thing it
+# Pulls every poll, keeps the newest partial, and NEVER terminates anything - termination belongs to
+# the orchestrator that owns the run; this is insurance, and insurance that can destroy the thing it
 # insures is not insurance.
 set -uo pipefail
 
@@ -65,8 +50,8 @@ try:
     print(sum(len(u.get(\"cells\") or {}) for u in (d.get(\"matrix\",{}).get(\"upstreams\") or {}).values()))
 except Exception: print(0)' 2>/dev/null || echo 0)\"
       # THE BOX'S OWN DEATH CLOCK. \`shutdown -h +N\` writes USEC=<epoch-microseconds> here; this is
-      # the authoritative answer to 'how long does this machine have left', not our own bookkeeping
-      # of when we launched it, which is the number nobody checked the night this mattered.
+      # the authoritative answer to 'how long does this machine have left', not our own bookkeeping of
+      # when we launched it.
       printf 'deadline=%s\n' \"\$(sed -n 's/^USEC=//p' /run/systemd/shutdown/scheduled 2>/dev/null || echo 0)\"
     " 2>/dev/null | tr -d '\r' | awk -F= '
       /^alive=/{a=$2} /^cells=/{c=$2} /^deadline=/{d=$2}
@@ -109,8 +94,8 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
   esac
 
   # NEVER READ "NOT STARTED YET" AS "FINISHED". At launch the box is still provisioning and `otb` is
-  # absent, so a bare `alive == 0` test would take the exit path before the run had begun - the same
-  # shape of mistake that lost eight hours of busbar. The run is only over once it has been seen alive.
+  # absent, so a bare `alive == 0` test would take the exit path before the run had begun. The run is
+  # only over once it has been seen alive.
   [[ "$alive" =~ ^[1-9] ]] && seen_alive=1
   if [[ "${seen_alive:-0}" == "1" && "$alive" == "0" ]]; then
     rsync -az --timeout=180 -e "$SSHCMD" \

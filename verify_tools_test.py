@@ -2,19 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# RED FIXTURES FOR THE TWO AUDITORS THAT HAD NEITHER A TEST NOR A PLACE IN THE CI GATE.
-#
-# `verify-latency.py` and `audit-every-metric.py` were written in one sitting during a live run and
-# shipped with no test file and no CI invocation. A later audit round found that `verify-frontier.py`
-# and `verify-turnover.py` - the OLDER and more important pair, and the ones that actually re-derive
-# the frontier - had neither either, so fixing only the two newest was a half-fix. All four are
-# covered here now. That is the same shape as the defects they exist to
-# catch: an oracle nobody has shown can fail is an oracle nobody should believe. A typo'd field name
-# that always resolves to `None` would leave `checked` at 0 and print PASS on every board forever, and
-# nothing would notice.
+# RED FIXTURES for all four auditors (verify-latency, audit-every-metric, verify-frontier,
+# verify-turnover): an oracle nobody has shown can fail is an oracle nobody should believe - a typo'd
+# field name that always resolves to `None` would print PASS on every board forever, unnoticed.
 #
 # So each check gets a fixture that violates exactly it, and the test asserts the tool FAILS. The
-# accept side is covered too, because a checker that rejects everything is equally useless.
+# accept side is covered too, since a checker that rejects everything is equally useless.
 #
 # Run: python3 verify_tools_test.py
 
@@ -83,9 +76,8 @@ def snapshot(cell):
 def run(tool, cell):
     """Run one auditor over a one-cell board and return (exit_code, output).
 
-    `verify-frontier.py` deliberately PARSES engine/src/frontier.rs for the declared bounds rather than
-    hardcoding them - so it cannot police a different axis than the one that ran, and going blind counts
-    as a failure rather than a pass. The fixture tree therefore has to carry that file too.
+    verify-frontier.py parses engine/src/frontier.rs for the declared bounds rather than hardcoding
+    them, so the fixture tree has to carry that file too.
     """
     d = tempfile.mkdtemp()
     try:
@@ -156,12 +148,9 @@ def main():
     c, o = run("audit-every-metric.py", mutate(memory__idle_rss_mib=-5.0))
     expect("a negative RSS FAILS", c, o, True, "negative")
 
-    # RED: a NEGATIVE cost per request. The engine already refuses this at the counters - a backwards
-    # counter (pid reuse) becomes Absent::HarnessError rather than a subtraction into a negative - so
-    # a negative reaching the artifact means that refusal was bypassed. This is the second line of
-    # defence, and it exists because a negative CPU time is an impossible number, and by this
-    # project's rule an impossible number is an ENGINE bug that must never be published as a gateway
-    # property.
+    # RED: a negative cost per request. The engine refuses this at the counters (a backwards counter
+    # from pid reuse becomes Absent::HarnessError), so a negative reaching the artifact means that
+    # refusal was bypassed - this check is the second line of defence.
     c, o = run("audit-every-metric.py", mutate(perf__cpu_us_per_request=-12.5))
     expect("a NEGATIVE cpu_us_per_request FAILS", c, o, True, "negative")
 
@@ -173,15 +162,9 @@ def main():
     c, o = run("audit-every-metric.py", mutate(memory__recovered_rss_mib=9999.0))
     expect("a recovered value above the peak FAILS", c, o, True)
 
-    # ACCEPT, AND THIS ONE GUARDS AGAINST A GATE COMING BACK RATHER THAN GOING MISSING.
-    # audit-every-metric.py used to assert p50 <= p99 across added_latency / added_ttft / added_gap,
-    # under a comment claiming they were "pairs from one distribution". They are DIFFERENCES of two
-    # distributions' percentiles (gateway leg minus direct leg), and a difference does not inherit
-    # monotonicity: a constant gateway overhead under a stretching DIRECT baseline gives a smaller
-    # added figure at p99 than at p50 with no percentile anywhere out of order.
-    # It fired on the real 2026-07-30 field run - agentgateway anthropic>anthropic, added_gap p50=4us
-    # vs p99=3us - and acting on it would have meant "fixing" an engine that was computing correctly.
-    # These pin that a legitimate inverted DIFFERENCE is accepted, so the unsound rule cannot return.
+    # ACCEPT: guards against the removed p50<=p99 gate coming back. added_latency/added_ttft/added_gap
+    # are DIFFERENCES of two distributions' percentiles, not one population, so they don't inherit
+    # monotonicity - this fired on real, correct field data (agentgateway, 2026-07-30) before removal.
     c, o = run("audit-every-metric.py", mutate(stream__added_gap_p50_us=4, stream__added_gap_p99_us=3))
     expect("an added_gap p50 above its p99 is ACCEPTED (a difference, not one distribution)", c, o, False)
     c, o = run("audit-every-metric.py", mutate(perf__added_latency_p50_us=900, perf__added_latency_p99_us=800))
@@ -218,14 +201,9 @@ def main():
     expect("a frontier missing declared bounds FAILS", c, o, True)
 
     print("verify-turnover.py:")
-    # ACCEPT, AND FOR THE RIGHT REASON. This fixture used to be CLEAN_CELL, whose only rung above the
-    # winner carries `fail: 1` - so verify-turnover classified it CLIFF-BUT-MOOT and NEVER entered the
-    # `proved` branch. The test passed, and the tool's central classification - the thing its entire
-    # docstring is about - was unexercised: inverting the `best < win_rps` comparison in the tool would
-    # have left all 16 fixtures green.
-    #
-    # So this one carries a genuinely CLEAN, strictly slower rung above the peak, which is what a proved
-    # turnover IS, and asserts the tool says so.
+    # ACCEPT: a genuinely clean, strictly slower rung above the peak - a proved turnover. Using
+    # CLEAN_CELL here would classify as CLIFF-BUT-MOOT instead (its only rung above carries fail:1),
+    # leaving the PROVED branch, the tool's central classification, unexercised.
     proved = copy.deepcopy(CLEAN_CELL)
     proved["perf"]["sweep_max_proxy"] = [
         {"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0},
@@ -269,14 +247,10 @@ def main():
 
 
 # ---- run-on-ec2.sh: the provision payload is SINGLE-QUOTED, so it cannot contain an apostrophe ----
-# This cost a full 14-box launch on 2026-07-30. The provisioning block is passed as
-# `ssh host 'set -e ... '`, so the FIRST apostrophe inside it closes the string - and everything
-# after runs on the ORCHESTRATOR instead of the box. The symptom is maximally misleading: the error
-# reads "./run-on-ec2.sh: line 907: sudoq: command not found", naming a local line number for a
-# helper that is defined and correct on the remote side, while every box reports PROVISION FAILED.
-# Parity does not save it: an even number of apostrophes re-closes the string but still executes the
-# span between them locally. The only safe rule is ZERO apostrophes in the payload, including prose
-# in comments - which is exactly where all three came from ("the gateway's", "run.sh's", "else's").
+# The payload is passed as `ssh host 'set -e ... '`, so the first apostrophe inside it closes the
+# string and everything after runs on the orchestrator instead of the box (an even count re-closes but
+# still executes the span between locally). Zero apostrophes, including in comment prose, is the only
+# safe rule - this cost a full 14-box launch on 2026-07-30.
 def _test_provision_payload_has_no_apostrophe():
     import re
     src = open(os.path.join(HERE, "run-on-ec2.sh"), encoding="utf-8").read().split("\n")

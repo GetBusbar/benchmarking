@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# bench-cost.py had no test at all. Its one selection function decides WHICH snapshot a cost report
-# describes, and every wrong answer is silent: an older snapshot, another gateway's snapshot, or a
-# snapshot from a different engine all produce a plausible table. Pinned here: newest-per-gateway
-# selection, the gateway filter, the engine-prefix filter, and that a malformed snapshot is skipped
-# rather than sinking the report.
+# Covers bench-cost's snapshot-selection function: which snapshot a cost report describes is a
+# silent failure mode (wrong gateway, wrong age, wrong engine all produce a plausible table).
+# Pins newest-per-gateway selection, the gateway/engine-prefix filters, and that a malformed
+# snapshot is skipped rather than sinking the report.
 #
 #   python3 bench-cost_test.py
 import importlib.util
@@ -55,14 +54,10 @@ with tempfile.TemporaryDirectory() as td:
     with open(os.path.join(d, "result_anon_2026-07-25.json"), "w") as f:
         json.dump({"measured_at": "x"}, f)
 
-    # POINT THE AUDIT'S PATH ANCHOR AT THE FIXTURE, DO NOT chdir.
-    #
-    # bench-cost reads snapshots through bench-audit's `snapshot_paths()`, which resolves against the
-    # SCRIPT's directory so the audit can be run from anywhere. A chdir therefore no longer changes
-    # what it reads: this test used to chdir into the fixture and then silently assert against the
-    # real repo's snapshots - passing or failing on whatever board happened to be checked out. Moving
-    # HERE is the only thing that redirects it, and it is what bench-audit_test.py's own RED proof
-    # does for the same reason.
+    # Point bench-audit's path anchor at the fixture; do NOT chdir. snapshot_paths() resolves
+    # against the script's own directory so the audit runs from anywhere - a chdir here would not
+    # redirect it, and this test would silently assert against whatever the real repo has checked
+    # out. Same fix bench-audit_test.py's RED proof uses.
     audit_mod = sys.modules.get("bench_audit") or bc._audit
     old_here = audit_mod.HERE
     audit_mod.HERE = td

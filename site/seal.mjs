@@ -1,43 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
-// seal.mjs: the data-honesty ENVELOPE - the single point where a measurement becomes a published
-// datum, at PROJECTION time (gen-data.mjs), never at read time. Every metric the board consumes is
-// sealed here, and the raw scalar is CONSUMED at seal time so there is no ungated raw field for any
-// render site to leak (Design E, invariant P1). app.js reads envelopes through metric(); charts.py
-// mirrors metric() + SWEEP_CAPTION.
+// seal.mjs: the data-honesty ENVELOPE - the single point where a measurement becomes a published datum,
+// at PROJECTION time (gen-data.mjs), never at read time. The raw scalar is consumed here so no ungated
+// raw field survives for a render site to leak (Design E, invariant P1). app.js reads envelopes through
+// metric(); charts.py mirrors metric() + SWEEP_CAPTION.
 //
 // Envelope shapes:
-//   CERTIFIED   { value: N,    certified: true,  suppressed: false, headroom?, rig_ceiling?, ...extras }
-//   MEASURED-0  { value: 0,    certified: true,  suppressed: false, note: "no_qualifying_ceiling" }
-//   NOT-MEASURED{ value: null, certified: false, suppressed: false, reason: <engine absence token>, detail? }
+//   CERTIFIED    { value: N,    certified: true,  suppressed: false, headroom?, rig_ceiling?, ...extras }
+//   MEASURED-0   { value: 0,    certified: true,  suppressed: false, note: "no_qualifying_ceiling" }
+//   NOT-MEASURED { value: null, certified: false, suppressed: false, reason: <engine absence token>, detail? }
 //
-// A PRESENT NUMBER IS ALWAYS PUBLISHED. There used to be a fourth shape - SUPPRESSED, `{value: null,
-// certified: false, suppressed: true, reason: "mock_bound"|"unverifiable"}` - and a whole GATED/PACED
-// vocabulary feeding it. A "gated" metric was certified only when the engine's `*_mock_bound` flag
-// proved the number was not our own rig's ceiling; a positive value whose flag was `true` (rig-bound)
-// or `null` (unmeasurable reference) had its value replaced with null.
+// A PRESENT NUMBER IS ALWAYS PUBLISHED. There used to be a fourth SUPPRESSED shape, gated on the
+// engine's `*_mock_bound` flag (was this number provably not our own rig's ceiling?) - which withheld
+// correct measurements: on the 2026-07-28 board a gateway within 0.7% of the paced mock published
+// nothing. The engine now publishes the ceiling and the fraction reached instead of a verdict, riding on
+// the certified envelope as `rig_ceiling`/`headroom`; nothing in this file judges a threshold.
+// `suppressed: false` still rides on every envelope - invariant C2 asserts no published envelope ever
+// carries `suppressed: true`, i.e. that this retired machinery hasn't come back.
 //
-// That withheld correct measurements. The engine reached the flag by comparing the observation against
-// a rig reference and applying a chosen fraction, and it fired hardest on the gateways that did best:
-// on the 2026-07-28 board a gateway keeping pace with the paced mock to within 0.7% published nothing
-// at all. The number was right; only its INTERPRETATION was open, and deleting the number is not a way
-// to resolve that.
-//
-// So the engine no longer produces a verdict, and this no longer consumes one. It produces the two
-// facts the verdict was derived from - the ceiling the measurement was taken against and the fraction
-// of it reached - and they ride ON the certified envelope as `rig_ceiling` and `headroom`. A reader
-// sees `43297 frames/sec, 83% of the mock's own 52013 ceiling` and draws their own conclusion. Nothing
-// in this file chooses a threshold, because nothing in this file reaches a conclusion.
-//
-// `suppressed: false` is still emitted on every envelope. It is load-bearing for consumers and for
-// invariant C2, which asserts no envelope in a published bundle carries `suppressed: true` - the guard
-// that the retired machinery has not come back.
-//
-// The NOT-MEASURED reason is not a hardcoded literal: the engine publishes WHY a field is absent
-// (measurement.rs `Absent` - not_measured, below_resolution, rig_limited, untestable, search_exhausted,
-// harness_error, not_served) in the cell's sibling `absences` map, and the seal CARRIES that reason plus
-// its prose detail instead of flattening every hole to one token. In particular "below_resolution" is a
-// difference that came out at or below what the rig can resolve - the best result the comparison can
-// express - and every surface renders it apart from a never-measured hole.
+// NOT-MEASURED's `reason` is the engine's own absence token (measurement.rs `Absent`: not_measured,
+// below_resolution, rig_limited, untestable, search_exhausted, harness_error, not_served), carried
+// through rather than flattened to one literal - "below_resolution" (the best result the rig can
+// express) must render differently from a hole that was never measured.
 
 // ---- provenance stamp + caption vocabulary ---------------------------------
 // The `sweep` token names WHICH projection of the run the datum is; every caption renders FROM it via
@@ -56,46 +39,29 @@ export const SWEEP = {
 };
 
 // ---- the ONE metric-field vocabulary ---------------------------------------
-// gen-data seals these, check-consistency asserts these. Both IMPORT from here, so a producer field
-// added on one side can never ship unsealed because the other side's whitelist lagged (audit #11).
-//
-// THROUGHPUT_FIELDS was `GATED_FIELDS`, and the rename is the point: this is a VOCABULARY (which keys
-// are metrics that must be envelopes), never again a gate (which values are allowed to show). It is the
-// set of throughput-shaped metrics, and it is the set that carries `headroom` when a rig ceiling was
-// available for the comparison.
+// gen-data seals these; check-consistency asserts these. Both import from here so a field added on one
+// side can never ship unsealed because the other's whitelist lagged (audit #11).
+// THROUGHPUT_FIELDS (formerly GATED_FIELDS - a vocabulary of which keys must be envelopes, not a gate on
+// which values show): throughput-shaped metrics that carry `headroom` when a rig ceiling was available.
 export const THROUGHPUT_FIELDS = ["streams_sustained", "streams_sustained_fps"];
 
-// THE FRONTIER'S DECLARED TAIL-LATENCY BOUNDS, in milliseconds, mirroring the engine's
-// `frontier::P99_BOUNDS_US`. Ascending, with the unbounded reading rendered separately.
-//
-// A MIRROR IS A SECOND SOURCE OF TRUTH, so this one is CHECKED rather than trusted: the bundle carries
-// each reading's own `p99_bound_us`, `check-consistency` compares this list against what the raw
-// artifacts actually contain, and a divergence is a violation rather than a silently short table. The
-// alternative - deriving the columns from whatever the first gateway happens to publish - would let a
-// gateway missing a bound quietly shrink the board for everyone.
+// The frontier's declared tail-latency bounds (ms), mirroring the engine's `frontier::P99_BOUNDS_US`.
+// Ascending; the unbounded reading is rendered separately. A mirror is a second source of truth, so
+// check-consistency compares this list against what raw artifacts actually contain rather than trusting
+// it - deriving columns from whatever the first gateway happens to publish would let a missing bound
+// silently shrink the board for everyone.
 export const FRONTIER_BOUNDS_MS = [1, 5, 10, 50, 100];
 
-// WHICH BOUND THE BOARD SHOWS BEFORE THE READER PICKS ONE.
-//
-// It has to default to something to render a table, and this is the honest way to choose: 10 ms sits at
-// the middle of where the field population actually separates (of 1632 recorded rungs, 16% hold 1 ms,
-// 47% hold 10 ms, 88% hold 100 ms, and 96% hold 1 s - so a looser default would put nearly every gateway
-// on the same side of it and discriminate between almost nothing).
-//
-// IT IS A VIEW, NOT A VERDICT, and that is the whole difference from the constant it replaces.
-// `SUSTAINED_P99_CEILING_US` decided which measurements existed; this decides which column opens first.
-// Every bound is published on every cell, the UI names the one it is showing, and switching it re-ranks
-// the board in front of the reader.
+// Which bound the board shows before the reader picks one. 10ms sits where the field population
+// actually separates (of 1632 recorded rungs: 16% hold 1ms, 47% hold 10ms, 88% hold 100ms, 96% hold 1s)
+// - a looser default would put nearly every gateway on the same side of it. It's a VIEW, not a verdict
+// (unlike the `SUSTAINED_P99_CEILING_US` constant it replaces): every bound is published on every cell,
+// and switching it just re-ranks the board in front of the reader.
 export const DEFAULT_BOUND_MS = 10;
 
-// What `sealMetric` will publish for a raw value, as a pure function of the same inputs.
-//
-// THE ONE PLACE THE DISPLAY RULE LIVES. `sealMetric` builds a whole envelope (notes, headroom, absence
-// reasons); this answers only "does the number show, and as what", which is the part an independent
-// oracle needs and the part that must never be written twice.
-//
-// It used to take a `flag` and `{gated, paced}` and return null for a measured number whose flag was
-// not `false`. It now has exactly one branch, because a measured number always shows.
+// What `sealMetric` will publish for a raw value - the ONE place the display rule lives (separate from
+// sealMetric's full envelope) so an independent oracle can answer "does it show, and as what" without
+// duplicating this logic. One branch: a measured number always shows.
 export function displayedValue(raw, { absentReason = null } = {}) {
   // A below-resolution absence DISPLAYS as 0: the comparison ran and the difference was too small
   // for the rig to weigh, which ranks equal-best and renders as "≈0", never as a hole. Every other
@@ -105,11 +71,9 @@ export function displayedValue(raw, { absentReason = null } = {}) {
 }
 // UNGATED, latency-shaped, on a perf cell.
 export const UNGATED_LAT_FIELDS = ["added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us", "direct_c1_p99_us"];
-// UNGATED, cost-shaped, on a perf record. WHAT THE CELL COST rather than what it delivered - the
-// answer that does not stop describing the gateway once it saturates its cores. Listed explicitly
-// (rather than discovered by pattern) because these are six unrelated shapes - a duration, a rate, a
-// concurrency, two counts and a fault total - with no common suffix a regex could key on safely.
-// Leaving any of them out would let it ship as a bare unsealed scalar: the peak_rss_hwm_mib bug again.
+// UNGATED, cost-shaped, on a perf record - what the cell COST, not what it delivered. Listed explicitly
+// rather than discovered by pattern: these are six unrelated shapes with no common suffix a regex could
+// key on safely, so a bare unsealed scalar (the peak_rss_hwm_mib bug again) is one omission away.
 export const UNGATED_COST_FIELDS = [
   "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc", "cost_core_utilisation",
   "cost_window_ok", "cost_window_rps",
@@ -117,16 +81,13 @@ export const UNGATED_COST_FIELDS = [
 ];
 // UNGATED, latency/rate-shaped, on a stream record.
 export const UNGATED_STREAM_FIELDS = ["added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us", "added_gap_p99_us"];
-// RSS metrics are sealed BY DISCOVERY, not by a whitelist: ANY RSS-in-MiB field the producer emits is a
-// metric and must be sealed, idle/peak/recovered today, plus the qualified variants the producer has
-// already added (peak_rss_HWM_mib, post_load_rss_mib). The pattern deliberately allows a qualifier
-// between `rss` and `mib` (e.g. peak_rss_hwm_mib) so a narrower regex or a fixed whitelist can't again
-// let a differently-named RSS field ship as a bare unsealed scalar.
+// RSS metrics are sealed BY DISCOVERY, not by a whitelist: any *_rss_..._mib field the producer emits
+// (idle/peak/recovered, plus qualified variants like peak_rss_hwm_mib) is a metric and must be sealed.
+// A fixed whitelist let a differently-named RSS field ship as a bare unsealed scalar before.
 export const RSS_FIELD_RE = /_rss_(?:[a-z0-9]+_)*mib$/;
-// UNGATED, memory-shaped, on a per-cell memory window. These are NOT RSS values (so RSS_FIELD_RE cannot
-// discover them) but they ARE published numbers: the growth rate is the leak rate when a gateway never
-// reached a steady state, i.e. the most load-bearing number the memory metric produces. Leaving them out
-// of the vocabulary would let them ship as bare unsealed scalars: the peak_rss_hwm_mib bug again.
+// UNGATED, memory-shaped, on a per-cell memory window. Not RSS values (RSS_FIELD_RE can't discover
+// them), but published numbers - growth_rate is the leak rate when a gateway never reached steady
+// state - so they're listed explicitly rather than shipping as bare unsealed scalars.
 export const UNGATED_MEM_FIELDS = ["growth_rate_mib_per_min", "time_to_plateau_s"];
 // isMetricField(k): is this key a sealed-envelope metric field? The single predicate both gen-data
 // (what to seal) and check-consistency (what must BE an envelope) use.
@@ -145,66 +106,42 @@ export function makeSource(kind, sweep, build, measuredAt) {
 }
 
 // ---- the seal ---------------------------------------------------------------
-// sealMetric: a raw scalar -> a sealed envelope. The raw scalar does not survive onto the returned
-// object except as `value`.
+// sealMetric: a raw scalar -> a sealed envelope. The raw scalar survives only as `value`.
 //   value        : the raw number (or null/undefined when not measured)
 //   opts.source  : the provenance stamp (makeSource)
 //   opts.extras  : extra CERTIFIED-only fields to carry (concurrency, sweep array)
-//   opts.headroom: the fraction of the rig's own ceiling this measurement reached, from the engine's
-//                  `*_headroom`. A FACT ABOUT THE COMPARISON, carried so a reader can weigh a number
-//                  that sat near our equipment's limit. Omitted when the engine had no usable ceiling -
-//                  which costs the fraction and NOT the value. It used to cost both.
-//   opts.ceiling : the ceiling that fraction is of, from `*_rig_ceiling` / `*_mock_ceiling`, so the
-//                  headroom is checkable rather than asserted. For the stream metrics this is DERIVED
-//                  from the mock's declared pacing (run::mock_frame_ceiling_fps), not measured.
-// The envelope is LEAN: it does NOT repeat the provenance stamp (the CELL carries `source`, which is
-// authoritative and drives every caption). Keeping the stamp off each envelope avoids ~10x bundle bloat
-// across the 36-cell matrix while preserving invariant P1 (no raw scalar survives).
+//   opts.headroom: fraction of the rig's own ceiling reached (engine's `*_headroom`). Omitted (not 0)
+//                  when the engine had no usable ceiling.
+//   opts.ceiling : the ceiling that fraction is of (`*_rig_ceiling`/`*_mock_ceiling`), so headroom is
+//                  checkable rather than asserted. For stream metrics this is DERIVED from the mock's
+//                  declared pacing (run::mock_frame_ceiling_fps), not measured.
+// The envelope does NOT repeat the provenance stamp - the cell's `source` is authoritative - to avoid
+// ~10x bundle bloat across the 36-cell matrix while still preserving invariant P1 (no raw scalar leaks).
 //
-// opts.zeroNote: WHAT a measured 0 MEANS. A 0 is ALWAYS an honest MEASURED value (the harness ran and
-// the answer was zero) and is ALWAYS certified - it is NEVER folded into "not measured", which is
-// exclusively `value == null` (audit #3). The note names the meaning so each surface can render the two
-// apart:
+// opts.zeroNote: what a measured 0 means. A 0 is always an honest MEASURED, CERTIFIED value, never
+// folded into "not measured" (exclusively `value == null`, audit #3):
 //   ZERO_NO_CEILING    (RPS ceilings)     - served, but no tested load held the qualifying gates.
-//   ZERO_MEASURED_FAIL (streaming counts) - the gateway was offered stream load and sustained NONE.
-// Publishing a measured stream-sustain FAILURE as "not measured" would flatter the gateway; null (an
-// absent field) is the ONLY not-measured state.
+//   ZERO_MEASURED_FAIL (streaming counts) - offered stream load and sustained NONE of it.
 export const ZERO_NO_CEILING = "no_qualifying_ceiling";
 export const ZERO_MEASURED_FAIL = "measured_failure";
-// WHICH ZERO-NOTE A FIELD TAKES, as data rather than as a literal repeated at each call site.
-//
-// The note is the whole difference between "served, but no offered load held the gates" and "offered
-// stream load and sustained none of it", and gen-data used to pick it by hand per call while the
-// independent oracle in check-consistency knew nothing about it at all - so a swapped note published a
-// measured streaming failure as a missing RPS ceiling and verified green. One list, imported by both.
-// The streaming counts are the measured-failure family; every other throughput metric is an RPS ceiling.
-// `cpu_fps` is gone from this list because the metric is retired - see the engine's `run.rs`. A field
-// name left in a vocabulary after the field stops existing is not harmless: `zeroNoteFor` would keep
-// answering ZERO_MEASURED_FAIL for it, so a future field that happened to reuse the name would silently
-// inherit a "the gateway was offered load and sustained none of it" annotation it never earned.
+// WHICH ZERO-NOTE A FIELD TAKES, as data (one list, imported by both gen-data and check-consistency)
+// rather than a literal repeated per call site - a swapped note once published a measured streaming
+// failure as a missing RPS ceiling and both sides verified it green. Streaming counts are the
+// measured-failure family; every other throughput metric is an RPS ceiling. `cpu_fps` is gone from this
+// list because the metric is retired - leaving it would make `zeroNoteFor` keep answering
+// ZERO_MEASURED_FAIL for a future field that happened to reuse the name.
 export const ZERO_FAIL_FIELDS = ["streams_sustained", "streams_sustained_fps"];
-// NULL FOR A FIELD WITH NO ZERO-NOTE VOCABULARY, which is most of them. The two tokens above are claims
-// about a THROUGHPUT measurement - "no tested load held the qualifying gates", "offered stream load and
-// sustained none" - and neither is a true sentence about anything else.
-//
-// This used to fall through to ZERO_NO_CEILING for every field it did not recognise. That was harmless
-// only because the caller applied it under a `gated` flag; when the gate was removed the fallthrough
-// became live, and 37 `growth_rate_mib_per_min` zeros and 6 `added_gap_p50_us` zeros shipped annotated
-// "served, but no tested load held p99 < 1 s at <0.1% errors" - a fabricated claim about a memory growth
-// rate and an inter-frame gap. Neither surface could tell, and the independent oracle called
-// `zeroNoteFor` too, so it expected the same wrong note and the bundle verified green.
+// Null for a field with no zero-note vocabulary (most of them) - the two tokens above are claims about
+// a THROUGHPUT measurement and are not true sentences about anything else. This used to fall through to
+// ZERO_NO_CEILING for every unrecognised field, which fabricated the RPS sentence onto memory-growth and
+// gap zeros once the caller's `gated` flag (which had made it harmless) was removed.
 export function zeroNoteFor(field) {
   if (ZERO_FAIL_FIELDS.includes(field)) return ZERO_MEASURED_FAIL;
   return THROUGHPUT_FIELDS.includes(field) ? ZERO_NO_CEILING : null;
 }
-// HEADROOM: the field the "how close to our own rig's ceiling did this come" fact rides on, and the
-// ceiling it is a fraction of.
-//
-// These replace `PACED_MATCH`, which was a boolean re-statement of the engine's retired `*_mock_bound`
-// flag ("this number matched the paced upstream"). A boolean was all that could be carried while the
-// engine only published a verdict; now that it publishes the ceiling and the ratio, the same
-// information is available as a number a reader can actually weigh. 0.993 and 0.20 were both
-// `paced_match: undefined` before.
+// HEADROOM: how close to our own rig's ceiling a measurement came, and RIG_CEILING: the ceiling it is a
+// fraction of. Replace `PACED_MATCH`, a boolean re-statement of the engine's retired `*_mock_bound` flag
+// - 0.993 and 0.20 were both `paced_match: undefined` before; now the ratio itself is published.
 export const HEADROOM = "headroom";
 export const RIG_CEILING = "rig_ceiling";
 //   opts.absent: the engine's `absences` entry for this field ({reason, detail}), when the caller has
@@ -213,15 +150,11 @@ export const RIG_CEILING = "rig_ceiling";
 //                was how "below rig resolution" (a win) rendered identically to "never ran" (a hole).
 export function sealMetric(value, opts = {}) {
   const { extras = null, zeroNote = null, absent = null, headroom = null, ceiling = null } = opts;
-  // The extras (concurrency, the rung, the sweep array) attach to EVERY certified envelope, including a
-  // certified 0. They used to attach only on the last line, which the measured-zero branch returned
-  // before ever reaching - so a certified 0 published without the concurrency it was measured at and
-  // without the sweep array that is the evidence FOR the zero: the one reading whose curve a reader
-  // most needs, since "0" beside a real maximum is the claim that most demands its evidence.
+  // Extras (concurrency, sweep array) and headroom/ceiling attach to EVERY certified envelope, including
+  // a certified 0 - "0" beside a real maximum is the claim that most needs its evidence (the sweep
+  // curve) attached.
   const withExtras = (env) => {
     if (extras) for (const [k, v] of Object.entries(extras)) if (v != null) env[k] = v;
-    // The comparison's own facts, on every certified envelope that has them - including a certified 0,
-    // for the same reason the extras are.
     if (Number.isFinite(headroom)) env[HEADROOM] = headroom;
     if (Number.isFinite(ceiling)) env[RIG_CEILING] = ceiling;
     return env;
@@ -231,16 +164,11 @@ export function sealMetric(value, opts = {}) {
     if (absent && absent.detail) env.detail = absent.detail;
     return env;
   }
-  /* A NON-NUMBER MUST NOT WEAR THE CERTIFIED BADGE. `Number("n/a")` is NaN, `NaN === 0` is false,
-     so it fell straight to the certified branch - and `JSON.stringify(NaN)` is `null`. The bundle
-     then carried `{value: null, certified: true}`: a bare null with no reason, in a shape that
-     matches none of the three documented envelope forms above, and which `isEnvelope` and the C2
-     guard both wave through. This file already uses `Number.isFinite` one function away in
-     `numOrNull` and for headroom/ceiling; the value path was the one that did not. */
-  /* AND THE COERCION ITSELF IS THE HAZARD, not just NaN. `Number("")` is 0, `Number([])` is 0,
-     `Number(" ")` is 0 - all finite, so a finiteness check alone would have certified an empty
-     string as a MEASURED ZERO, which is the same fabrication in a quieter costume. Only a number,
-     or a string that actually spells one, is a measurement. */
+  // A non-number must not wear the CERTIFIED badge: `Number("n/a")` is NaN but `JSON.stringify(NaN)` is
+  // `null`, which would silently pass as `{value: null, certified: true}` (matches no documented shape,
+  // slips past isEnvelope/C2). Coercion alone isn't enough either - `Number("")`/`Number([])` are 0 and
+  // finite, which would certify an empty string as a measured zero. Only a number, or a string that
+  // actually spells one, counts.
   const numeric =
     typeof value === "number" || (typeof value === "string" && value.trim() !== "");
   const num = numeric ? Number(value) : NaN;
@@ -265,30 +193,18 @@ export function sealMetric(value, opts = {}) {
   return withExtras({ value: num, certified: true, suppressed: false });
 }
 
-// sealFrontier: the engine's frontier -> one sealed reading per bound.
+// sealFrontier: the engine's frontier -> one sealed reading per bound. The RATE is a sealed envelope
+// (absent means absent, with the engine's own reason); the rest of the reading (concurrency, tail, the
+// concurrency above it that stopped qualifying) is evidence and rides as plain fields, like `source`.
+// `bound_ms` comes from the engine's own `p99_bound_us`, not from FRONTIER_BOUNDS_MS, so a reading
+// always names the bound it was actually taken under. `lower_bound` marks a rate the sweep never found
+// a ceiling for as a floor, not a ceiling.
 //
-// Each reading's RATE is a sealed envelope for the same reason every other published number is: absent
-// means absent, with the engine's own reason, and no surface can reach a raw scalar. The rest of the
-// reading is EVIDENCE ABOUT that rate - the concurrency it was observed at, the tail it actually came
-// with, the concurrency above it that stopped qualifying - and rides as plain fields, exactly as
-// `source` and `reverify_note` do.
-//
-// `bound_ms` is derived from the engine's `p99_bound_us` rather than from `FRONTIER_BOUNDS_MS`, so a
-// reading always reports the bound IT was taken under even if the mirror above ever drifts.
-// `lower_bound` travels because a rate the sweep never found a ceiling for is a floor, and a surface
-// that renders it as a ceiling is making a claim the data does not support.
-//
-// THE ABSENCE KEY IS BLOCK-PREFIXED, and getting that wrong silently destroyed the distinction this
-// whole metric exists to preserve. `CellPerf::absences()` keys the frontier as
-// `perf.frontier.10ms.rps`; this looked up `frontier.10ms.rps`, found nothing, and every absent reading
-// fell back to a bare `not_measured` with no detail.
-//
-// The damage was not cosmetic. one-api genuinely cannot serve under a 10 ms tail - its own rungs never
-// got below 34 ms - and the engine says exactly that, with `below_resolution` and the prose "every
-// cleanly-served rung had a tail latency at or above 10ms". Flattened to `not_measured`, no surface
-// could tell "measured, and it cannot do this" from "nothing was measured here", and the neutral
-// reading FLATTERS the gateway. Both prefixed and bare keys are accepted, matching
-// `gen-data.mjs::absentEntryFor`, because a projected record carries the bare form.
+// The absence key is BLOCK-PREFIXED (`CellPerf::absences()` keys it `perf.frontier.10ms.rps`); both the
+// prefixed and bare forms are accepted here (matching gen-data.mjs::absentEntryFor) since a projected
+// record carries the bare form. Missing this once flattened every `below_resolution` reading (a real
+// result - e.g. one-api genuinely can't serve under a 10ms tail) to an indistinguishable `not_measured`,
+// which flatters the gateway.
 export function sealFrontier(readings, absences = null) {
   if (!Array.isArray(readings)) return [];
   return readings.map((r) => {
@@ -306,22 +222,12 @@ export function sealFrontier(readings, absences = null) {
     };
   });
 }
-/* THE RATE EVERY GATEWAY CARRIED AT THE SAME CONCURRENCY, sealed, so the board can be read
-   apples-to-apples on a rung instead of on each gateway's own peak.
-
-   WHY THIS EXISTS. The ranked column shows each gateway at the concurrency where ITS throughput
-   peaked, which is a measurement and not a setting - but it renders as "77,248 @ 128 conc" beside
-   "44,475 @ 32 conc", and that reads as four times the concurrency handed to one entrant. The
-   information that refutes it was already published (`sweep` carries every rung both gateways drove)
-   and no surface could show it: at c=128, the rung busbar is displayed at, litellm-rust does 47,825 -
-   within 0.5% of its own published peak. The advantage is 1.6x at every rung from 1 to 256, which is
-   the fact the peak-vs-peak view cannot state.
-
-   MEDIAN OF THE CLEAN WINDOWS AT THAT RUNG, because the sweep drives each concurrency
-   WINDOWS_PER_RUNG times and a single window is noise near saturation - the same discipline every
-   other repeated measurement on this board reports under. A window that FAILED requests is not a rate:
-   it is excluded, and a rung with no clean window publishes a suppressed envelope rather than a
-   number, so "it dropped requests here" can never render as throughput. */
+/* sealRungs: the rate every gateway carried at the SAME concurrency, so the board can compare
+   apples-to-apples on a rung instead of each gateway's own peak (peak-vs-peak misleadingly implies the
+   concurrency itself was an advantage, e.g. "77,248 @ 128 conc" vs "44,475 @ 32 conc").
+   Median of the clean windows at that rung (the sweep drives each concurrency WINDOWS_PER_RUNG times;
+   a single window is noise near saturation). A window that failed requests is excluded, not averaged
+   in - a rung with no clean window publishes an absent envelope, never a rate. */
 export function sealRungs(sweep) {
   if (!Array.isArray(sweep) || !sweep.length) return [];
   const byConc = new Map();
@@ -359,10 +265,8 @@ function numOrNull(v) {
   return Number.isFinite(v) ? v : null;
 }
 
-// THE READING THE BOARD IS CURRENTLY SHOWING, by bound. `null` selects the unbounded reading.
-//
-// One accessor, so every surface - table, drawer, compare, charts - reads the same reading for the same
-// bound and cannot disagree about which column it is displaying.
+// The reading the board is currently showing, by bound (`null` selects the unbounded reading). One
+// accessor so every surface - table, drawer, compare, charts - reads the same reading for the same bound.
 export function frontierAt(frontier, boundMs) {
   if (!Array.isArray(frontier)) return null;
   return frontier.find((r) => (boundMs == null ? r.bound_ms == null : r.bound_ms === boundMs)) || null;

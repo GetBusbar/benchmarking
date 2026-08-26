@@ -2,35 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# RE-DERIVE THE ADDED-LATENCY FIGURES FROM THE TWO LEGS THEY ARE A DIFFERENCE OF.
+# Re-derives the added-latency figures from the two legs they are a difference of.
 #
-# WHY THIS EXISTS. Two engine bugs were found in one night, and BOTH were found the same way: a second
-# implementation of one rule disagreeing with the first. The frontier's tie-break surfaced because
-# Python's `max` and Rust's `max_by` break ties at opposite ends. The NaN-sort corruption surfaced
-# because I went looking for the same class afterwards. Neither was caught by a test.
+# WHY: published quantities computed by exactly one piece of code, with no independent re-derivation,
+# are unaudited - which is how two prior engine bugs went uncaught by any test. The frontier now has
+# three independent re-derivations; added latency had zero. This is the second one.
 #
-# That makes the discovery mechanism luck plus a habit, not coverage - and it means ANY published
-# quantity computed by exactly one piece of code, with no independent re-derivation, is unaudited in
-# precisely the way those two were. The frontier is now re-derived three independent ways. Added
-# latency was re-derived zero ways. This is the second way.
+#   CAN CHECK:    `added_latency_p*_us` is a DIFFERENCE of two published numbers - the gateway leg and
+#                 the direct-to-mock leg at concurrency 1. Both operands ride in the artifact, so the
+#                 subtraction is fully checkable.
 #
-# WHAT CAN AND CANNOT BE CHECKED, stated plainly, because the limit is the point:
+#   CANNOT CHECK: the two operands are themselves percentiles over raw per-request latencies, which
+#                 are NOT published. So this verifies the ARITHMETIC, never the percentiles - a
+#                 systematic error in `percentile()` would move both legs together and still pass.
+#                 Printed every run (see closing note) so a pass here isn't mistaken for full coverage.
 #
-#   CAN:    `added_latency_p*_us` is a DIFFERENCE of two published numbers - the gateway leg and the
-#           direct-to-mock leg at concurrency 1. Both operands ride in the artifact, so the subtraction
-#           is fully checkable, and a published difference that disagrees with its own operands is a
-#           defect no other tool here would notice.
-#
-#   CANNOT: the two operands are themselves percentiles over raw per-request latencies, and those
-#           samples are NOT published. So this verifies the ARITHMETIC, never the percentiles. If
-#           `percentile()` were wrong, both legs would be wrong consistently and this would pass. That
-#           is a real limit and it is reported rather than papered over - see the closing note, which
-#           prints it every run so nobody mistakes a pass here for a fully audited figure.
-#
-# The same shape of check applies to the streaming TTFT figures, which DO declare
-# `ttft_direct_samples` / `ttft_gw_samples`. On the boards seen so far those fields are null, so there
-# is nothing to re-derive from; the tool says so per cell rather than silently skipping, because a
-# checker that quietly finds nothing looks exactly like a clean bill of health.
+# The streaming TTFT figures get the same shape of check where `ttft_direct_samples` / `ttft_gw_samples`
+# are populated; on boards seen so far those are null, so the tool reports "nothing to re-derive" per
+# cell rather than silently skipping (a silent skip looks identical to a clean bill of health).
 
 import glob
 import json
@@ -65,9 +54,9 @@ def check(path):
             direct = num(perf.get("direct_c1_p99_us"))
             added = num(perf.get("added_latency_p99_us"))
 
-            # A cell may legitimately withhold all three (egress re-verification proved the gateway did
-            # not translate, so every number there describes a different wire). Absent-together is fine;
-            # a difference present without its operands is not - it would be a number nothing can check.
+            # A cell may legitimately withhold all three (egress re-verification found the gateway did
+            # not translate). Absent-together is fine; a difference present without its operands is not
+            # - it would be a number nothing can check.
             if added is None:
                 continue
             if gw_leg is None or direct is None:
@@ -85,30 +74,21 @@ def check(path):
                     f"{at}: published added_latency_p99_us={added} but its own legs give "
                     f"{gw_leg} - {direct} = {mine}"
                 )
-            # A NEGATIVE difference would mean the gateway beat the direct leg, which is not a
-            # measurement of overhead - it is the two legs having been taken under conditions that are
-            # not comparable. charts.py refuses to plot one; nothing checked the artifact for it.
+            # A NEGATIVE difference means the gateway beat the direct leg - not overhead, but the two
+            # legs having been measured under non-comparable conditions. charts.py refuses to plot one.
             if mine < 0:
                 problems.append(
                     f"{at}: the gateway leg ({gw_leg}us) is FASTER than direct-to-mock ({direct}us), so "
                     f"'added latency' is negative - the two legs are not comparable and the difference "
                     f"is not overhead"
                 )
-            # NO p50<=p99 CHECK, AND THE ONE REMOVED FROM HERE WAS UNSOUND FOR THE SAME REASON AS ITS
-            # TWIN IN audit-every-metric.py - which is the point worth recording, because the two were
-            # written in one sitting and the second was missed when the first was found.
-            #
-            # It read "p50 must not exceed p99 from the same distribution. Cheap, and it catches a
-            # swap." Both added_latency figures are DIFFERENCES (gateway leg minus direct leg), not one
-            # distribution, and a difference does not inherit monotonicity: constant gateway overhead
-            # under a stretching direct baseline is smaller at p99 than at p50 with nothing out of
-            # order. The sibling rule fired on agentgateway in the 2026-07-30 field run (added_gap
-            # p50=4us vs p99=3us); this one had simply not been unlucky yet.
-            #
-            # Catching a SWAP was a fair motive, but it cannot be done from the differences alone, and
-            # the swap it would catch is indistinguishable from a legitimate reading. What this tool
-            # does prove - that each added figure equals the difference of its own published legs - is
-            # the statement that is actually true of these numbers, and it stays.
+            # NO p50<=p99 CHECK, deliberately: added_latency figures are DIFFERENCES (gateway leg minus
+            # direct leg), not one distribution, and a difference does not inherit monotonicity -
+            # constant gateway overhead under a stretching direct baseline can be smaller at p99 than at
+            # p50 with nothing actually out of order (observed on real field data). Such a rule would
+            # catch a genuine swap, but is indistinguishable from a legitimate reading, so it was
+            # removed; what this tool proves instead - each added figure equals the difference of its
+            # own published legs - is the statement that is actually true of these numbers.
 
             st = cell.get("stream") or {}
             if listof(st.get("ttft_gw_samples")) and listof(st.get("ttft_direct_samples")):
@@ -143,9 +123,8 @@ def main():
         f"{ttft} cell(s) publish raw TTFT samples; the rest publish TTFT percentiles with no samples, "
         f"so those are not re-derivable here"
     )
-    # PRINTED EVERY RUN, PASS OR FAIL. A pass here means the subtraction is right - not that the
-    # percentiles feeding it are. Saying so on every run is the difference between a known limit and a
-    # false sense of coverage.
+    # Printed every run, pass or fail: a pass here means the subtraction is right, not that the
+    # percentiles feeding it are.
     print(
         "LIMIT: this verifies the ARITHMETIC of a difference, not the percentiles it subtracts. The raw\n"
         "       per-request latencies behind gateway_c1_p99_us and direct_c1_p99_us are not published, so\n"
