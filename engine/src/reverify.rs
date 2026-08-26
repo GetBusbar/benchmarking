@@ -1,50 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// DID THE GATEWAY ACTUALLY TRANSLATE, OR DID IT JUST FORWARD OUR BYTES?
+// Re-verifies that a gateway actually translated a request rather than forwarding it verbatim.
+// The mock answers all dialects by path, so a passthrough gateway that does no translation at all
+// can still get a plausible 200 back - `probe_cell` alone can't tell that apart from a real
+// translation, and publishing `served: true` for a capability the gateway doesn't have is the
+// failure mode this module exists to prevent.
 //
-// This is not a metric. It is an ANTI-FALSE-POSITIVE GUARD, and it exists because of one property of
-// the rig: the mock answers all six dialects BY PATH. A gateway that proxies the client's ingress
-// path verbatim to the upstream - doing no translation whatsoever - still gets a plausible 200 back
-// from the mock's canned response for that path, and `probe_cell` has no way to tell that apart from
-// a real translation. The cell would then publish `served: true` for, say, anthropic->openai: a
-// translation capability the gateway does not have, asserted by us, about somebody's product. A false
-// negative embarrasses the board; a false POSITIVE that flatters a gateway is the error this project
-// exists to not make.
+// Under `MOCK_RECORD=1` the mock records, per dialect, how many requests hit its endpoint and
+// whether the LAST body matched that dialect's own shape (`GET /__mock/state`, `POST
+// /__mock/reset`). This module clears the recorder, drives exactly one request through the
+// gateway, and reads back which dialect the mock saw and whether the body was that dialect's shape.
 //
-// THE MOCK ALREADY OWNS THE DETECTION. Under `MOCK_RECORD=1` it records, per dialect, how many
-// requests landed on that dialect's endpoint and whether the LAST body passed that dialect's own
-// request-shape check (`request_shape_ok`), plus the path and a body snippet as evidence.
-// `GET /__mock/state` returns the record and `POST /__mock/reset` clears it. So the whole of this
-// module is: clear the recorder, drive exactly one request through the gateway, and read back which
-// dialect the mock saw and whether the body was that dialect's shape.
+// Recording is turned on for that one request and off again immediately after: a recorded request
+// takes a process-wide lock in the mock, and the mock's own throughput is the reference every
+// gateway's number is judged against, so a recording mock left running would understate every
+// gateway measured against it.
 //
-// RECORDING IS TURNED ON FOR THIS ONE REQUEST AND OFF AGAIN AFTERWARDS, and that is a
-// measurement-integrity requirement rather than tidiness. A recorded request takes a process-wide
-// lock in the mock, and the mock's own throughput is the reference every gateway's number is judged
-// against: a slower mock means every gateway measured against it looks slower, and a rig regression
-// that shifts the reference is the worst kind, because every number stays internally consistent
-// while all of them move together.
-//
-// The earlier version of this comment described the consequence as cells "having their real, honest
-// throughput SUPPRESSED as mock-bound" within 10% of the ceiling, citing `rigbound::is_rig_bound`.
-// That suppression mechanism was deleted - `rigbound.rs`'s own header records why, and the function
-// named here no longer exists - so nothing is suppressed today; a slow mock now simply understates
-// every gateway. The requirement below is unchanged, but the reason it protects is a different one,
-// and leaving the old reason in place would have a reader looking for a threshold that is gone.
-//
-// So the invariant is: recording is off for every load window, on for exactly one request per cell.
-// It applies to the gateway's windows AND to the mock's own reference window, which is what keeps
-// both sides of the mock-bound comparison on identical mock behaviour - if the reference were taken
-// against a recording mock and the gateway's number against a quiet one, the two would be different
-// instruments and the verdict between them would mean nothing.
-//
-// THREE ANSWERS, NOT TWO. `Some(true)` is proof of translation. `Some(false)` is proof of ITS ABSENCE
-// - the mock saw the request and it was not the egress dialect's shape. `None` is "not checked", and
-// it is a first-class answer rather than a failure: a diagonal cell has no translation to prove, a
-// mock started without MOCK_RECORD cannot answer at all, and a mock we could not reach tells us
-// nothing about the gateway. Collapsing any of those three into `false` would convict a gateway on
-// our own configuration, which is the same class of error in the opposite direction.
+// The verdict is THREE-VALUED, not boolean. `Some(true)` proves translation, `Some(false)` proves
+// its absence, and `None` means "not checked" (diagonal cell, mock not recording, mock
+// unreachable) - a first-class answer, since collapsing it into `false` would convict a gateway on
+// our own configuration.
 
 use crate::cell::CellId;
 use crate::http::{self, Outcome};
@@ -52,17 +28,12 @@ use crate::ingress::Dialect;
 use crate::run::{path_for, RunConfig};
 use std::time::Duration;
 
-/// How long the control-plane calls and the single re-verification request may take. Generous
-/// relative to what they do (one loopback round trip each): this runs once per served cell and a
-/// timeout here costs an unchecked cell, so the deadline is set to outlast a busy box rather than to
-/// be tight.
+/// How long the control-plane calls and the single re-verification request may take. Generous,
+/// since a timeout here costs an unchecked cell rather than the deadline being tight.
 const REVERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The verdict, and the evidence behind it.
-///
-/// `verified` and `note` travel together because neither is usable alone: a bare `false` says a
-/// gateway failed a check without saying what was seen instead, and a bare note is prose nothing can
-/// act on. `note` is `None` only for the one case that needs no explanation - a proven translation.
+/// The verdict, and the evidence behind it. `note` is `None` only for the one case that needs no
+/// explanation - a proven translation; every other outcome carries the reason.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Reverified {
     pub verified: Option<bool>,
@@ -70,8 +41,8 @@ pub struct Reverified {
 }
 
 impl Reverified {
-    /// Not checked, for a stated reason. Never `false`: "we did not ask" and "we asked and it failed"
-    /// are different claims and only one of them is about the gateway.
+    /// Not checked, for a stated reason. Never `false`: "we did not ask" and "we asked and it
+    /// failed" are different claims and only one is about the gateway.
     fn unchecked(note: impl Into<String>) -> Self {
         Reverified {
             verified: None,
@@ -106,24 +77,21 @@ pub struct DialectState {
 /// The mock's recorder, as read back off `/__mock/state`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MockState {
-    /// Whether the mock was started with `MOCK_RECORD=1` at all. Served regardless of that flag
-    /// precisely so a caller can tell "recording off" from "no requests arrived" - two documents that
-    /// would otherwise be byte-identical and mean opposite things.
+    /// Whether the mock was started with `MOCK_RECORD=1`. Served regardless of the flag so a
+    /// caller can tell "recording off" from "no requests arrived" apart.
     pub recording: bool,
     pub dialects: std::collections::BTreeMap<String, DialectState>,
 }
 
 /// Parse `/__mock/state`'s document.
 ///
-/// A free function over bytes so the whole verdict below it can be tested against real documents (and
-/// against malformed ones) with no mock, no socket and no gateway - the same reason
-/// `run::sustained_gate_passes` is a free function rather than logic inside a probe.
+/// A free function over bytes so the verdict logic can be tested against real and malformed
+/// documents with no mock, socket, or gateway involved.
 pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
     let v: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| format!("the mock's state document did not parse: {e}"))?;
-    // A MISSING `recording` KEY IS NOT `false`. False is the mock telling us it was not recording;
-    // missing means this is not the document we think it is, and reading it as "not recording" would
-    // publish a parse failure of ours as a configuration fact about the run.
+    // A missing `recording` key is not `false`: that would turn a parse failure of ours into a
+    // false configuration claim about the run.
     let recording = v
         .get("recording")
         .and_then(serde_json::Value::as_bool)
@@ -162,16 +130,12 @@ pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
     })
 }
 
-/// THE VERDICT ITSELF, over an already-read recorder state. Pure.
+/// The verdict itself, over an already-read recorder state. Pure, so it's testable without a live
+/// gateway/mock pair.
 ///
-/// Separate from the driving below for the reason `apply_peak_verdict` is separate from `judge_cell`:
-/// every branch here is a claim the board publishes about somebody's product, and none of them can be
-/// reached on demand from a fixture where one loopback server plays both the gateway and the mock.
-///
-/// `ingress` is needed even though only `egress` is being proven, because WHICH WRONG DIALECT the
-/// request landed on is the difference between two findings: the ingress dialect's own endpoint means
-/// the gateway forwarded our bytes verbatim, which is precisely the passthrough this guard exists to
-/// catch, and any other endpoint means it translated to something that is not what this cell claims.
+/// `ingress` matters even though only `egress` is being proven: landing on the ingress dialect's own
+/// endpoint means the gateway forwarded bytes verbatim (the passthrough this guard exists to catch),
+/// while landing elsewhere means it translated to the wrong thing.
 pub fn verdict(state: &MockState, ingress: Dialect, egress: Dialect) -> Reverified {
     if !state.recording {
         return Reverified::unchecked(
@@ -202,9 +166,8 @@ pub fn verdict(state: &MockState, ingress: Dialect, egress: Dialect) -> Reverifi
     let elsewhere: Vec<(&String, &DialectState)> =
         state.dialects.iter().filter(|(_, d)| d.count > 0).collect();
     if elsewhere.is_empty() {
-        // The mock saw nothing at all. This says nothing about the gateway: the request may have been
-        // answered from a cache, refused before the upstream call, or never have left. Publishing
-        // `false` here would convict on an absence of evidence.
+        // Nothing arrived at all: says nothing about the gateway (cached, refused before upstream,
+        // or never sent). Publishing `false` here would convict on absent evidence.
         return Reverified::unchecked(format!(
             "no request reached the mock on any dialect while re-verifying {}>{}, so what the gateway \
              emitted upstream was never observed",
@@ -241,13 +204,12 @@ pub fn verdict(state: &MockState, ingress: Dialect, egress: Dialect) -> Reverifi
 /// Drive the re-verification for one served cell: clear the recorder, send exactly ONE request
 /// through the gateway, read the recorder back.
 ///
-/// ONE request, not the load window's thousands. The recorder keeps only the LAST body per dialect,
-/// so a window would make `body_ok` a statement about whichever request happened to land last, and a
-/// single request is all the proof this needs anyway: translation is a property of the code path, not
-/// of how many times it ran.
+/// One request, not the load window's thousands: the recorder keeps only the LAST body per dialect,
+/// so a window would just capture whichever request landed last, and translation is a property of
+/// the code path, not of how many times it ran.
 ///
-/// Run BEFORE the metrics on a cell rather than after, because the metrics drive millions of requests
-/// through the same recorder and the reset would then be racing an eight-minute memory window.
+/// Run before the metrics windows, since those drive millions of requests through the same recorder
+/// and a reset would race an eight-minute memory window.
 pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverified {
     let Ok(egress) = id.egress.parse::<Dialect>() else {
         return Reverified::unchecked(format!(
@@ -255,10 +217,8 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
             id.egress
         ));
     };
-    // A DIAGONAL CELL HAS NOTHING TO PROVE. Ingress and egress are the same dialect, so "the gateway
-    // forwarded our bytes" and "the gateway translated openai to openai" are the same wire, and no
-    // observation of the mock can separate them. `false` here would mark every passthrough cell in the
-    // grid as a failed translation it was never asked to perform.
+    // A diagonal cell has nothing to prove: ingress and egress are the same dialect, so forwarding
+    // and translating are the same wire, and no mock observation can separate them.
     if ingress == egress {
         return Reverified::unchecked(format!(
             "{}>{} is a same-dialect cell: there is no translation to prove, so a request-shape check \
@@ -277,34 +237,26 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
     )) {
         return Reverified::unchecked(format!("the mock's recorder could not be cleared, so anything it holds may predate this cell: {why}"));
     }
-    // FAIL CLOSED. A toggle that could not be set means the recorder's state is unknown, and the only
-    // two ways to be wrong here are both unacceptable: assuming it is ON yields a refutation drawn
-    // from an empty record, and assuming it is OFF leaves recording enabled for every load window
-    // that follows. Reporting unchecked, with the reason, is the answer that asserts neither.
+    // Fail closed: if the enable's result is unknown, assuming ON risks refuting from an empty
+    // record and assuming OFF risks leaving recording enabled for every window after this cell -
+    // `unchecked` asserts neither.
     //
-    // ONE ENABLE, ONE DISABLE, AND NOTHING RETURNS BETWEEN THEM. The failure is a VALUE from here on,
-    // never a `return`: every way this can go wrong used to leave the function on its own line, and a
-    // gateway that merely timed out on this single request therefore left the recorder ON for its own
-    // load windows and for every cell after it - a slower mock under the rest of the grid, with
-    // nothing in the artifact saying so. `drive_and_read` hands its failures back instead, so the
-    // disable below is the only way out.
+    // Failures below are carried as a VALUE, never an early `return`, so the disable at the end of
+    // this function always runs - a request that merely timed out must not leave the recorder ON for
+    // every window that follows.
     let outcome = match set_recording(cfg, true) {
         Some(why) => Err(Reverified::unchecked(format!(
             "the mock's recorder could not be enabled for this cell, so what the gateway emitted upstream was never observed: {why}"
         ))),
-        // The enable answered badly, and a toggle that answered badly may still have TAKEN, so this
-        // arm falls through to the same disable the success path does rather than returning here.
+        // A bad answer may still have taken effect, so fall through to the same disable as success.
         None => drive_and_read(cfg, id, ingress),
     };
 
-    // OFF AGAIN BEFORE ANYTHING ELSE RUNS, including before this function's own return path decides
-    // anything: every load window on this cell happens after this point, and the guarantee they rely
-    // on is that the mock is quiet by the time they start. Unconditional, and the only exit from this
-    // function is past it.
+    // Disable unconditionally before returning: every load window on this cell depends on the mock
+    // being quiet by the time it starts.
     let disabled = set_recording(cfg, false);
-    // A recorder that could not be turned back off has left every window that follows measuring a
-    // slower mock, which is a claim about the RIG's state and belongs beside this cell's verdict even
-    // though the verdict itself is sound.
+    // A recorder that won't turn off leaves later windows measuring a slower mock - a rig-state fact
+    // worth surfacing beside this cell's (otherwise sound) verdict.
     if let Some(why) = disabled {
         eprintln!("reverify: the mock's recorder could not be disabled after {}>{}, so the windows that follow are taken against a recording mock: {why}", ingress.as_str(), egress.as_str());
     }
@@ -317,27 +269,12 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
 
 /// Drive the one re-verification request and read the recorder back.
 ///
-/// SEPARATED SO THE DISABLE CANNOT BE SKIPPED, which is the same reason `parse_state` and `verdict`
-/// above are free functions: what is left in the caller is sequencing, and sequencing with one exit
-/// cannot forget a step. Its caller has turned the mock's recorder ON and owes the run a matching
-/// turn-off, so every failure in here is an `Err(Reverified)` the caller carries PAST that turn-off
-/// rather than a `return` that jumps over it. A new failure mode added here inherits that for free.
+/// Separated so the caller's mandatory disable can't be skipped: every failure here returns as
+/// `Err(Reverified)` rather than an early `return`, letting the caller carry it past the turn-off.
 fn drive_and_read(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Result<MockState, Reverified> {
-    // THE SAME REQUEST THE PROBE SENT: same path, same headers, and - the part that was wrong - the
-    // same MODEL.
-    //
-    // This sent `cfg.model`, the gateway's base model name, while the path and headers were built for
-    // `id.egress`. On every gateway whose upstreams are selected BY MODEL NAME - which is most of
-    // them, and is exactly how this harness configures them - the base name routes to the openai
-    // upstream no matter which egress the cell is about. So the gateway did the right thing, the mock
-    // recorded /v1/chat/completions, and this concluded "the gateway forwarded the ingress request
-    // rather than translating it".
-    //
-    // It said that about 18 cells across 6 gateways in the 2026-07-28 field run, including
-    // litellm-python, whose entire product is protocol translation. The verdict is an accusation
-    // published about someone else's software, and it was being made from a request that asked for
-    // the wrong upstream. `model_for` is what every probe and load window in `run.rs` uses; using
-    // anything else here means re-verifying a wire the cell never measured.
+    // Must use the same model the probe used (`model_for`, keyed by egress), not `cfg.model`: most
+    // gateways route their upstream by model name, so the base model routes every cell to the
+    // openai upstream regardless of egress, silently re-verifying the wrong wire.
     let path = path_for(cfg, ingress, &id.egress);
     let body = ingress.body(&crate::run::model_for(cfg, &id.egress));
     let headers = crate::run::headers_for(cfg, ingress, &id.egress);
@@ -365,11 +302,9 @@ fn drive_and_read(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Result<Mock
     }
 }
 
-/// Turn the mock's recorder on or off, returning why it could not be done.
-///
-/// Its own function because BOTH directions have to be checked and neither may be assumed: the
-/// enable is what the verdict rests on, and the disable is what every load window after this cell
-/// rests on.
+/// Turn the mock's recorder on or off, returning why it could not be done. Both directions are
+/// checked: the enable is what the verdict rests on, the disable is what every window after this
+/// cell rests on.
 fn set_recording(cfg: &RunConfig, on: bool) -> Option<String> {
     let body = format!("{{\"on\":{on}}}");
     control_failed(http::post_json(
@@ -383,15 +318,12 @@ fn set_recording(cfg: &RunConfig, on: bool) -> Option<String> {
 
 /// Leave the mock's recorder OFF before a run's measurements begin.
 ///
-/// The field boots the mock quiet, so this is normally a no-op that costs one request. It is kept
-/// because the mock also honours MOCK_RECORD=1 as a starting state for local debugging, and because
-/// a mock left recording by a previous run's crash would otherwise taint this one: the
-/// box-qualification window runs before the first cell is ever re-verified, so the run's very first
-/// load window - the one whose rate becomes the baseline every later run on this box is judged
-/// against - would be taken against a recording mock while every window after it is not.
+/// Normally a no-op (the field boots the mock quiet), but guards against a `MOCK_RECORD=1` debug
+/// start or a previous run's crash leaving it on, which would taint the box-qualification baseline
+/// window taken before the first cell is ever re-verified.
 ///
-/// Best effort by design: a mock that will not answer this is a rig fault the suite reports through
-/// its own per-cell verdicts, not a reason to refuse a run that may still produce honest numbers.
+/// Best effort: an unresponsive mock is a rig fault reported through per-cell verdicts, not a reason
+/// to refuse a run that may still produce honest numbers.
 pub fn quiesce_recorder(cfg: &RunConfig) -> Option<String> {
     set_recording(cfg, false)
 }
@@ -406,11 +338,8 @@ fn control_failed(outcome: Outcome) -> Option<String> {
         Outcome::ConnectionFailed(e) => Some(format!("no connection: {e}")),
         Outcome::TimedOut => Some("timed out".to_string()),
         Outcome::Malformed { message, .. } => Some(format!("unparseable response: {message}")),
-        // OUR OWN REFUSAL, and it lands here rather than anywhere near the cell's verdict for exactly
-        // the reason this function exists: everything it returns is a RIG fault that makes the
-        // re-verification unusable, never evidence about a gateway. The re-verify lane composes the
-        // same manifest headers the load lane does, and until `http::unsendable_request` was applied
-        // to `send` it was the lane that still interpolated them raw.
+        // Our own refusal, not the gateway's: a rig fault that makes the re-verification unusable,
+        // never evidence about a gateway.
         Outcome::RigRefused(why) => Some(format!(
             "the rig refused to send this control-plane request: {why}"
         )),
@@ -478,9 +407,9 @@ mod tests {
         assert_eq!(v.note, None, "a proven translation needs no explanation");
     }
 
-    // THE DEFECT THIS WHOLE MODULE EXISTS FOR: the gateway forwarded the client's own ingress request
-    // verbatim, the mock answered its canned body by path, and the probe saw a 200. Without this the
-    // cell publishes a translation the gateway never performed.
+    // The defect this module exists for: a verbatim-forwarded request still gets a plausible 200
+    // from the mock's canned response, and without this check the cell would publish a translation
+    // the gateway never performed.
     #[test]
     fn a_request_forwarded_verbatim_to_the_ingress_endpoint_is_refuted_with_what_was_seen() {
         let v = verdict(
@@ -548,10 +477,8 @@ mod tests {
             v.verified, None,
             "a mock that was not recording says nothing about the gateway"
         );
-        // The note must say the RECORDER was off, not that the gateway did anything wrong. The field
-        // boots the mock quiet on purpose and the engine toggles recording around this one request,
-        // so reaching here means the toggle did not take - a rig fault, and the note has to read as
-        // one or a reader will take it for a gateway defect.
+        // Reaching this state means the recording toggle didn't take - a rig fault - so the note
+        // must name the recorder, not read as a gateway defect.
         let note = v.note.unwrap_or_default();
         assert!(
             note.contains("recording"),
@@ -559,8 +486,7 @@ mod tests {
         );
     }
 
-    // NOTHING ARRIVED is an absence of evidence, not evidence of absence. Publishing `false` here
-    // would convict a gateway because our own observation failed.
+    // Nothing arrived is an absence of evidence, not evidence of absence; must not be `false`.
     #[test]
     fn a_recorder_that_saw_nothing_at_all_is_unchecked_never_false() {
         let v = verdict(
@@ -572,10 +498,8 @@ mod tests {
         assert!(v.note.unwrap_or_default().contains("never observed"));
     }
 
-    // The mock records `body_ok: false` for every dialect it has not seen, so a recorder that saw
-    // nothing must not be read off that flag: `count` is what says whether there is a verdict to
-    // read at all. This is the exact confusion that would turn an unconfigured run into a field of
-    // gateways that all "failed to translate".
+    // The mock defaults `body_ok: false` for every unseen dialect, so `count`, not `body_ok`, is
+    // what says whether there's a verdict to read at all.
     #[test]
     fn an_untouched_dialects_default_body_ok_false_is_never_read_as_a_refutation() {
         let mut s = state(true, &[]);
@@ -615,16 +539,13 @@ mod tests {
         assert_eq!(v.verified, None);
         let note = v.note.unwrap_or_default();
         assert!(note.contains("same-dialect"), "{note}");
-        // And it never touched the network: the mock address above is a dead port, so a check that
-        // tried to reach it would have come back with a connection failure in the note instead.
+        // Never touches the network: the mock address is a dead port, so a real attempt would show
+        // up as a connection failure in the note.
         assert!(!note.contains("connection"), "{note}");
     }
 
-    // A minimal stand-in for the mock's control plane: tracks whether `/__mock/record` last turned
-    // recording on or off, and answers `/__mock/reset` and `/__mock/state` well enough for
-    // `reverify_cell` to drive its whole sequence against it. No `Content-Length` framing subtlety
-    // beyond what `reverify_cell` itself sends, since this is standing in for the mock, not testing
-    // this client's HTTP parsing (that is `http.rs`'s own job).
+    // Minimal stand-in for the mock's control plane: tracks whether `/__mock/record` last turned
+    // recording on or off. Not testing HTTP parsing (that's `http.rs`'s job).
     fn fake_mock(recording: std::sync::Arc<std::sync::atomic::AtomicBool>) -> std::net::SocketAddr {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -637,9 +558,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut buf = Vec::new();
                     let mut chunk = [0u8; 4096];
-                    // Read until the head/body this test ever sends has fully arrived: reset and
-                    // record bodies are a handful of bytes, so one read is enough in practice, but
-                    // loop for robustness against a split read.
+                    // Loop for robustness against a split read; one read is enough in practice.
                     loop {
                         match c.read(&mut chunk) {
                             Ok(0) => break,
@@ -683,13 +602,8 @@ mod tests {
         addr
     }
 
-    // THE DEFECT THIS PINS: if the single re-verification request to the GATEWAY fails (here,
-    // nothing is listening on the gateway address at all, the cheapest way to force
-    // `control_failed` to fire on the send at reverify.rs:302-308), `reverify_cell` returns early at
-    // line 309-313 without ever reaching the `set_recording(cfg, false)` call at line 319. The
-    // recorder the mock was told to turn ON at line 278 is left ON, so every load window the suite
-    // runs on this cell (and any cell after it, until some later re-verify happens to succeed) is
-    // measured against a recording - and therefore slower - mock.
+    // Pins: if the gateway request fails, the recorder must still be turned back off before
+    // returning, or every window after this cell measures against a recording (slower) mock.
     #[test]
     fn a_failed_gateway_request_must_not_leave_the_mocks_recorder_on() {
         let recording = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -713,11 +627,8 @@ mod tests {
         );
     }
 
-    /// A fake GATEWAY that records the request body it was handed, and answers 200.
-    ///
-    /// The mock-side fake above cannot see this: the re-verification request goes to the GATEWAY
-    /// address, and what this module has to get right is which model name it puts on that wire. So the
-    /// only way to test it is to be the gateway.
+    /// A fake gateway that records the request body it receives. The mock-side fake above can't see
+    /// this: what matters here is the model name on the wire to the gateway.
     fn fake_gateway(seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> std::net::SocketAddr {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -754,20 +665,10 @@ mod tests {
         addr
     }
 
-    // THE MODEL NAME THAT ACTUALLY GOES ON THE WIRE, not the one a helper would have returned.
-    //
-    // `the_reverify_request_names_the_cells_own_egress_model` below recomputes `model_for` and
-    // `Dialect::body` by hand and asserts properties of THEIR return values. It never calls
-    // `reverify_cell`, so it cannot see which body this module really sends - and reverting the
-    // construction at the top of `drive_and_read` to `ingress.body(&cfg.model)`, the exact regression
-    // this module's largest comment block describes, leaves all thirteen tests in this file green.
-    //
-    // That defect is not hypothetical: naming the base model routes a model-routed gateway to its
-    // OPENAI upstream, so the mock records openai, the egress under test is never exercised, and the
-    // cell publishes "the gateway forwarded rather than translated" about a translation that was never
-    // requested. It did that to 18 cells across 6 gateways in the 2026-07-28 field run.
-    //
-    // So this one is the gateway, and reads the body off the socket.
+    // Guards against reverting `drive_and_read`'s model construction back to
+    // `ingress.body(&cfg.model)`: the test below recomputes `model_for`/`Dialect::body` by hand and
+    // never calls `reverify_cell`, so it can't see that regression. This one reads the body directly
+    // off the gateway socket to catch it.
     #[test]
     fn the_body_sent_to_the_gateway_names_the_cells_own_egress_model() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -803,8 +704,8 @@ mod tests {
         );
     }
 
-    // An unreachable mock is a rig fault. It must not be published as the gateway failing to
-    // translate, which is the same inversion `probe.rs` exists to prevent for the served verdict.
+    // Unreachable mock is a rig fault, not a failed translation - the same inversion `probe.rs`
+    // guards against for the served verdict.
     #[test]
     fn an_unreachable_mock_is_unchecked_never_false() {
         let cfg = crate::run::test_fixture(
@@ -826,17 +727,8 @@ mod tests {
             .contains("recorder could not be cleared"));
     }
 
-    // RE-VERIFICATION MUST DRIVE THE CELL'S OWN WIRE.
-    //
-    // The path and headers were built from `id.egress` while the BODY carried the gateway's base
-    // model name. Most gateways here select their upstream BY MODEL NAME, so the base name routes to
-    // the openai upstream whatever the cell is about: the gateway behaved correctly, the mock
-    // recorded /v1/chat/completions, and this concluded the gateway "forwarded the ingress request
-    // rather than translating it". It published that about 18 cells across 6 gateways in the
-    // 2026-07-28 field run - including litellm-python, whose whole product is translation.
-    //
-    // A capability verdict is an accusation about somebody else's software. Making one from a
-    // request that asked for the wrong upstream is the worst way to be wrong.
+    // Same invariant as the socket-level test above (drive the cell's own wire), verified directly
+    // via `model_for`/`Dialect::body` instead of a live gateway.
     #[test]
     fn the_reverify_request_names_the_cells_own_egress_model() {
         let cfg = crate::run::test_fixture(

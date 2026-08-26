@@ -50,18 +50,10 @@ pub struct RunConfig {
     /// value the launcher's --name and the stop path take: there is no second name for a reader to
     /// disagree with.
     pub runtime: crate::manifest::Runtime,
-    /// THE INGRESS PATH THIS GATEWAY DECLARES, when it is not the dialect's standard one.
-    ///
-    /// Most gateways serve the OpenAI API at `/v1/chat/completions`. Some mount their compatible
-    /// API under a prefix, and one entrant declares `/openai/v1/chat/completions` in its manifest.
-    /// The probe ignored that field and used the standard path, so every cell answered a truthful
-    /// 404 and the artifact published the gateway as serving nothing at all. That is a false claim
-    /// about somebody's product, produced entirely by us, and it is the worst class of error this
-    /// board can make.
-    ///
-    /// Applies to the ONE dialect whose standard path it ends with; every other dialect keeps its
-    /// own. A gateway that serves a dialect somewhere unusual says so, and one that does not serve
-    /// it at all still answers 404, which is the honest verdict rather than an artefact of ours.
+    /// The gateway's declared ingress path, when it differs from the dialect's standard one (e.g. a
+    /// compatible API mounted under a prefix). Ignoring this previously made served gateways appear
+    /// to serve nothing (404 on every cell). Applies only to the one dialect whose standard path it
+    /// ends with; every other dialect keeps its own.
     pub declared_path: String,
     /// Per-cell overrides, keyed `"<ingress>>egress"`. See `Manifest::cell_paths`.
     pub cell_paths: std::collections::BTreeMap<String, String>,
@@ -72,54 +64,31 @@ pub struct RunConfig {
     pub matrix_note: String,
     pub untestable_cells: Vec<String>,
     pub untestable_note: String,
-    /// HOW TO PUT THE GATEWAY BACK AT REST. The memory group needs a process that has not served
-    /// load to read an idle RSS from, and the only way to get one is to restart it, so the spec that
-    /// launched it has to be reachable from a metric.
-    ///
-    /// `None` when the harness does not own the gateway's lifetime (no `launch` in the manifest, or
-    /// a run against an already-up target). The memory group then publishes idle as ABSENT rather
-    /// than as a reading it knows was taken under load - see `Memory::measure`.
+    /// How to restart the gateway to rest, so the memory group can read an idle RSS. `None` when
+    /// the harness does not own the gateway's lifetime; memory then publishes idle as ABSENT rather
+    /// than a reading taken under load — see `Memory::measure`.
     pub relaunch: Option<crate::launch::LaunchSpec>,
-    /// The manifest's post-boot `commands`, REPLAYED ON EVERY RESTART. A gateway with no config
-    /// file is configured through its own admin API after it boots, and for docker a stop is
-    /// `docker rm -f`: the container's writable layer - the database those commands wrote - is
-    /// destroyed with it. Restarting without replaying them relaunches an UNCONFIGURED gateway:
-    /// on the 2026-07-28 board one-api lost its three channels at the memory group's restart, and
-    /// every metric measured after it (streaming, added latency) failed 100% while throughput,
-    /// measured before it, published real numbers - a half-configured gateway answering probes is
-    /// exactly the state the initial-launch path refuses to measure.
+    /// The manifest's post-boot `commands`, replayed on every restart. Config applied via admin API
+    /// after boot lives in the container's writable layer, which a `docker rm -f` stop destroys;
+    /// skipping replay would relaunch an unconfigured gateway that fails every metric after restart.
     pub relaunch_commands: Vec<String>,
-    /// THE ONE LAUNCHER THAT OWNS THIS GATEWAY'S NATIVE CHILD, for every restart across every cell.
-    ///
-    /// `restart_to_rest` used to build a throwaway `RealLauncher` per call: the `Child` it held was
-    /// dropped when the function returned, so the NEXT restart's `pkill` killed a process nothing
-    /// could `wait()` on, leaking a zombie process-table entry once per served cell over an
-    /// eight-hour run. Holding the same launcher here, across every cell, means the launcher that
-    /// spawned a native child is still the one asked to stop it next time, so it can actually reap
-    /// it (see `RealLauncher::reap_previous_native_child`). Present even when `relaunch` is `None`;
-    /// it is simply never used in that case.
+    /// The one launcher that owns this gateway's native child across every restart. A per-call
+    /// throwaway launcher drops its `Child` when it returns, so the next restart's `pkill` kills a
+    /// process nothing can `wait()` on, leaking a zombie entry per served cell. Sharing the launcher
+    /// lets it reap what it spawned (see `RealLauncher::reap_previous_native_child`). Present even
+    /// when `relaunch` is `None`, just unused.
     pub relaunch_launcher: std::sync::Mutex<crate::launch::RealLauncher>,
 }
 
 /// Every header one request carries: how this INGRESS dialect authenticates, then whatever the
-/// gateway needs to select this EGRESS column.
-///
-/// Two axes, and they are genuinely different things. The auth header belongs to the protocol the
-/// client is speaking and is identical across gateways, so it comes from `Dialect`. The routing
-/// header belongs to the gateway and is how some of them decide which upstream to call, so it comes
-/// from the manifest, keyed by column. Collapsing them into one hardcoded shape is what sent
-/// `authorization: Bearer` to dialects that do not use one.
+/// gateway needs to select this EGRESS column. Auth headers come from `Dialect` (protocol-level,
+/// same across gateways); routing headers come from the manifest, keyed by column (gateway-level).
 /// Where to send this dialect's probe: the gateway's declared path when it is a longer form of this
 /// dialect's standard one, otherwise the standard.
-/// The model name this cell must send to reach ITS egress column.
-///
-/// Every request the grid makes goes through here rather than reading `cfg.model`, because reading
-/// the bare field is exactly the defect this exists to prevent: most gateways pick the upstream from
-/// the model name, so a fixed model sends the same request for all six egress columns, reaches one
-/// upstream, and publishes six cells for one measurement - a translation claim the gateway was never
-/// asked to perform. Falls back to the declared `model` when the manifest names nothing for this
-/// column, which is right for a single-upstream gateway and for the column whose canonical name is
-/// already the declared one.
+/// The model name this cell must send to reach its egress column. Callers must go through here
+/// rather than `cfg.model`: most gateways pick the upstream from the model name, so a fixed model
+/// would reach one upstream while claiming six egress columns were exercised. Falls back to the
+/// declared `model` when the manifest names nothing for this column.
 pub fn model_for(cfg: &RunConfig, egress: &str) -> String {
     cfg.egress_models
         .get(egress)
@@ -148,35 +117,21 @@ pub fn path_for(cfg: &RunConfig, ingress: Dialect, egress: &str) -> String {
 /// The exact header list one cell is driven with: the dialect's own credential headers, then the
 /// manifest's always-on headers, then the ones that select this egress column.
 ///
-/// ONE HEADER PER NAME ON THE WIRE, and the rig's own copy is the one that goes.
-///
-/// Ledger RIG-12's remainder. This used to concatenate all three sources unfiltered, and nothing
-/// stopped a manifest declaring a name the dialect already sends - `gateways/litellm-rust` declares
-/// `Authorization: Bearer {GW_AUTH}`, which collides with the bearer header the openai,
-/// openai-responses, cohere and bedrock ingress dialects each send. Two `authorization` headers left
-/// on one request, and HTTP does not define which a server honours: first, last, or comma-joined and
-/// rejected, by implementation. Nothing errors, the gateway authenticates as SOMEBODY, and a clean
-/// number is published for a request whose credential and therefore whose tenant and route we cannot
-/// state. A wrong measurement that looks entirely right.
-///
-/// The dialect's wins because the credential is the HARNESS's to assert: `cfg.auth` is the token
-/// this run holds (one gateway mints it at launch), and the shape is what a real client of that
-/// dialect sends. A manifest able to override it could have a gateway measured under an identity the
-/// harness cannot name. Disclosed rather than silent: `Manifest::rig_owned_headers_declared` reports
-/// the collision through `otb validate`, naming the file and the header.
-///
-/// Dropping, not refusing at load, because the one manifest that trips this is a first-party file
-/// and refusing would stop the whole benchmark rather than measure it unambiguously. The comparison
-/// is exact today - that manifest's value is byte-identical to the header it duplicates - so this
-/// changes what goes on the wire only in the case that was undefined anyway.
+/// Ledger RIG-12: one header per name on the wire, case-insensitively deduped, with the dialect's
+/// own credential header always winning over a manifest-declared duplicate (e.g. `litellm-rust`
+/// declares an `Authorization` header colliding with several ingress dialects' bearer headers).
+/// HTTP does not define which of two same-name headers a server honours, so a duplicate risks
+/// silently authenticating as the wrong identity while still publishing a clean number. The
+/// dialect's header wins because `cfg.auth` is the credential the harness can actually name.
+/// Dropped rather than refused at load (refusing would halt the whole benchmark); collisions are
+/// reported via `Manifest::rig_owned_headers_declared` / `otb validate`.
 pub(crate) fn headers_for(
     cfg: &RunConfig,
     ingress: Dialect,
     egress: &str,
 ) -> Vec<(String, String)> {
     let mut out = ingress.auth_headers(&cfg.auth);
-    // Case-insensitively, because HTTP header names are (`HttpResponse::header` already reasons this
-    // way) and `Authorization` vs `authorization` is the same header to every server that reads it.
+    // Header names compared case-insensitively per HTTP semantics.
     let rig_owned: Vec<String> = out.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
     let push = |out: &mut Vec<(String, String)>, (n, v): (String, String)| {
         if rig_owned.contains(&n.to_ascii_lowercase()) {
@@ -195,30 +150,16 @@ pub(crate) fn headers_for(
     out
 }
 
-/// Ask the gateway whether it serves this pairing. The answer comes only from what was OBSERVED:
-/// THE MOST SIMULTANEOUS CONNECTIONS THIS HOST CAN ACTUALLY MAKE TO ONE DESTINATION.
+/// The most simultaneous connections this host can make to one destination, bounded by ephemeral
+/// source ports (`net.ipv4.ip_local_port_range`) since one load window drives one destination.
+/// Asking past it doesn't measure a bigger gateway: `connect` returns EADDRNOTAVAIL, which
+/// `GenStats::rig_refused` must distinguish from the gateway refusing.
 ///
-/// A TCP connection is identified by (src ip, src port, dst ip, dst port). Every load window drives
-/// ONE destination, so simultaneous connections are bounded by this host's ephemeral source ports:
-/// `net.ipv4.ip_local_port_range`. Asking past it does not measure a bigger gateway - `connect`
-/// starts returning EADDRNOTAVAIL, and before `GenStats::rig_refused` existed those landed in the
-/// failure count where nothing could tell them apart from the gateway refusing, so the search would
-/// publish the rig's port range as the gateway's ceiling.
-///
-/// EVERY NUMBER HERE IS READ OR DERIVED, none chosen. The ceiling is the largest power of two that
-/// fits the host's own range - powers of two because the ladder doubles, so a ceiling between rungs
-/// would be reachable only by the clamp and would make the top rung a different shape from every
-/// rung below it.
-///
-/// The fallback, when /proc cannot be read (macOS, a restricted container), is the same computation
-/// over Linux's own documented default range rather than a constant somebody picked: if we cannot
-/// ask the host, we assume the host is stock.
-///
-/// TIME_WAIT is not handled by shaving a fraction off - that would be an invented number doing a
-/// real job badly. A closed connection holds its port until TIME_WAIT expires, so the orchestrator
-/// enables `net.ipv4.tcp_tw_reuse` before a run and the kernel recycles them for new outbound
-/// connections. Widening the range or changing that policy needs no change here: this reads whatever
-/// the host is actually configured to do.
+/// Returns the largest power of two fitting the host's range, since the ladder doubles and a
+/// ceiling between rungs would make the top rung a different shape from the rest. Falls back to
+/// Linux's documented default range when /proc can't be read (macOS, restricted containers).
+/// TIME_WAIT is not fudged with a fraction; the orchestrator enables `tcp_tw_reuse` so the kernel
+/// recycles ports itself, and this simply reads whatever range the host is actually configured with.
 pub fn host_connection_ceiling() -> u32 {
     // Linux's compiled-in default, used only when the real one cannot be read.
     const STOCK_LINUX_RANGE: (u32, u32) = (32_768, 60_999);
@@ -240,61 +181,15 @@ pub fn host_connection_ceiling() -> u32 {
     ceiling
 }
 
-/// The concurrency ceiling for a HELD-OPEN STREAM, which is a different physical bound from a request.
+/// Concurrency ceiling for a held-open stream, distinct from `host_connection_ceiling`'s request
+/// bound: a stream holds its connection/fd for the whole window, so the binding resource is
+/// descriptors, not ports (though on the bench box the raised fd limit means `min()` picks the port
+/// term anyway). Uses a third of the descriptor budget, not clamped lower — measured field ceilings
+/// exceed naive guesses, and an invented cap would clip real measurements. Very high concurrency is
+/// actually bound by rig memory/CPU, a known gap this can't distinguish from gateway speed.
 ///
-/// `host_connection_ceiling` derives its answer from the ephemeral port range, and for short requests
-/// that is exactly right: a request opens a socket, completes in milliseconds, and hands the port
-/// back, so how many can be in flight at once is a question about ports.
-///
-/// A streaming lane does not do that. It holds its connection open for the whole window - the mock
-/// paces 64 frames at 20ms, so about 1.28 seconds - and for that entire time it also holds a task, a
-/// read buffer, and a file descriptor on the rig, one on the gateway, and one on the mock. The
-/// binding resource is therefore DESCRIPTORS, not ports, and descriptors are the smaller number by a
-/// wide margin on a STOCK box.
-///
-/// ON THE BENCH BOX IT IS NOT, AND THIS GUARD NEVER BINDS THERE. `run-on-ec2.sh` raises the fd limit
-/// to 1,048,576, so the descriptor term is 1048576/3 rounded down to a power of two = 262,144, while
-/// the port term is 32,768. `min()` therefore picks ports on every field run and the descriptor half
-/// of this derivation has never once participated in a result. The 2026-07-29 run climbing apisix to
-/// c=32,768 held-open streams is what that looks like: the guard written to stop it was inert.
-///
-/// NOT PAPERED OVER WITH A SMALLER NUMBER, deliberately. The note above on `STREAM_RUNAWAY_CAP`
-/// explains why - litellm-rust reached c=6,144 and aisix c=4,096 with every window passing, so a cap
-/// chosen anywhere near where measurements live would have clipped three gateways and published a
-/// smaller rung as their peak, which is worse than an honest hole. A ceiling chosen near where
-/// measurements live becomes part of the measurement.
-///
-/// What actually binds at 32,768 concurrent lanes is neither ports nor descriptors: it is MEMORY AND
-/// CPU IN THE ENGINE PROCESS, which holds an `SseReader` with its buffers per lane on a box that is
-/// also running the pinned gateway and the mock. That is the rig saturating, and the ladder cannot
-/// tell it apart from a gateway that is still fast - so the honest fix is to DETECT and disclose rig
-/// saturation, not to guess a number that stops the climb before it. Left as a known gap rather than
-/// closed with an invented threshold.
-///
-/// The 2026-07-29 run inherited the port bound and climbed apisix's stream ladder to c=32768 on both
-/// of its streamable cells. Forty-nine thousand usable ports made that the largest power of two the
-/// port rule allowed, so the ladder ran to the top, never plateaued - because past a few thousand
-/// held-open streams the RIG is what is saturating, and a saturating rig keeps yielding small
-/// increments rather than the flat run the search stops on - and published nothing at all. Thirty-two
-/// thousand concurrently-held SSE streams on one box is not a measurement of a gateway.
-///
-/// A THIRD OF THE DESCRIPTOR BUDGET, not all of it: the rig needs descriptors for everything else it
-/// is doing, and a ladder that climbs until the process runs out of file handles measures the ladder.
-/// Still capped by the port rule, which remains a real bound and is simply not the first one to bite.
-///
-/// AND A RUNAWAY BACKSTOP, WHICH IS NOT THE SAME AS A MEASUREMENT BOUND.
-///
-/// An earlier version of this put a constant ceiling at 4096, reasoning that no gateway had cleanly
-/// exceeded c=2178. The field's own sweeps said otherwise: apisix sustained c=16384 with ZERO stalls
-/// and every window passing, litellm-rust c=6144, aisix c=4096. That constant would have clipped
-/// three gateways and published a smaller rung as their peak - a wrong number, which is worse than an
-/// honest hole. A ceiling chosen near where measurements live becomes part of the measurement.
-///
-/// So the ladder's real stopping condition is MEASURED: it climbs until its rungs stop holding, and
-/// `saturation_plateau` publishes the best rung that actually passed (see the bound-versus-ceiling
-/// note there). `STREAM_RUNAWAY_CAP` exists only so a bug cannot climb forever - it sits far above
-/// anything this field has produced or plausibly could, so it never participates in a result. If a
-/// search ever reaches it, that is a runaway to investigate and not a gateway's ceiling to publish.
+/// `STREAM_RUNAWAY_CAP` is a runaway backstop, not a measurement bound: it sits far above anything
+/// plausible, so reaching it means investigate a bug, not "this is the gateway's ceiling".
 const STREAM_RUNAWAY_CAP: u32 = 65_536;
 
 pub fn stream_connection_ceiling() -> u32 {
@@ -343,14 +238,9 @@ pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     )
 }
 
-/// The same probe over an EXPLICIT budget, so a test can exercise the retry loop without sleeping
-/// through the field's real pause.
-///
-/// The pause is a minute of wall clock across the budget. Tests that sat through it did not just run
-/// slowly, they held sockets while they waited and starved the rest of the suite, which is how a
-/// neighbouring stream test started failing under parallel load - a test made flaky by another test
-/// is worse than a slow one, because the red it produces points at innocent code. `supervise.rs`
-/// already injects its own sleep for exactly this reason; this follows it.
+/// The same probe over an explicit budget, so a test can exercise the retry loop without sleeping
+/// through the field's real ~minute-long pause (which previously held sockets and starved parallel
+/// tests). Mirrors the pattern `supervise.rs` already uses for the same reason.
 pub fn probe_cell_within(
     cfg: &RunConfig,
     id: &CellId,
@@ -359,22 +249,9 @@ pub fn probe_cell_within(
     pause: Duration,
 ) -> Served {
     let (mut last, mut retryable) = probe_cell_once(cfg, id, mock_healthy);
-    // SPEND THE BUDGET THE VERDICT CLAIMS TO HAVE SPENT.
-    //
-    // `Verdict::Failed` is documented as "the failure persisted across the whole budget", and
-    // `transient_budget()` exists to fund that, but nothing outside its own tests ever called it: a
-    // single 503 was recorded as "this gateway does not serve this pairing", permanently, on the
-    // board. A status that says TEMPORARILY unavailable in words is not a capability.
-    //
-    // The harness makes this condition itself. Cells run back to back with no settle and the metric
-    // before each probe is a heavy load, so a gateway with admission control can still be shedding
-    // when the next cell asks whether it exists. busbar answered 503 on 26 of 36 cells in the
-    // 2026-07-28 field run and every one was published as a red; the day before, on a lighter
-    // engine, it served all 36. Its egress lanes all still answered under openai ingress in the
-    // same run, which is what shows the lanes were healthy and the moment was not.
-    //
-    // Every cell gets the same attempts and the same pause - the budget takes no arguments for that
-    // reason - so no cell can be tried harder than another.
+    // Retry across the full `transient_budget()`: a single transient status (e.g. 503 from a
+    // gateway briefly shedding load after the prior cell's heavy window) must not be recorded as a
+    // permanent "does not serve" verdict. All cells get the same attempts/pause.
     for attempt in 1..attempts {
         let Some(why) = retryable.clone() else { break };
         eprintln!(
@@ -391,23 +268,12 @@ pub fn probe_cell_within(
     last
 }
 
-/// One probe attempt: the verdict, and WHY it is worth asking again, if it is.
-///
-/// The second half is what `probe_cell` spends the budget on. Two kinds of answer deserve another
-/// ask, and they arrive through different doors:
-///
-///   - a transient STATUS (503 and friends), which is the gateway saying "not right now"
-///   - a transient TRANSPORT failure (no answer at all, or a refused connection), which is the
-///     gateway not saying anything right now
-///
-/// Both are moments. The harness manufactures both: cells run back to back with no settle and the
-/// metric before each probe is a heavy load, so the next cell asks its question of a gateway still
-/// shedding. busbar lost 26 cells to the first door in the 2026-07-28 field run and litellm-python
-/// lost three to the second, its served count sliding 8 -> 7 -> 5 across the day's runs while the
-/// cells it lost were recorded "the gateway accepted the connection and never answered".
-///
-/// A malformed response and an unknown dialect are NOT retryable: the first is a real answer the
-/// gateway keeps giving, the second is our own manifest and no amount of asking changes it.
+/// One probe attempt: the verdict, and why it is worth asking again, if it is. Retryable answers
+/// are transient statuses (503 and friends: "not right now") and transient transport failures (no
+/// answer, or a refused connection: "not saying anything right now") — both are moments the
+/// back-to-back, no-settle cell schedule can manufacture. A malformed response and an unknown
+/// dialect are NOT retryable: the first is a real answer the gateway keeps giving, the second is
+/// our own manifest and no amount of asking changes it.
 fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served, Option<String>) {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
         return (
@@ -426,28 +292,23 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
     ) {
         Outcome::Response(r) if (200..300).contains(&r.status) => (Served::Yes, None),
         Outcome::Response(r) => {
-            // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
-            // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
+            // Keep the actual status/body: a bare verdict can't distinguish "gateway declined" from
+            // "rig-side reason produced 4xx on every cell".
             let evidence = crate::cell::Evidence {
                 status: r.status,
                 body_snippet: crate::cell::Evidence::snippet(&String::from_utf8_lossy(r.body())),
             };
-            // A REFUSAL WE PROVOKED IS NOT A CAPABILITY VERDICT. A real client of some dialects signs
-            // its requests and the harness cannot: it sends a bearer token and will not forge a
-            // signature. A gateway that checks credentials properly answers 401/403 to that, which is
-            // CORRECT behaviour, so grading it as a refusal would publish a red the gateway did not
-            // earn. Decided here rather than in `persistent_transient_verdict` because that function
-            // is a pure function of the observed status and must stay one - this needs the dialect,
-            // which is a property of our own instrument, not of the gateway.
+            // A refusal we provoked is not a capability verdict: some dialects sign requests and the
+            // harness sends a bearer token instead of forging a signature, so a gateway correctly
+            // rejecting that with 401/403 must not be graded as a red. Decided here (needs the
+            // dialect) rather than in `persistent_transient_verdict`, which stays a pure function of
+            // the observed status.
             if ing.auth_is_unforgeable_by_the_rig() && matches!(r.status, 401 | 403) {
                 return (Served::UnprobedAuth(evidence), None);
             }
-            // The verdict decides which of the three this is, and they are NOT interchangeable.
-            // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
-            // the gateway's own answer that it reached and declined this attempt at a pairing that
-            // is otherwise real. NotVerified means the rig could not get a fair reading, so nothing
-            // was learned about the gateway, and recording it as "does not serve" would convict on
-            // the rig's failure.
+            // NotConfigured: gateway says the pairing doesn't exist. Failed: gateway reached and
+            // declined an otherwise-real pairing. NotVerified: rig couldn't get a fair reading, so
+            // nothing was learned — must not be recorded as "does not serve".
             let retry = crate::probe::status_is_transient(r.status)
                 .then(|| format!("HTTP {} is transient", r.status));
             match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
@@ -466,8 +327,7 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
                 ),
             }
         }
-        // No HTTP answer at all: the gateway may never have been reached, so this says nothing
-        // about it. Never a gateway fault.
+        // No HTTP answer: the gateway may never have been reached, so this is never a gateway fault.
         Outcome::ConnectionFailed(e) => (
             Served::Untestable(format!("no connection to the gateway: {e}")),
             Some("the connection was refused".to_string()),
@@ -476,21 +336,15 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
             Served::Untestable("the gateway accepted the connection and never answered".into()),
             Some("the gateway did not answer in time".to_string()),
         ),
-        // A response we cannot parse is a real answer the gateway keeps giving; asking again spends
-        // the budget to be handed the same bytes.
+        // A response we cannot parse is a real answer the gateway keeps giving; retrying just
+        // re-fetches the same bytes.
         Outcome::Malformed { message, .. } => (
             Served::Untestable(format!("unparseable response: {message}")),
             None,
         ),
-        // WE NEVER ASKED, so there is nothing here to grade. `Untestable` and never `Served::No`:
-        // every other arm above describes something the GATEWAY did, and this one describes a
-        // manifest of ours that declared a header we will not put on the wire. Recording it as a
-        // capability verdict would convict a gateway of our defect, and `probe::Verdict` has the
-        // right word for it already - NotVerified is "a statement about the RIG, not the gateway",
-        // which `Untestable` is how this function spells.
-        //
-        // No retry: the manifest will say the same thing on the next attempt, so the budget would be
-        // spent to be refused identically. It is loud on stderr so the run points at the file to fix.
+        // We never asked: this describes a manifest defect of ours (a header we won't send), not
+        // the gateway, so it's `Untestable` and never `Served::No`. No retry — the manifest says the
+        // same thing every time. Logged loudly so the run points at the file to fix.
         Outcome::RigRefused(why) => {
             eprintln!(
                 "probe: refused to send to {}>{} - {why}. The gateway was never asked; fix the \
@@ -512,38 +366,26 @@ struct SweepProbe<'a> {
     cfg: &'a RunConfig,
     path: String,
     body: String,
-    /// The SAME composed header list the probe authenticated this cell with. Carried per probe rather
-    /// than rebuilt inside `spawn_pinned`, so the window and the probe cannot end up speaking to the
-    /// gateway as two different clients.
+    /// Same composed header list the probe authenticated this cell with, so the window and the
+    /// probe can't end up speaking to the gateway as two different clients.
     headers: Vec<(String, String)>,
 }
 
 impl Probe for SweepProbe<'_> {
     fn probe(&mut self, concurrency: u32) -> Option<Sample> {
-        // THE GENERATOR RUNS AS ITS OWN PINNED PROCESS, exactly as the Go one did.
-        //
-        // Running it in-process would put load generation on the orchestrator's cores, competing
-        // with the gateway under test and with our own bookkeeping. The core split (gateway 0-3,
-        // load 4-9, mock 10-15) IS the comparability basis of every published number: an unpinned
-        // generator measures a different machine than a pinned one, and the difference is invisible
-        // in the artifact. Same binary, separate process, same pinning the load generator has always
-        // had.
+        // Load generator runs as its own pinned process (gateway 0-3, load 4-9, mock 10-15) so the
+        // core split is the comparability basis of every published number; an unpinned generator
+        // would measure a different machine.
         let stats = self.spawn_pinned(concurrency)?;
-        // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
+        // The OS refusing a thread means the window never ran at the requested concurrency: a rig
         // limit, not a gateway result, so the search must stop rather than read a turnover.
         if stats.spawn_failed {
             eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
             return None;
         }
-        // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
-        // `spawn_failed` already models: the window never ran at the concurrency it claims, so
-        // nothing about the gateway was learned at any concurrency we could name.
-        //
-        // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
-        // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
-        // failed and the search recorded our own port range as the gateway's ceiling. Counting them
-        // separately was only half the fix: a window containing any of them still failed, and still
-        // failed for our reason. It is unmeasured instead.
+        // Connections THIS HOST couldn't make (ephemeral ports/descriptors exhausted) are counted
+        // separately from genuine gateway failures and treated as unmeasured, not a gateway result —
+        // otherwise the search records our own port range as the gateway's ceiling.
         if stats.rig_refused > 0 {
             eprintln!(
                 "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
@@ -552,18 +394,13 @@ impl Probe for SweepProbe<'_> {
             );
             return None;
         }
-        // A window that produced nothing is UNMEASURED, not a zero.
+        // A window that produced nothing is unmeasured, not a zero.
         if stats.ok == 0 && stats.fail == 0 {
             return None;
         }
-        // THE LATENCY RIDES ALONG WITH THE RATE, because the generator already measured it.
-        //
-        // This used to return the rate and the verdict alone, and the p99 this window ran at died
-        // here. That single narrowing is why the engine ran a SECOND search to answer "and how much
-        // at 20ms?": the answer was not readable off the sweep it had just taken. The second search
-        // ran after the memory group had restarted the gateway, so the two published throughput
-        // numbers described two different states of it. Carrying the reading is what lets one sweep
-        // answer both, from one set of windows, on one state of the gateway.
+        // Carry the reading (p99/ok/fail) alongside the rate: the generator already measured it, so
+        // one sweep can answer both throughput and latency-at-target from one set of windows on one
+        // gateway state, instead of needing a second search after a restart.
         Some(
             Sample::new(stats.rps(), stats.fail == 0 && stats.ok > 0).with_reading(
                 crate::search::Reading {
@@ -584,20 +421,14 @@ impl SweepProbe<'_> {
 }
 
 /// Drive one pinned load window against the gateway and read the generator's stats line back.
-///
-/// Shared by the throughput search and the memory window so both put load on the box the same way:
-/// same binary, same pinning, its own process. A memory number taken under a differently-generated
-/// load is not comparable with a throughput number taken under this one.
+/// Shared by the throughput search and the memory window so both load the box the same way (same
+/// binary, pinning, process) — a memory number taken under different load isn't comparable.
 /// Stop the gateway and start it again, returning only once it is ready to serve.
 ///
-/// This exists for ONE reason: an idle memory reading has to come from a process that has not served
-/// load, and after the throughput sweep no such process exists. Restarting is the only way to get one
-/// back. The alternative that was in place - reading RSS where the process happened to be - published
-/// post-load memory as idle and made every cell depend on the load the cell before it had run.
-///
-/// Errors carry the stage that failed, because "could not restart" and "restarted but never came
-/// back" are different findings: the first leaves the gateway up, the second leaves it down and every
-/// later cell in the grid will fail too.
+/// Needed so idle memory can be read from a process that hasn't served load; the prior approach of
+/// reading RSS in place published post-load memory as idle. Errors carry the failed stage because
+/// "could not restart" (gateway still up) and "restarted but never came back" (gateway down, every
+/// later cell fails) are different findings.
 pub fn restart_to_rest(
     spec: &crate::launch::LaunchSpec,
     launcher: &std::sync::Mutex<crate::launch::RealLauncher>,
@@ -608,20 +439,16 @@ pub fn restart_to_rest(
         .map_err(|_| "the launcher lock was poisoned".to_string())?;
     crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(30))
         .map_err(|e| format!("stopping it failed: {e:?}"))?;
-    // The stop above already confirmed the previous native child (if any) is dead, so reaping it
-    // here through the SAME launcher that spawned it is a wait, never a hang - and it is the only
-    // safe way this process can collect a pid the next `pkill` is about to kill.
+    // The stop above already confirmed the previous native child is dead, so reaping it through the
+    // same launcher that spawned it is a wait, never a hang.
     launcher.reap_previous_native_child();
     crate::launch::launch_default(&mut *launcher, spec)
         .map(|_| ())
         .map_err(|e| format!("it did not come back up: {e:?}"))?;
-    // REPLAY THE POST-BOOT COMMANDS, exactly as the initial launch ran them. For docker the stop
-    // above was `docker rm -f`: any configuration those commands wrote into the container (an
-    // admin-API-configured gateway's database - its channels, its quota) died with the writable
-    // layer, and a gateway that comes back up unconfigured answers probes while serving nothing.
-    // A failure here is the restart failing, not a softer state: a half-configured gateway is
-    // worse than a down one, because every later metric would measure the missing configuration
-    // and publish it as the gateway's own failure.
+    // Replay post-boot commands: for docker the stop was `docker rm -f`, which destroys the
+    // writable layer any admin-API config was written into. A failure here must propagate — a
+    // half-configured gateway is worse than a down one, since later metrics would silently measure
+    // the missing configuration.
     for line in commands {
         crate::launch::run_line(line, Duration::from_secs(120))
             .map_err(|why| format!("its post-boot configuration failed: {line}: {why}"))?;
@@ -639,22 +466,13 @@ pub fn load_window(
     load_window_at(cfg, cfg.gateway_addr, path, body, headers, concurrency)
 }
 
-/// The same window, plus WHAT THE GATEWAY SPENT SERVING IT.
+/// The same window, plus what the gateway spent serving it. Counters are read from the gateway's
+/// process tree immediately before and after (not an absolute `utime`, which would carry startup
+/// and every earlier window and make cell order look like a gateway property).
 ///
-/// The counters are read from the gateway's process tree immediately before and after the window, so
-/// the difference covers this window and nothing else. That ordering is the whole design: an absolute
-/// `utime` carries the process's startup, its config parse and every earlier window, and charging
-/// those to this window's requests would make CELL ORDER look like a gateway property - the first
-/// cell measured would always look the most expensive.
-///
-/// The cost is `Absent`, never zero, whenever it cannot be taken: the pid may not resolve (the
-/// gateway is not up, or the runtime hides it), `/proc` may not exist (a non-Linux host), or a
-/// counter may go backwards (pid reuse - see `procsample::cost`). A gateway that we failed to
-/// measure must never read as a gateway that used no CPU.
-///
-/// SAMPLING IS NOT FREE AND IS DELIBERATELY OUTSIDE THE WINDOW. Both reads walk `/proc` once, which
-/// is the same scan the RSS sampler already performs on a timer; doing them before and after rather
-/// than during means the observation cost cannot land inside the interval being measured.
+/// Cost is `Absent`, never zero, whenever it cannot be taken (pid unresolved, no /proc, or a
+/// backwards counter from pid reuse) — an unmeasured gateway must never read as using no CPU.
+/// Sampling itself is deliberately outside the window so its own cost cannot land inside it.
 pub fn load_window_costed(
     cfg: &RunConfig,
     path: &str,
@@ -666,10 +484,9 @@ pub fn load_window_costed(
     crate::procsample::WindowCost,
     crate::measurement::Measurement<f64>,
 ) {
-    // The pinned-core utilisation is read from the SAME declaration taskset was given. An empty
-    // spec (the `smoke` path, which drives a gateway this process never pinned) yields no cores and
-    // therefore an absent utilisation - measuring some other process's cores and labelling the
-    // result this gateway's would be worse than reporting nothing.
+    // Utilisation is read from the same core declaration taskset was given; an empty spec (the
+    // `smoke` path) yields no cores and an absent utilisation rather than measuring another
+    // process's cores under this gateway's name.
     let started = std::time::Instant::now();
     let cores = crate::procsample::parse_cores(&cfg.gw_cores);
     let cpu_before = if cores.is_empty() {
@@ -686,10 +503,10 @@ pub fn load_window_costed(
         ),
     };
     let stats = load_window_at(cfg, cfg.gateway_addr, path, body, headers, concurrency);
-    // Re-resolve rather than reuse `pid`: a gateway is free to restart between the two reads, and a
-    // second sample taken from a DIFFERENT process would be subtracted from the first as though it
-    // were the same one. Re-resolving means a restart shows up as a backwards counter, which
-    // `procsample::cost` already refuses as a harness error rather than publishing a negative.
+    // Re-resolve rather than reuse `pid`: a restart between the two reads would otherwise subtract
+    // a different process's sample as though it were the same one. Re-resolving turns a restart
+    // into a backwards counter, which `procsample::cost` already refuses rather than publishing a
+    // negative.
     let after = match crate::rss::root_pid(&cfg.runtime).copied() {
         Some(p) => crate::procsample::sample_live(p),
         None => crate::measurement::Measurement::absent_because(
@@ -697,9 +514,8 @@ pub fn load_window_costed(
             "the gateway's root pid did not resolve after the window",
         ),
     };
-    // Requests come from the window's OWN completed count, never from its published rate: the rate is
-    // already a derived figure, and deriving cost from a derivation makes one number's error the
-    // other's too.
+    // Requests come from the window's own completed count, never its published rate, which is
+    // already derived — deriving cost from a derivation compounds the error.
     let requests = stats.as_ref().map(|s| s.ok).unwrap_or(0);
     let cost = crate::procsample::cost(&before, &after, requests, cfg.sweep_duration_s as f64);
     let cpu_after = if cores.is_empty() {
@@ -707,22 +523,13 @@ pub fn load_window_costed(
     } else {
         crate::procsample::cpu_busy_total(&crate::rss::RealProc, &cores)
     };
-    // UTILISATION IS DERIVED FROM THE GATEWAY OWN CPU, NOT FROM /proc/stat. It was the other way
-    // round for exactly one field run, and tensorzero proved it wrong.
+    // Utilisation is derived from the gateway's own CPU accounting, not /proc/stat's tick-sampled
+    // per-CPU counters: for bursty workloads (short requests completing between ticks) the tick
+    // sample badly undercounts busy time (observed 14x-41x on tensorzero), and the error is worst
+    // exactly where CPU-boundedness is most interesting, so it can't be corrected for uniformly.
     //
-    // /proc/stat per-CPU counters are TICK-SAMPLED; per-process utime/stime is accounted by the
-    // scheduler at every context switch. Those disagree badly for a bursty workload. Measured on a
-    // live box: tensorzero accumulated 66-255 jiffies in five seconds while its four pinned cores
-    // reported 3-18 busy - a 14x to 41x undercount - because it serves ~380us requests that begin and
-    // end between ticks. The tell was the denominator: total jiffies for those cores read 1741-1933
-    // per five seconds instead of ~2000, and FELL as load rose.
-    //
-    // A continuously-busy gateway does not show this, which is why eleven of twelve passed the
-    // cross-check and only the bursty one failed. The error is therefore not uniform and cannot be
-    // corrected for - it is worst exactly where "is this gateway CPU-bound?" is most interesting.
-    //
-    // Wall time is MEASURED here rather than taken from `sweep_duration_s`, which is the CONFIGURED
-    // length and not what elapsed.
+    // Wall time is measured here rather than taken from `sweep_duration_s`, the configured (not
+    // actual) length.
     let elapsed_s = started.elapsed().as_secs_f64();
     let util = match (cores.is_empty(), cost.cpu_us.copied()) {
         (true, _) => crate::measurement::Measurement::absent_because(
@@ -741,29 +548,21 @@ pub fn load_window_costed(
             "the window reported no elapsed time, so utilisation cannot be divided out",
         ),
     };
-    // The tick-sampled reading is computed but NOT published as utilisation. Kept so the two can be
-    // compared deliberately: where a gateway is continuously busy they agree, and a large gap is
-    // itself the signal that the workload is bursty.
+    // Tick-sampled reading kept (not published) for deliberate comparison: agreement signals a
+    // continuously-busy gateway, a large gap signals burstiness.
     let _tick_sampled = crate::procsample::utilisation(cpu_before, cpu_after);
     (stats, cost, util)
 }
 
-/// The same load window, driven at an EXPLICIT address rather than the gateway's.
+/// The same load window, driven at an explicit address rather than the gateway's. Needed so the
+/// added-latency group's baseline leg can load the mock directly with the exact same generator,
+/// pinning and windowing as the gateway-facing window — otherwise the gap between the two legs
+/// would include rig noise, not purely what the gateway adds.
 ///
-/// The added-latency group's baseline leg has to put load on the mock directly, using the exact same
-/// generator, pinning and windowing as every gateway-facing window - otherwise the two legs of a
-/// difference would be two different measuring instruments and the gap between them would be partly
-/// rig noise rather than purely what the gateway adds. `load_window` stays the common case (there is
-/// no second address to thread through every existing call site), and is now a one-line call into
-/// this.
-///
-/// `headers` IS NOT OPTIONAL AND IS NOT DERIVED HERE. The child used to hardcode
-/// `authorization: Bearer dummy`, so every load window authenticated as a placeholder while the probe
-/// beside it used the manifest's real credential in the right per-dialect shape. A gateway whose
-/// declared auth was anything else passed its probe and then failed 100% of every window, and the
-/// absence that reached the artifact blamed the search rather than naming a credential fault. Taking
-/// the composed header list as an argument, from the same `headers_for` the probe uses, is what makes
-/// that impossible to reintroduce by forgetting a field.
+/// `headers` is required, not derived here: the child previously hardcoded a dummy bearer token,
+/// so every window authenticated as a placeholder while the probe beside it used the real
+/// per-dialect credential, silently failing 100% of windows for gateways with other auth. Taking
+/// the composed header list from the same `headers_for` the probe uses prevents that recurring.
 pub fn load_window_at(
     cfg: &RunConfig,
     addr: SocketAddr,
@@ -773,8 +572,8 @@ pub fn load_window_at(
     concurrency: u32,
 ) -> Option<GenStats> {
     {
-        // Same reasoning as the spawn failure below: a rig that cannot find its own binary empties
-        // every window of the run, so it must not do so in silence.
+        // A rig that cannot find its own binary empties every window of the run, so this must not
+        // fail silently (same reasoning as the spawn failure below).
         let exe = match std::env::current_exe() {
             Ok(exe) => exe,
             Err(e) => {
@@ -799,24 +598,17 @@ pub fn load_window_at(
         };
         let out = cmd
             .args(["loadgen", &addr, path, &conc, &dur, body])
-            // The credential rides in the ENVIRONMENT, not the argument list: a token on a command
-            // line is visible in `ps` to every user on the box for the life of the window.
+            // Credential rides in the environment, not argv: argv is visible in `ps` to every user
+            // on the box.
             .env(
                 crate::loadgen::HEADERS_ENV,
                 crate::loadgen::encode_headers(headers),
             )
             .stderr(std::process::Stdio::inherit())
             .output();
-        // THE ONE FAILURE THAT KILLS EVERY WINDOW IN THE RUN WAS THE SILENT ONE.
-        //
-        // This was `.output().ok()?`, which discards the spawn/IO error entirely. If `taskset` is not
-        // on PATH - a minimal container, any non-util-linux box - or this binary cannot be re-executed,
-        // the child never runs and `None` travels up through every rung of every throughput and
-        // sustained search for every cell. The artifact then reads
-        // "no load window completed at c=X" and blames the search or the gateway for a missing binary
-        // on the rig. Every neighbouring path already reports its cause (spawn_failed, rig_refused, the
-        // HarnessError below, gen.rs's runtime-build failure); this one, uniquely, did not - and it is
-        // the only one whose blast radius is the whole run rather than one window.
+        // Must report the spawn/IO error rather than discard it (`.output().ok()?`): a missing
+        // `taskset` or failed re-exec would otherwise silently empty every window of the entire run,
+        // with the artifact blaming the gateway for a missing rig binary.
         let out = match out {
             Ok(out) => out,
             Err(e) => {
@@ -829,20 +621,10 @@ pub fn load_window_at(
         };
         let line = String::from_utf8_lossy(&out.stdout);
         let parsed = crate::loadgen::parse_ugen_line(line.trim());
-        // OUR OWN WIRE CONTRACT BREAKING IS NOT AN EMPTY WINDOW.
-        //
-        // `parse_ugen_line` classifies a stats line missing a required field, or carrying a
-        // non-numeric one, as `HarnessError` with a detail naming the field and quoting the line -
-        // and `.into_value()` erased both one call later. `None` then travels up through
-        // `load_window`, `SweepProbe::probe` and the search until the cell publishes
-        // `NotMeasured("no load window completed at c=X")`, the same message an idle or killed window
-        // gets. The one piece of evidence that would tell an operator "this is the engine
-        // disagreeing with its own loadgen child, not the gateway and not the rig" was generated and
-        // then thrown away.
-        //
-        // Reported rather than threaded: the value still has to become `None` here, because there is
-        // no window to report on, but the reason it is `None` now reaches stderr and the run log
-        // instead of dying at this line.
+        // A wire-contract violation (missing/non-numeric field in the stats line) still resolves to
+        // `None` here, but the reason is logged to stderr first — otherwise it's indistinguishable
+        // from an ordinary unmeasured window and the engine's own parsing bug looks like a gateway
+        // or rig issue.
         if let (Some(reason), detail) = (parsed.reason(), parsed.detail()) {
             eprintln!(
                 "loadgen: the stats line from our own child could not be read ({reason}){} - this \
@@ -854,25 +636,21 @@ pub fn load_window_at(
         parsed.into_value().map(|u| GenStats {
             ok: u.ok.max(0) as u64,
             fail: u.fail.max(0) as u64,
-            // `u.rps` is f64 now (fractional below 1/s), so the comparison and the division are
-            // both float. A sub-1/s window previously could not even reach here: it failed the i64
-            // parse and the whole window was classified as a HarnessError.
+            // `u.rps` is f64 (fractional below 1/s); a sub-1/s window would otherwise fail an i64
+            // parse and be misclassified as a HarnessError.
             elapsed_s: if u.rps > 0.0 {
                 u.ok as f64 / u.rps
             } else {
                 0.0
             },
             latencies_us: Vec::new(),
-            // FROM THE CHILD, not assumed. This was hardcoded `false`, so `if stats.spawn_failed` in
-            // `SweepProbe::probe` - the check that stops the search when the OS refused a thread -
-            // could never fire on the subprocess path, and a window that never ran at its stated
-            // concurrency was read as an ordinary result of the gateway.
+            // Read from the child, not assumed `false` — otherwise `stats.spawn_failed` in
+            // `SweepProbe::probe` could never fire on the subprocess path.
             spawn_failed: u.spawn_failed,
             rig_refused: u.rig_refused.max(0) as u64,
             budget_exceeded: u.budget_exceeded.max(0) as u64,
-            // The subprocess never sends its raw samples back, only the percentiles it already
-            // computed over them, so these are filled straight from the stats line rather than left
-            // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
+            // Subprocess sends back computed percentiles, not raw samples, so these come straight
+            // from the stats line rather than being derived from the empty `latencies_us` above.
             p50_us: Some(u.p50_us.max(0) as u64),
             p99_us: Some(u.p99_us.max(0) as u64),
         })
@@ -880,27 +658,15 @@ pub fn load_window_at(
 }
 
 pub struct CellPerf {
-    /// EVERY WINDOW THE CLIMB PROBED, in probe order. The whole of what this sweep produces.
-    ///
-    /// It used to carry four scalars beside these - `max_proxy` / `max_proxy_concurrency` and
-    /// `sustained` / `sustained_concurrency` - which were this same set of windows summarised twice, once
-    /// by a plateau search and once by a gate bisection. Both summaries are gone: `frontier.rs` reads the
-    /// throughput answer at six declared tail-latency bounds off these rungs, so the sweep no longer
-    /// decides anything and there is nothing left for a chosen ceiling to decide it with.
-    ///
-    /// `sustained_points` went with them. It existed to carry the bisection's extra windows as evidence
-    /// for a number the bisection produced; there is no bisection and no such number, and these rungs are
-    /// the evidence for every reading taken from them.
+    /// Every window the climb probed, in probe order — the whole of what this sweep produces.
+    /// `frontier.rs` reads throughput at six declared tail-latency bounds directly off these rungs;
+    /// there is no separate plateau/bisection summary anymore.
     pub points: Vec<crate::search::ProbedPoint>,
 }
 
-/// One load window at ONE concurrency. A point measurement, not a search.
-///
-/// This exists because asking a PEAK SEARCH for a maximum over a range of one is a category error:
-/// the rig-ceiling reference and the box-qualification observation both want "what does this do at
-/// exactly c", not a search with room to find a turnover on either side.
-///
-/// A point measurement makes no turnover claim, so there is nothing for a flanking check to refuse.
+/// One load window at one concurrency — a point measurement, not a search. Asking a peak search for
+/// a maximum over a range of one is a category error; a point measurement makes no turnover claim,
+/// so there's nothing for a flanking check to refuse.
 pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement<f64> {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
         return Measurement::absent_because(
@@ -915,8 +681,7 @@ pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement
         headers: headers_for(cfg, ing, &id.egress),
     };
     match p.probe(concurrency) {
-        // The gate still applies: a window with failures is not a throughput reading, it is a window
-        // the target could not serve cleanly.
+        // A window with failures is not a throughput reading; the clean-window gate still applies.
         Some(s) if s.passed => Measurement::Measured(s.value),
         Some(_) => Measurement::absent_because(
             Absent::NotMeasured,
@@ -929,20 +694,13 @@ pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement
     }
 }
 
-/// Find the gateway's throughput peak on one served cell, AND how much of it survives the 20ms gate.
-///
-/// ONE SWEEP, TWO ANSWERS. Users ask two questions about a gateway - "how much can it do?" and "how
-/// much can it really do, at a latency I would accept?" - and those only mean anything side by side
-/// if they describe the same gateway at the same moment. They used to be two searches: this one, and
-/// a `bisect_ceiling` that ran three groups later, after `Memory` had cold-restarted the gateway and
-/// driven minutes of load through it. Each number was a real measurement; the PAIR was a comparison
-/// between two different states of the process, and on three cells of the 2026-07-28 run the
-/// "sustained" figure landed above the "maximum" one by up to 7%.
+/// Find the gateway's throughput peak on one served cell, and how much of it survives the 20ms
+/// gate, from ONE sweep. Both readings must describe the same gateway state to be comparable; two
+/// separate searches (one before, one after a cold restart) previously produced numbers up to 7%
+/// apart purely from measuring different moments.
 pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
     let Ok(ing) = id.ingress.parse::<Dialect>() else {
-        // Nothing was probed, so there is no evidence to carry. The CELL's own `served` verdict says
-        // why; a sweep with no rungs needs no separate reason of its own, and inventing one here would
-        // be a second vocabulary for one fact.
+        // The cell's own `served` verdict already explains why; no separate reason needed here.
         return CellPerf { points: Vec::new() };
     };
     let mut p = SweepProbe {
@@ -951,13 +709,9 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
         body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
     };
-    // No start argument: the climb always begins at the floor. A start derived from the range made the
-    // ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is how a 1..65536
-    // run once began by asking for 32768 concurrent connections.
-    //
-    // NO GATE ARGUMENT EITHER, and that is the change. The climb used to be handed the 20ms predicate so
-    // it would keep going past the throughput plateau until the gate broke - a union of two stopping
-    // rules for two summaries. There is one rule now (stop when requests start failing) and no summary:
+    // No start argument: the climb always begins at the floor. A start derived from the range made
+    // a wider range open with a higher first probe.
+    // No gate argument either: one stopping rule (stop when requests start failing), no summary —
     // every rung comes back and `frontier.rs` reads whichever bound a caller asks for.
     CellPerf {
         points: search::climb_rungs(&mut p, lo, hi),
@@ -970,55 +724,36 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
 /// edit that changes one without the other.
 pub const SUSTAINED_P99_CEILING_US: u64 = 20_000;
 
-/// The error-rate half of the same gate. README: "...and a <0.1% error rate". Not the throughput
-/// sweep's own all-or-nothing clean-window bar (`fail == 0`, see `SweepProbe`): the sustained search
-/// exists specifically to find where a gateway starts to strain, and demanding zero failures would
-/// make a single dropped connection at an otherwise-healthy concurrency fail the WHOLE rung the same
-/// way it fails a peak rung, collapsing "occasionally drops one connection in ten thousand" and
-/// "cannot serve this concurrency at all" into the same verdict. The README's own number is the bar.
+/// The error-rate half of the same gate. README: "...and a <0.1% error rate". Distinct from the
+/// throughput sweep's all-or-nothing clean-window bar (`fail == 0`, see `SweepProbe`): a single
+/// dropped connection here must not collapse "occasionally drops one in ten thousand" into the
+/// same verdict as "cannot serve this concurrency at all".
 pub const SUSTAINED_MAX_FAIL_RATIO: f64 = 0.001;
 
-/// How many times the sustained ceiling may step down when it fails confirmation.
-///
-/// Each step halves the concurrency, so this bounds the walk at a few doublings below the
-/// bisection's answer - far enough to find a rung that genuinely holds, short enough that a cell
-/// cannot spend its whole budget here.
+/// How many times the sustained ceiling may step down when it fails confirmation. Each step halves
+/// the concurrency; bounds the walk to a few doublings below the bisection's answer.
 /// Rungs at or below this drive too few sockets for draining to matter, and pausing after them is
 /// pure schedule cost across a field sweep.
 const STREAM_SETTLE_FREE_BELOW: u32 = 512;
 /// One second of drain per 1,000 concurrent streams the last window drove.
 const STREAM_SETTLE_MS_PER_1K: u64 = 1_000;
-/// The backstop, and it is ONE TIME_WAIT GENERATION rather than a round number.
-///
-/// This was 10s, "deliberately shorter than TIME_WAIT" on the theory that the queues and descriptor
-/// table drain in far less. The board disagreed: cells that had carried c=4,096 still failed at
-/// c=4,107..4,193 after their 4-5s, and TIME_WAIT is exactly the residue `HostState` names as "the
-/// one that takes tens of seconds to clear". Since the wait now ends on the OBSERVED counter, this
-/// bounds only the pathological case - and 60s is the longest a closed socket can physically need.
-/// Past it the host is not draining, it is broken, which is a finding rather than a longer wait.
+/// Backstop, sized to one TIME_WAIT generation (60s = longest a closed socket can need) rather than
+/// a round number; the wait normally ends earlier on the observed counter. Past this the host is
+/// broken, not draining — a finding, not a longer wait.
 const STREAM_SETTLE_MAX_MS: u64 = 60_000;
-/// How often the drain condition is re-read. A /proc/net/sockstat read is one small file; 50ms keeps
-/// the wait tight on the small rungs (where it now costs milliseconds instead of seconds) without
-/// making the poll itself measurable.
+/// How often the drain condition is re-read; 50ms keeps small-rung waits tight without making the
+/// poll itself measurable.
 const STREAM_SETTLE_POLL_MS: u64 = 50;
-/// How far above this cell's own starting TIME_WAIT count still counts as drained.
-///
-/// A bench box is never perfectly idle: the mock and the load generator hold their own sockets, and
-/// the gateway keeps a pool. Demanding an exact return to baseline would time out on every window
-/// and turn the backstop into the schedule. The tolerance is a multiple of the count the cell STARTED
-/// at, so it scales with whatever that particular box considers quiet rather than being a number
-/// chosen here.
+/// How far above this cell's own starting TIME_WAIT count still counts as drained. A bench box is
+/// never perfectly idle, so this is a multiple of the cell's own starting count rather than a fixed
+/// number, scaling to whatever that box considers quiet.
 const STREAM_SETTLE_TW_TOLERANCE: u64 = 2;
 
 thread_local! {
-    /// The TIME_WAIT count this cell began with, times the tolerance: the level `settle_after_streams`
-    /// waits to come back down to.
-    ///
-    /// PER CELL, NOT PER PROCESS. A run measures 36 cells back to back and the box's quiet level
-    /// drifts across them (a gateway restarts, a previous cell's pool ages out). Sampling once at
-    /// startup would have every later cell waiting on a number taken before any of them ran.
-    /// `None` on a host with no /proc/net/sockstat, which is what makes the caller fall back to the
-    /// clock instead of waiting on a signal that will never arrive.
+    /// This cell's starting TIME_WAIT count times the tolerance — the level `settle_after_streams`
+    /// waits to come back down to. Recorded per cell, not once per process, since the box's quiet
+    /// level drifts across a run's 36 back-to-back cells. `None` when /proc/net/sockstat is
+    /// unavailable, so the caller falls back to the clock.
     static STREAM_SETTLE_TW_BASELINE: std::cell::RefCell<Option<u64>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -1030,12 +765,9 @@ pub fn arm_stream_settle_baseline() {
 }
 const MAX_CEILING_STEPDOWNS: usize = 4;
 
-/// WHY the sustained-stream search ended without a ceiling.
-///
-/// It exists because the absence used to be described by one hardcoded sentence no matter how the
-/// search ended, and the five endings are not the same fact - one of them is OURS. Publishing "the
-/// gateway did not hold the gate" for a window the RIG failed to take is the attribution error this
-/// whole board is built to avoid, and it is invisible: the sentence reads like a measurement.
+/// Why the sustained-stream search ended without a ceiling. Distinguishes rig-caused endings from
+/// gateway-caused ones — publishing "the gateway did not hold the gate" for a window the rig failed
+/// to take would be an invisible attribution error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamStop {
     /// The rig could not complete its windows at this concurrency. Never the gateway's result.
@@ -1048,19 +780,13 @@ enum StreamStop {
     WindowUnavailable { at: u32 },
     /// The step-down budget was genuinely spent without finding a rung that holds.
     BudgetExhausted,
-    /// A rung failed at a concurrency this same cell had ALREADY proved clean. Never the gateway's
-    /// result: a gate that fails at 3,088 after passing 6,144 is measuring how far the rig has
-    /// drained, not what the gateway can carry.
+    /// A rung failed at a concurrency this same cell had already proved clean. Never the gateway's
+    /// result: a lower concurrency failing after a higher one passed means the rig hasn't drained.
     RigContaminated { at: u32, proven: u32 },
-    /// The gateway stopped serving after an overload and did not come back on its own. THIS ONE IS
-    /// ABOUT THE GATEWAY, and it is a finding rather than a gap: aisix passed every rung to c=8,192,
-    /// was pushed to c=16,384, and then failed seventeen consecutive windows including c=4,096 which
-    /// it had just carried cleanly. A ceiling cannot be measured on a process that never recovers,
-    /// but "it does not recover" is exactly what a reader wants to know, so it is published as the
-    /// reason instead of an unexplained absence.
+    /// The gateway stopped serving after overload and did not recover on its own. This one IS about
+    /// the gateway — a real finding, published as the reason rather than an unexplained absence.
     ///
-    /// `restart_cleared` records whether a restart brought it back - which is the difference between
-    /// "wedged until restarted" and "wedged and stayed wedged", and the two are not the same claim.
+    /// `restart_cleared` distinguishes "wedged until restarted" from "wedged and stayed wedged".
     GatewayDidNotRecover {
         at: u32,
         proven: u32,
@@ -1069,18 +795,11 @@ enum StreamStop {
 }
 
 impl StreamStop {
-    /// May the search fall back to confirming the cell's own proven-clean floor?
-    ///
-    /// ONLY WHERE THE HOST IS NOT THE SUSPECT. The floor fallback re-measures a rung on the same box
-    /// that just failed several, so it is only meaningful when the failures were the gateway's or the
-    /// budget's. `RigRanShort`, `WindowUnavailable` and `RigContaminated` all say the instrument is
-    /// the variable, and a number taken on a host we have just accused would be exactly the
-    /// attribution error the rest of this enum exists to prevent - with the flattering sign, because
-    /// it would publish a figure where honesty published none.
-    ///
-    /// `GatewayDidNotRecover` is excluded for the opposite reason: the process serving the fallback
-    /// window is not the process the sweep measured, so whatever it carries is not this cell's
-    /// ceiling. "It does not recover" is the finding, and it must not be overwritten by a number.
+    /// May the search fall back to confirming the cell's own proven-clean floor? Only when the host
+    /// itself isn't the suspect: `RigRanShort`/`WindowUnavailable`/`RigContaminated` all implicate
+    /// the rig, so a fallback reading there would repeat the same attribution error with a
+    /// flattering sign. `GatewayDidNotRecover` is excluded too — "it does not recover" is itself the
+    /// finding and must not be overwritten by a number from a since-recovered process.
     fn floor_fallback_ok(self) -> bool {
         matches!(
             self,
@@ -1097,8 +816,7 @@ impl StreamStop {
             StreamStop::RigRanShort { .. }
             | StreamStop::WindowUnavailable { .. }
             | StreamStop::RigContaminated { .. } => Absent::HarnessError,
-            // A gateway that does not recover from overload is the GATEWAY's result, so it must not
-            // be filed under our own faults - that would be the attribution error in reverse.
+            // Gateway-not-recovering is the gateway's result, not ours.
             StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
             _ => Absent::NotMeasured,
         }
@@ -1149,52 +867,28 @@ impl StreamStop {
     }
 }
 
-/// One rung as the sustained-throughput GATE saw it, carrying the p99 and fail count behind its
-/// pass/fail verdict.
-///
-/// Distinct from `search::ProbedPoint` because the two answer different questions about the same
-/// window: the point says what the SEARCH made of it, this says what the GATE made of it. They now
-/// describe the same windows - which is the whole change - but a reader comparing
-/// `sweep_max_proxy` to `sweep_sustained_20ms` is comparing two readings of one sweep, and
-/// collapsing them into one type would hide that there were ever two verdicts to reconcile.
+/// One rung as the sustained-throughput gate saw it, carrying the p99 and fail count behind its
+/// pass/fail verdict. Distinct from `search::ProbedPoint`: the point is what the search made of a
+/// window, this is what the gate made of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SustainedPoint {
     pub concurrency: u32,
     pub passed: bool,
     pub rps: f64,
     pub p99_us: Option<u64>,
-    /// Failed requests in the window behind this rung, or `None` when no window carried a reading.
-    ///
-    /// `Option`, not `i64`, and that is the whole point: this was a bare `i64` whose only value for
-    /// "no window reported" was 0, and `metric.rs` mapped it to `Measurement::Measured(0)`
-    /// unconditionally - so a rung nothing was ever read from published `fail: 0` in
-    /// `sweep_sustained_20ms`, a fabricated zero that reads as "it served this rate losing nothing".
-    /// The board's central rule is that an absent measurement publishes null with a reason and is
-    /// never substituted by a number; the type had no way to obey it.
+    /// Failed requests behind this rung, or `None` when no window reported. `Option`, not a bare
+    /// `i64`: collapsing "no window" to 0 previously published a fabricated `fail: 0` reading a
+    /// rung nothing was ever measured on.
     pub fail: Option<i64>,
 }
 
-/// Whether one window satisfies the sustained-throughput gate: p99 under the latency ceiling AND
-/// the error rate under the README's bar.
+/// Whether one window satisfies the sustained-throughput gate: p99 under the latency ceiling and
+/// error rate under the README's 0.1% bar. A free function (not inlined into a probe) so the
+/// pass/fail boundary is unit-testable without driving a real subprocess load window.
 ///
-/// A free function rather than logic inlined into a probe, so the gate's pass/fail boundary - the one
-/// piece of judgement this whole metric turns on - can be unit-tested directly against fixed numbers.
-/// A probe's own `probe()` drives a real subprocess load window and cannot be exercised that way in
-/// this crate's unit tests (see `tests/end_to_end.rs`'s own note on why: under `cargo test` the
-/// current exe is the test binary, not `otb`).
-///
-/// NOTHING IN THE MEASUREMENT PATH CALLS THIS ANY MORE. The sustained-throughput scalar it gated was
-/// retired when the frontier replaced it (`record.rs`, `metric.rs`), and the only callers left are
-/// this file's own unit tests. It is kept because the tests pin the README's stated bar - p99 under
-/// the ceiling AND under 0.1% errors - and that bar is still the definition the frontier's
-/// `served_cleanly` descends from; deleting it would delete the only executable statement of it.
-///
-/// Two claims were removed from this comment rather than left to mislead: it said the gate "is now
-/// applied to the SAME windows the throughput sweep took, via `sustained_gate`" - there is no
-/// `sustained_gate` function anywhere in the crate, and this one has no production caller - and it
-/// cited `rigbound::is_rig_bound` as a live example, which was itself deleted (see `rigbound.rs`'s
-/// own header). A doc comment describing an integration that does not exist sends the next reader
-/// looking for code that was removed.
+/// No longer called from the measurement path (the frontier replaced the scalar it gated — see
+/// `record.rs`/`metric.rs`); kept only because it's the one executable statement of the README's
+/// bar, which the frontier's `served_cleanly` still descends from.
 pub fn sustained_gate_passes(p99_us: Option<u64>, ok: u64, fail: u64) -> bool {
     let total = ok + fail;
     let fail_ratio = if total == 0 {
@@ -1210,15 +904,9 @@ pub fn sustained_gate_passes(p99_us: Option<u64>, ok: u64, fail: u64) -> bool {
 
 /// How many content frames the MOCK sends per stream, read from the variable the mock reads.
 ///
-/// NOT `STREAM_FRAME_BUDGET`, and the difference is the point. That constant is how many frames the RIG
-/// ASKS FOR - our own choice, legitimately a constant. This is how many the mock actually SENDS, which
-/// is the mock's configuration and must be read from it. They coincide at 64 today, which is exactly why
-/// nothing noticed the engine mirroring the mock's default instead of reading it: set
-/// MOCK_STREAM_CHUNKS=128 and the mock sends 128 while the engine still believes 64, silently.
-///
-/// It matters now because the ceiling below is DERIVED from it. A frame count mirrored rather than read
-/// would make that ceiling wrong by exactly the ratio of the two, and a derived bound built on a magic
-/// number is still a magic number.
+/// Not `STREAM_FRAME_BUDGET` (how many frames the rig asks for) — this is how many the mock
+/// actually sends, read from its own configuration rather than mirrored, since the ceiling below is
+/// derived from it and a mirrored value could silently drift from the mock's real setting.
 pub fn mock_stream_chunks() -> u32 {
     std::env::var("MOCK_STREAM_CHUNKS")
         .ok()
@@ -1229,30 +917,16 @@ pub fn mock_stream_chunks() -> u32 {
         .unwrap_or(64)
 }
 
-/// THE MOST FRAMES A SECOND THE MOCK CAN PHYSICALLY EMIT at this concurrency. Arithmetic, not a
-/// measurement - we own the mock, so its ceiling is known rather than probed.
+/// The most frames per second the mock can physically emit at this concurrency. Arithmetic, not a
+/// measurement — we own the mock, so its ceiling is known rather than probed.
 ///
-/// This replaces a MEASURED direct-to-mock reference, and the bench box's own core partitioning is why.
-/// The two legs do not get the same machine:
+/// Replaces a measured direct-to-mock reference: the bench box's core partitioning makes that leg
+/// structurally slower than the gateway leg (driving + reading both land on the loadgen's own cores
+/// instead of being split across three core sets), so a measured reference systematically
+/// understates the true ceiling and can wrongly flag a fast gateway as exceeding it.
 ///
-///   through the gateway   the loadgen reads c streams from the gateway, and the GATEWAY drives c
-///                         streams to the mock on its own cores - three core sets engaged.
-///   direct to the mock    the loadgen BOTH drives and reads c streams on its cores; the gateway's sit
-///                         idle - two core sets.
-///
-/// Removing the hop does not make the path leaner, it moves the driving half onto the already-busiest
-/// component. So the direct leg is systematically SLOWER than the path it was meant to bound, and that
-/// is structural rather than a fault - the partitioning is exactly right for comparing gateways.
-///
-/// Measured on the 2026-07-29 box at c=1024: the direct leg took 2.53-3.37s per window where this
-/// arithmetic says 1.26s, delivering every frame with zero stalls - 38-50% of what the mock can emit.
-/// The gateway leg reached 83%. NEITHER exceeded the real ceiling; the gateway only exceeded the weak
-/// measurement of it, by 1.67x, and a chosen 1.5x factor discarded it for that. Seven gateway/metric
-/// pairs on that board published nothing for the same reason.
-///
-/// The mock cannot emit frames faster than it sleeps, and both terms are declared: `mock_stream_chunks`
-/// frames per stream, `stream_pacing_interval_ms` between them. It sleeps before every delta except the
-/// first, so a stream lasts `(chunks - 1) * interval` and carries `chunks` frames. Nothing is chosen.
+/// Both terms are declared (`mock_stream_chunks` frames per stream, `stream_pacing_interval_ms`
+/// between them, sleeping before every delta except the first), so nothing here is chosen.
 pub fn mock_frame_ceiling_fps(concurrency: u32) -> f64 {
     let chunks = f64::from(mock_stream_chunks());
     let interval_s = stream_pacing_interval_ms() as f64 / 1000.0;
@@ -1263,110 +937,55 @@ pub fn mock_frame_ceiling_fps(concurrency: u32) -> f64 {
     f64::from(concurrency) * chunks / per_stream_s
 }
 
-/// The mock's own delta interval, READ FROM THE VARIABLE THE MOCK READS.
-///
-/// Named here rather than inlined at the one comparison because this and `STREAM_STALL_MULTIPLIER`
-/// together ARE the gate's definition - the README states it as "no stream stalls past 10x the mock's
-/// pacing interval", and a reader who wants to know what "stalled" means on this board should find
-/// one place that says so.
-///
-/// An older paragraph here claimed the interval was "a boot-time environment knob the engine cannot
-/// observe over the wire, so this is a documented coupling rather than a derived value". The function
-/// below reads that exact variable, so the claim was the direct opposite of the code beneath it, and
-/// it also cited the README's threshold as 2x when both the README and `STREAM_STALL_MULTIPLIER` say
-/// 10x. A reader cross-checking either statement would have concluded the wrong thing about which
-/// side was stale.
-///
-/// This was a `20` hardcoded here to match `MOCK_STREAM_INTERVAL_MS`'s default over in the mock, with
-/// a comment calling it a documented coupling. It is the same two-places-one-truth shape as the two
-/// hand-rolled ladders: set the mock to a different pace and the engine keeps measuring stalls
-/// against a cadence nothing is producing, silently, with every streaming rung judged by the wrong
-/// bound. A "documented" coupling is one that is right until someone uses the knob.
-///
-/// So both sides now read the same variable and the default matches the mock's own. Nothing in the
-/// field sets it today, which is exactly why the divergence would not have been noticed.
+/// The mock's own delta pacing interval, read from the same env var the mock reads (default 20ms).
+/// Together with `STREAM_STALL_MULTIPLIER` this defines "stalled" per the README ("no stream stalls
+/// past 10x the mock's pacing interval"); both sides reading the same variable prevents the two from
+/// silently diverging if the mock's pace is ever changed.
 pub fn stream_pacing_interval_ms() -> u64 {
     std::env::var("MOCK_STREAM_INTERVAL_MS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        // A PACE OF ZERO IS NOT A PACE. A parsed 0 drove `stall_bound_us()` to 0, which makes EVERY
-        // inter-frame gap - including a gap of nothing - count as a stall, so both stream metrics fail
-        // on every rung of every cell and the board reads it as the gateway going quiet. The mock
-        // refuses 0 too (`chunks.max(1)` and a sleep it never takes), so the two sides would not even
-        // agree about what zero meant. Rejected in favour of the default, which is what an unset
-        // variable already gets.
+        // Zero would drive the stall bound to 0, making every inter-frame gap count as a stall.
         .filter(|v| *v > 0)
         .unwrap_or(20)
 }
-/// The stall bound as a multiple of the mock's pacing interval: a gap past this is a stream that
-/// WENT QUIET, not one that wobbled off the mock's clock.
-///
-/// It was 2, and 2x a 20ms pace is a 40ms budget - a bar that mostly measured whether the gateway
-/// could keep to the mock's own clock under concurrency, which is the added_gap percentiles' job
-/// (they quantify pacing fidelity to the microsecond, per leg, and publish it). On the 2026-07-28
-/// board that budget failed nearly every gateway at every rung (streams_sustained on 6 of 16 served
-/// cells, cpu_fps on 1), so the search returned absence across the board and the metric measured
-/// nothing at all. This metric's question is DELIVERY: every expected frame arrives
-/// (`STREAM_MIN_DELIVERY_RATIO = 1.0`, deliberate, unchanged) and no lane goes quiet mid-stream.
-/// 10x the pace (200ms at the default 20ms) is a bound a reader would recognise as "the stream
-/// stalled", while scheduler jitter and GC pauses well past the mock's clock stay the gap metric's
-/// finding rather than this gate's.
+/// Stall bound as a multiple of the mock's pacing interval: a gap past this means a stream went
+/// quiet, not that it merely wobbled off the mock's clock. 10x rather than 2x, since 2x mostly
+/// measured pacing fidelity under concurrency (the added_gap percentiles' job) and failed nearly
+/// every gateway at every rung. Delivery (every frame arrives) and stalling (no dead air) are
+/// deliberately separate concerns.
 pub const STREAM_STALL_MULTIPLIER: u64 = 10;
 
 /// Fraction of expected frames that must arrive, and the share of streams that may fail, for a
-/// concurrency to hold the streams-sustained gate.
-///
-/// EVERY FRAME. A proxy that drops a frame has dropped a user's token, and there is no concurrency
-/// at which that is the gateway succeeding - so the sustained ceiling is the last rung before
-/// anything is lost, which is exactly the number this metric is for. It was 0.999, which sounds
-/// tight and is not: at c=256 and a 64-frame budget it waves through 16 lost frames per window, and
-/// the loss it admits is invisible in the published rate.
-///
-/// The bound stays reachable because the rungs below the gateway's limit really are perfect: 1169 of
-/// the 1314 passing rungs in the 2026-07-28 field run delivered every expected frame. The 145 that
-/// did not are the point - they are where a gateway started losing tokens, and the gate now stops
-/// there instead of climbing past it.
+/// concurrency to hold the streams-sustained gate. Every frame, not 99.9%: a dropped frame is a
+/// dropped token, and the sustained ceiling is meant to be the last rung before anything is lost.
 pub const STREAM_MIN_DELIVERY_RATIO: f64 = 1.0;
 pub const STREAM_MAX_ERROR_RATIO: f64 = 0.001;
 
-/// What one window of `concurrency` concurrent streams did.
-///
-/// Counts rather than rates, plus the wall clock, so every published number below is derived here
-/// once from the same window. Splitting "how many frames" from "how long" across two windows is the
-/// two-populations defect `metric.rs`'s module doc names.
+/// What one window of `concurrency` concurrent streams did. Counts plus wall clock, all derived
+/// from the same window, so "how many frames" and "how long" never come from two populations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamWindow {
     pub concurrency: u32,
-    /// Streams opened, and of those, the ones that never became a readable event stream at all
-    /// (no connection, a non-2xx, a malformed head, or a peer that answered with something that is
-    /// not an event stream). A stream that opened and then delivered short is NOT an error: it is a
-    /// delivery shortfall, and the two are separate halves of the README's gate.
+    /// Streams opened, and of those, the ones that never became a readable event stream at all. A
+    /// stream that opened and delivered short is NOT an error, just a delivery shortfall — the two
+    /// are separate halves of the README's gate.
     pub streams: u64,
     pub errored: u64,
-    /// `errored`, split by ATTRIBUTION. Always sums to `errored`.
+    /// `errored`, split by attribution. Always sums to `errored`.
     pub error_kinds: StreamErrorKinds,
-    /// The host's socket/descriptor state sampled just BEFORE this window opened its connections.
+    /// Host socket/descriptor state sampled just before this window opened its connections.
     pub host_before: HostState,
-    /// EVERY SSE event dispatched, across every lane. What `fps` is computed from, and what anything
-    /// asking "did this stream at all" wants.
-    ///
-    /// MAY EXCEED `expected_frames`, and that is not a surplus of tokens. Each lane reads until its
-    /// CONTENT budget is delivered (`http::SseBudget::Content`), so a gateway that inserts pings or
-    /// re-frames a translated stream spends more events than the mock's own layout would - which is
-    /// precisely the case the event-budgeted read used to publish as a delivery shortfall.
-    /// `expected_frames` stays the mock-shaped budget, because what it answers ("did it stream at
-    /// all", and the scale fps is read against) is unchanged by the gateway's framing style.
+    /// Every SSE event dispatched across every lane; what `fps` is computed from. May exceed
+    /// `expected_frames`: each lane reads until its content budget is delivered
+    /// (`http::SseBudget::Content`), so a gateway inserting pings or re-framing spends more events
+    /// than the mock's layout implies. `expected_frames` stays the mock-shaped budget regardless.
     pub frames: u64,
     pub expected_frames: u64,
-    /// Of `frames`, the ones that carried MODEL OUTPUT, as the request's own dialect classifies them
-    /// (`ingress::Dialect::sse_event_is_content`), and the most a full budget could have carried.
-    ///
-    /// Ledger RIG-11, and the reason there are two pairs of counts here rather than one. The delivery
-    /// gate is the one number that must not count scaffolding: openai spends 3 events on framing and
-    /// anthropic 5, so a lane could satisfy 1 (openai) or 2 (anthropic) frames of its budget before
-    /// a single token arrived, and the two dialects differed from each other by exactly two on a
-    /// ratio that is compared against a fixed bound of 1.0. `frames`/`expected_frames` are kept
-    /// beside them unchanged, because fps and "did it stream" legitimately want every event.
+    /// Of `frames`, the ones carrying model output (`ingress::Dialect::sse_event_is_content`).
+    /// Ledger RIG-11: the delivery gate must not count framing scaffolding (openai spends 3 events
+    /// on framing, anthropic 5), so this pair is kept separate from `frames`/`expected_frames`,
+    /// which legitimately want every event for fps / "did it stream at all".
     pub content_frames: u64,
     pub expected_content_frames: u64,
     /// Inter-frame gaps that exceeded the stall bound, summed across every lane.
@@ -1385,14 +1004,9 @@ impl StreamWindow {
         self.frames as f64 / self.elapsed_s
     }
 
-    /// The share of expected MODEL OUTPUT that arrived - the numerator counts content frames, not
-    /// every SSE event.
-    ///
-    /// This used to be `frames / expected_frames`, which credited a lane for `message_start` and
-    /// `content_block_start` exactly as it credited it for a token. Against a bound of 1.0 that is
-    /// not a rounding difference: it is 1 (openai) or 2 (anthropic) frames of every lane's budget
-    /// satisfied by scaffolding, and a two-frame constant offset BETWEEN the two dialects on a
-    /// number the board compares across them.
+    /// Share of expected model output that arrived; numerator counts content frames, not every SSE
+    /// event. Previously `frames / expected_frames`, which credited framing scaffolding the same as
+    /// a token — a constant offset that differed between dialects on a value compared across them.
     pub fn delivery_ratio(&self) -> f64 {
         if self.expected_content_frames == 0 {
             return 0.0;
@@ -1407,35 +1021,18 @@ impl StreamWindow {
         self.errored as f64 / self.streams as f64
     }
 
-    /// Why THIS ENGINE is at fault for the numbers in this window, if it is. `None` when the counts are
-    /// arithmetically possible - which is not the same as the gateway having done well.
+    /// Why this engine (not the gateway) is at fault for the numbers in this window, if at all.
+    /// `None` means the counts are arithmetically possible, not that the gateway did well.
     ///
-    /// A NUMBER THAT CANNOT HAPPEN IS OUR BUG, NEVER THE GATEWAY'S. That is the whole reason this
-    /// exists, and it is the half of the old rig-ceiling comparison that was worth keeping. The other
-    /// half - deciding that a legitimately fast gateway was "rig-bound" and withholding its number -
-    /// is gone; see `rigbound.rs`. What survives is the case where the observation is not a
-    /// measurement of anything: there is no gateway behaviour that produces it, so attributing it to
-    /// the gateway (or to our rig's capacity) would publish a defect of ours as a finding about theirs.
-    /// `Absent::HarnessError` is the only honest label, and `measurement.rs` already states that it and
-    /// `RigLimited` must never be swapped.
+    /// A number that cannot happen is our bug, never the gateway's, so it's flagged `HarnessError`
+    /// rather than published as a finding. Checked exactly, no tolerance, since both clauses are
+    /// arithmetic over counts this rig took itself:
+    /// - Content frames above the expected content budget (the mock's declared per-stream budget)
+    /// - A non-finite or negative fps (broken clock or counter)
     ///
-    /// EXACT, WITH NO FACTOR AND NO TOLERANCE. Every clause below is arithmetic over counts this rig
-    /// took itself, so there is nothing to tune and nothing to get wrong by a few percent:
-    ///
-    /// - Content frames above the expected content budget. The mock emits a DECLARED number of content
-    ///   deltas per stream and `expected_content_frames` accumulates exactly that budget per surviving
-    ///   lane, so counting more model output than the mock could have produced means we counted wrong.
-    ///   Confirmed against the field data before relying on it: every instrumented window on the
-    ///   2026-07-29 box delivered content exactly at budget (`content=64512/64512`, 24 of 24), never
-    ///   above, and 1169 of the 1314 passing rungs on the 2026-07-28 board sat at exactly 1.0.
-    /// - A non-finite or negative rate. `fps` divides counts by a wall clock; either is a broken clock
-    ///   or a broken counter, and an infinity would win every peak search it appeared in.
-    ///
-    /// DELIBERATELY NOT CHECKED: `frames` above `expected_frames`. That one is legal and happens - a
-    /// gateway that inserts pings or re-frames a translated stream spends more SSE events than the
-    /// mock's own layout would, which is why the delivery gate counts content frames rather than
-    /// events (Ledger RIG-11). Bounding the event count would fail honest gateways for their framing
-    /// style, so the exact bound is available on content and only on content.
+    /// Deliberately NOT checked: `frames` above `expected_frames`. That's legal — a gateway
+    /// inserting pings or re-framing a translated stream spends more SSE events than the mock's
+    /// layout implies, which is why the delivery gate counts content frames instead (Ledger RIG-11).
     pub fn engine_fault(&self) -> Option<String> {
         if self.content_frames > self.expected_content_frames {
             return Some(format!(
@@ -1456,31 +1053,21 @@ impl StreamWindow {
     }
 }
 
-/// Whether one window holds the README's streams-sustained gate: EVERY expected content frame
+/// Whether one window holds the README's streams-sustained gate: every expected content frame
 /// arrived, no lane stalled past `STREAM_STALL_MULTIPLIER` times the mock's pace, and almost no
-/// stream failed outright.
-///
-/// A free function over plain counts, like `sustained_gate_passes`, so the one piece of judgement the
-/// whole search turns on can be pinned directly against fixed numbers rather than only through a
-/// window that needs a live mock behind it.
+/// stream failed outright. A free function over plain counts, like `sustained_gate_passes`, so it's
+/// unit-testable without a live mock.
 pub fn streams_gate_passes(w: &StreamWindow) -> bool {
     streams_gate_verdict(w).is_none()
 }
 
-/// WHY one window failed the gate, or `None` when it held. The clause that tripped is named with the
-/// counts that tripped it, so a rung that fails publishes evidence a reader can weigh instead of a
-/// bare `passed: false` - "a gateway failing at every rung must publish a reason, never a bare
-/// absence" is the defect class this exists for.
+/// Why one window failed the gate, or `None` when it held. Names the tripped clause with its
+/// counts so a failing rung publishes evidence, not a bare `passed: false`.
 pub fn streams_gate_verdict(w: &StreamWindow) -> Option<String> {
-    // A window that opened no stream, or expected no frame, has not PASSED anything - it measured
-    // nothing, and a ratio computed from zero must never read as a clean window by accident of
-    // floating-point division.
+    // A ratio computed from zero must never read as a clean window by floating-point accident.
     if w.streams == 0 {
         return Some("the window opened no stream, so it measured nothing".to_string());
     }
-    // Expected CONTENT frames, because that is the denominator the delivery clause below divides by.
-    // A dialect whose whole budget is prelude expects no tokens at all, and a ratio computed from
-    // zero must never read as a clean window by accident of floating-point division.
     if w.expected_content_frames == 0 {
         return Some(format!(
             "the window opened {} stream(s) but expected no content frames, so it measured nothing",
@@ -1489,9 +1076,8 @@ pub fn streams_gate_verdict(w: &StreamWindow) -> Option<String> {
     }
     let mut why = Vec::new();
     if w.delivery_ratio() < STREAM_MIN_DELIVERY_RATIO {
-        // Content frames on BOTH sides of the "of", and said in words, because the raw event count
-        // beside it is larger and a reader comparing the two would otherwise think frames went
-        // missing that never carried a token in the first place.
+        // Content frames on both sides of "of": the raw event count is larger and would otherwise
+        // read as tokens missing that never carried a token in the first place.
         why.push(format!(
             "delivered {} of {} expected content frames ({} SSE events in total)",
             w.content_frames, w.expected_content_frames, w.frames
@@ -1519,12 +1105,9 @@ fn stall_bound_us() -> u64 {
     stream_pacing_interval_ms() * STREAM_STALL_MULTIPLIER * 1_000
 }
 
-/// How many gaps in one lane's frame arrivals exceeded the stall bound.
-///
-/// GAPS, not the first frame's offset: time to first token is a latency the `Streaming` group already
-/// publishes as a difference, and charging it here would make every stream stall on a gateway that is
-/// merely slow to start rather than one that goes quiet mid-stream, which is what the README's rule
-/// is about.
+/// How many gaps in one lane's frame arrivals exceeded the stall bound. Gaps only, not the first
+/// frame's offset (time-to-first-token is `Streaming`'s job) — otherwise a merely-slow-to-start
+/// gateway would be charged as one going quiet mid-stream.
 fn stalls_in(offsets: &[u64]) -> u64 {
     offsets
         .windows(2)
@@ -1533,26 +1116,16 @@ fn stalls_in(offsets: &[u64]) -> u64 {
 }
 
 /// Whether one lane's outcome is a stream that never existed, as opposed to one that ran short.
+/// Zero frames is an error, not a shortfall (README: a 200 that buffers and never frames is "did
+/// not stream"), so it must not be folded into the delivery ratio — that would average away
+/// gateways that streamed nothing entirely at high concurrency.
+/// Host socket/descriptor state sampled immediately before a window opens its connections, used to
+/// tell "gateway changed its mind" from "host hadn't recovered" when a rung fails after a lower one
+/// passed:
 ///
-/// ZERO FRAMES IS AN ERROR, NOT A SHORTFALL, and that is the case worth stating: the README's own
-/// rule is that "a gateway that answers 200 but buffers the stream (never frames)" is recorded as not
-/// having streamed. Such a peer answers a perfectly valid 200 and simply never sends an event, so
-/// every other signal here reads clean; folding it into the delivery ratio instead would let a
-/// gateway that streams NOTHING be averaged away against lanes that did, and at high concurrency a
-/// handful of buffering lanes would vanish entirely.
-/// WHAT THE HOST LOOKED LIKE WHEN A WINDOW RAN.
-///
-/// A rung that fails at a concurrency the same cell already carried cleanly is either the gateway
-/// changing its mind or the host not having recovered, and no amount of staring at pass/fail can
-/// tell those apart. These are the counters that separate them, sampled immediately before the
-/// window opens its connections:
-///
-///   * `tw` - sockets in TIME_WAIT across the box (`/proc/net/sockstat`). The residue a previous
-///     window leaves behind, and the one that takes tens of seconds to clear.
-///   * `tcp_inuse` / `tcp_alloc` - live and allocated TCP sockets, so a leak shows as a floor that
-///     never returns rather than a spike that does.
-///   * `fds` - open descriptors in THIS process (`/proc/self/fd`), which is where a loadgen holding
-///     a reader per stream would show up.
+///   * `tw` - sockets in TIME_WAIT (`/proc/net/sockstat`); the residue that takes longest to clear.
+///   * `tcp_inuse` / `tcp_alloc` - live/allocated TCP sockets; a leak shows as a floor that persists.
+///   * `fds` - open descriptors in this process (`/proc/self/fd`).
 ///
 /// All absent on a non-Linux host, which is honest rather than zero: a zero here would read as
 /// "the box was clean" on a machine that simply cannot answer.
@@ -1597,16 +1170,10 @@ impl HostState {
     }
 }
 
-/// WHY a stream errored, not just THAT it did. One `errored` count cannot answer the only question
-/// worth asking about a failed rung - was it us or them - and that ambiguity is why the
-/// sustained-stream defect went undiagnosed: "636 of 8192 streams errored" reads like a gateway
-/// collapse and reads exactly the same when the peer reset every one of them for a reason of ours.
-///
-/// These are attribution classes, not error codes. `Refused`/`Reset` is the peer declining a
-/// connection it was asked for; `Status` is the peer answering and saying no; `NoFrames` is a 2xx
-/// that never produced an event; `Malformed`/`NotEventStream` is the peer speaking something that is
-/// not SSE. Rig-side ends (`RigExhausted`, `RigRefused`) never reach here - `stream_window` discards
-/// the whole window for those, so they cannot be laundered into a gateway's error rate.
+/// Why a stream errored, not just that it did — a single `errored` count can't distinguish "us"
+/// from "them". Attribution classes, not error codes: connect-failed (peer declined/reset), status
+/// (peer answered no), no-frames (2xx, no event), malformed/not-event-stream (not SSE). Rig-side
+/// ends never reach here — `stream_window` discards those windows entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StreamErrorKinds {
     /// The peer refused, reset, or was unreachable - the connection never carried a request.
@@ -1625,9 +1192,8 @@ impl StreamErrorKinds {
     }
     fn add(&mut self, o: &crate::http::SseOutcome) {
         use crate::http::SseEnd;
-        // ORDER MATTERS AND MIRRORS `stream_errored`: a lane that never connected has no status and
-        // no frames, so testing frames first would file every refused connection as "no frames" and
-        // erase the distinction this type exists for.
+        // Order matters and mirrors `stream_errored`: testing frames before status would file a
+        // refused connection as "no frames" instead of "connect failed".
         if matches!(o.end, SseEnd::ConnectionFailed(_)) {
             self.connect_failed += 1;
         } else if !o.status.is_some_and(|s| (200..300).contains(&s)) {
@@ -1641,16 +1207,13 @@ impl StreamErrorKinds {
 }
 
 fn stream_errored(o: &crate::http::SseOutcome) -> bool {
-    // THE RIG RUNNING OUT IS NOT AN ERRORED STREAM. A lane that could not get a source port never
-    // asked the gateway anything, and counting it here published our own exhaustion as the gateway's
-    // stream ceiling. `stream_window` discards the whole window instead - see `rig_exhausted_in`.
+    // Rig running out of ports is not an errored stream: the gateway was never asked. `stream_window`
+    // discards the whole window instead — see `rig_exhausted_in`.
     if matches!(o.end, crate::http::SseEnd::RigExhausted(_)) {
         return false;
     }
-    // NEITHER IS A REQUEST WE REFUSED TO SEND. The gateway was never asked, so it cannot have
-    // errored; `stream_window` discards the whole window and says so loudly, exactly as it does for
-    // exhaustion. Charging a manifest defect of ours to the gateway's stream error rate is the
-    // attribution inversion this file refuses everywhere else.
+    // Neither is a request we refused to send; the gateway was never asked either. Discarded the
+    // same way, loudly, by `stream_window`.
     if matches!(o.end, crate::http::SseEnd::RigRefused(_)) {
         return false;
     }
@@ -1660,11 +1223,9 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
     if o.frame_offsets_us.is_empty() {
         return true;
     }
-    // `EventCeilingReached` is deliberately NOT here. A lane that spent the whole event ceiling
-    // without delivering its content budget streamed perfectly well by every structural measure - it
-    // just did not deliver, which is the delivery clause's finding and shows up in the ratio. Calling
-    // it an errored stream would double-count one shortfall as two failures and blur the two halves
-    // of the README's gate that this function exists to keep apart.
+    // `EventCeilingReached` deliberately not included: a lane that exhausted the event ceiling
+    // without delivering its content budget is a delivery shortfall (shows in the ratio), not a
+    // structural stream error — counting both would double-count one failure.
     matches!(
         o.end,
         crate::http::SseEnd::ConnectionFailed(_)
@@ -1675,65 +1236,34 @@ fn stream_errored(o: &crate::http::SseOutcome) -> bool {
 
 /// Drive `concurrency` concurrent streams against `addr` and read each one to the frame budget.
 ///
-/// `None` means the window never ran at the requested concurrency - the OS refused a lane - which is
-/// a RIG limit exactly as `SweepProbe`'s `spawn_failed` is: nothing about the gateway was learned, so
-/// the search must stop rather than read the shortfall as a turnover.
+/// `None` means the window never ran at the requested concurrency (OS refused a lane) — a rig
+/// limit, so the search must stop rather than read the shortfall as a turnover.
 ///
-/// IN-PROCESS THREADS, unlike `load_window`'s pinned child. Two reasons, and the second is the one
-/// that matters: a stream lane spends its life asleep between the mock's 20 ms deltas rather than
-/// saturating a core, so it does not contend for the orchestrator's CPU the way the request generator
-/// would; and the mock-ceiling reference below is taken with THIS SAME function against the mock, so
-/// whatever the instrument's own overhead is, it is charged identically to both legs of the
-/// comparison. What this does NOT get is the generator's core pinning, and at concurrencies high
-/// enough to saturate the box that is a real limitation on the absolute frames/sec - which is exactly
-/// why the mock-bound guardrail is applied to these numbers rather than them being published bare.
+/// In-process tasks, not `load_window`'s pinned child: a stream lane sleeps between the mock's 20ms
+/// deltas rather than saturating a core, and the mock-ceiling reference is taken with this same
+/// function, so instrument overhead is charged identically to both legs. Trades away the generator's
+/// core pinning, which matters only at concurrencies high enough to saturate the box — hence the
+/// mock-bound guardrail applied to these numbers rather than publishing them bare.
 ///
-/// `dialect` is the wire the request speaks, and it is not optional here: without it the delivery
-/// ratio counts protocol scaffolding as delivered tokens (ledger RIG-11), which is the one place the
-/// distinction changes a published verdict.
-/// LET THE HOST DRAIN BETWEEN STREAM WINDOWS, SCALED TO WHAT THE LAST ONE DROVE.
+/// `dialect` is required: without it the delivery ratio counts protocol scaffolding as delivered
+/// tokens (ledger RIG-11).
+/// Let the host drain between stream windows, scaled to what the last one drove. A window at high
+/// concurrency leaves that many sockets in FIN_WAIT/TIME_WAIT; measuring the next rung immediately
+/// after would measure residue as much as the gateway (confirmed: bisection failures where a lower
+/// concurrency failed right after a higher one had passed cleanly).
 ///
-/// A window at c=6,176 leaves that many sockets working through FIN_WAIT/TIME_WAIT and that many
-/// descriptors coming back. The very next window opens its own connections into whatever is left, so
-/// a rung measured immediately after a big one is measuring the residue as much as the gateway.
-///
-/// This is not a hypothesis. On the 2026-07-31 board the sustained-stream bisection failed to
-/// converge on 6 cells across 4 independent gateways, and every one carried the same impossible
-/// signature: a rung failing at a concurrency THAT SAME CELL had already carried cleanly minutes
-/// earlier (busbar failed c=3,088 after passing c=4,096 and c=6,144 with zero errors; agentgateway
-/// failed c=1,357 after c=2,048; one-api failed c=170 after c=256). The engine already knew this
-/// effect existed - `stream_rig_ceiling` sleeps for exactly this reason, in a comment that names
-/// draining sockets - but it settled only AFTER the ladder, protecting the reference measurement and
-/// not the ladder's own re-measurements, which are the numbers that actually get published.
-///
-/// WAIT FOR THE HOST TO SAY IT HAS DRAINED, RATHER THAN GUESSING HOW LONG THAT TAKES.
-///
-/// This slept `concurrency * 1s/1000`, capped at 10s. A duration is the wrong shape for this: no
-/// constant is right for every gateway and every rung, and the field showed it failing in BOTH
-/// directions at once. Too long: 1,647 windows above the free-below threshold, averaging 3.3s of
-/// unconditional sleep, is 91.8 MINUTES of pure waiting in a single field run. Too short: cells that
-/// had carried c=4,096 still failed at c=4,107..4,193 after their 4-5s, which is the residue this
-/// function exists to absorb, and the old cap was deliberately set BELOW one TIME_WAIT generation on
-/// the theory that the queues drain much faster. The data says otherwise.
-///
-/// The signal was already being collected and never acted on. `HostState` samples `tw` - sockets in
-/// TIME_WAIT from /proc/net/sockstat - immediately before every window, and the comment on it names
-/// this exact purpose: telling "the gateway changed its mind" apart from "the host had not
-/// recovered". So the wait now ENDS when the host is observably back, which is short on a small rung
-/// and long on a large one without either being chosen in advance.
-///
-/// THE 60s BACKSTOP IS ONE TIME_WAIT GENERATION, not a round number: it is the longest recovery a
-/// closed socket can physically need. Past it the host is not draining, it is broken, and that is a
-/// finding to report rather than a wait to extend.
+/// Waits for the host to report drained (via TIME_WAIT count, `HostState`) rather than a fixed
+/// sleep, since no constant duration is right for every gateway/rung — a fixed sleep was measured to
+/// be both too long (tens of minutes of pure waiting across a field run) and too short (residue still
+/// present after the old cap). The 60s backstop is one TIME_WAIT generation: the longest a closed
+/// socket can physically need. Past it the host is broken, not draining — a finding, not a longer wait.
 fn settle_after_streams(concurrency: u32) {
     if concurrency <= STREAM_SETTLE_FREE_BELOW {
         return;
     }
     let baseline = STREAM_SETTLE_TW_BASELINE.with(|b| *b.borrow());
     let Some(target) = baseline else {
-        // No baseline means no /proc to read (a non-Linux host, or the first call). Fall back to the
-        // proportional sleep: an unobservable host still needs SOME pause, and the old behaviour is
-        // the honest default when the condition cannot be evaluated.
+        // No baseline means no /proc to read; fall back to the proportional sleep.
         let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
         std::thread::sleep(std::time::Duration::from_millis(ms.min(STREAM_SETTLE_MAX_MS)));
         return;
@@ -1743,12 +1273,10 @@ fn settle_after_streams(concurrency: u32) {
     loop {
         let now = HostState::sample();
         match now.tw {
-            // Drained: TIME_WAIT is back within the tolerance of where this cell started. The
-            // tolerance exists because a box is never perfectly idle - the mock and the load
-            // generator hold their own sockets - so demanding an exact return would always time out.
+            // Drained: TIME_WAIT is back within tolerance of where this cell started.
             Some(tw) if tw <= target => return,
-            // The counter stopped being readable mid-sweep. Waiting on a signal that no longer
-            // exists would burn the whole backstop on every window, so this falls back to the clock.
+            // Counter stopped being readable mid-sweep; fall back to the clock rather than waiting
+            // on a signal that no longer exists.
             None => {
                 std::thread::sleep(std::time::Duration::from_millis(
                     (u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000)
@@ -1783,39 +1311,21 @@ pub fn stream_window(
     // The most content frames a lane's budget can hold: the budget minus what this dialect spends
     // before its first token. See `Dialect::stream_prelude_frames`.
     let content_budget = (budget as u64).saturating_sub(dialect.stream_prelude_frames());
-    // AND THE READ IS BUDGETED IN THOSE CONTENT FRAMES, not in events - which is what makes the
-    // denominator above safe to compare against.
-    //
-    // `content_budget` is a CONSTANT, computed from the MOCK's layout, while the numerator is
-    // measured on the GATEWAY's stream. Reading to a fixed number of EVENTS made every non-content
-    // event the gateway adds beyond the mock's own prelude displace exactly one content frame, so
-    // the ratio landed under `STREAM_MIN_DELIVERY_RATIO` (1.0, deliberate) at EVERY rung on a
-    // gateway that lost nothing: anthropic's real protocol sends `ping`s, a translation cell has the
-    // gateway re-emitting the stream with ITS own framing rather than the mock's, and a keepalive
-    // does the same. Same mistake `STREAM_STALL_MULTIPLIER` (2 -> 10) fixed on the other clause of
-    // this gate - a bound calibrated on the mock, applied to gateways that do not share its
-    // behaviour.
-    //
-    // Reading until the tokens arrive asks the question the metric is actually asking. A gateway
-    // that inserts framing simply spends more events on the same delivery. Bounded by
-    // `STREAM_EVENT_CEILING` (and by `STREAM_TIMEOUT` as before), and a lane that hits the ceiling
-    // short of its content is a REAL shortfall that still fails the gate on the count.
+    // Read is budgeted in content frames, not events, so the ratio's denominator is safe to compare
+    // against: reading to a fixed event count would let any non-content event a gateway adds (pings,
+    // re-framing, keepalives) displace a content frame and depress delivery on gateways that lost
+    // nothing — same class of bug `STREAM_STALL_MULTIPLIER` fixed on the stall clause. Bounded by
+    // `STREAM_EVENT_CEILING`/`STREAM_TIMEOUT`; a lane that hits the ceiling short of its content is
+    // still a real shortfall.
     let lane_budget = crate::http::SseBudget::Content {
         frames: content_budget,
         event_ceiling: crate::metric::STREAM_EVENT_CEILING,
     };
 
-    // ONE TOKIO TASK PER LANE, NOT ONE OS THREAD.
-    //
-    // A thread per lane is what capped the concurrent-stream searches far below the throughput
-    // searches: 65536 threads is scheduler thrashing, not a bigger gateway, and a field run that
-    // tried it sat at a 1-minute load average over 24,000 and never converged. That cap was OUR
-    // limit arriving on the board as the gateway's - 15 cells of the 2026-07-28 run published no
-    // cpu_fps at all because the search "was still climbing" at the point the harness gave up.
-    //
-    // The lane body is `post_json_sse_async`, which feeds the SAME `SseReader` and sends the same
-    // bytes as the blocking lane; a differential test drives both against one peer and asserts they
-    // decode identically. So this changes who owns the waiting and nothing about what is measured.
+    // One tokio task per lane, not one OS thread: a thread per lane caps far below the throughput
+    // searches (scheduler thrashing at tens of thousands of threads, not a bigger gateway). The lane
+    // body (`post_json_sse_async`) feeds the same `SseReader` and sends the same bytes as the
+    // blocking lane (differential-tested), so this changes only who owns the waiting.
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1830,9 +1340,8 @@ pub fn stream_window(
     let body = body.to_string();
     let headers = headers.to_vec();
 
-    // SAMPLED HERE, before a single connection is opened, because the question this answers is what
-    // the window INHERITED - not what it left behind. Sampling after would measure this window's own
-    // sockets and could never distinguish a dirty start from a busy finish.
+    // Sampled before any connection opens, so it reflects what the window inherited, not what it
+    // leaves behind.
     let host_before = HostState::sample();
 
     let (outcomes, panicked, elapsed_s): (Vec<crate::http::SseOutcome>, usize, f64) =
@@ -1855,22 +1364,14 @@ pub fn stream_window(
                     .await
                 }));
             }
-            // The clock starts once every lane exists, exactly as `gen.rs::run` does: the ramp of
-            // creating them must not land in the denominator, or fps() is depressed hardest at exactly
-            // the high rungs the search is climbing toward.
+            // Clock starts once every lane exists (mirrors `gen.rs::run`): the ramp of creating them
+            // must not land in the denominator, or fps() is depressed hardest at the high rungs.
             let started = std::time::Instant::now();
             let mut out = Vec::with_capacity(lanes.len());
             let mut panicked = 0usize;
             for l in lanes {
-                // A PANICKED LANE IS A HARNESS FAULT, not a gateway failure, and it is also not a
-                // stream: it is counted in neither column, because attributing our own defect to the
-                // gateway's error rate is the exact inversion this engine refuses everywhere else.
-                //
-                // COUNTED, THOUGH. Dropping it silently is what made a four-hour run undiagnosable: a
-                // lane that panicked left no number, no message, and no trace anywhere in the artifact
-                // or the log, so the only visible symptom was a metric that took 0.0s and published an
-                // absence. "Not the gateway's fault" is a reason to keep it out of the gateway's error
-                // rate, never a reason to lose it.
+                // A panicked lane is a harness fault, not a gateway failure — kept out of the
+                // gateway's error rate but still counted (via `panicked`), so it isn't silently lost.
                 match l.await {
                     Ok(o) => out.push(o),
                     Err(_) => panicked += 1,
@@ -1891,9 +1392,8 @@ pub fn stream_window(
         stalls: 0,
         elapsed_s,
     };
-    // A REQUEST WE REFUSED TO SEND MEASURED NOTHING AT ALL, and unlike exhaustion it is not even a
-    // resource limit - it is a defect in a first-party manifest that would have put a smuggled header
-    // on the wire. Loud, unmeasured, never the gateway's: see `http::SseEnd::RigRefused`.
+    // A request we refused to send measured nothing at all — a manifest defect, not a resource
+    // limit. Loud, unmeasured, never the gateway's: see `http::SseEnd::RigRefused`.
     if let Some(why) = outcomes.iter().find_map(|o| match &o.end {
         crate::http::SseEnd::RigRefused(why) => Some(why.clone()),
         _ => None,
@@ -1904,9 +1404,8 @@ pub fn stream_window(
         );
         return None;
     }
-    // A WINDOW THAT RAN OUT OF RIG NEVER RAN AT THE CONCURRENCY IT CLAIMS, exactly as a loadgen
-    // window with `rig_refused` did not. Unmeasured, not a failing rung: the alternative is
-    // publishing this host's ephemeral port range as the gateway's concurrent-stream ceiling.
+    // A window that ran out of rig capacity never ran at the concurrency it claims. Unmeasured, not
+    // a failing rung — the alternative publishes this host's port range as the gateway's ceiling.
     let rig_exhausted = outcomes
         .iter()
         .filter(|o| matches!(o.end, crate::http::SseEnd::RigExhausted(_)))
@@ -1959,31 +1458,18 @@ pub fn stream_window(
     Some(w)
 }
 
-/// May a stream ceiling be PUBLISHED from these windows? Pure, so the rule can be tested without a
-/// socket - the same reason `window_refusal` and `cpu_fps_result_from_search` are separate.
+/// May a stream ceiling be published from these windows? Pure, so testable without a socket.
 ///
-/// TWO CONDITIONS, and the stream path used to carry only the second. A window that could not run is
-/// skipped without incrementing `total`, so two absent repeats left the count at 1 of 1 and `1 * 2 > 1`
-/// published the bisection's single unrepeated window as a confirmed ceiling. Both absent paths -
-/// `SseEnd::RigExhausted` when the host runs out of ephemeral ports or descriptors, and a panicked
-/// lane - are reachable exactly at the top rung, so the shrinking denominator was likeliest precisely
-/// where the published number matters most.
-///
-/// `confirm_ceiling` refuses the same input on the throughput side, and its comment says why: one
-/// lucky window is how a sustained figure lands ABOVE the peak measured from the same sweep, which is
-/// the inversion class C6 catches downstream. Every other rate on this board is a median of
-/// `WINDOWS_PER_RUNG` windows; so is this one, or it is not published.
+/// Two conditions required (minimum window count AND majority): checking only the majority lets a
+/// window that couldn't run skip without incrementing `total`, so two absent repeats could leave
+/// 1-of-1 published as a confirmed ceiling — a single-lucky-window inversion class C6 catches
+/// downstream (`confirm_ceiling` refuses the same input on the throughput side).
 fn stream_ceiling_confirmed(total: usize, held: usize) -> bool {
     total >= crate::search::WINDOWS_PER_RUNG && held * 2 > total
 }
 
-/// Why a stream window must be DISCARDED rather than published, or `None` when it may stand.
-///
-/// Pure, and separate from the window that feeds it, for the reason `apply_peak_verdict` and
-/// `cpu_fps_result_from_search` are separate from theirs: the rule is plain arithmetic, while the
-/// only part that needs a socket is opening one. Deciding it inline left it unreachable from any
-/// test - and the rule it encodes had already cost a four-hour run its cpu_fps on every streamable
-/// cell, silently, which is precisely the defect class this codebase treats as its worst.
+/// Why a stream window must be discarded rather than published, or `None` when it may stand. Kept
+/// pure (separate from the window that feeds it) so it's unit-testable.
 fn window_refusal(panicked: usize, streams: u64, concurrency: u32) -> Option<String> {
     if panicked > 0 {
         return Some(format!(
@@ -2002,12 +1488,8 @@ fn window_refusal(panicked: usize, streams: u64, concurrency: u32) -> Option<Str
     None
 }
 
-/// One rung a stream search actually probed, carrying the counts behind its verdict.
-///
-/// Its own type rather than `search::ProbedPoint` for the reason `SustainedPoint` is: the generic
-/// point carries a pass/fail and a value because that is all a generic gate search can observe, and
-/// widening it with delivery counts that two of its four callers never fill would make its shape a
-/// lie about what a search knows.
+/// One rung a stream search actually probed, carrying the counts behind its verdict. Its own type
+/// rather than `search::ProbedPoint` since it needs delivery counts the generic point doesn't carry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamPoint {
     pub concurrency: u32,
@@ -2015,35 +1497,27 @@ pub struct StreamPoint {
     pub fps: f64,
     pub frames: u64,
     pub expected_frames: u64,
-    /// The two counts the DELIVERY clause is actually computed from. `frames`/`expected_frames` are
-    /// not: they count every SSE event, so a rung published with only those could not be re-derived
-    /// by a reader - and now that a lane reads to its content budget rather than to a fixed event
-    /// count, `frames` can legitimately come in ABOVE `expected_frames` on a gateway that inserts
-    /// framing, which reads as nonsense without the content pair beside it.
+    /// The two counts the delivery clause is actually computed from (not `frames`/`expected_frames`,
+    /// which count every SSE event and can legitimately exceed the content pair on a gateway that
+    /// inserts framing).
     pub content_frames: u64,
     pub expected_content_frames: u64,
     pub streams: u64,
     pub errored: u64,
-    /// `errored`, split by attribution - see `StreamErrorKinds`. Rides on the POINT, not just the
-    /// window, because the sweep array is the only record that survives into the snapshot, and a
-    /// failed rung whose cause is not recorded there cannot be diagnosed after the box is gone.
+    /// `errored`, split by attribution — see `StreamErrorKinds`. Carried on the point (not just the
+    /// window) because the sweep array is what survives into the snapshot.
     pub error_kinds: StreamErrorKinds,
-    /// The host state this rung was measured against - see `HostState`. On the POINT because the
-    /// sweep array is what survives into the snapshot.
+    /// Host state this rung was measured against — see `HostState`. On the point for the same reason.
     pub host_before: HostState,
     pub stalls: u64,
-    /// WHY the gate failed, from `streams_gate_verdict`, when it did. A failing rung publishes the
-    /// clause that tripped with the counts that tripped it, so "no rung passed" is never a bare
-    /// absence a reader has to re-derive from the raw counts.
+    /// Why the gate failed, from `streams_gate_verdict`, when it did.
     pub why: Option<String>,
 }
 
 impl StreamPoint {
-    /// The published rung, self-describing: the concurrency, the rate, the verdict, and every count
-    /// the verdict was computed from, so a reader can re-derive the pass/fail rather than trust it.
-    /// `sweep_streams`/`sweep_cpu_fps` are `Vec<serde_json::Value>` on the wire (record.rs never
-    /// pinned a shape against a real artifact, because none has ever carried one), so this is where
-    /// the shape is decided, in one place, rather than at each of the two searches.
+    /// The published rung, self-describing: every count the verdict was computed from, so a reader
+    /// can re-derive pass/fail rather than trust it. Decides the wire shape once, here, rather than
+    /// at each of the two searches that emit it as `Vec<serde_json::Value>`.
     pub fn to_json(&self) -> serde_json::Value {
         let mut v = serde_json::json!({
             "conc": self.concurrency,
@@ -2055,8 +1529,8 @@ impl StreamPoint {
             "content_frames_expected": self.expected_content_frames,
             "streams": self.streams,
             "stream_errors": self.errored,
-            // THE BREAKDOWN, always emitted (zeros included) so a clean rung and an unrecorded one
-            // are distinguishable in the snapshot.
+            // Always emitted, zeros included, so a clean rung and an unrecorded one are
+            // distinguishable in the snapshot.
             "stream_errors_connect_failed": self.error_kinds.connect_failed,
             "stream_errors_status": self.error_kinds.status,
             "stream_errors_no_frames": self.error_kinds.no_frames,
@@ -2152,14 +1626,12 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
 
 /// Find the highest concurrency at which the gateway still carries clean streams.
 ///
-/// `bisect_ceiling`, not `saturation_plateau`: this is a monotone pass/fail gate in concurrency, exactly like
-/// `sweep_sustained_cell`. Once enough concurrent streams are in flight that frames start arriving
-/// late or short, adding more does not bring them back.
+/// `bisect_ceiling`, not `saturation_plateau`: this is a monotone pass/fail gate in concurrency,
+/// exactly like `sweep_sustained_cell`. Once frames start arriving late or short, adding more
+/// concurrency does not bring them back.
 pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellStreams {
-    // WHAT "DRAINED" MEANS FOR THIS CELL, read before it drives anything. Every settle in this
-    // ladder waits to come back to this level, so it has to be taken while the box is as quiet as it
-    // will be - and re-taken per cell, because a run measures 36 of them back to back and the quiet
-    // level drifts as gateways restart and pools age out.
+    // What "drained" means for this cell, recorded before driving anything and re-armed per cell
+    // (the box's quiet level drifts across a run's 36 back-to-back cells).
     arm_stream_settle_baseline();
     let Some(t) = stream_target(cfg, id) else {
         return CellStreams {
@@ -2181,26 +1653,22 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
     let lo = lo.min(hi);
     let r = search::bisect_ceiling(&mut p, lo, hi);
     match r.ceiling.copied() {
-        // `bisect_ceiling`'s own MEASURED "nothing sustains this gate": there is no rung to read a
-        // rate back from, so the rate is a real zero rather than a lookup that would miss.
+        // `bisect_ceiling`'s own measured "nothing sustains this gate": a real zero, not a missed
+        // lookup.
         Some(0) => CellStreams {
             concurrency: Measurement::Measured(0),
             fps: Measurement::Measured(0.0),
             points: p.points,
         },
-        // CONFIRMED, for the same reason the sustained ceiling is: `bisect_ceiling` walks up until ONE
-        // window fails, so it lands exactly on the boundary - the highest concurrency that passed
-        // once. Re-measuring the sustained ceilings of the 2026-07-28 run found 9 of 48 held their
-        // gate in only 1 of 3 windows. This gate is STRICTER (every expected frame must arrive, no
-        // stalls), so a boundary rung here is if anything more likely to be marginal, and nothing was
-        // re-measuring it at all.
+        // Needs confirmation: `bisect_ceiling` lands exactly on the boundary rung (highest
+        // concurrency that passed once), which can be marginal — re-measurement found some
+        // "sustained" ceilings held in only 1 of 3 windows.
         Some(c) => match p.points.iter().find(|pt| pt.concurrency == c).map(|pt| pt.fps) {
             Some(v) => {
-                /* THE TOP OF THIS CELL'S OWN UNCONTAMINATED ASCENDING PREFIX - every rung from the
-                   first up to and including it passed, before anything in this cell had failed. It is
-                   the only concurrency figure in scope that is certainly NOT an artefact of a busy
-                   host, because nothing had been driven hard yet when it was taken. Used below as the
-                   line under which a failure cannot honestly be the gateway's. */
+                // Top of this cell's own uncontaminated ascending prefix (every rung up to and
+                // including it passed before anything failed) — the only concurrency here certainly
+                // not an artefact of a busy host. Used below as the line under which a failure
+                // cannot honestly be the gateway's.
                 let proven_clean = p
                     .points
                     .iter()
@@ -2214,30 +1682,22 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 // Defaults to the budget case, which is what the loop ends on when nothing else
                 // interrupts it; every other exit overwrites this at its own `break`.
                 let mut stop = StreamStop::BudgetExhausted;
-                /* A STEPPED RUNG WHOSE SEED WINDOW FAILS MUST STEP DOWN AGAIN, NOT END THE SEARCH.
-                   plano `anthropic>anthropic` is what this costs: the ascending sweep carried c=64,
-                   the bisection settled on c=79, confirmation failed, the step-down bisected to
-                   c=71, its first window failed - and the search stopped there, with every
-                   concurrency between 64 and 71 untried and most of the step-down budget unspent.
-                   The cell published an absence where a number was almost certainly available.
-
-                   What it must NOT do is give that rung its confirmation windows anyway: a rung that
-                   could not seed has not earned a vote, and crediting it is how a gate-failing window
-                   folds into a published figure. So the failed seed buys another step-down and
-                   nothing else - the rung is abandoned, the bracket narrows, and the search carries
-                   on with the budget it has left. */
+                // A stepped rung whose seed window fails must step down again, not end the search:
+                // ending here previously left concurrencies untried and most of the step-down budget
+                // unspent, publishing absence where a number was likely available. The failed seed
+                // must not get confirmation windows either — a rung that couldn't seed hasn't earned
+                // a vote, so it's simply abandoned and the search continues.
                 let mut seed_failed = false;
                 for _ in 0..MAX_CEILING_STEPDOWNS {
                     if seed_failed {
-                        // The rung below is abandoned unconfirmed; fall straight to another
-                        // step-down rather than voting on a window that never held.
+                        // Abandon unconfirmed; fall to another step-down rather than voting on a
+                        // window that never held.
                         seed_failed = false;
                     } else {
                     let mut held = 1usize; // the bisection's own winning window is a real vote
                     let mut total = 1usize;
                     let mut rates = vec![first_fps];
                     for _ in 1..crate::search::WINDOWS_PER_RUNG {
-                        // The previous window at this same concurrency is still draining off the host.
                         settle_after_streams(ceiling);
                         let Some(w) = stream_window(cfg.gateway_addr, &p.path, &p.body, &p.headers, p.dialect, ceiling) else {
                             continue;
@@ -2250,25 +1710,12 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             rates.push(w.fps());
                         }
                     }
-                    // THE SAME TWO-PART RULE `confirm_ceiling` USES, not just its majority half.
-                    //
-                    // A window that could not RUN takes the `continue` above without incrementing
-                    // `total`, so two absent repeats left this at 1 of 1 - and `1 * 2 > 1` is true, so
-                    // the bisection's single unrepeated window was published as a confirmed ceiling
-                    // along with its own raw fps. Both absent paths are reachable exactly here, at the
-                    // top rung: `SseEnd::RigExhausted` when the host runs out of ephemeral ports or
-                    // descriptors, and a panicked lane. So the shrinking denominator was likeliest
-                    // precisely where the number matters most.
-                    //
-                    // `confirm_ceiling` refuses this input on the throughput side and says why: one
-                    // lucky window is how a sustained figure lands ABOVE the peak from the same sweep.
-                    // The stream copy carried the majority test and dropped the minimum-window half,
-                    // and the comment claiming it "runs the same majority rule" was true only of the
-                    // half that survived. A rate here is a median of WINDOWS_PER_RUNG windows or it is
-                    // not published.
+                    // Same two-part rule `confirm_ceiling` uses (majority AND enough windows), not
+                    // just the majority half: without the minimum-window check, two absent repeats
+                    // could leave a single unrepeated window published as a confirmed ceiling.
                     if stream_ceiling_confirmed(total, held) {
-                        // The published rate is the median of the windows that HELD, matching how
-                        // every other repeated measurement in this engine reports.
+                        // Published rate is the median of the windows that held, matching every
+                        // other repeated measurement in this engine.
                         rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         let fps = crate::search::nearest_rank_median(&rates).unwrap_or(first_fps);
                         winner = Some((ceiling, fps));
@@ -2293,22 +1740,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         break;
                     }
                     }
-                    /* STEP DOWN INSIDE THE BRACKET, NOT BY HALVING.
-                       Halving throws away everything the ascending sweep and the bisection just
-                       established. busbar proved every rung to c=4,096, bisected to c=6,176, failed
-                       to confirm it - and then halved to c=3,088, a concurrency it had already
-                       carried cleanly, discarding the entire 4,096..6,176 bracket the search had
-                       spent fifteen rungs narrowing. The true ceiling was never below 4,096; it was
-                       just under 6,176 (a later run confirmed 5,120).
-
-                       The known-good floor is the top of this cell's own uncontaminated ascending
-                       prefix, falling back to the search's lower bound. Bisecting between it and the
-                       failed rung keeps every rung the search already paid for and converges toward
-                       the boundary instead of collapsing away from it.
-
-                       Halving survives only as the fallback for when there IS no bracket - the
-                       confirmation failed at the known-good rung itself, so nothing below it is
-                       known and there is no information to bisect. */
+                    // Step down inside the bracket, not by halving: halving would discard everything
+                    // the ascending sweep and bisection already established, potentially dropping
+                    // below a concurrency already proven clean. Bisect between the known-good floor
+                    // (top of this cell's uncontaminated ascending prefix) and the failed rung;
+                    // halving is only the fallback when there's no bracket to bisect within.
                     let known_good = if proven_clean > 0 { proven_clean.max(lo) } else { lo };
                     let next = if known_good < ceiling {
                         let mid = known_good + (ceiling - known_good) / 2;
@@ -2338,24 +1774,12 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             let passed = streams_gate_passes(&w);
                             p.points.push(point_of(&w, passed));
                             if !passed {
-                                /* A RUNG CANNOT FAIL BELOW ONE IT HAS ALREADY PASSED, so when it does,
-                                   the gateway is not what changed. `proven_clean` is the top of THIS
-                                   cell's own uncontaminated ascending prefix; a failure at or under it
-                                   is the rig, and filing it as `SteppedRungFailed` charged the gateway
-                                   for our own undrained host on 6 cells of the 2026-07-31 board.
-
-                                   One full-cap retry first, because the cheap explanation - not enough
-                                   drain - is also the likeliest, and it costs one window to rule out.
-                                   If it holds this time the search simply carries on and publishes a
-                                   number, which is the outcome all of this is for. */
-                                /* AND ONLY WHERE THE MECHANISM CAN ACTUALLY EXIST. Draining sockets
-                                   explain a rung failing under a proven one at c=3,088; they explain
-                                   nothing at c=1 under c=2, where there is no residue to speak of and
-                                   a failure is simply a failure. Gating on the same threshold the
-                                   settle uses keeps this from becoming a universal excuse that
-                                   relabels every real gateway failure as our fault - the mirror image
-                                   of the bug it fixes, and the more dangerous of the two, because it
-                                   flatters the subject. */
+                                // A rung cannot fail below one it has already passed — that points at
+                                // an undrained rig, not the gateway. Retry once after a full settle
+                                // (cheap, and the likeliest explanation); gated on the same
+                                // `STREAM_SETTLE_FREE_BELOW` threshold the settle itself uses, so this
+                                // can't become a blanket excuse for real gateway failures at low
+                                // concurrency where there's no drain residue to speak of.
                                 let contaminated =
                                     proven_clean > STREAM_SETTLE_FREE_BELOW && ceiling <= proven_clean;
                                 let recovered = if contaminated {
@@ -2375,20 +1799,12 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                 } else {
                                     false
                                 };
-                                /* A SETTLE DID NOT BRING IT BACK, SO ASK WHETHER ANYTHING WILL.
-                                   The remaining explanations are opposite: our rig is still dirty,
-                                   or the GATEWAY stopped serving and is not coming back on its own.
-                                   Restarting is the one experiment that separates them, and the
-                                   harness already owns this process's lifetime - the memory group
-                                   stops and starts it every cell, and the probe loop restarts it
-                                   mid-grid for a refused connection.
-
-                                   A number is deliberately NOT published on the far side of this.
-                                   Whatever a restarted gateway carries is a fact about a fresh
-                                   process, not about the one that just served fifteen rungs, and
-                                   quietly folding it into the same sustained figure would publish
-                                   two different processes as one measurement. What gets published
-                                   instead is the finding: it did not recover. */
+                                // A settle didn't help, so a restart is the experiment that separates
+                                // "rig still dirty" from "gateway stopped serving and isn't coming
+                                // back". No number is published on the far side either way — a
+                                // restarted process's reading isn't a fact about the one that served
+                                // the prior rungs; the finding itself ("did not recover") is published
+                                // instead.
                                 if !recovered && contaminated {
                                     let restart_cleared = match cfg.relaunch.as_ref() {
                                         Some(spec) => {
@@ -2416,19 +1832,10 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                         // the rig-side one it already had.
                                         None => false,
                                     };
-                                    /* THE RESTART IS THE ATTRIBUTION TEST, and its two outcomes
-                                       point at opposite culprits.
-
-                                       Cleared by a restart: the process that had been serving was
-                                       wedged, a fresh one is not, and the host was the same
-                                       throughout - so it is the GATEWAY that did not recover.
-
-                                       NOT cleared: a brand-new gateway process still cannot carry a
-                                       rung this cell already carried. The gateway is the thing that
-                                       just changed and the failure did not, which leaves the host as
-                                       the variable - so this stays OURS. Calling it a gateway
-                                       failure here would be the flattering direction of the same
-                                       error, and the one nobody would catch. */
+                                    // Restart is the attribution test: cleared means the old process
+                                    // was wedged and the gateway is at fault; not cleared means a
+                                    // fresh gateway still can't carry a proven rung, so the host is
+                                    // still the variable and it stays ours.
                                     stop = if restart_cleared {
                                         StreamStop::GatewayDidNotRecover {
                                             at: ceiling,
@@ -2458,25 +1865,13 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         }
                     }
                 }
-                /* THE FLOOR THE SEARCH ALREADY PROVED IS A RESULT, NOT A LEFTOVER.
-                
-                   The step-down budget converges toward `proven_clean` without ever re-testing it:
-                   busbar openai>openai carried c=4,096 on the ascending sweep, bisected to c=5,652,
-                   lost both confirmation windows, and spent all four step-downs at 4,874 / 4,485 /
-                   4,290 / 4,193 - every one of them ABOVE the rung it had already carried. The cell
-                   then published nothing, on a board where the same gateway is the subject. Three
-                   busbar cells, and seven across the field, read `unconfirmed` for this reason.
-                
-                   "We could not confirm 5,652" and "we know nothing" are different statements. The
-                   first is true; the second is what an absence says. So when the search is otherwise
-                   out of budget, the floor gets the confirmation the bisected rung got: a full set of
-                   windows, the same majority rule, the same median-of-holds. It publishes a
-                   CONSERVATIVE number - the ceiling is somewhere above it - and that is the honest
-                   shape of what the search learned.
-                
-                   It costs WINDOWS_PER_RUNG windows and only on the failure path. It cannot inflate a
-                   result: `proven_clean` is a rung this cell drove cleanly during its own ascent, and
-                   it still has to hold a majority now to be published at all. */
+                // The floor the search already proved is a result, not a leftover: the step-down
+                // budget can converge toward `proven_clean` without ever re-testing it, publishing
+                // nothing even though "could not confirm the higher rung" and "know nothing" are
+                // different statements. So when otherwise out of budget, give the floor the same
+                // confirmation the bisected rung got (full window set, same majority rule) and
+                // publish it as a conservative number if it holds — it cannot inflate a result since
+                // `proven_clean` was already driven cleanly and still needs to hold a majority now.
                 if winner.is_none() && proven_clean > 0 && stop.floor_fallback_ok() {
                     eprintln!(
                         "streams: the ceiling search is out of budget; confirming the floor this cell \
@@ -2521,26 +1916,10 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                         fps: Measurement::Measured(fps),
                         points: p.points,
                     },
-                    // THE REASON IS THE ONE THAT ACTUALLY HAPPENED, not one sentence for five outcomes.
-                    //
-                    // This was a single hardcoded string - "stepping down found none that did within N
-                    // attempts" - emitted for EVERY way the search ends without a winner. There are five,
-                    // and they are not the same fact:
-                    //
-                    //   * the rig could not complete its windows          (OUR failure, and the code says
-                    //                                                      so five lines up before
-                    //                                                      breaking with this message)
-                    //   * the step-down floor was reached
-                    //   * a stepped rung's first window failed the gate
-                    //   * the window could not be taken at all
-                    //   * the step-down budget was genuinely exhausted
-                    //
-                    // Reporting a RIG shortfall as "the gateway did not hold the gate" is the precise
-                    // error this board exists to avoid, and it was doing it in a sentence that reads like
-                    // a measurement. It also made two opposite findings render identically: busbar
-                    // delivering ZERO frames on re-measurement and litellm-rust degrading gracefully near
-                    // a real ceiling of ~3,144 streams got the same words, so the site could not tell a
-                    // gateway's collapse from our own instrument giving up.
+                    // The reason names which of the five ways the search actually ended without a
+                    // winner (rig shortfall, floor reached, stepped rung failed, window unavailable,
+                    // or budget exhausted), rather than one generic sentence that would make a rig
+                    // shortfall read as "the gateway did not hold the gate".
                     None => CellStreams {
                         concurrency: Measurement::absent(Absent::NotMeasured),
                         fps: Measurement::absent_because(
@@ -2578,38 +1957,21 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
 
 // ── cpu_fps: RETIRED ──────────────────────────────────────────────────────────────────────────────
 //
-// `cpu_fps` was "peak SSE frames/sec", found by a `saturation_plateau` over a saturating curve. It is
-// gone, and the reason is that the field data says no reading of it was defensible. Across the 16 cells
-// on the 2026-07-29 board that published both it and `streams_sustained_fps` - the rate at the PROVEN
-// delivery boundary - it fell into exactly three regimes:
-//
-//   4 of 16 INVERTED. agentgateway anthropic>openai read cpu_fps 6,949 against a gated 12,575 - a
-//     "peak" 45% BELOW a number the bisection proved. A maximum under a proven boundary is not a
-//     maximum, and this is the same defect `saturation_plateau` caused on the throughput lane: the
-//     plateau search stopped on three flat rungs while the bisection kept going over the same windows.
-//   5 of 16 REDUNDANT. portkey and tensorzero came in at 0.98-0.99x of `streams_sustained_fps`. The
-//     same number, published twice, under two names.
-//   7 of 16 ABOVE THE GATE. one-api 2.47x, plano 1.73x. A frame rate achieved at a concurrency where
-//     the delivery gate did NOT hold - which means it was measured while dropping frames or stalling.
-//     Publishing that as a throughput figure credits a gateway for frames its users never received.
-//
-// `streams_sustained_fps` is the honest version of the same quantity: the frame rate at a concurrency
-// proven to deliver every content frame with no stall past the pace. It stays.
+// `cpu_fps` ("peak SSE frames/sec" via `saturation_plateau`) is gone: field data showed readings
+// that were inverted below the gated `streams_sustained_fps` boundary, redundant with it, or above
+// it only because they were measured at a concurrency where the delivery gate did not hold (dropping
+// or stalling frames). `streams_sustained_fps` — the rate at the proven delivery boundary — is the
+// honest version of the same quantity and stays.
 
 /// The MOCK's own frames/sec at one concurrency, driven straight at it.
 ///
-/// The streaming analogue of `suite::rig_ceiling`, and it takes the reference AT THE OPERATING POINT
-/// the gateway's own number was taken at, for the reason `rigbound.rs`'s header gives: the rig is not
-/// equally fast at every concurrency, so a reference from the top of the range would systematically
-/// understate how close the gateway came to it.
+/// The streaming analogue of `suite::rig_ceiling`. Takes the reference at the operating point the
+/// gateway's own number was taken at, since the rig isn't equally fast at every concurrency and a
+/// reference from the top of the range would understate the gateway's closeness to it. A single
+/// window, not a search — a point measurement makes no turnover claim.
 ///
-/// A single window, not a search: a point measurement makes no turnover claim, so there is nothing
-/// for a flanking check to refuse.
-/// Takes the mock's address, model and token as arguments rather than a `RunConfig`. `rig_ceiling`
-/// has to build a mock-facing config because the request generator's search plumbing reads one, and
-/// every gateway-shaped field in it then has to be individually blanked with a comment explaining
-/// why, a shape that exists to be defused. A stream window takes where to send and what to send, so
-/// this says the same thing in three arguments with nothing to blank out.
+/// Takes the mock's address/model/token directly rather than a `RunConfig`, since a stream window
+/// needs only where and what to send.
 pub fn stream_fps_at(
     mock_addr: SocketAddr,
     model: &str,
@@ -2619,60 +1981,34 @@ pub fn stream_fps_at(
 ) -> Measurement<f64> {
     let path = dialect.mock_direct_path(model);
     let body = dialect.stream_body(model);
-    // The MOCK's own auth shape, with no gateway routing headers: those select an upstream INSIDE a
-    // gateway and mean nothing here, exactly as `mock_healthy` already reasons.
+    // Mock's own auth shape, no gateway routing headers: those select an upstream inside a gateway
+    // and mean nothing here.
     let headers = dialect.auth_headers(auth);
 
-    // THE MEDIAN OF THE SAME NUMBER OF WINDOWS THE OBSERVATION GETS.
+    // Reference must be the median of the same window count (`WINDOWS_PER_RUNG`) the observation
+    // gets: a single-window reference is a one-sample bar policing a figure built to resist one
+    // unlucky window, and an understated reference falsely clears the gateway's real number as
+    // unvouchable.
     //
-    // This took ONE window, and its fps became the ceiling that judges a number the search built from
-    // the median of `WINDOWS_PER_RUNG` windows - a bar chosen by a single sample, policing a figure
-    // deliberately made "resistant to one unlucky window". When the single reference window came in
-    // low, the observation cleared it by more than `IMPOSSIBLE_FACTOR` and the gateway's real,
-    // repeatedly-measured number was thrown away as unvouchable.
+    // Box is also given time to settle first: the reference is taken right after a ladder that just
+    // drove thousands of concurrent streams through this host, and residual draining/CPU heat would
+    // depress it. The median defends against one unlucky window, not a uniformly busy box.
     //
-    // That is not hypothetical. The mock streams 64 frames at 20ms, so a lane carries ~50 frames/sec
-    // and c=469 has a theoretical ceiling near 23,450. Bifrost was measured at 21,404 there - 91% of
-    // theory, entirely plausible - which means the reference must have come back under 14,269, about
-    // 61% of theory. Seven gateway/metric pairs on the 2026-07-29 board published nothing for this
-    // reason. The gateway cannot beat the mock it forwards to, so an overshoot was always evidence
-    // about this measurement rather than about the gateway; making it as strong as the number it
-    // polices is the fix, not widening the factor that catches it.
-    // AND LET THE BOX SETTLE FIRST. The reference is taken at the WINNING concurrency, which is only
-    // known once the search has finished - so it is measured immediately after a ladder that just
-    // drove thousands of concurrent streams through this same host. Sockets are still draining and
-    // the CPU is still hot, and every one of those depresses the direct-to-mock number that is about
-    // to be used as a ceiling. The median above defends against ONE unlucky window; it cannot defend
-    // against a box that is uniformly busy, which is what this pause is for.
+    // NOT on the live path — `suite::stream_rig_ceiling` uses `mock_frame_ceiling_fps` (pure
+    // arithmetic from the mock's declared pacing) instead; nothing outside this file's tests calls
+    // this function. Kept as the only measured cross-check on that arithmetic ceiling.
     //
-    // NOT ON THE LIVE PATH. `suite::stream_rig_ceiling` calls `mock_frame_ceiling_fps` - a pure arithmetic
-    // derivation from the mock's declared pacing - and nothing outside this file's tests calls this
-    // function. So the protocol described below (median of WINDOWS_PER_RUNG clean windows, settle first,
-    // IMPOSSIBLE_FACTOR guard) is NOT what any published streams_sustained_fps was checked against; the
-    // live reference is one-shot arithmetic with none of those safeguards. Kept because the arithmetic
-    // ceiling has no measured cross-check at all, and this is the only implementation of one - but a
-    // reader must not infer from the detail here that it is running.
-    // Short on purpose. It runs twice per served streaming cell, so it is minutes across a field run,
-    // and it does not need to outlast TIME_WAIT to be worth having - the queues and the run queue
-    // drain in far less than that, and those are what move this number.
+    // Sleep kept short (runs twice per served streaming cell): doesn't need to outlast TIME_WAIT,
+    // just the run-queue/socket drain, which clears much faster.
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     let mut clean: Vec<f64> = Vec::with_capacity(crate::search::WINDOWS_PER_RUNG);
     let mut why: Option<String> = None;
     for _ in 0..crate::search::WINDOWS_PER_RUNG {
         match stream_window(mock_addr, &path, &body, &headers, dialect, concurrency) {
-            // The reference must be a CLEAN window or it is not a ceiling: a reference taken while
-            // the mock itself was dropping streams would be an understated bar, and a gateway
-            // measured against it would read as rig-bound when it was not.
-            // WHAT THE REFERENCE WINDOW ACTUALLY SAW, on one line per window.
-            //
-            // A reference that comes back low is indistinguishable, from the artifact alone, between
-            // "the window was slow" and "the window read fewer frames" - `fps` is frames/elapsed and
-            // collapses both. On the 2026-07-29 bifrost run the reference landed at exactly 50% of
-            // theory in both cells while the gateway leg measured 86%, and there was no way to tell
-            // which half of that fraction was wrong. Locally the same window at the same concurrency
-            // is stable at 83-89% of theory with exactly 64 frames per stream, so whatever depresses
-            // it is specific to the bench box and cannot be reasoned about from here.
+            // Must be a clean window or it is not a ceiling. Logged per window (streams/frames/fps)
+            // since "the window was slow" and "the window read fewer frames" are otherwise
+            // indistinguishable from the collapsed fps figure alone.
             Some(w) if w.errored == 0 && w.frames > 0 => {
                 eprintln!(
                     "[ref] c={concurrency} streams={} frames={} content={}/{} stalls={} elapsed={:.3}s fps={:.0}",
@@ -2694,19 +2030,9 @@ pub fn stream_fps_at(
             }
         }
     }
-    // A FULL SET, NOT MERELY A NON-EMPTY ONE.
-    //
-    // Taking the median of three windows was supposed to stop one unlucky window deciding a ceiling,
-    // and it did not: `median` returns a value whenever the vec is non-empty, so ONE clean window out
-    // of three still produced a published reference - the exact single-sample bar the change was
-    // written to remove. And the direction matters, because an UNDERSTATED reference is what suppresses
-    // a gateway's real number: the observation then clears it by more than IMPOSSIBLE_FACTOR and a
-    // measured figure is thrown away as unvouchable. Seven gateway/metric pairs on the 2026-07-29 board
-    // published nothing that way.
-    //
-    // So the bar here is the bar everywhere else - `confirm_ceiling` and `stream_ceiling_confirmed`
-    // both require WINDOWS_PER_RUNG - and falling short says so with the count, rather than quietly
-    // handing back a ceiling one window wide.
+    // A full set, not merely a non-empty one: `median` would happily return a value from a single
+    // clean window, silently reintroducing the single-sample bar this function exists to avoid. Same
+    // bar as `confirm_ceiling`/`stream_ceiling_confirmed`.
     if clean.len() < crate::search::WINDOWS_PER_RUNG {
         let got = clean.len();
         let want = crate::search::WINDOWS_PER_RUNG;
@@ -2753,29 +2079,19 @@ pub fn mock_healthy(cfg: &RunConfig) -> bool {
 
 pub struct CellResult {
     pub outcome: CellOutcome,
-    /// Every metric the engine took on this cell, keyed by the artifact field it fills. `None` for a
-    /// cell that was not served: there is nothing to measure, and an empty map would read as
-    /// "measured nothing" rather than "never asked".
+    /// Every metric the engine took on this cell, keyed by the artifact field it fills. `None` for
+    /// an unserved cell (never asked), distinct from an empty map (measured nothing).
     pub metrics: Option<std::collections::BTreeMap<&'static str, Measurement<f64>>>,
-    /// The evidence behind those scalars: the rungs the throughput search probed and the resident
-    /// memory readings taken across the load window. `None` alongside `metrics` for a cell that was
-    /// never measured, and empty for one that was measured but produced no series.
+    /// Evidence behind those scalars: throughput rungs and memory readings. `None` alongside
+    /// `metrics` for a cell that was never measured, empty for one measured with no series.
     pub series: Option<crate::metric::Series>,
-    /// SECONDS PER METRIC GROUP, so a slow run can be diagnosed offline instead of re-run with a
-    /// stopwatch. Keyed by the group's own name (`throughput`, `streaming`, `memory`, ...).
-    ///
-    /// A total is not an answer: "this cell took thirteen minutes" cannot distinguish the TTFT
-    /// sample set from a stream ladder that climbed to a higher rung from a gateway that simply got
-    /// slower, and those have completely different responses. Published per cell so the question
-    /// "what would we save by halving the TTFT samples" is arithmetic on the artifact.
-    ///
-    /// `None` for a cell that was never measured, matching `metrics` and `series`.
+    /// Seconds per metric group (`throughput`, `streaming`, `memory`, ...), so a slow run can be
+    /// diagnosed offline rather than re-run with a stopwatch — a single total can't distinguish
+    /// which group cost the time. `None` for a cell that was never measured.
     pub timings_s: Option<std::collections::BTreeMap<&'static str, f64>>,
-    /// Whether the gateway was PROVEN to have emitted this cell's egress dialect upstream, and the
-    /// evidence behind that verdict. See `reverify.rs`: this is an anti-false-positive guard rather
-    /// than a measurement, which is why it is a plain tri-state beside the metrics rather than one of
-    /// them. `Default` (both `None`) for a cell that was never served, where there is nothing to
-    /// re-verify.
+    /// Whether the gateway was proven to have emitted this cell's egress dialect upstream — an
+    /// anti-false-positive guard (see `reverify.rs`), not a measurement, hence a plain tri-state
+    /// beside the metrics. `Default` for a cell that was never served.
     pub reverify: crate::reverify::Reverified,
 }
 
@@ -2797,17 +2113,10 @@ pub fn run_grid_with(
     out
 }
 
-/// The same walk, HANDING EACH CELL OVER AS IT FINISHES rather than at the end.
-///
-/// `run_grid_with` returns a `Vec`, which means the whole grid must finish before its caller sees
-/// anything. `suite.rs` iterates that `Vec` and flushes a snapshot at every egress-column boundary,
-/// under a comment promising that "a run interrupted partway through must not lose every cell it
-/// already measured" - a promise the shape of the call made impossible to keep. Busbar measured 16
-/// of 36 cells across four hours; the loop never started, no checkpoint was ever written, and the
-/// box was torn down with every one of those measurements still in memory. Not one number survived.
-///
-/// So the walk pushes, and the caller decides when that is worth persisting. `run_grid_with` stays
-/// as the collecting wrapper because most tests genuinely do want the whole grid at once.
+/// The same walk, handing each cell over as it finishes rather than at the end. `run_grid_with`'s
+/// `Vec` return means the whole grid must finish before the caller sees anything, which breaks the
+/// "an interrupted run must not lose already-measured cells" guarantee `suite.rs` depends on to
+/// checkpoint per egress column. `run_grid_with` stays as a collecting wrapper for tests.
 pub fn run_grid_streaming(
     cfg: &RunConfig,
     lo: u32,
@@ -2837,11 +2146,9 @@ pub fn run_grid_streaming(
                 });
                 continue;
             }
-            // A CELL THE MANIFEST DECLARES OUT OF SCOPE, OR THE RIG CANNOT POSE, IS NEVER PROBED.
-            // Checked before `probe_cell` runs at all: sending the request and then discarding its
-            // status is not the same as never sending it, because a global auth gate or rate limiter
-            // still answers with a real status that has nothing to do with this specific pairing -
-            // see `RunConfig::matrix`'s own doc for why that status must never be graded.
+            // A cell the manifest declares out of scope, or the rig cannot pose, is never probed —
+            // checked before `probe_cell` runs at all, since sending and discarding the status isn't
+            // the same as never sending it (see `RunConfig::matrix`'s doc).
             if crate::manifest::is_untestable_cell(&cfg.untestable_cells, ing.as_str(), eg.as_str())
             {
                 let note = if cfg.untestable_note.is_empty() {
@@ -2849,10 +2156,8 @@ pub fn run_grid_streaming(
                 } else {
                     cfg.untestable_note.clone()
                 };
-                // ONE LINE PER CELL, TO STDERR, AS IT IS DECIDED - not buffered until the grid
-                // finishes. A box that dies mid-run leaves this trail in .run.log for whatever it
-                // reached, and a live run can be tailed for real progress instead of going dark
-                // until the sentinel lands.
+                // Logged per cell, not buffered until the grid finishes, so a run that dies mid-way
+                // leaves progress in .run.log and can be tailed live.
                 eprintln!("[cell {done}/{total}] {id}: untestable");
                 on_cell(CellResult {
                     outcome: CellOutcome::untestable(id, note),
@@ -2884,36 +2189,19 @@ pub fn run_grid_streaming(
                 });
                 continue;
             }
-            // THE RIG IS RE-CONFIRMED FOR EVERY CELL, not once for the whole grid.
-            //
-            // `mock_healthy` is what lets `persistent_transient_verdict` answer NotVerified: when the
-            // rig cannot vouch for itself, nothing observed is attributable to the gateway. Reading
-            // it once before a grid that runs for hours defeated exactly that. busbar's 36 cells take
-            // about ninety minutes; a mock that degraded at cell five left every cell after it graded
-            // as though the rig were confirmed fine, so its failures became the gateway's verdict -
-            // the same inversion as counting our own port exhaustion as a refusal, just with a
-            // longer fuse.
-            //
-            // One request per cell against a mock that is answering hundreds of thousands. The cost
-            // is not worth thinking about; the wrong verdict is.
+            // The rig is re-confirmed for every cell, not once for the whole grid: `mock_healthy`
+            // feeds `persistent_transient_verdict`'s NotVerified, and reading it once before an
+            // hours-long grid would let a mid-run mock degradation grade every later cell as though
+            // the rig were fine. One cheap request per cell against the alternative.
             let healthy = mock_healthy(cfg);
             if !healthy {
                 eprintln!("[cell {done}/{total}] {id}: the mock did not answer its own health check - nothing observed here is attributable to the gateway");
             }
             let mut served = probe_cell(cfg, &id, healthy);
-            // A GATEWAY THAT DIED TAKES THE REST OF THE GRID WITH IT, UNLESS SOMETHING RESTARTS IT.
-            //
-            // The retry budget inside `probe_cell` outlasts a gateway that is merely busy. It cannot
-            // outlast one that is gone: nothing between cells restarts the process, so the first
-            // death forfeits every remaining cell as untestable. plano published one measured cell
-            // and two "no connection to the gateway: Connection refused" in both the dd26a54 and
-            // 8f2af5d field runs - the same shape twice, the whole grid after the first cell lost to
-            // a process that was not there any more.
-            //
-            // The harness owns this gateway's lifetime (that is what `relaunch` IS - the memory
-            // group already stops and starts it every cell), so when the connection is refused after
-            // the budget, bring it back and ask once more. Cheap when it works, and when it does not
-            // the cell records exactly what it recorded before.
+            // A gateway that died takes the rest of the grid with it unless restarted here:
+            // `probe_cell`'s retry budget outlasts a merely-busy gateway but not a gone one, and
+            // nothing else between cells restarts the process. The harness owns the gateway's
+            // lifetime (`relaunch`), so bring it back and ask once more before writing off the grid.
             if let (Served::Untestable(ref why), Some(spec)) = (&served, cfg.relaunch.as_ref()) {
                 if why.contains("no connection") {
                     eprintln!("[cell {done}/{total}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
@@ -2929,13 +2217,9 @@ pub fn run_grid_streaming(
                                 }
                             );
                         }
-                        // A FAILED RESTART POISONS EVERYTHING AFTER IT. The stop may have half
-                        // succeeded, the relaunch may be up with its post-boot configuration
-                        // half-replayed - a gateway that ANSWERS while misconfigured, which is the
-                        // worst state to keep measuring: every later cell's failure would publish
-                        // as the gateway's own. The cell keeps its honest verdict; the rest of the
-                        // grid is marked untestable naming OUR failure, and the probe loop stops
-                        // asking a gateway whose state the harness can no longer vouch for.
+                        // A failed restart poisons everything after it: the gateway may now answer
+                        // while half-configured, the worst state to keep measuring against. The rest
+                        // of the grid is marked untestable naming our own failure instead.
                         Err(e) => {
                             eprintln!(
                                 "[cell {done}/{total}] {id}: the gateway could not be restarted: {e} - refusing to measure the rest of the grid against an unvouched process"
@@ -2947,13 +2231,11 @@ pub fn run_grid_streaming(
                     }
                 }
             }
-            // THE ENGINE, IN TWO LINES: if the cell is served, run every metric on it. The list of
-            // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
-            // a measurement cannot be implemented, tested, and then silently never taken.
-            // RE-VERIFY BEFORE MEASURING, not after. The metrics drive millions of requests through
-            // the same recorder the check reads, so a reset afterwards would be racing an eight
-            // minute memory window, and the recorder's `body_ok` only ever describes the LAST body it
-            // saw. One request, on a cleared recorder, with nothing else in flight.
+            // If the cell is served, run every metric in `metric::METRICS` — one source of truth, so
+            // a measurement can't be implemented and never wired in.
+            // Re-verify before measuring, not after: the metrics drive millions of requests through
+            // the same recorder the check reads, and the recorder's `body_ok` only describes the
+            // last body it saw, so this needs a cleared recorder with nothing else in flight.
             let reverify = if served.is_measurable() {
                 crate::reverify::reverify_cell(cfg, &id, *ing)
             } else {
@@ -2968,10 +2250,8 @@ pub fn run_grid_streaming(
                     max_conc: hi,
                 };
                 let (m, s, t) = metric::process_cell_with(&ctx, metrics);
-                // WHERE THE CELL'S TIME WENT, on one greppable line. A run that is slower than the
-                // last one is otherwise unanswerable from the artifact: the total says a cell took
-                // thirteen minutes and nothing says whether that was the TTFT samples, a stream
-                // ladder reaching a higher rung, or the gateway itself.
+                // Per-metric-group timing breakdown, one greppable line, so a slow cell can be
+                // diagnosed without re-running.
                 let mut by_cost: Vec<_> = t.iter().collect();
                 by_cost.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
                 let total: f64 = t.values().sum();
@@ -2980,11 +2260,8 @@ pub fn run_grid_streaming(
                     .map(|(name, secs)| format!("{name}={secs:.1}s"))
                     .collect::<Vec<_>>()
                     .join(" ");
-                // `[cost]`, NOT `[cell]`. The status board parses `[cell N/M] <id>: <verdict>` and
-                // counts anything whose verdict is not a cheap outcome as a served cell, so emitting
-                // the breakdown under that prefix made every measured cell count twice - "10/8
-                // served" and an ETA of zero on a gateway still running. A diagnostic line that
-                // corrupts the progress display is worse than no diagnostic line.
+                // Logged under `[cost]`, not `[cell]`: the status board parses `[cell N/M] <id>:
+                // <verdict>` to count served cells, and reusing that prefix here would double-count.
                 eprintln!("[cost {done}/{total_cells}] {id}: {total:.1}s total | {breakdown}");
                 (Some(m), Some(s), Some(t))
             } else {
@@ -3056,11 +2333,8 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 
 #[cfg(test)]
 mod tests {
-    /* THE DRAIN WAITS ON A CONDITION, AND THE CONDITION HAS TO BE REACHABLE.
-    
-       A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
-       above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
-       is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
+    // The drain waits on a condition, and the condition must be reachable on a box that's never
+    // perfectly idle, or the 60s backstop becomes the schedule for every large window.
     #[test]
     fn the_drain_target_is_reachable_on_a_box_that_is_never_perfectly_idle() {
         // The baseline is the cell's own starting count, scaled - not a number chosen here. A box
@@ -3078,10 +2352,8 @@ mod tests {
         assert_eq!(0 * STREAM_SETTLE_TW_TOLERANCE + 64, 64, "an idle box still has headroom");
     }
 
-    /* AND THE BACKSTOP IS ONE TIME_WAIT GENERATION, which is the point of the number. It was 10s,
-       deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
-       after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
-       broken rather than busy. */
+    // The backstop is one TIME_WAIT generation: a closed socket can't need longer, past that the
+    // host is broken rather than busy.
     #[test]
     fn the_settle_backstop_covers_a_full_time_wait_generation() {
         assert!(
@@ -3096,36 +2368,28 @@ mod tests {
         );
     }
 
-    /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
-       absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
-       only meaningful when the host was not the suspect - and the flattering direction of this error
-       (publishing a figure where honesty published none) is the one nobody would catch. */
+    // The floor fallback's gate: only meaningful when the host itself wasn't the suspect for the
+    // rungs that just failed.
     #[test]
     fn floor_fallback_only_where_the_host_is_not_the_suspect() {
-        // The search ran out of room or budget: the gateway and the rig are both innocent so far, and
-        // the rung the cell already carried is a real, conservative result.
+        // Search ran out of room or budget: gateway and rig both innocent so far.
         assert!(StreamStop::BudgetExhausted.floor_fallback_ok());
         assert!(StreamStop::FloorReached { last: 4193 }.floor_fallback_ok());
         assert!(StreamStop::SteppedRungFailed { at: 4193 }.floor_fallback_ok());
 
-        // OUR instrument is the variable. A number taken on a host we have just accused would be
-        // exactly the attribution error the enum exists to prevent.
+        // Our instrument is the variable here.
         assert!(!StreamStop::RigRanShort { measured: 1, wanted: 3 }.floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
         assert!(!StreamStop::RigContaminated { at: 4096, proven: 4096 }.floor_fallback_ok());
 
-        // And a gateway that had to be restarted is no longer the process the sweep measured, so
-        // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
-        // finding and must not be overwritten by a number.
+        // A restarted gateway is a different process than the one the sweep measured.
         assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: true }
             .floor_fallback_ok());
         assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: false }
             .floor_fallback_ok());
     }
 
-    /* AND THE FLOOR STILL HAS TO EARN IT. The fallback publishes only what the same majority rule
-       every other repeated measurement uses would publish, so a floor that wins one window of three -
-       the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
+    // The floor still has to earn it via the same majority rule as any other repeated measurement.
     #[test]
     fn the_floor_is_published_only_on_the_same_majority_every_other_rate_needs() {
         assert!(stream_ceiling_confirmed(3, 3), "three of three holds");
@@ -3137,16 +2401,10 @@ mod tests {
 
     #[test]
     fn the_stream_bound_is_physical_and_the_runaway_cap_never_participates() {
-        // A CAP CHOSEN NEAR WHERE MEASUREMENTS LIVE BECOMES PART OF THE MEASUREMENT. The first version
-        // of this bound was a constant 4096, picked because no gateway had cleanly exceeded c=2178.
-        // The field's own sweeps said otherwise - apisix sustained c=16384 with ZERO stalls and every
-        // window passing, litellm-rust c=6144, aisix c=4096 - so it would have clipped three gateways
-        // and published a smaller rung as their peak. A wrong number is worse than an honest hole.
-        //
-        // The real stopping condition is measured (see
-        // `search::a_ladder_that_ends_on_failing_rungs_publishes_the_best_passing_rung`). The cap here
-        // is only a runaway backstop, and these assertions are what keep it from quietly becoming
-        // anything more.
+        // A cap chosen near where measurements live becomes part of the measurement — the real
+        // stopping condition must be measured (see
+        // `search::a_ladder_that_ends_on_failing_rungs_publishes_the_best_passing_rung`), and the cap
+        // here is only a runaway backstop.
         let bench_box_fds = 1_048_576;
         let bench_box_ports = 32_768;
         assert_eq!(
@@ -3155,12 +2413,8 @@ mod tests {
             "the PHYSICAL bound must decide it - with descriptors raised far above the port range, \
              the port range is the answer and the runaway cap must not be visible in it"
         );
-        // WHAT THE BACKSTOP IS FOR, asserted through the function rather than against the constant.
-        // This was `STREAM_RUNAWAY_CAP >= 4 * 16_384`, which clippy correctly called a constant
-        // assertion: both sides are compile-time literals, so it could never fail at runtime - a dead
-        // gate in the very test written to keep a cap honest. Driving the derivation with no physical
-        // limit at all shows the backstop is the thing that stops it, and that it sits several
-        // doublings above the highest rung the field has cleanly sustained (apisix, c=16384).
+        // Asserted through the function, not against the constant directly, so this can't become a
+        // dead compile-time-literal comparison.
         let unbounded_host = super::stream_ceiling_from(u32::MAX, u32::MAX);
         assert_eq!(
             unbounded_host,
@@ -3190,17 +2444,9 @@ mod tests {
         );
     }
 
-    // A REFERENCE MUST REST ON AS MANY WINDOWS AS THE NUMBER IT JUDGES.
-    //
-    // `stream_fps_at` takes WINDOWS_PER_RUNG windows and medians the clean ones - but `stats::median`
-    // returns a value whenever its input is non-empty, so ONE clean window out of three still produced
-    // a published reference. That is the single-sample bar the median was added to remove, still live
-    // inside the fix for it.
-    //
-    // The direction is what makes it costly: an UNDERSTATED reference is what suppresses a gateway's
-    // real number. The observation then clears it by more than IMPOSSIBLE_FACTOR and a measured figure
-    // is discarded as unvouchable - which is how seven gateway/metric pairs on the 2026-07-29 board
-    // published nothing at all.
+    // A reference must rest on as many windows as the number it judges — otherwise `stats::median`
+    // would happily return a value from one clean window, reintroducing the single-sample bar the
+    // median was meant to remove.
     #[test]
     fn a_rig_reference_needs_a_full_set_of_clean_windows() {
         let want = crate::search::WINDOWS_PER_RUNG;
@@ -3222,12 +2468,8 @@ mod tests {
         assert!(enough(want + 1), "and more is fine");
     }
 
-    // A PACING INTERVAL OF ZERO WOULD FAIL EVERY STREAM ON THE BOARD.
-    //
-    // `stall_bound_us()` is this interval times STREAM_STALL_MULTIPLIER, so a parsed 0 makes the stall
-    // bound 0 and EVERY inter-frame gap counts as a stall - including a gap of nothing. Both stream
-    // metrics would then fail on every rung of every cell, and the artifact would read that as thirteen
-    // gateways going quiet rather than as one bad environment variable.
+    // A pacing interval of zero would fail every stream: `stall_bound_us()` is this times
+    // STREAM_STALL_MULTIPLIER, so 0 makes every inter-frame gap count as a stall.
     #[test]
     fn a_zero_pacing_interval_is_refused_in_favour_of_the_default() {
         // Driven through the parse+filter chain this function uses, since the function itself reads a
@@ -3262,19 +2504,8 @@ mod tests {
         );
     }
 
-    // ONE LUCKY WINDOW MUST NOT BECOME A CONFIRMED STREAM CEILING.
-    //
-    // The confirmation loop opens `held = 1, total = 1` because the bisection's own winning window is
-    // a real vote, then takes WINDOWS_PER_RUNG-1 repeats. A repeat that cannot RUN is skipped WITHOUT
-    // incrementing `total`, so two absent repeats left 1 of 1 - and the majority test alone reads that
-    // as a pass, publishing the single unrepeated window as the ceiling plus its own raw fps as
-    // streams_sustained_fps. Both absent paths (RigExhausted on ports/descriptors, a panicked lane)
-    // bite hardest at the top rung, which is exactly where the published number comes from.
-    //
-    // `confirm_ceiling` refuses the same input on the throughput side and explains that one lucky
-    // window is how a sustained figure lands ABOVE the peak from the same sweep. The stream copy kept
-    // the majority half and dropped the minimum-window half, while its comment claimed to run "the
-    // same majority rule" - true only of the half that survived.
+    // One lucky window must not become a confirmed stream ceiling: the majority test alone (without
+    // a minimum-window check) would let two skipped/absent repeats leave 1-of-1 read as a pass.
     #[test]
     fn a_stream_ceiling_needs_as_many_windows_as_any_other_rung() {
         let n = crate::search::WINDOWS_PER_RUNG;
@@ -3300,18 +2531,9 @@ mod tests {
         assert!(!super::stream_ceiling_confirmed(3, 1), "1 of 3 held is not");
     }
 
-    // A WINDOW THAT LOST LANES MUST BE DISCARDED, LOUDLY.
-    //
-    // This rule cost a four-hour run every cpu_fps number it should have produced, and left nothing
-    // to diagnose it with. A panicked lane was dropped on the floor - no count, no message - and
-    // when every lane went, `streams == 0` returned `None` through the ONE refusal in that function
-    // that said nothing. The visible symptom was a metric that took 0.0s and published an absence,
-    // on every streamable cell, with no line anywhere in the log or the artifact explaining why.
-    //
-    // The subtler half is why survivors are not good enough: `streams` and `expected_frames` are
-    // both accumulated per surviving lane, so a panicked lane leaves the numerator AND the
-    // denominator. A window that lost half its lanes reported the survivors' delivery ratio as the
-    // whole window's and passed the gate on it - flattered by the removal of its own failures.
+    // A window that lost lanes must be discarded, loudly: survivors alone aren't good enough, since
+    // `streams`/`expected_frames` are accumulated per surviving lane, so a panicked lane removes
+    // itself from both numerator and denominator and flatters the delivery ratio.
     #[test]
     fn a_window_that_lost_lanes_is_refused_and_says_so() {
         let why = super::window_refusal(4, 60, 64).expect("lost lanes must refuse the window");
@@ -3402,18 +2624,11 @@ while True:
         }
     }
 
-    // THE DEFECT THIS GUARDS AGAINST. `restart_to_rest` used to build a throwaway `RealLauncher` on
-    // every call, so the `Child` it spawned was dropped the moment the function returned. The NEXT
-    // restart's `pkill` then killed a process nothing could `wait()` on: a zombie, once per served
-    // cell, for the whole run. Two restarts against the SAME persistent launcher must not leave the
-    // FIRST process a zombie once the second has replaced it.
+    // Guards against `restart_to_rest` leaving the process a prior restart replaced as a zombie.
     #[test]
     fn restart_to_rest_reaps_the_process_it_replaces() {
-        // `build_invocation` pins a native gateway with `taskset`, which is Linux-only. The field
-        // runs on Linux and so does CI, so this exercises the real launch path there; on a
-        // developer's macOS box there is nothing to pin with and the launch would fail for a reason
-        // that has nothing to do with reaping. Say so out loud rather than failing on it: a test
-        // that reports red for the wrong reason gets ignored, and an ignored test is not a gate.
+        // `build_invocation` pins with `taskset`, Linux-only; skip loudly on other platforms rather
+        // than failing for an unrelated reason.
         if std::process::Command::new("sh")
             .args(["-c", "command -v taskset"])
             .output()
@@ -3449,15 +2664,9 @@ while True:
         let _ = crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
     }
 
-    // THE UNCONFIGURED-RELAUNCH DEFECT THIS GUARDS AGAINST. A gateway with no config file is
-    // configured through its own admin API by the manifest's `commands`, run once after the initial
-    // launch. For docker a stop is `docker rm -f`, so the database those commands wrote dies with
-    // the container - and `restart_to_rest` relaunched WITHOUT replaying them. On the 2026-07-28
-    // board one-api lost its three channels at the memory group's restart: throughput (measured
-    // before it) published real numbers, and streaming + added latency (measured after it) failed
-    // 100%, publishing the missing configuration as the gateway's own failure. The restart must
-    // replay the commands, and a command that fails must fail the restart: a half-configured
-    // gateway answering probes is worse than a down one.
+    // Guards against the unconfigured-relaunch defect: `restart_to_rest` must replay post-boot
+    // commands (config written via admin API dies with a docker `rm -f` stop), and a failing command
+    // must fail the restart rather than leave a half-configured gateway answering probes.
     #[test]
     fn restart_to_rest_replays_the_post_boot_commands_and_fails_when_they_do() {
         if std::process::Command::new("sh")
@@ -3500,11 +2709,8 @@ while True:
         let _ = crate::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
     }
 
-    // THE COLLAPSED EGRESS AXIS THIS PREVENTS. Most gateways choose the upstream from the model name
-    // in the request, so a grid that sends one fixed model sends a byte-identical request for all six
-    // egress columns of a row. Every column reaches the SAME upstream, and the artifact publishes six
-    // translation cells for one measurement the gateway was never asked to perform. The axis reads as
-    // measured and is not.
+    // Prevents the collapsed egress axis: a fixed model would make all six egress columns reach the
+    // same upstream, publishing six cells for one actual measurement.
     #[test]
     fn every_egress_column_asks_for_its_own_model() {
         let a = "127.0.0.1:1".parse().expect("addr");
@@ -3568,9 +2774,8 @@ while True:
                     let _ = c.read(&mut b);
                     let _ =
                         c.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
-                    // Openai-shaped, like `serve_sse` and like the mock: a role head that carries no
-                    // token, then content deltas. The delivery gate counts CONTENT frames, so a
-                    // ladder of bare `data: f0` events would fail every rung for the wrong reason.
+                    // Openai-shaped role head (no token) then content deltas: the delivery gate
+                    // counts content frames, so bare `data: f0` events would fail for the wrong reason.
                     let _ = c.write_all(
                         b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
                     );
@@ -3580,10 +2785,8 @@ while True:
                         1
                     };
                     for i in 0..frames {
-                        // STOP AT THE FIRST WRITE THAT FAILS. A dropped lane times out per write, so
-                        // pushing all 64 frames anyway held the lane ~16s (64 x 250ms) and the
-                        // in-flight count never came back down - the simulator's own backlog, read as
-                        // the gateway being saturated.
+                        // Stop at the first failed write, or a dropped lane holds up the whole
+                        // window's timing.
                         if c.write_all(
                             format!(
                                 "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"f{i}\"}}}}]}}\n\n"
@@ -3614,16 +2817,9 @@ while True:
             Some(1),
             "the stepped-down rung must not publish on the strength of its own failing seed window"
         );
-        /* AND WHAT IT PUBLISHES INSTEAD IS THE FLOOR IT ACTUALLY CARRIED.
-        This asserted `None` - correct while a search out of budget gave up entirely. It no longer
-        does: the rung the cell proved on its own ascent gets the same confirmation the bisected
-        rung got, so a cell that demonstrably carries c=2 publishes 2 rather than an absence
-        claiming nothing is known. This fixture serves every rung at or below 3, so 2 is a true
-        reading, and it is conservative - the real ceiling is somewhere above it.
-
-        THE INVARIANT THIS TEST IS NAMED FOR IS UNTOUCHED AND IS THE ASSERTION ABOVE: the stepped
-        rung that could not seed (c=1) never voted for itself. What is published is a rung that held
-        a majority of fresh windows, which is the bar every other rate on this board has to clear. */
+        // Publishes the floor it actually carried (c=2) rather than an absence, via the same
+        // confirmation the bisected rung gets; the stepped rung that couldn't seed (c=1) still never
+        // votes for itself, which is the invariant this test is named for.
         assert_eq!(
             r.concurrency.value().copied(),
             Some(2),
@@ -3770,15 +2966,13 @@ while True:
         let gw = serve(200);
         let mut cfg = cfg_for(gw, gw);
         cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
-        // An explicit, empty metric list: this test is about the SHAPE of the grid, so it must not
-        // pay for every real measurement to assert that every pairing appears.
+        // Empty metric list: this test is about the shape of the grid, not real measurement cost.
         let rows = run_grid_with(&cfg, 1, 2, &[]);
         assert_eq!(rows.len(), 4);
     }
 
-    /// A relaunch spec that cannot come back up: its stop path matches no process (so stopping
-    /// "succeeds" instantly) and its binary does not exist, so `restart_to_rest` fails fast on any
-    /// platform - no taskset gating needed, because the FAILURE path is what is under test.
+    /// A relaunch spec that cannot come back up (nonexistent binary), so `restart_to_rest` fails
+    /// fast on any platform — the failure path is what's under test, no taskset gating needed.
     fn unlaunchable_spec(marker: &str) -> crate::launch::LaunchSpec {
         let port = {
             let l = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port to pick one");
@@ -3802,11 +2996,8 @@ while True:
         }
     }
 
-    // THE UNVOUCHED-PROCESS DEFECT THIS PINS. A mid-grid restart that FAILED used to be one eprintln
-    // and business as usual: the loop went on probing a gateway whose stop may have half succeeded
-    // and whose relaunch may be up half-configured, so every later cell's failure published as the
-    // gateway's own. After a failed restart, every remaining cell must be recorded untestable with a
-    // detail naming the HARNESS's failure, and nothing after it may be probed or measured.
+    // Pins the unvouched-process rule: after a failed mid-grid restart, every remaining cell must be
+    // recorded untestable naming the harness's failure, never probed or measured.
     #[test]
     fn a_failed_mid_grid_restart_marks_every_remaining_cell_untestable_naming_the_harness() {
         // Nothing listens at the gateway address, so the first cell's probe ends "no connection",
@@ -3858,10 +3049,8 @@ while True:
         }
     }
 
-    // A cell the manifest declares OUT of its capability grid must never be probed at all, even when
-    // the server sitting behind it would happily answer 200: the declaration wins, unconditionally,
-    // because probing it anyway and grading whatever came back is exactly the defect this field
-    // exists to prevent (a global gate answering for a pairing that was never really asked).
+    // A cell the manifest declares out of its capability grid must never be probed, even if the
+    // server behind it would answer 200 — the declaration wins unconditionally.
     #[test]
     fn a_declared_incapable_cell_is_never_probed_even_when_the_server_would_serve_it() {
         let gw = serve(200);
@@ -3922,16 +3111,8 @@ while True:
             );
         }
     }
-    // WHICH URL A CELL IS DRIVEN AT, in precedence order.
-    //
-    // Two real gateways mount their compatible API somewhere other than the dialect's standard path,
-    // and the probe ignored the manifest and used the standard one. Both answered a truthful 404 on
-    // every cell and the artifact published them as serving nothing at all: a false claim about
-    // somebody's product, produced entirely by us.
-    //
-    // A per-cell entry exists for the gateways that route a same-dialect request differently from a
-    // translating one. It is keyed by the full cell, so choosing it is a deliberate, visible act in
-    // that gateway's data rather than something the engine infers.
+    // Which URL a cell is driven at, in precedence order: cell-specific path, then declared path
+    // (for gateways mounting their compatible API elsewhere), then the dialect standard.
     #[test]
     fn a_cell_is_driven_at_its_own_path_then_the_declared_one_then_the_standard() {
         let mut cfg = cfg_for(
@@ -4045,8 +3226,7 @@ while True:
         assert!(streams_gate_passes(&clean_stream_window(64, 64)));
     }
 
-    // EVERY FRAME, and the rung below is where the gateway's real ceiling is. A dropped frame is a
-    // dropped token; there is no concurrency at which losing one is the gateway succeeding.
+    // Every frame: a dropped frame is a dropped token, at any concurrency.
     #[test]
     fn a_single_lost_frame_fails_the_rung() {
         let mut w = clean_stream_window(1000, 1000);
@@ -4067,9 +3247,8 @@ while True:
         );
     }
 
-    // Both stream searches judge a window the same way. They did not: the cpu-fps probe passed on
-    // `errored == 0 && frames > 0`, so a window delivering 1 frame of 64 counted as a healthy rung
-    // and its frames/sec was published.
+    // Both stream searches judge a window the same way (the retired cpu-fps probe used a laxer
+    // `errored == 0 && frames > 0` check that let a 1-of-64 window count as healthy).
     #[test]
     fn both_stream_searches_use_the_same_definition_of_a_healthy_window() {
         let mut w = clean_stream_window(64, 64);
@@ -4112,9 +3291,8 @@ while True:
         );
     }
 
-    // A window that opened nothing measured nothing. A ratio computed from zero must never read as a
-    // clean window by accident of floating-point division - the same trap `sustained_gate_passes`
-    // guards for its own all-zero window.
+    // A ratio computed from zero must never read as a clean window by floating-point accident (same
+    // trap `sustained_gate_passes` guards).
     #[test]
     fn a_window_that_opened_no_stream_never_reads_as_a_pass() {
         let mut w = clean_stream_window(4, 0);
@@ -4127,8 +3305,7 @@ while True:
         assert_eq!(w.error_ratio(), 1.0, "no streams is not a zero error rate");
     }
 
-    // A window with no measurable duration measured no RATE. An infinity here would win every peak
-    // search it appeared in and publish a rig artefact as the gateway's frames/sec ceiling.
+    // No elapsed time means no rate; an infinity would win every peak search it appeared in.
     #[test]
     fn a_window_with_no_elapsed_time_reports_no_rate_rather_than_an_infinity() {
         let mut w = clean_stream_window(4, 4);
@@ -4139,9 +3316,7 @@ while True:
 
     // ── the stall bound itself ───────────────────────────────────────────────────────────────────
 
-    // Gaps, not the first frame's offset: a gateway that is merely slow to start the stream has not
-    // stalled, and charging its time-to-first-token here would fail it on the number the `Streaming`
-    // group already publishes as a difference.
+    // Gaps, not the first frame's offset: time-to-first-token is `Streaming`'s job, not a stall here.
     #[test]
     fn a_late_first_frame_is_not_a_stall_but_a_late_second_one_is() {
         let bound = stream_pacing_interval_ms() * STREAM_STALL_MULTIPLIER * 1_000;
@@ -4159,14 +3334,9 @@ while True:
 
     // ── a real window against a real SSE peer ───────────────────────────────────────────────────
 
-    /// A minimal SSE peer, SHAPED LIKE THE MOCK'S OPENAI STREAM: one role head frame carrying no
-    /// content, then `frames` content deltas `gap_ms` apart, then the connection closes. Enough to
-    /// drive `stream_window` for real - the gate above is pure, but nothing else proves the lanes
-    /// actually open, read frames, and are joined.
-    ///
-    /// The head frame is not decoration. A peer that sent nothing but content deltas could not
-    /// distinguish the delivery ratio RIG-11 fixed from the one it replaced, because the two agree
-    /// exactly when no scaffolding arrives.
+    /// A minimal SSE peer shaped like the mock's openai stream: one role head frame (no content),
+    /// then `frames` content deltas `gap_ms` apart, then close. The head frame matters: without it,
+    /// a test can't distinguish RIG-11's fixed delivery ratio from the one it replaced.
     fn serve_sse(frames: usize, gap_ms: u64) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -4221,12 +3391,8 @@ while True:
             w.expected_frames, w.frames,
             "a full-budget peer leaves no shortfall"
         );
-        // NOT `stalls == 0`. A stall is a frame gap wider than twice the mock's pace, so on a
-        // machine running the rest of this suite in parallel it is a fact about the machine: this
-        // asserted zero and observed 2 whenever a neighbouring window test ran beside it. What the
-        // window is actually being held to is that stalls do not stop a clean full-delivery window
-        // from holding the gate, which the gate assertion below says directly and without depending
-        // on how busy the box is.
+        // Not `stalls == 0`: under parallel test load, occasional stalls are a fact about the
+        // machine, not this window. The gate assertion below is what actually matters.
         assert!(
             w.stalls <= w.frames,
             "a stall is a gap BETWEEN frames, so it cannot exceed them: {w:?}"
@@ -4241,9 +3407,8 @@ while True:
         );
     }
 
-    /// A peer that answers a well-formed JSON document rather than an event stream. Declares its
-    /// content-type, which is what lets `post_json_sse` answer immediately instead of waiting out its
-    /// deadline - the same short-circuit a real non-streaming gateway gets.
+    /// A peer that answers well-formed JSON rather than an event stream; declares its content-type
+    /// so `post_json_sse` short-circuits instead of waiting out its deadline.
     fn serve_json(status: u16) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -4266,9 +3431,7 @@ while True:
         addr
     }
 
-    // A peer that answers plain JSON has not streamed. That is an ERRORED stream, not a delivery
-    // shortfall: the two halves of the README's gate are different findings, and folding a
-    // non-streaming peer into "delivered fewer frames" would hide it behind a ratio.
+    // A peer that answers plain JSON has not streamed: an errored stream, not a delivery shortfall.
     #[test]
     fn a_peer_that_answers_json_instead_of_frames_counts_as_an_errored_stream() {
         let json = serve_json(200);
@@ -4283,9 +3446,7 @@ while True:
         assert!(!streams_gate_passes(&w));
     }
 
-    // A stream that opens and then delivers SHORT is not an error, it is a delivery shortfall. The
-    // gate refuses it on the delivery bar, and the error count stays clean, so the published rung
-    // says which of the two actually happened.
+    // A stream that opens then delivers short is a delivery shortfall, not an error.
     #[test]
     fn a_short_stream_is_a_delivery_shortfall_rather_than_an_error() {
         let short = crate::metric::STREAM_FRAME_BUDGET / 2;
@@ -4303,28 +3464,11 @@ while True:
         assert!(!streams_gate_passes(&w));
     }
 
-    // THE CLOCK STARTS AFTER THE LANES EXIST, and that is asserted at the clock site rather than
-    // through the stopwatch, because the stopwatch cannot see it.
-    //
-    // This test used to assert `elapsed_s < 0.25`. That constant is the speed of the machine that
-    // wrote it: green on CI, stably red at 0.355s on a developer's Mac, and red on any loaded
-    // runner. It was never measuring the ordering it is named for.
-    //
-    // Measured, rather than assumed: spawning the 200 lanes costs 2.4ms of a 380ms window - 0.6%.
-    // Starting the clock before the spawn loop instead of after it therefore moves `elapsed_s` by
-    // less than the run-to-run scatter, and an injected version of exactly that defect passes every
-    // timing bound loose enough not to fail on a slow machine. Lane setup stopped being expensive
-    // when it stopped being serial OS-thread creation, which is the same change that made the
-    // ordering matter less; the bound outlived the ramp it was written for.
-    //
-    // So this keeps what a window CAN be held to - every lane ran, every frame was counted, and the
-    // clock is positive and finite - and leaves the ordering to the comment at `started`, which is
-    // where a reader changing it will actually be standing.
+    // Clock starts after lanes exist; asserted at the clock site (see `started`), not via a timing
+    // bound here, since a machine-speed-dependent constant was never a reliable proxy for ordering.
     #[test]
     fn a_stream_window_counts_every_lane_it_was_asked_for() {
-        // A fleet, but not a stampede. 200 lanes here starved a neighbouring window test into
-        // reporting stalls under parallel load, and since the ramp assertion is gone the extra
-        // lanes bought nothing but contention - a test that fails its neighbours is a bad test.
+        // A fleet, not a stampede: keep concurrency modest to avoid starving neighbouring tests.
         let concurrency = 64;
         let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
         let w = stream_window(
@@ -4367,28 +3511,13 @@ while True:
 
     #[test]
     fn a_window_with_ok_and_fail_both_zero_reads_as_all_failed_never_a_pass() {
-        // `sustained_gate_passes` is only ever called after `SustainedProbe::probe` has already
-        // filtered out the all-zero window as unmeasured (see its own `stats.ok == 0 && stats.fail
-        // == 0` guard). This pins the function's own behaviour on that input regardless: a fail
-        // ratio computed as 0/0 must never read as a CLEAN window by accident of floating-point
-        // division.
+        // Pins the function's own behaviour on 0/0 regardless of callers already filtering it: a
+        // fail ratio computed as 0/0 must never read as clean by floating-point accident.
         assert!(!sustained_gate_passes(Some(1), 0, 0));
     }
 
-    // A SERVER THAT IS BUSY NOW AND FINE IN A MOMENT MUST NOT BE RECORDED AS INCAPABLE.
-    //
-    // This is the defect that cost a board. `transient_budget()` - 3 attempts, 30s apart - existed,
-    // was documented as the budget `Verdict::Failed` had spent, was unit-tested, and was called by
-    // nothing. So one 503 became "this gateway does not serve this pairing", permanently, in public.
-    //
-    // The harness provokes exactly this: cells run back to back with no settle and the metric before
-    // each probe is a heavy load, so a gateway with admission control is still shedding when the next
-    // cell asks whether it exists. In the 2026-07-28 field run busbar answered 503 on 26 of 36 cells
-    // and every one published as a red, while every egress lane answered fine under openai ingress
-    // in the same run - the lanes were healthy, the moment was not.
-    //
-    // The pause is shortened here through the same budget the field uses, so the test exercises the
-    // real loop rather than a copy of it.
+    // A server that is busy now and fine in a moment must not be recorded as incapable. Uses a
+    // shortened pause through the same budget the field uses, so the test exercises the real loop.
     fn serve_busy_then_ok(busy_times: usize) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -4457,13 +3586,8 @@ while True:
         }
     }
 
-    // A GATEWAY THAT DOES NOT ANSWER IN TIME IS A MOMENT, NOT A CAPABILITY.
-    //
-    // The status door and the transport door lead to the same place. busbar lost 26 cells to a
-    // transient 503; litellm-python lost three to a timeout, its served count sliding 8 -> 7 -> 5
-    // across the 2026-07-28 runs while the lost cells recorded "the gateway accepted the connection
-    // and never answered". Both are the harness asking a question of a gateway still shedding the
-    // load the harness itself just applied.
+    // A gateway that does not answer in time is a moment, not a capability — the transport-failure
+    // analogue of the transient-status retry above.
     fn serve_silent_then_ok(silent_times: usize) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -4532,14 +3656,8 @@ while True:
         }
     }
 
-    // THE STALL BOUND FOLLOWS THE MOCK'S ACTUAL PACE, not a copy of its default.
-    //
-    // A stall is a frame gap wider than twice the upstream's delta interval, so the bound is only
-    // meaningful if it tracks the interval the mock is really using. It was a 20 hardcoded in the
-    // engine to match MOCK_STREAM_INTERVAL_MS's default, described as a documented coupling - which
-    // is the same two-places-one-truth shape as the two hand-rolled ladders, and right up until
-    // someone uses the knob. Turn the mock's pacing down and every streaming rung is judged against
-    // a cadence nothing is producing, with no error anywhere.
+    // The stall bound follows the mock's actual pace (read from its env var), not a hardcoded copy
+    // of its default, so changing the mock's pacing can't silently desync the two.
     #[test]
     fn the_stall_bound_tracks_the_pace_the_mock_was_actually_told_to_use() {
         // Default: the mock's own default, so the field behaviour is unchanged.
@@ -4573,12 +3691,7 @@ while True:
         std::env::remove_var("MOCK_STREAM_INTERVAL_MS");
     }
 
-    // THE CEILING IS THE HOST'S, AND EVERY NUMBER IN IT IS READ OR DERIVED.
-    //
-    // 4096 was picked when the generator was thread-per-connection, and replacing it with a bigger
-    // constant only moved the arbitrary number: raising it to 65536 asked for more connections than
-    // a single host can make to a single destination, because a TCP connection needs a unique
-    // 4-tuple and the source ports run out first. Stock Linux allows about 28,000 of them.
+    // The ceiling is the host's own port range, derived rather than a chosen constant.
     #[test]
     fn the_connection_ceiling_comes_from_the_hosts_port_range_not_a_chosen_constant() {
         // The derivation, over the ranges that matter: stock Linux, the range the orchestrator sets,
@@ -4639,12 +3752,7 @@ while True:
         }
     }
 
-    // THE RIG RUNNING OUT IS NOT AN ERRORED STREAM.
-    //
-    // The load generator got this treatment first; the stream path is where it bites soonest,
-    // because the stream searches reach high concurrency before anything else does. A lane that
-    // could not get an ephemeral source port never asked the gateway anything, and counting it as an
-    // errored stream published our own exhaustion as the gateway's concurrent-stream ceiling.
+    // The rig running out of ports is not an errored stream: the gateway was never asked.
     #[test]
     fn a_lane_this_host_could_not_open_is_not_the_gateway_erroring() {
         let ours = crate::http::SseOutcome {
@@ -4737,13 +3845,8 @@ while True:
         );
     }
 
-    // A CEILING THE GATEWAY HOLDS ONE TIME IN THREE IS NOT A CEILING IT SUSTAINS.
-    //
-    // The bisection walks up until ONE window fails, so it lands exactly on the boundary: the
-    // highest concurrency that passed once. Re-measuring the 2026-07-28 field run's own published
-    // ceilings found 9 of 48 held the p99 gate in only 1 of 3 windows, and the shape is unmistakable
-    // - the first window passes and the rest fail. agentgateway c=252 saw 19866, 20036, 20404 against
-    // a 20000us gate; apisix c=171 saw 19980, 21114, 22530.
+    // A ceiling the gateway holds one time in three is not a ceiling it sustains: the bisection
+    // lands exactly on the boundary rung, which can be marginal, hence the majority confirmation.
     #[test]
     fn a_ceiling_is_confirmed_by_a_majority_of_its_own_windows() {
         // The rule the confirmation applies, with the bisection's own winning window counted as one
@@ -4754,8 +3857,7 @@ while True:
             held * 2 > total
         };
 
-        // The field shape: bisection window passed, both confirmations failed. 1 of 3 is not a
-        // ceiling, and this is the case that was being published.
+        // Bisection window passed, both confirmations failed: 1 of 3 is not a ceiling.
         assert!(
             !holds(&[false, false]),
             "1 of 3 windows must not confirm a ceiling"
@@ -4794,13 +3896,8 @@ while True:
 
     // ── the rig refuses to smuggle: the lanes run.rs owns ───────────────────────────────────────
 
-    // A PROBE WE REFUSE TO SEND IS UNTESTABLE, NEVER A CAPABILITY VERDICT.
-    //
-    // Ledger RIG-12: the probe lane composed the same manifest headers the load lane did and
-    // interpolated them raw. Now `http::send` refuses, and this is what the refusal must become on
-    // the way out - `Served::Untestable`, the spelling of `probe::Verdict::NotVerified`, which is
-    // "a statement about the RIG, not the gateway". `Served::No` here would convict a gateway of a
-    // defect in one of our own manifest files.
+    // Ledger RIG-12: a probe we refuse to send is `Served::Untestable`, never a capability verdict —
+    // `Served::No` here would convict a gateway of our own manifest defect.
     #[test]
     fn a_probe_the_rig_refuses_to_send_is_untestable_rather_than_a_refusal() {
         // A live, healthy peer, so nothing about this verdict can come from an address with nothing
@@ -4841,9 +3938,7 @@ while True:
         );
     }
 
-    // A STREAM WINDOW WE REFUSE TO SEND MEASURED NOTHING, so it is unmeasured - not a failing rung,
-    // and not an errored stream. Charging the gateway for a header of ours is the attribution
-    // inversion this engine refuses everywhere.
+    // A stream window we refuse to send is unmeasured, not a failing rung or an errored stream.
     #[test]
     fn a_stream_window_the_rig_refuses_to_send_is_unmeasured_not_a_failing_rung() {
         let sse = serve_sse(crate::metric::STREAM_FRAME_BUDGET, 0);
@@ -4876,10 +3971,8 @@ while True:
 
     // ── delivery counts TOKENS, not events (ledger RIG-11) ──────────────────────────────────────
 
-    /// A peer that answers with a full budget of well-formed openai events, NONE of which carries a
-    /// token: the role head, then finish/`[DONE]` scaffolding repeated. A real gateway does not do
-    /// this; the point is that nothing in the old accounting could tell it apart from one that
-    /// streamed perfectly.
+    /// A peer that answers with a full budget of well-formed openai events, none of which carries a
+    /// token. The old event-count accounting couldn't tell this apart from a perfect stream.
     fn serve_sse_without_tokens(events: usize) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -4908,13 +4001,8 @@ while True:
         addr
     }
 
-    // A STREAM THAT DELIVERED NO TOKENS HAS NOT DELIVERED.
-    //
-    // Ledger RIG-11. `delivery_ratio` was `frames / expected_frames` over every dispatched SSE
-    // event, so a peer that filled its whole frame budget with framing satisfied the gate - ratio
-    // 1.0, no stalls, no errors, published as the gateway carrying clean streams at that
-    // concurrency. The counts a reader needs to see this are on the window either way; only the
-    // ratio's numerator changed.
+    // Ledger RIG-11: a stream that delivered no tokens has not delivered, even if it filled its
+    // whole frame budget with framing scaffolding.
     #[test]
     fn a_full_budget_of_scaffolding_is_not_a_delivered_stream() {
         let peer = serve_sse_without_tokens(crate::metric::STREAM_FRAME_BUDGET);
@@ -4964,14 +4052,10 @@ while True:
 
     // ── the delivery budget is counted in CONTENT, not in events ────────────────────────────────
 
-    /// An SSE peer SHAPED LIKE A GATEWAY RATHER THAN LIKE THE MOCK: openai's role head, then a
-    /// SECOND framing event the mock never sends, then `content` tokens with a keepalive between
-    /// each pair. Every token the client asks for is delivered; the stream just costs more events
-    /// than the mock's own layout to deliver them.
-    ///
-    /// This is not a hypothetical peer. Anthropic's real SSE protocol sends `ping` events, a
-    /// TRANSLATION cell has the gateway re-emitting the stream in the client's dialect with its own
-    /// framing, and a keepalive does the same thing on any dialect.
+    /// An SSE peer shaped like a gateway rather than the mock: role head, an extra framing event the
+    /// mock never sends, then content tokens with a keepalive between pairs. Every token is
+    /// delivered; it just costs more events than the mock's layout (real behaviour: anthropic sends
+    /// `ping`s, translation cells re-frame, keepalives insert events).
     fn serve_sse_with_gateway_framing(content: usize) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -4987,7 +4071,7 @@ while True:
                     if c.write_all(head.as_bytes()).is_err() {
                         return;
                     }
-                    // Two prelude events where the mock sends one: the gateway's framing is its own.
+                    // Two prelude events where the mock sends one.
                     let role = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
                     let ping = "data: {\"choices\":[{\"index\":0,\"delta\":{}}]}\n\n";
                     for f in [role, ping] {
@@ -5015,13 +4099,9 @@ while True:
 
     // A GATEWAY'S OWN FRAMING IS NOT A DELIVERY SHORTFALL.
     //
-    // The delivery denominator is `STREAM_FRAME_BUDGET - stream_prelude_frames()`, a constant read
-    // off the MOCK's layout, while the numerator is measured on the GATEWAY's stream. While the read
-    // stopped after a fixed number of EVENTS, every ping or extra prelude chunk the gateway emitted
-    // displaced exactly one content frame: this peer delivers every token asked of it, and an
-    // event-budgeted read would have collected 31 of the 63 expected content frames - a ratio of
-    // 0.49 against a bound of 1.0, failing AT EVERY RUNG, for a shortfall the gateway did not cause.
-    // Reading to the CONTENT budget instead asks the question the metric is for.
+    // Denominator is `STREAM_FRAME_BUDGET - stream_prelude_frames()` (mock's layout); numerator is
+    // measured on the gateway's stream. Reading to a fixed event count would let every extra framing
+    // event the gateway emits displace a content frame and fail every rung for no real reason.
     #[test]
     fn a_gateway_that_spends_extra_events_on_framing_still_delivers_every_token() {
         let gw = serve_sse_with_gateway_framing(crate::metric::STREAM_FRAME_BUDGET);
@@ -5076,8 +4156,8 @@ while True:
         );
     }
 
-    /// A peer that frames FOREVER and never sends a token: the pathological case a content-budgeted
-    /// read has to be bounded against, since the tokens it is waiting for are never coming.
+    /// A peer that frames forever and never sends a token: the pathological case a content-budgeted
+    /// read must be bounded against.
     fn serve_sse_endless_framing() -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
@@ -5104,12 +4184,8 @@ while True:
         addr
     }
 
-    // THE READ STAYS BOUNDED WITHOUT WAITING OUT THE TIMEOUT, and the shortfall is still a failure.
-    //
-    // A budget counted in content frames has no bound of its own against a peer that keeps framing,
-    // and `STREAM_TIMEOUT` alone is 20 seconds per lane - at the concurrencies these searches climb
-    // to that is a search that never returns. `STREAM_EVENT_CEILING` stops the read at 4x the frame
-    // budget; hitting it with no tokens is a real delivery shortfall, and the gate says so.
+    // The read stays bounded by `STREAM_EVENT_CEILING` without waiting out `STREAM_TIMEOUT`, and
+    // hitting the ceiling with no tokens is still a real delivery shortfall.
     #[test]
     fn an_endless_framing_stream_stops_at_the_event_ceiling_and_still_fails_the_gate() {
         let peer = serve_sse_endless_framing();
@@ -5136,20 +4212,13 @@ while True:
 
     // ── one credential header on the wire (ledger RIG-12 remainder) ─────────────────────────────
 
-    // TWO `authorization` HEADERS ON ONE REQUEST IS A MEASUREMENT NOBODY CAN ATTRIBUTE.
-    //
-    // `headers_for` composed the dialect's credential header and then appended the manifest's
-    // verbatim, and `gateways/litellm-rust/definition.json` declares `Authorization: Bearer
-    // {GW_AUTH}` today. HTTP does not define which of two same-named headers a server honours, so
-    // the gateway authenticated as somebody and published a clean number for a request whose tenant
-    // and route we could not state.
+    // Two `authorization` headers on one request is a measurement nobody can attribute (HTTP does
+    // not define which same-named header a server honours).
     #[test]
     fn only_one_copy_of_a_header_the_rig_owns_reaches_the_wire() {
         let a: SocketAddr = "127.0.0.1:1".parse().expect("addr");
         let mut cfg = test_fixture(a, a);
-        // Spelled as the live manifest spells it, capital A and all: HTTP header names are
-        // case-insensitive, and a rule that only caught the lowercase one would not have caught the
-        // manifest that motivated it.
+        // Spelled with a capital A, matching the live manifest, to prove the dedup is case-insensitive.
         cfg.static_headers = vec![
             ("Authorization".into(), "Bearer manifest-token".into()),
             ("x-route".into(), "keep-me".into()),
@@ -5175,15 +4244,13 @@ while True:
             auths[0].1, "Bearer dummy",
             "the surviving one is the rig's own, built from the token this run holds: {h:?}"
         );
-        // Nothing else is dropped: a routing header is how a column selects its upstream, and losing
-        // one would publish a number for a pairing that was never driven.
+        // Nothing else is dropped: a routing header selects a column's upstream.
         assert!(
             h.contains(&("x-route".to_string(), "keep-me".to_string())),
             "{h:?}"
         );
 
-        // The dialect decides which names it owns, so anthropic's protocol constant is protected
-        // too - two `anthropic-version` headers is the same undefined resolution.
+        // The dialect decides which names it owns, so anthropic's protocol constant is protected too.
         cfg.static_headers = vec![
             ("anthropic-version".into(), "1999-01-01".into()),
             ("X-Api-Key".into(), "manifest-key".into()),
@@ -5218,10 +4285,8 @@ while True:
 
     // ── the derived mock ceiling, and the engine-fault check that replaced the old suppression ──────
 
-    // ARITHMETIC, NOT A MEASUREMENT, and this is the arithmetic. The mock sleeps `interval` before every
-    // delta except the first, so `chunks` frames take `(chunks - 1) * interval` and c concurrent streams
-    // carry `c * chunks` of them in that time. Both terms come from the variables the MOCK reads, so
-    // this test states the identity rather than a remembered number.
+    // Arithmetic, not a measurement: the mock sleeps `interval` before every delta except the first,
+    // so this states the identity rather than a remembered number.
     #[test]
     fn the_mock_ceiling_is_the_mocks_own_declared_pacing_and_nothing_else() {
         let chunks = f64::from(mock_stream_chunks());
@@ -5241,12 +4306,7 @@ while True:
         );
     }
 
-    // THE NUMBER THIS BOX ACTUALLY HAS, so a defaults change cannot quietly move the ceiling without a
-    // test noticing. 64 frames 20ms apart is 1.26s per stream; 1024 streams carry 65536 frames in that
-    // time, which is 52013 frames/sec - the figure the 2026-07-29 investigation turned on. The measured
-    // reference that day read 25893 (50% of physics) and the gateway leg 43297 (83%): the gateway beat
-    // the disadvantaged CONTROL by 1.67x while sitting comfortably under the real bound, and a chosen
-    // 1.5x factor discarded it on that basis.
+    // Pins the number this box actually has, so a defaults change can't quietly move the ceiling.
     #[test]
     fn the_ceiling_reproduces_the_bench_boxs_own_measured_night() {
         // Only meaningful on the box's defaults; if either knob is set, the identity above is the test.
@@ -5278,8 +4338,7 @@ while True:
         }
     }
 
-    // A ceiling of zero rather than an infinity when there is nothing to bound. An infinity would make
-    // every headroom fraction 0.0 and read as "miles below the rig" on every cell.
+    // A ceiling of zero, not an infinity, when there is nothing to bound.
     #[test]
     fn no_streams_means_no_frame_rate_to_bound_against() {
         assert_eq!(mock_frame_ceiling_fps(0), 0.0);
@@ -5287,9 +4346,7 @@ while True:
 
     // ── engine_fault: exact, and only where an exact bound exists ───────────────────────────────────
 
-    // A window at its budget is the SUCCESS case and must never be called a fault. This is the shape
-    // every clean rung has (`content=64512/64512` in the field logs), and the old rig comparison
-    // suppressed exactly these.
+    // A window at its budget is the success case and must never be called a fault.
     #[test]
     fn a_window_delivering_exactly_its_content_budget_is_not_a_fault() {
         let w = StreamWindow {
@@ -5308,10 +4365,8 @@ while True:
         assert_eq!(w.engine_fault(), None, "{w:?}");
     }
 
-    // MORE MODEL OUTPUT THAN THE MOCK COULD HAVE SENT IS OUR BUG. The gateway cannot invent tokens, so
-    // there is no gateway behaviour that produces this and no rig capacity that explains it - the only
-    // honest label is a fault of ours. Exact: one frame over budget is over budget, with no tolerance
-    // to tune.
+    // More model output than the mock could have sent is our bug — no gateway behaviour produces
+    // this. Exact, no tolerance.
     #[test]
     fn counting_more_content_than_the_mock_can_send_is_this_engines_fault() {
         let w = StreamWindow {
@@ -5335,10 +4390,7 @@ while True:
         );
     }
 
-    // EXTRA SSE EVENTS ARE LEGAL AND MUST NOT BE A FAULT. A gateway that inserts pings or re-frames a
-    // translated stream spends more events than the mock's own layout would - Ledger RIG-11, and the
-    // whole reason the delivery gate counts content frames. Bounding the event count would fail honest
-    // gateways for their framing style, so this asserts the bound is NOT there.
+    // Ledger RIG-11: extra SSE events (pings, re-framing) are legal and must not be a fault.
     #[test]
     fn a_gateway_that_adds_its_own_framing_is_not_a_fault() {
         let w = StreamWindow {
@@ -5363,8 +4415,7 @@ while True:
         );
     }
 
-    // A rate that is not a rate. `fps` divides counts by a wall clock, so a non-finite result means the
-    // clock or the counter is broken - and an infinity would win every peak search it appeared in.
+    // A non-finite rate means the clock or counter is broken.
     #[test]
     fn a_rate_that_is_not_finite_is_this_engines_fault() {
         let w = StreamWindow {
@@ -5389,8 +4440,8 @@ while True:
 mod stream_stop_tests {
     use super::*;
 
-    // ONE SENTENCE FOR FIVE OUTCOMES WAS THE BUG, so the test is that the five outcomes say five
-    // different things - and that the two which are OURS are attributed to the harness.
+    // The five stream-search endings must say five different things, and the two that are ours
+    // must be attributed to the harness.
     #[test]
     fn each_way_the_stream_search_ends_reports_its_own_cause() {
         let proved = 3144;
@@ -5419,9 +4470,8 @@ mod stream_stop_tests {
             );
         }
 
-        // THE ATTRIBUTION, which is the half that matters. A window the RIG failed to take is not a
-        // fact about the gateway, and filing it under NotMeasured would put our shortfall among the
-        // gateway's results.
+        // The attribution is the half that matters: a window the rig failed to take must not be
+        // filed under NotMeasured (which is a statement about the gateway).
         assert!(
             matches!(
                 StreamStop::RigRanShort {
@@ -5472,9 +4522,8 @@ mod stream_stop_tests {
 mod contamination_tests {
     use super::*;
 
-    /// The guard must NOT fire where draining cannot explain anything - otherwise it becomes a
-    /// universal excuse that relabels real gateway failures as rig faults, which flatters the
-    /// subject and is the more dangerous mirror of the bug it fixes.
+    /// The guard must not fire where draining cannot explain anything, or it becomes a universal
+    /// excuse relabelling real gateway failures as rig faults.
     #[test]
     fn the_contamination_guard_only_applies_where_draining_could_explain_it() {
         let fires = |proven: u32, at: u32| proven > STREAM_SETTLE_FREE_BELOW && at <= proven;
@@ -5493,9 +4542,8 @@ mod contamination_tests {
         );
     }
 
-    /* A RUNG FAILING BELOW ONE THE SAME CELL ALREADY PASSED IS OURS, AND MUST BE FILED AS OURS.
-    This is the whole point of the variant: `Absent::NotMeasured` puts a finding among the
-    GATEWAY's results, which is what happened to 6 cells on the 2026-07-31 board. */
+    // A rung failing below one the same cell already passed is ours, and must be filed as ours:
+    // `Absent::NotMeasured` would put the finding among the gateway's results instead.
     #[test]
     fn a_contaminated_rung_is_a_harness_error_and_never_the_gateways_result() {
         assert_eq!(
@@ -5524,8 +4572,7 @@ mod contamination_tests {
         );
     }
 
-    /// The sentence has to carry BOTH concurrencies, because the impossibility is the relation
-    /// between them - either number alone reads like an ordinary failure.
+    /// Must carry both concurrencies: either number alone reads like an ordinary failure.
     #[test]
     fn the_contaminated_reason_names_the_rung_and_what_the_cell_had_already_carried() {
         let d = StreamStop::RigContaminated {
@@ -5544,9 +4591,8 @@ mod contamination_tests {
         );
     }
 
-    /* THE SETTLE IS PROPORTIONAL, FREE AT THE BOTTOM, AND CAPPED. Each of those is load-bearing: a
-    flat pause sized for c=8,192 would be pure schedule cost on the dozen small rungs every cell
-    walks through, and an uncapped one is a field sweep whose duration nobody predicted. */
+    // The settle is proportional, free at the bottom, and capped — each is load-bearing: a flat
+    // pause would waste time on small rungs, and an uncapped one has unpredictable duration.
     #[test]
     fn the_stream_settle_is_free_below_the_threshold_and_capped_above_it() {
         let ms = |c: u32| {
@@ -5595,11 +4641,8 @@ mod stream_error_kind_tests {
         }
     }
 
-    /* THE WHOLE POINT IS ATTRIBUTION, so the ordering inside `add` is load-bearing rather than
-    stylistic. A refused connection has no status and no frames; if frames were tested first,
-    every refused connection would be filed as "no frames" and the one distinction this type
-    exists to draw - the peer declining a connection vs the peer answering badly - would be
-    erased in exactly the case we need it. */
+    // The ordering inside `add` is load-bearing: testing frames before status would file every
+    // refused connection as "no frames", erasing the distinction this type exists to draw.
     #[test]
     fn each_error_is_filed_under_the_thing_that_actually_went_wrong() {
         let mut k = StreamErrorKinds::default();
@@ -5719,10 +4762,8 @@ mod stepdown_tests {
         }
     }
 
-    /* THE DEFECT THIS REPLACES, ON THE REAL NUMBERS. busbar proved every rung to 4,096, bisected to
-    6,176, could not confirm it, and halved to 3,088 - below a concurrency it had already carried
-    cleanly, discarding the whole bracket. A later run confirmed the true ceiling at 5,120, which
-    is inside the bracket halving threw away and nowhere near 3,088. */
+    // The defect this replaces: halving after a failed confirmation could step below a concurrency
+    // already proven clean, discarding the whole bracket the search had paid for.
     #[test]
     fn the_step_down_stays_inside_the_bracket_the_search_paid_for() {
         let next = next_rung(4096, 1, 6176);
@@ -5778,10 +4819,8 @@ mod stepdown_tests {
 mod gateway_recovery_tests {
     use super::*;
 
-    /* THE WHOLE POINT IS THAT THIS ONE IS THEIRS. A gateway that stops serving after an overload and
-    does not come back is a finding about the gateway, so filing it under HarnessError would be
-    the attribution error running in reverse - hiding a real gateway limitation behind our own
-    fault, which is just as dishonest as the inverse and rather more flattering. */
+    // A gateway that stops serving after overload and doesn't come back is the gateway's own
+    // finding — filing it under HarnessError would hide a real limitation behind our own fault.
     #[test]
     fn a_gateway_that_never_recovers_is_the_gateways_result() {
         assert_eq!(
@@ -5838,11 +4877,9 @@ mod gateway_recovery_tests {
 mod restart_attribution_tests {
     use super::*;
 
-    /* THE RESTART IS AN ATTRIBUTION TEST AND ITS TWO OUTCOMES BLAME OPPOSITE THINGS. Getting this
-    backwards is not a cosmetic error: "a restart fixed it" means the gateway was wedged, while
-    "a restart did not fix it" means a brand-new process still fails, which leaves our host as the
-    only thing that changed. The second is the flattering direction - it would let us print a
-    gateway limitation we caused - so it is the one worth a test. */
+    // The restart is an attribution test: its two outcomes blame opposite things. "Fixed it" means
+    // the gateway was wedged; "did not fix it" means a fresh process still fails, leaving the host
+    // as the only variable — the flattering direction, worth pinning with a test.
     fn stop_for(restart_cleared: bool, at: u32, proven: u32) -> StreamStop {
         if restart_cleared {
             StreamStop::GatewayDidNotRecover {
@@ -5880,22 +4917,13 @@ mod restart_attribution_tests {
     }
 }
 
-/* ── THE SEARCH SIMULATOR ─────────────────────────────────────────────────────────────────────────
-
-Every defect in the sustained-stream search this session was found by running fourteen EC2 boxes
-for hours and reading the wreckage: halving past the bracket, giving up with budget unspent, and
-filing a wedged gateway as a dirty rig. All three are defects in a PURE FUNCTION - pick a rung,
-measure, confirm by majority, step down, attribute - which needs no gateway, no mock, and no box
-to exercise. Using a twelve-hour field run as the test harness for that function is what made the
-bugs expensive and what made them take three rounds to find.
-
-This drives the REAL search (`sweep_streams_cell`) against synthetic gateways whose true ceiling is
-declared up front, so the assertions can be about correctness rather than plausibility: did the
-search find the ceiling it was told to find, and when it could not, did it say so honestly?
-
-The server models CAPACITY the way a gateway actually saturates - on concurrently-open lanes, not
-on accept order - so a window at c=N genuinely presents N simultaneous connections and the model
-decides what that does. */
+// ── The search simulator ─────────────────────────────────────────────────────────────────────────
+//
+// Drives the real search (`sweep_streams_cell`) against synthetic gateways with a declared true
+// ceiling, so assertions can check correctness (did it find the ceiling, and say so honestly when
+// it couldn't) rather than plausibility against a real field run. The server models capacity by
+// concurrently-open lanes, not accept order, so a window at c=N genuinely presents N simultaneous
+// connections.
 #[cfg(test)]
 mod search_simulator {
     use super::*;
@@ -5910,13 +4938,11 @@ mod search_simulator {
         /// Serves cleanly up to `cap`, refuses everything above it. The easy case, and the one a
         /// bisection should nail exactly.
         KnifeEdge { cap: usize },
-        /// Serves up to `cap`; past it, delivers a short stream instead of erroring - a DELIVERY
-        /// shortfall, which fails the gate without counting as an errored stream. plano's real
-        /// failures had zero errors and looked exactly like this.
+        /// Serves up to `cap`; past it, delivers a short stream instead of erroring — a delivery
+        /// shortfall, which fails the gate without counting as an errored stream.
         Shortfall { cap: usize },
         /// Serves up to `cap`, but once it has ever seen more than `wedge_at` concurrent lanes it
-        /// refuses everything from then on, permanently. aisix: seventeen consecutive failures
-        /// including rungs it had just carried.
+        /// refuses everything from then on, permanently.
         Wedge { cap: usize, wedge_at: usize },
     }
 
@@ -5932,12 +4958,8 @@ mod search_simulator {
                 let live = Arc::clone(&live);
                 let wedged = Arc::clone(&wedged);
                 std::thread::spawn(move || {
-                    /* COUNT THE LANE AS OPEN FOR AS LONG AS IT IS OPEN, AND ALWAYS PUT IT BACK.
-                    The first version decremented on each exit path by hand and leaked: after the
-                    c=16 rung, ~24 lanes were still counted live, so a c=2 window presented "26
-                    concurrent" to a gateway capped at 24 and was refused. The simulator wedged
-                    itself and every rung after c=16 failed - which looked exactly like a search
-                    defect and was not. A drop guard cannot leak, whatever the exit path. */
+                    // Drop guard, not manual decrement per exit path: a hand-rolled version leaked
+                    // and wedged the simulator itself, mimicking a search defect.
                     struct Lane(Arc<AtomicUsize>);
                     impl Drop for Lane {
                         fn drop(&mut self) {
@@ -5963,14 +4985,8 @@ mod search_simulator {
                     }
                     live.fetch_add(1, Ordering::SeqCst);
                     let _lane = Lane(Arc::clone(&live));
-                    /* LET THE WHOLE WINDOW ARRIVE BEFORE JUDGING IT. Deciding on the count at the
-                    instant each request lands measures arrival order, not concurrency: a fast
-                    lane completes and releases before its peers connect, so a window at c=64 was
-                    presenting ~40 simultaneous requests and passed on a gateway capped at 40.
-                    That made the harness's fidelity depend on scheduling - it passed alone and
-                    failed under a parallel test run, which is a fixture nobody can trust.
-                    Waiting a beat lets every lane of the window land, so the count is the
-                    window's real concurrency. */
+                    // Let the whole window arrive before judging it: deciding on arrival order
+                    // instead of waiting a beat would measure scheduling, not concurrency.
                     std::thread::sleep(std::time::Duration::from_millis(60));
                     let n = live.load(Ordering::SeqCst);
                     let (cap, short, wedge_at) = match model {
@@ -6018,30 +5034,19 @@ mod search_simulator {
 
     fn search(model: Model, lo: u32, hi: u32) -> CellStreams {
         let gw = sim_gateway(model);
-        // THE MOCK NEEDS ITS OWN SERVER. Pointing both legs at one address let the engine's probe and
-        // its direct-to-mock reference open lanes that the capacity model counted as load, so a
-        // window at c=8 presented far more than eight lanes to a gateway capped at 24 and the search
-        // walked down to nothing. The model must see the GATEWAY's lanes and only those.
+        // The mock needs its own server: sharing one address with the gateway would let the
+        // direct-to-mock reference's lanes count as gateway load in the capacity model.
         let mock = sim_gateway(Model::KnifeEdge { cap: usize::MAX });
         let cfg = super::tests::cfg_for(gw, mock);
         let id = CellId::new("openai", "openai");
         sweep_streams_cell(&cfg, &id, lo, hi)
     }
-    /* ── the assertions ──────────────────────────────────────────────────────────────────────────
-    Each names the real defect it would have caught. They are about CORRECTNESS - the ceiling is
-    declared, so "did it find it" is answerable - rather than about the output looking reasonable,
-    which is the bar that let three defects through. */
+    // ── the assertions ──────────────────────────────────────────────────────────────────────────
+    // Each checks correctness against a declared ceiling rather than plausibility of the output.
 
-    /* THE MODEL'S CEILING IS APPROXIMATE, AND THE ASSERTIONS SAY SO.
-    Capacity is decided on lanes in flight at the moment each request arrives, and a window's lanes
-    RAMP - the first has finished reading before the last has connected - so a window at c=26 may
-    never present 26 simultaneous requests to a gateway capped at 24, and passes. That slack is a
-    property of the harness, not of the search, and pretending otherwise would mean tuning the
-    search to satisfy a fixture.
-
-    So the bar is "within a quarter", which is loose enough to survive the ramp and far tighter
-    than any defect this exists to catch: halving past the bracket put busbar at 3,088 against a
-    true 5,120, and giving up early published nothing at all. A 2x error cannot hide in +-25%. */
+    // The model's ceiling is approximate (lane ramp means a window may not present its full
+    // concurrency simultaneously), so the bar is "within a quarter" — loose enough to survive that
+    // slack but tight enough that a 2x search error can't hide inside it.
     const SLACK: f64 = 1.25;
 
     /// The base case. A gateway with a hard ceiling must be measured at about that ceiling.
@@ -6063,10 +5068,8 @@ mod search_simulator {
         }
     }
 
-    /* THE HALVING DEFECT. busbar carried every rung to c=4,096, bisected to c=6,176, could not
-    confirm it, and halved to c=3,088 - BELOW a concurrency it had already carried, discarding the
-    whole bracket. A search that does that lands far under the true ceiling, which is exactly what
-    this asserts against: the answer must be the ceiling, not something under the floor it proved. */
+    // The halving defect: a search that discards its bracket on step-down can land far under the
+    // true ceiling. Answer must be at/above what was already proven, not below.
     #[test]
     fn the_search_never_lands_below_a_concurrency_it_already_carried() {
         for cap in [12usize, 20, 33] {
@@ -6091,9 +5094,8 @@ mod search_simulator {
         }
     }
 
-    /* THE PREMATURE-TERMINATION DEFECT. plano's stepped rung failed one window and the search
-    stopped, leaving every concurrency between it and the carried rung untried. A gateway with a
-    real, findable ceiling must not come back empty. */
+    // The premature-termination defect: a gateway with a real, findable ceiling must not come back
+    // empty just because one stepped rung failed a single window.
     #[test]
     fn a_findable_ceiling_is_never_published_as_nothing() {
         for cap in [9usize, 17, 40] {
@@ -6106,8 +5108,8 @@ mod search_simulator {
         }
     }
 
-    /// A delivery shortfall fails the gate with ZERO errors - plano's real failures looked exactly
-    /// like this, and a search that only understands errored streams would climb straight past it.
+    /// A delivery shortfall fails the gate with zero errors; a search that only understands errored
+    /// streams would climb straight past it.
     #[test]
     fn a_delivery_shortfall_bounds_the_ceiling_just_like_an_error_does() {
         let r = search(Model::Shortfall { cap: 16 }, 1, 64);
@@ -6122,9 +5124,8 @@ mod search_simulator {
         }
     }
 
-    /* THE WEDGE. Once the gateway stops serving, no number is knowable - so the only correct
-    outcomes are "no number" or "a number at or below the true cap". What must NEVER happen is a
-    number ABOVE the cap, which would be the search publishing the wedge as capacity. */
+    // The wedge: once the gateway stops serving, the only correct outcomes are no number, or a
+    // number at or below the true cap. A number above the cap would publish the wedge as capacity.
     #[test]
     fn a_wedged_gateway_never_yields_a_number_above_its_real_ceiling() {
         let r = search(

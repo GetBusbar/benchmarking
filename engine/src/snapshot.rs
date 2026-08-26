@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// DURABLE, ATOMIC PUBLICATION OF A RESULT SNAPSHOT.
+// Durable, atomic publication of a result snapshot (record.rs describes the artifact's shape). Never
+// a half-written file, never a rename lost to a self-terminating box dying mid-write, never a worse
+// result silently replacing a better one just because it ran more recently.
 //
-// record.rs describes the shape of the artifact. This module writes it to disk the way a public
-// board's only copy of the numbers deserves: never a half-written file at the target path, never a
-// rename that vanishes the moment before a self-terminating cloud box dies, and never a worse result
-// quietly replacing a better one just because it ran more recently.
-//
-// Two files come out of one call: the per-gateway CURRENT file (read by whatever renders the board
-// today) and a timestamped HISTORICAL copy (read by nothing today, kept so "what did this gateway look
-// like on that day" is answerable later). Both live in the same directory the caller hands in; where
-// that directory sits relative to results/matrix vs results/snapshots is the caller's concern, not
-// this module's.
+// One call writes two files: the per-gateway CURRENT file (what the board renders today) and a
+// timestamped HISTORICAL copy (kept for "what did this gateway look like on that day"). Both live in
+// the directory the caller passes in.
 
 use crate::record::{Matrix, ResultSnapshot, Served};
 use std::collections::BTreeSet;
@@ -51,14 +46,9 @@ pub enum SnapshotError {
         what: &'static str,
         raw: String,
     },
-    /// A header this gateway's manifest declares could not be resolved, so the run would have measured
-    /// it with NO headers at all.
-    ///
-    /// Refused rather than tolerated, because the alternative is the worst outcome this harness can
-    /// produce: every cell fails to serve, the board publishes `served: false`, and a reader concludes
-    /// the GATEWAY does not work when in fact the harness dropped its authentication. `validate()`
-    /// checks headers for shell-style `$` but never exercises `{...}` substitution, so a manifest with
-    /// an unknown placeholder passes the gate and reaches the measurement path.
+    /// A header this gateway's manifest declares could not be resolved. Refused rather than run with
+    /// no headers, since that would make every cell fail to serve and a reader would blame the
+    /// gateway rather than the harness's dropped auth.
     UnresolvableHeader {
         detail: String,
     },
@@ -101,21 +91,17 @@ impl std::error::Error for SnapshotError {
     }
 }
 
-/// How many (ingress, egress) cells this matrix actually served. Counted over the full 6x6 grid
-/// (`upstreams.*.cells`) when present, since that is the sole numeric source (record.rs's own words);
-/// the top-level `cells` map is only a v1-compat mirror of one egress row and would undercount a
-/// gateway configured for more than one. Falls back to the compat row only for a matrix that never
-/// carried the full grid at all, so an old-shaped snapshot still has a meaningful count.
+/// How many (egress, ingress) cells this matrix actually served. Uses the full grid
+/// (`upstreams.*.cells`) when present; falls back to the top-level `cells` map only for an old-shaped
+/// snapshot that never carried the full grid (that map would otherwise undercount).
 #[cfg(test)]
 fn served_cell_count(matrix: &Matrix) -> usize {
     served_cell_keys(matrix).len()
 }
 
-/// The identity of every cell this matrix actually served, as (egress, ingress) keys. Grid cells
-/// (`upstreams.*.cells`) are keyed by their real egress and ingress; the v1-compat top-level `cells`
-/// row has no egress dimension of its own, so it is keyed by an empty egress alongside the ingress -
-/// which is also why keys from the two branches are never compared against each other (see the
-/// `comparable` check in `write_snapshot`).
+/// The identity of every cell this matrix actually served, as (egress, ingress) keys. The v1-compat
+/// top-level `cells` row has no egress dimension, so it's keyed by an empty egress — which is why the
+/// two branches' keys are never compared against each other (see `comparable` in `write_snapshot`).
 fn served_cell_keys(matrix: &Matrix) -> BTreeSet<(String, String)> {
     if matrix.upstreams.is_empty() {
         matrix
@@ -140,12 +126,9 @@ fn served_cell_keys(matrix: &Matrix) -> BTreeSet<(String, String)> {
 
 /// Write `bytes` to `target` without ever exposing a partial file at that path.
 ///
-/// Temp-then-rename, both fsynced: the temp file is written and fsynced FIRST (a rename only makes the
-/// directory entry's name change durable, not the bytes sitting behind it), then renamed over the
-/// target (atomic on the same filesystem, which it is: the temp file lives in `dir`, the target's own
-/// parent), then the directory itself is fsynced (a rename's directory-entry update is not guaranteed
-/// durable on its own, and these runs die on a hard self-termination timer, so "renamed, then the box
-/// died a moment later" is a real window, not a theoretical one).
+/// Temp file written and fsynced first, then renamed over the target (atomic — same filesystem), then
+/// the directory itself fsynced (a rename's directory-entry update isn't durable on its own, and these
+/// runs die on a hard self-termination timer, so that window is real).
 fn atomic_write(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), SnapshotError> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -195,10 +178,9 @@ fn atomic_write(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), SnapshotE
     Ok(())
 }
 
-/// Read the existing current-file snapshot at `path`, if any. `Ok(None)` means there is nothing there
-/// yet (the ordinary first-run case); any other read or parse failure is reported, never swallowed,
-/// because a corrupt current file silently treated as "absent" would let the promote guard wave a
-/// worse result straight through.
+/// Read the existing current-file snapshot at `path`, if any. `Ok(None)` means genuinely absent
+/// (first run); other read/parse failures are reported rather than treated as absent, since that
+/// would let the promote guard wave a worse result through.
 fn read_existing(path: &Path) -> Result<Option<ResultSnapshot>, SnapshotError> {
     match fs::read(path) {
         Ok(bytes) => {
@@ -216,12 +198,10 @@ fn read_existing(path: &Path) -> Result<Option<ResultSnapshot>, SnapshotError> {
 
 /// A filename component the caller supplied, made safe to join onto a directory.
 ///
-/// `PathBuf::join` has a sharp edge: an ABSOLUTE argument replaces the base entirely, and `..`
-/// traverses out of it. Both the gateway name and the timestamp reach the path from data, so an
-/// unvalidated one could write outside the results tree while the call still reports success and
-/// looks like a normal publish in the log. Anything that is not a plain, safe component is rejected
-/// rather than sanitised: silently rewriting a name would publish one gateway's result under
-/// another's, which is worse than refusing.
+/// `PathBuf::join` replaces the base entirely on an absolute argument and `..` traverses out of it,
+/// so an unvalidated gateway name or timestamp could write outside the results tree while reporting
+/// success. Rejected rather than sanitised: silently rewriting a name could publish one gateway's
+/// result under another's.
 fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError> {
     let ok = !raw.is_empty()
         && raw.len() <= 128
@@ -242,26 +222,17 @@ fn safe_component(raw: &str, what: &'static str) -> Result<String, SnapshotError
 }
 
 /// Write `snapshot` durably into `dir`: the per-gateway current file (`<gateway>.json`) and a
-/// timestamped historical copy (`result_<gateway>_<measured_at, ':' -> '-'>.json`), both by
-/// temp-then-rename-then-fsync (see `atomic_write`).
+/// timestamped historical copy (`result_<gateway>_<measured_at, ':' -> '-'>.json`), both via
+/// `atomic_write`.
 ///
-/// If a current file already exists and `snapshot` served strictly fewer cells, this returns
-/// `SnapshotError::PromoteGuard` and writes NEITHER file: a rewrite of the promote guard's own
-/// rejection into a historical copy would still be publishing the worse result, just under a
-/// different name.
+/// If a current file already exists and `snapshot` served strictly fewer cells, returns
+/// `SnapshotError::PromoteGuard` and writes neither file.
 ///
-/// EACH FILE IS ATOMIC; THE PAIR IS NOT, and it cannot be without a two-phase commit this module has
-/// no reason to grow. So the ORDER is the guarantee instead: the historical copy lands first, the
-/// current file second. That makes the one observable in-between state - a box that dies between the
-/// two renames, which these self-terminating runs really do - "a historical copy with no current
-/// file", which is a run whose result is on disk and simply not promoted yet, and which the next run
-/// rewrites in full. The other order produced the opposite state: a promoted current file, read by
-/// the board, with no historical copy behind it, so the day's number existed with nothing to answer
-/// "what did this gateway look like then" and nothing anywhere recording that a copy was missing.
-///
-/// A failure on the SECOND write is therefore reported with both files' fate implied by the error's
-/// path: the historical copy is already durable, the current file is not, and the caller sees an
-/// `Io` error naming the current path.
+/// Each file is atomic; the pair is not. So order is the guarantee: historical is written first,
+/// current second. A box dying between the two renames then leaves "historical with no current" (a
+/// result on disk, simply not yet promoted, rewritten by the next run) rather than "current with no
+/// historical" (a promoted, board-visible result with no history behind it and no record it's
+/// missing).
 pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, SnapshotError> {
     let current_path = dir.join(format!(
         "{}.json",
@@ -272,11 +243,9 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
         let existing_keys = served_cell_keys(&existing.matrix);
         let incoming_keys = served_cell_keys(&snapshot.matrix);
 
-        // Cell identity is only comparable when both snapshots come from the same branch of the
-        // served-cell walk: the grid keys by (egress, ingress), the v1-compat row by ingress alone
-        // (empty egress). Comparing keys across that shape boundary would read a legitimate v1 file
-        // on disk / v2 run incoming as losing every cell and wedge promotion for that directory
-        // forever, so a shape mismatch keeps the old aggregate-count rule instead.
+        // Per-cell keys are only comparable within the same branch (grid vs v1-compat row); a shape
+        // mismatch would read a legitimate v1-on-disk/v2-incoming pair as losing every cell, so it
+        // falls back to the aggregate-count rule instead.
         let comparable =
             existing.matrix.upstreams.is_empty() == snapshot.matrix.upstreams.is_empty();
         let regressed = if comparable {
@@ -292,9 +261,8 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
         }
     }
 
-    // The historical filename's timestamp comes from the snapshot's OWN measured_at, not the clock at
-    // write time: re-writing the same measurement later (a retry, a re-publish) must not invent a new
-    // measurement instant just because the write happened again.
+    // Timestamp comes from the snapshot's own measured_at, not the write-time clock, so a retry or
+    // re-publish doesn't invent a new measurement instant.
     let ts_safe = snapshot.measured_at.replace(':', "-");
     let historical_path = dir.join(format!(
         "result_{}_{}.json",
@@ -306,8 +274,7 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
     body.push('\n');
     let bytes = body.into_bytes();
 
-    // HISTORICAL FIRST, CURRENT SECOND. See this function's header: the pair is not atomic as a pair,
-    // so the order chooses which half-written state a crash can leave behind.
+    // Historical first, current second — see the function doc comment for why the order matters.
     atomic_write(dir, &historical_path, &bytes)?;
     atomic_write(dir, &current_path, &bytes)?;
 
@@ -321,9 +288,6 @@ pub fn write_snapshot(dir: &Path, snapshot: &ResultSnapshot) -> Result<Paths, Sn
 mod tests {
     use super::*;
 
-    // A name that is not a safe path component is REFUSED, not sanitised. PathBuf::join replaces the
-    // base entirely when handed an absolute path, and traverses out of it on "..", so an unvalidated
-    // gateway name or timestamp could write outside the results tree while the call reported success.
     #[test]
     fn a_name_that_would_escape_the_directory_is_refused() {
         for bad in [
@@ -386,9 +350,9 @@ mod tests {
         }
     }
 
-    /// A cell that was probed and answered with a status string rather than `true`. The grid always
-    /// enumerates every cell (`run::run_grid`, the live walker), so this — not a missing row — is
-    /// what a lost capability actually looks like in a snapshot.
+    /// A cell that was probed and answered with a status string rather than `true`. This — not a
+    /// missing row, since the grid always enumerates every cell — is what a lost capability looks
+    /// like in a snapshot.
     fn unserved_cell(status: &str) -> Cell {
         Cell {
             served: Served::Status(status.to_string()),
@@ -397,8 +361,8 @@ mod tests {
     }
 
     /// `served` cells that answered true, plus `unserved` cells that were probed and did not. Total
-    /// cell count is `served + unserved`, so a caller can hold the GRID SIZE fixed and vary only how
-    /// many of those cells were actually served.
+    /// cell count is `served + unserved`, so a caller can hold grid size fixed and vary only how many
+    /// answered true.
     fn matrix_of(gateway: &str, measured_at: &str, served: usize, unserved: usize) -> Matrix {
         let mut cells = HashMap::new();
         for i in 0..served {
@@ -554,20 +518,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // THE PAIR IS NOT ATOMIC AS A PAIR, SO THE ORDER IS THE GUARANTEE.
-    //
-    // Each file is written atomically, but two atomic writes are not one transaction: a box that dies
-    // between them - which these self-terminating runs really do - leaves one of the two behind. With
-    // the current file written first, that state was "a promoted result the board reads, with no
-    // historical copy behind it", so the day's numbers existed with nothing able to answer "what did
-    // this gateway look like then" and nothing recording that a copy was missing. Historical first
-    // inverts it into the harmless half: a copy on disk, simply not promoted yet, which the next run
-    // rewrites in full.
-    //
-    // Observed from the side the test can drive: make the HISTORICAL write fail (a directory sitting
-    // at its path cannot be renamed over) and assert nothing was promoted. Under the old order the
-    // current file was already on disk by then - the board reading a result with no history behind it,
-    // and no error anywhere the board could see.
+    // Regression test for the write-order guarantee (see write_snapshot's doc comment): forces the
+    // historical write to fail (a directory sitting at its path can't be renamed over) and asserts
+    // nothing was promoted to current.
     #[test]
     fn a_result_is_never_promoted_before_its_historical_copy_is_durable() {
         let dir = unique_dir("pair-order");
@@ -656,15 +609,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // THE CASE THE GRID ACTUALLY PRODUCES, and the one the two tests around this one cannot see.
-    //
-    // `run::run_grid` - the LIVE walker, called from suite.rs and bin/otb.rs - enumerates every cell
-    // every time, so a real re-run never changes the number of cells: it changes how many of them
-    // answered `true`. The neighbouring guard tests vary the cell COUNT (4 vs 1) with every cell
-    // served, which a real snapshot pair cannot do, so they cannot exercise `served_cell_count`'s
-    // `Served::Bool(true)` filter: this test holds the grid size fixed at 4 and varies only how many
-    // of those cells answered true, so a filter dropped in favor of a bare `.count()` would compare
-    // 4 against 4 and PROMOTE a run that lost three quarters of its capability.
+    // The case a real re-run actually produces: `run::run_grid` enumerates every cell every time, so
+    // grid size never changes between writes, only how many cells answer `true`. This test holds grid
+    // size fixed at 4 (unlike the neighboring tests, which vary cell count) so it actually exercises
+    // `served_cell_count`'s `Served::Bool(true)` filter — dropping that filter for a bare `.count()`
+    // would compare 4 against 4 here and wrongly promote.
     #[test]
     fn promote_guard_fires_when_the_grid_is_the_same_size_but_fewer_cells_served() {
         let dir = unique_dir("guard-same-size");
@@ -710,9 +659,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // The v1-compat branch of `served_cell_count` (the top-level `cells` map, used only by a matrix
-    // that never carried the full grid) has the same filter and needs the same hold: every fixture
-    // reaching it was all-Bool(true), so replacing its filter with a bare `.count()` was invisible.
+    // The v1-compat branch (top-level `cells` map) has the same filter and needs the same coverage:
+    // prior fixtures reaching it were all-Bool(true), so a bare `.count()` would have been invisible.
     #[test]
     fn the_v1_compat_row_also_counts_only_cells_that_answered_true() {
         let mut m = matrix_of("gw", "2026-07-25T08:00:00Z", 0, 0);
@@ -749,10 +697,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // The guard only compares the AGGREGATE served count, so a run that loses a previously-measured
-    // cell while gaining a different one slips through with `incoming_served >= existing_served` and
-    // silently overwrites the good measurement for the lost cell. Same grid size (two cells, "a" and
-    // "b"), same served count (1) both times, but WHICH cell answered true flips between writes.
+    // A run that loses one previously-served cell while gaining a different one keeps the aggregate
+    // count unchanged; the guard must still catch it via per-cell comparison. Same two cells ("a",
+    // "b"), same served count (1), but which one answered true flips between writes.
     #[test]
     fn promote_guard_fires_when_a_previously_served_cell_is_lost_even_if_another_is_gained() {
         let dir = unique_dir("guard-per-cell");

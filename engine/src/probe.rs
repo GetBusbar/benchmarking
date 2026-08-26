@@ -3,11 +3,9 @@
 //
 // Classifying what a cell probe OBSERVED, and deciding how hard to try.
 //
-// FAIRNESS. `Observation` carries only what the rig saw, no cell identity and no capability claim,
-// and `transient_budget()` takes no arguments at all, so neither a gateway's declaration nor a
-// cell's identity can reach the verdict or the measurement effort spent earning it, even by
-// accident: two cells that differ only in what the gateway claims about them must classify
-// identically and get the same number of attempts.
+// FAIRNESS: `Observation` carries no cell identity and no capability claim, and
+// `transient_budget()` takes no arguments, so neither a gateway's declaration nor a cell's
+// identity can influence the verdict or the effort spent earning it.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,16 +24,12 @@ pub struct Observation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// The gateway answered, deterministically, that this pairing does not exist at all (a
-    /// 404/501-shaped response). Grey on the board, never a red: no gateway is failed for a
-    /// pairing it never claimed to serve.
+    /// A deterministic 404/501-shaped response: the pairing does not exist. Grey on the board,
+    /// never a red - no gateway is failed for a pairing it never claimed to serve.
     NotConfigured,
-    /// The gateway answered, deterministically, but declined the request for a reason OTHER than
-    /// "this route does not exist": an auth rejection, a malformed-request response, a server
-    /// error. The pairing is real; this specific attempt failed. Published as a genuine defect,
-    /// not folded into the same grey "not configured" a truly absent route gets - collapsing the
-    /// two let a gateway that supports a pairing but rejects the probe (wrong auth shape, a bug on
-    /// its own error path) read identically to one that never built the route at all.
+    /// A deterministic response other than "route does not exist" (auth rejection, malformed
+    /// request, server error). Kept distinct from `NotConfigured` so a gateway that supports a
+    /// pairing but rejects the probe reads differently from one that never built the route.
     Failed,
     /// The harness could not get a fair reading. A statement about the RIG, not the gateway.
     NotVerified,
@@ -60,42 +54,21 @@ pub const fn transient_budget() -> (u32, u32) {
 const TRANSIENT_RETRIES: u32 = 3; // total attempts on ANY cell
 const TRANSIENT_PAUSE_S: u32 = 30; // seconds between them, on ANY cell
 
-/// Is this status one a RETRY could plausibly change?
-///
-/// The verdict below is documented as "the failure persisted across the whole budget", and
-/// `transient_budget()` exists to fund exactly that. This is the predicate that decides which
-/// statuses are worth spending it on. A 503 says "temporarily unavailable" in words; grading one on
-/// a single observation records a moment as a capability.
-///
-/// It matters because the harness MAKES this condition. Cells run back to back with no settle, and
-/// the last metric before the next cell's probe is a heavy load, so a gateway with admission control
-/// can still be shedding when we ask it whether it supports the next pairing. In the 2026-07-28
-/// field run busbar answered 503 on 26 of 36 cells and was recorded as not serving them; the same
-/// gateway had served all 36 the day before. Every egress lane still answered under openai ingress,
-/// which is what proves the lanes were fine and the moment was not.
-///
-/// 404 and 501 are excluded deliberately: those are the gateway stating the route does not exist,
-/// which is an answer, not a hiccup, and `NotConfigured` already carries it without spending a
-/// budget. 4xx that mean "your request was wrong" are equally deterministic - retrying an argument
-/// the gateway already rejected on its merits just spends box-time to hear it again.
+/// Is this status one a RETRY could plausibly change? Cells run back to back with no settle time,
+/// so a gateway can still be shedding load from the previous cell when probed; grading a single
+/// 503 as a capability would record a moment, not a fact. 404/501 are excluded because they are
+/// the gateway stating the route does not exist (`NotConfigured` already carries that), and other
+/// 4xx are excluded because they're deterministic - retrying gets the same answer.
 pub const fn status_is_transient(status: u16) -> bool {
     matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 507 | 509)
 }
 
 /// The verdict for "probed it, the failure persisted across the whole budget".
 ///
-/// A real HTTP status means the gateway accepted the connection, routed the request and produced a
-/// response of its own; a verifiably-recording mock means the rig did not go away underneath it.
-/// Reproduced across the budget, that is a deterministic application-level rejection: an
-/// observation, and the most informative one available. Calling it `not_verified` would throw away
-/// the status evidence and assert something false about our own ability to read the cell.
-///
-/// NotConfigured vs Failed is decided from the status ALONE, never from what a gateway declares it
-/// supports (that would violate the fairness rule this module's header states): 404 and 501 are the
-/// HTTP-standard ways a server says "this route/method is not implemented at all", so those two
-/// mean the pairing itself is absent. Every other real status (400, 401, 403, 422, 429, 500, 502,
-/// 503, ...) means the gateway recognised the request enough to evaluate and decline it for some
-/// OTHER reason - the pairing is real, and this attempt is what failed.
+/// NotConfigured vs Failed is decided from the status ALONE, never from what a gateway declares
+/// it supports (per the fairness rule in this module's header): 404/501 mean the route is not
+/// implemented at all; any other real status means the gateway evaluated and declined the request
+/// for some other reason, so the pairing is real and this attempt is what failed.
 pub fn persistent_transient_verdict(obs: Observation) -> Verdict {
     match (obs.status, obs.mock_healthy) {
         // No HTTP answer at all: the gateway may never have been reached.
@@ -198,13 +171,8 @@ mod tests {
         assert_eq!(Verdict::NotVerified.token(), "not_verified");
     }
 
-    // WHICH STATUSES ARE WORTH THE BUDGET.
-    //
-    // The verdict claims the failure "persisted across the whole budget". That claim is only true
-    // for statuses a retry could plausibly change, and false for the ones the gateway answered on
-    // the merits. 503 is the case that cost a whole board: busbar answered it on 26 of 36 cells in
-    // the 2026-07-28 field run, every one was published as a red, and the same gateway had served
-    // all 36 the day before.
+    // Which statuses are worth the retry budget: only ones a retry could plausibly change, not
+    // ones the gateway already answered on the merits.
     #[test]
     fn a_status_that_says_temporarily_is_retried_and_a_settled_answer_is_not() {
         // "Temporarily unavailable", "too many requests", "timed out" - all moments, not capabilities.

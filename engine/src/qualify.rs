@@ -3,17 +3,14 @@
 //
 // Box qualification: deciding whether a cloud box is fit to measure on before it measures anything.
 //
-// A contaminated box - one whose peak throughput has collapsed - must not run a full 6x6 and have the
+// A contaminated box (one whose peak throughput has collapsed) must not run a full 6x6 and have the
 // result published as a gateway regression. It replays a known load with no gateway in the path and
-// compares the throughput against a rolling baseline (`PEAK_DRIFT_PCT`), and that verdict is published
-// as `rig.box_qualify` inside the snapshot.
+// compares throughput against a rolling baseline (`PEAK_DRIFT_PCT`); the verdict publishes as
+// `rig.box_qualify` in the snapshot.
 //
-// ONE STAGE, NOT TWO. This header used to describe a stage 1 that compared the box's gateway-free
-// LATENCY FLOOR against its own baseline, ahead of the throughput stage. That stage is not wired:
-// `FLOOR_DRIFT_PCT` below appears nowhere outside its own definition and this module's tests, and
-// `Sense::LowerIsBetter` exists only to serve it. The machinery is kept because the throughput stage
-// shares `judge`, and a latency stage would be a caller away - but a reader must not be told two
-// things guard the box when one does.
+// Only this one stage is wired. `FLOOR_DRIFT_PCT` and `Sense::LowerIsBetter` exist to support a
+// latency-floor stage that would share `judge`, but nothing calls it yet — a reader must not assume
+// two things guard the box when one does.
 
 use crate::measurement::{Absent, Measurement};
 use serde::{Deserialize, Serialize};
@@ -73,14 +70,12 @@ impl Outcome {
     }
 }
 
-/// Which direction of deviation is the BAD one.
+/// Which direction of deviation is the bad one.
 ///
-/// THE BANDS ARE ONE-SIDED, and that is deliberate rather than an oversight to tidy up. A box cannot
-/// randomly get faster: contention, throttling and noisy neighbours only ever ADD latency and REMOVE
-/// throughput. A floor that beats its baseline is the box showing its true clean-hardware speed, and
-/// it implies the BASELINE was the noisy measurement rather than this run. Failing it would terminate
-/// healthy boxes, burn the replacement budget, and eventually skip the gateway entirely. The absolute
-/// envelope, which IS two-sided, is what bounds an absurd improvement.
+/// The bands are deliberately one-sided: a box cannot randomly get faster (contention/throttling/
+/// noisy neighbours only ever add latency and remove throughput), so a run beating its baseline means
+/// the baseline was the noisy one, not this run. Failing it would terminate healthy boxes. The
+/// absolute envelope (elsewhere) is what bounds an absurd improvement instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sense {
     /// Higher is worse (p99 latency): a POSITIVE drift is the regression.
@@ -123,16 +118,9 @@ pub fn judge(
     band_pct: f64,
     sense: Sense,
 ) -> (Outcome, Measurement<f64>) {
-    /* PRESENT IS NOT THE SAME AS USABLE. This screened `observed` for presence only, so a
-    `Measured(NaN)` - a value this crate constructs directly - passed straight through, reached
-    `drift_pct`, tripped its `!observed.is_finite()` arm, and came back `None`. `judge` then
-    reported the ONE thing that branch is allowed to mean: "baseline is not a usable number",
-    blaming a baseline that was perfectly fine for a broken observation.
-
-    And it did so as `Skipped`, which means the gate does not fire. A qualification check that
-    silently declines to run on a NaN observation is worse than a wrong reason: the box passes.
-    A non-finite observation is exactly "the stage produced no usable observation", so it takes
-    that branch, with that outcome. */
+    // Presence isn't the same as usable: a `Measured(NaN)` observation must fail the gate outright,
+    // not fall through to `drift_pct` and get reported as an unusable baseline (which would blame the
+    // wrong side and let the box pass via `Skipped`).
     let Some(&obs) = observed.value().filter(|v| v.is_finite()) else {
         return (
             Outcome::Fail,
@@ -149,10 +137,8 @@ pub fn judge(
         );
     };
     match drift_pct(obs, base) {
-        // A gate must never fail on a value it never obtained: an unusable baseline means this
-        // particular check does not fire, which is not the same as the observation being unmeasured.
-        // Now unambiguous: `obs` is finite by construction above, so the only way `drift_pct`
-        // declines is an unusable BASELINE, which is what this says.
+        // `obs` is finite by construction above, so the only way `drift_pct` declines here is an
+        // unusable baseline — unambiguous, unlike the observation-absent case above.
         None => (
             Outcome::Skipped,
             Measurement::absent_because(Absent::NotMeasured, "baseline is not a usable number"),
@@ -168,20 +154,15 @@ pub fn judge(
     }
 }
 
-/// Rolling median of the baseline candidates. A single wild run must not own the baseline, which is
-/// why this is a median and not the last value or a mean.
+/// Rolling median of the baseline candidates. A single wild run must not own the baseline, hence a
+/// median rather than the last value or a mean.
 ///
-/// DELEGATED RATHER THAN REPEATED. This sorted and took the middle itself, using the same
-/// `partial_cmp(b).unwrap_or(Equal)` comparator that made `stats::median` and `stats::percentile`
-/// return an ARRIVAL-ORDER-DEPENDENT answer on a slice containing NaN. It was safe only because of
-/// the `retain(is_finite)` on the line above - a guard this copy happened to have and the others did
-/// not. `suite::steady_state` was the same statistic written a third time, and it had no such guard.
+/// Delegates to `stats::median` rather than sorting locally, so the NaN-safe comparator fix lives in
+/// one place instead of being duplicated (and possibly missed) at each call site.
 ///
-/// One statistic, one implementation: a guard added to the shared one now protects every caller,
-/// which is exactly what the three-way duplication prevented. The `retain` stays because it is a
-/// DIFFERENT rule from the shared one - qualification history legitimately accumulates non-finite
-/// entries from old or partial runs and drops them, where a non-finite LATENCY sample means the rig
-/// malfunctioned and must refuse. Dropping bad history is not the same act as refusing a bad window.
+/// The `retain` here is a different rule from `stats::median`'s own refusal: qualification history
+/// legitimately accumulates non-finite entries from old/partial runs and drops them silently, whereas
+/// a non-finite *latency sample* means the rig malfunctioned and must be refused, not dropped.
 pub fn rolling_baseline(mut candidates: Vec<f64>) -> Measurement<f64> {
     candidates.retain(|v| v.is_finite());
     if candidates.is_empty() {
@@ -249,13 +230,10 @@ mod tests {
         assert_eq!(drift.copied(), None);
     }
 
-    // The bands are one-sided: a box cannot randomly get faster, since contention only ever adds
-    // latency and removes throughput. A floor that beats its baseline means the BASELINE was the
-    // noisy measurement, and failing it would terminate healthy boxes and burn the replacement
-    // budget.
+    // The bands are one-sided: an improvement over baseline means the baseline was noisy, not the box.
     #[test]
     fn an_improvement_never_fails_the_gate() {
-        // Latency: 10% FASTER than baseline, far outside a 4% band, and still a pass.
+        // Latency: 10% faster than baseline, far outside a 4% band, and still a pass.
         let (o, d) = judge(
             Measurement::Measured(90.0),
             Measurement::Measured(100.0),
@@ -376,9 +354,9 @@ mod tests {
         assert_eq!(Outcome::Skipped.token(), "skip");
     }
 
-    // Every token this engine PUBLISHES must be one it can read back, or the baseline filter that
-    // reads outcomes off disk would treat a real verdict as unrecognised. `Skipped` is the one that
-    // catches a serde-derived round trip: it publishes as "skip", not "skipped".
+    // Every published token must read back, or the baseline filter reading outcomes off disk would
+    // treat a real verdict as unrecognised. `Skipped` catches a naive serde round trip: it publishes
+    // as "skip", not "skipped".
     #[test]
     fn every_published_token_reads_back_as_the_outcome_that_wrote_it() {
         for o in [
@@ -407,10 +385,8 @@ mod tests {
 mod nonfinite_observation_tests {
     use super::*;
 
-    /* A NaN OBSERVATION MUST FAIL THE GATE, NOT SKIP IT. `judge` screened `observed` for presence
-    only, so `Measured(NaN)` reached `drift_pct`, came back `None`, and was reported as
-    "baseline is not a usable number" with outcome `Skipped` - blaming a healthy baseline, and
-    letting the box qualify on a measurement that does not exist. */
+    // A NaN observation must fail the gate, not skip it — a `Skipped` outcome would blame a healthy
+    // baseline and let the box qualify on a measurement that doesn't exist.
     #[test]
     fn a_non_finite_observation_fails_and_does_not_blame_the_baseline() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -433,7 +409,7 @@ mod nonfinite_observation_tests {
         }
     }
 
-    /// And a genuinely unusable BASELINE must still read as one, or the fix has just swapped the lie.
+    /// A genuinely unusable baseline must still read as a baseline problem.
     #[test]
     fn an_unusable_baseline_still_reads_as_a_baseline_problem() {
         let (outcome, m) = judge(

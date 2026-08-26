@@ -3,27 +3,19 @@
 //
 // A gateway manifest, as DATA.
 //
-// Identity is declared ONCE, not spelled out separately per reader: a manifest that named its
-// container or process pattern once per hook (once for RSS, once for HWM, once for stop) could drift
-// so RSS reads one process while HWM reads that process and every descendant, publishing two
-// different populations side by side for the same gateway - a gateway that forks workers would have
-// its peak inflated relative to its idle by whatever its children weighed. Every reader deriving
-// from one declaration removes that class of bug rather than merely guarding against it.
+// Identity is declared ONCE, not spelled out separately per reader (RSS, HWM, stop). If each hook
+// named its own container/process pattern they could drift — e.g. RSS reading one process while HWM
+// sums it plus its children — publishing two different populations for the same gateway.
 
 use serde::{Deserialize, Serialize};
 
 /// How the gateway runs, and therefore how its process tree is found. This is the single declaration
 /// every memory reader and the stop path derive from.
 /* AN UNKNOWN KEY IS A SILENT NO-OP, AND THAT COSTS A RUN.
-`Runtime::Docker` has no `image` field - the image lives on `launch` - but serde ignored unknown
-keys, so a `runtime.image` written into a manifest parsed cleanly, was read by nothing, and
-changed nothing. On 2026-08-02 that produced a box running getbusbar/busbar:1.4.1 for 25 minutes
-under the gateway key `busbar-150`, which would have published 1.4.1's numbers in a row labelled
-1.5.0 and shown two columns of the same binary as if they were a version comparison. Nothing in
-the harness objected, because from serde's point of view nothing was wrong.
-
-A manifest field nobody reads is either a typo or a stale key, and both should fail at load where
-the fix is cheap - not at publish, where the evidence is a box that no longer exists. */
+`Runtime::Docker` has no `image` field (the image lives on `launch`); without `deny_unknown_fields`
+a stray `runtime.image` parses cleanly, is read by nothing, and silently changes nothing — a box
+could run the wrong image version under a mislabelled run. A field nobody reads is a typo or a
+stale key, and both should fail at load where the fix is cheap, not at publish. */
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Runtime {
@@ -33,15 +25,12 @@ pub enum Runtime {
         container: String,
         /// THE RUN THAT OWNS THIS CONTAINER, appended to the declared name to form the real one.
         ///
-        /// A container's `--name` used to be the declared name alone, which is the same string on
-        /// every run of that gateway on that box. Two overlapping runs then name ONE container: the
-        /// second run's `docker run` collides, and its retry loop's `stop()` is `docker rm -f` on
-        /// that shared name, which deletes the FIRST run's container in the middle of its
-        /// measurement. Scoping the name means a run can only ever remove its own.
+        /// Without this, `--name` is the declared name alone — identical across runs of the same
+        /// gateway on the same box. Two overlapping runs would then collide on one container name,
+        /// and a retry's `docker rm -f` could delete the other run's container mid-measurement.
         ///
-        /// Not in any manifest and never serialized back into one: it is assigned per invocation
-        /// (`Runtime::scoped_to_run`), the same way run-on-ec2.sh tags the boxes it launched with
-        /// `run=$RUN_ID` so its teardown filters to its own and leaves a peer run's alone.
+        /// Not in any manifest, never serialized back: assigned per invocation
+        /// (`Runtime::scoped_to_run`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_scope: Option<String>,
     },
@@ -50,10 +39,8 @@ pub enum Runtime {
 }
 
 impl Runtime {
-    /// The one identity string, whatever the kind. Readers take this rather than being handed a name
-    /// per call site, which is what makes a mismatch between them unrepresentable. For a container
-    /// this is the RUN-SCOPED name: the name that was created, that gets measured, and that gets
-    /// removed, all three from here.
+    /// The one identity string, whatever the kind. For a container this is the RUN-SCOPED name —
+    /// the same name used to create, measure, and remove it.
     pub fn identity(&self) -> String {
         match self {
             Runtime::Docker {
@@ -65,9 +52,8 @@ impl Runtime {
         }
     }
 
-    /// The identity as the MANIFEST spells it, without a run scope. For validation messages and for
-    /// the `otb.gateway` label, where the stable name is the useful one; never for naming, finding or
-    /// removing a container, which must all go through `identity`.
+    /// The identity as the MANIFEST spells it, without a run scope. For validation messages and the
+    /// `otb.gateway` label only — never for naming, finding, or removing a container (use `identity`).
     pub fn declared_identity(&self) -> &str {
         match self {
             Runtime::Docker { container, .. } => container,
@@ -86,9 +72,9 @@ impl Runtime {
     /// Bind this identity to one run, so concurrent runs on a shared host cannot name (and therefore
     /// cannot remove) each other's containers.
     ///
-    /// A NATIVE identity is returned UNCHANGED, and that is not an oversight: `proc_match` matches a
-    /// command line the gateway itself produces, and no run id appears in it. The isolation a native
-    /// gateway needs comes from the port it binds, which two overlapping runs cannot share anyway.
+    /// A NATIVE identity is returned UNCHANGED deliberately: `proc_match` matches a command line the
+    /// gateway itself produces and contains no run id. A native gateway's isolation comes from the
+    /// port it binds instead.
     pub fn scoped_to_run(&self, run_id: &str) -> Runtime {
         match self {
             Runtime::Docker { container, .. } => Runtime::Docker {
@@ -104,10 +90,9 @@ impl Runtime {
     }
 }
 
-/// A run id reduced to what a container name accepts (`[a-zA-Z0-9_.-]`), because the scope is
-/// concatenated into `--name` and a rejected name is a launch that never happens. `None` for a scope
-/// that survives as nothing, so an unusable id leaves the name unscoped rather than trailing a bare
-/// separator.
+/// A run id reduced to what a container name accepts (`[a-zA-Z0-9_.-]`); a rejected name is a
+/// launch that never happens. `None` if nothing survives, so an unusable id leaves the name
+/// unscoped rather than trailing a bare separator.
 fn sanitize_run_scope(run_id: &str) -> Option<String> {
     let cleaned: String = run_id
         .chars()
@@ -118,23 +103,21 @@ fn sanitize_run_scope(run_id: &str) -> Option<String> {
 }
 
 /// Command-line fragments too generic to name one process. Matching is a SUBSTRING against every
-/// full command line on the box (`supervise::select_matches`), so a `proc_match` like `sh` or `node`
-/// selects a crowd, and whichever member of that crowd the stop path signals or the memory reader
-/// sums is a coin toss the artifact reports as the gateway's.
+/// full command line on the box (`supervise::select_matches`), so `sh` or `node` would select a
+/// crowd, and which member gets signalled or summed is a coin toss reported as the gateway's.
 const GENERIC_PROC_MATCHES: [&str; 14] = [
     "sh", "bash", "python", "python3", "node", "java", "docker", "server", "proxy", "gateway",
     "main", "app", "run", "start",
 ];
 
-/// The shortest a `proc_match` may be. Four characters of a command line is not an identity; every
-/// entrant in the field declares a path or a full binary name, which is what this asks for.
+/// The shortest a `proc_match` may be; every real entrant declares a path or full binary name.
 const MIN_PROC_MATCH_LEN: usize = 8;
 
 /// Why a declared `proc_match` cannot be trusted to name exactly one process, or `None` if it can.
 ///
-/// Checked at manifest level rather than only at match time because a generic pattern's damage is
-/// silent: the wrong process is stopped, or a bystander's memory is published as the gateway's, and
-/// both read as a plausible number rather than as an error.
+/// Checked at manifest level, not just at match time: a generic pattern's damage is silent (wrong
+/// process stopped, or a bystander's memory published as the gateway's) and reads as a plausible
+/// number rather than an error.
 pub fn proc_match_problem(proc_match: &str) -> Option<String> {
     let m = proc_match.trim();
     if m.is_empty() {
@@ -154,9 +137,8 @@ pub fn proc_match_problem(proc_match: &str) -> Option<String> {
             "proc_match {m:?} is a generic command name: it matches processes that are not this gateway"
         ));
     }
-    // The engine's own binary. A pattern that appears in the harness's argv makes the harness a
-    // candidate for its own stop signal, and makes `is_alive` read the engine's command line as
-    // proof the gateway is still up.
+    // The engine's own binary: a pattern in the harness's argv could match the harness itself, both
+    // as a stop-signal target and as false proof-of-life for `is_alive`.
     if m.contains("otb") {
         return Some(format!(
             "proc_match {m:?} contains the engine's own binary name, so it can match the harness's command line rather than the gateway's"
@@ -165,10 +147,9 @@ pub fn proc_match_problem(proc_match: &str) -> Option<String> {
     None
 }
 
-/// Why a config setting exists. The board's fairness rule is that every gateway config is the bare
-/// minimum required to run, so each setting must name which necessity it satisfies. As shell this
-/// was a free-text block a lint grepped; as an enum the build cannot express a setting with no
-/// reason, and "we turned a feature on" has no variant to hide in.
+/// Why a config setting exists. Every gateway config must be the bare minimum required to run, so
+/// each setting must name which necessity it satisfies — an enum, so the build cannot express a
+/// setting with no reason (or "we turned a feature on").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigReason {
@@ -192,8 +173,8 @@ pub struct ConfigSetting {
     pub note: String,
 }
 
-// Same rule as `Runtime` above, for the same reason: a key the schema does not define is a defect,
-// and one that parses is a defect nobody sees.
+// Same rule as `Runtime` above: a key the schema does not define is a defect, and one that
+// silently parses is a defect nobody sees.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -209,19 +190,14 @@ pub struct Manifest {
     pub model: String,
     /// THE MODEL NAME THAT SELECTS EACH EGRESS COLUMN, keyed by egress dialect.
     ///
-    /// The grid's two axes are driven by two different things. Ingress is the WIRE SHAPE, and the
-    /// engine owns that entirely: the path and the body come from `Dialect`. Egress is the UPSTREAM,
-    /// and most gateways choose it from the model name in the request, so a cell that does not vary
-    /// the model does not vary the egress at all - it sends a byte-identical request to the diagonal
-    /// and gets the same upstream, while the artifact labels it a translation. Six columns collapse
-    /// into one measurement published six times.
+    /// Ingress is the wire shape (owned by `Dialect`); egress is the upstream, and most gateways
+    /// choose it from the request's model name. A cell that doesn't vary the model doesn't vary the
+    /// egress either — it sends the same request as the diagonal cell and gets mislabelled as a
+    /// translation, collapsing six columns into one measurement published six times.
     ///
-    /// The engine always asks for the egress's model (`model_for`); this map is only how each
-    /// gateway spells it, because the spelling is not ours to choose. Some gateways route on a name
-    /// we configure and can be given any label; others infer the provider FROM the name by their own
-    /// convention, so the value has to be that convention's spelling or the gateway routes somewhere
-    /// else. Absent for an egress means `model` - correct for a gateway with one upstream, and for
-    /// the openai column whose canonical name usually IS `model`.
+    /// The engine always asks for the egress's model (`model_for`); this map is just each gateway's
+    /// own spelling of it, since some infer the provider from the name by their own convention.
+    /// Absent for an egress means `model`.
     #[serde(default)]
     pub egress_models: std::collections::BTreeMap<String, String>,
     pub auth: String,
@@ -233,20 +209,16 @@ pub struct Manifest {
     #[serde(default)]
     pub egress: Vec<String>,
     /// THE DECLARED 6x6 CAPABILITY GRID: which (ingress, egress) pairings this gateway is expected
-    /// to serve at all, researched against its own source/docs rather than guessed. Six rows
-    /// (ingress) of six characters (egress), axis order `["openai", "openai-responses",
-    /// "anthropic", "gemini", "cohere", "bedrock"]` both ways - the same order `Dialect::all()`
-    /// walks. `'1'` = declared capable, `'0'` = declared not. Empty (the default) means undeclared:
-    /// every cell is probed with no cell skipped on this basis.
+    /// to serve, researched against its own source/docs. Six rows (ingress) of six chars (egress),
+    /// axis order `["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]` both
+    /// ways (`Dialect::all()` order). `'1'` = declared capable, `'0'` = declared not. Empty (default)
+    /// means undeclared: every cell is probed.
     ///
-    /// A `'0'` cell is NEVER PROBED AT ALL, published `not_configurable` directly. Probing it anyway
-    /// and trusting the returned status would be the exact defect this field exists to prevent: a
-    /// gateway's own global auth gate or rate limiter can answer a request for a pairing it never
-    /// claims to support with a real HTTP status (401, 429, ...) that has nothing to do with that
-    /// specific pairing, because it fires before routing ever gets a chance to say "no such route".
-    /// Grading that status as a probed failure would publish the gateway's own front-door behaviour
-    /// as a genuine capability defect on a translation it never offered. A `'1'` cell, or any cell
-    /// when this field is empty, is measured exactly as before: the observed status alone decides
+    /// A `'0'` cell is NEVER PROBED, published `not_configurable` directly. A gateway's own global
+    /// auth gate or rate limiter can answer an unsupported pairing with a real HTTP status (401,
+    /// 429, ...) that fires before routing decides "no such route" — grading that as a probed
+    /// failure would publish the gateway's front-door behaviour as a capability defect. A `'1'` cell,
+    /// or any cell when this field is empty, is measured normally: observed status alone decides
     /// `NotConfigured` vs `Failed` (see `probe::persistent_transient_verdict`).
     #[serde(default)]
     pub matrix: Vec<String>,
@@ -254,66 +226,55 @@ pub struct Manifest {
     /// instead of a bare grey square.
     #[serde(default)]
     pub matrix_note: String,
-    /// Cells the RIG cannot pose at all, distinct from a declared incapability: the gateway serves
-    /// this pairing in production, but the harness's own mock cannot stand in for the real upstream
-    /// (e.g. a channel that signs requests straight to a fixed real hostname with no override).
-    /// `"<ingress>/<egress>"` per entry. Also never probed; published `untestable`, not graded either
-    /// way.
+    /// Cells the RIG cannot pose at all — distinct from a declared incapability: the gateway serves
+    /// this pairing in production, but the harness's mock cannot stand in for the real upstream
+    /// (e.g. a channel that signs requests to a fixed real hostname with no override).
+    /// `"<ingress>/<egress>"` per entry. Never probed; published `untestable`, not graded either way.
     #[serde(default)]
     pub untestable: Vec<String>,
     #[serde(default)]
     pub untestable_note: String,
     /// A PER-CELL INGRESS PATH, for the cells that have one. Keyed `"<ingress>>egress"`.
     ///
-    /// Some gateways expose a route that skips translation when the client's dialect already matches
-    /// the upstream's, and route it differently otherwise. Where that is what an operator would
-    /// actually call, measuring the other route measures work the gateway would not have done.
+    /// Some gateways route a dialect-matched request differently from a translated one; measuring
+    /// the wrong route would measure work the gateway wouldn't actually do for an operator.
     ///
-    /// Absent for a cell means the gateway's declared `path`, which means the dialect's standard
-    /// path. Twelve of the thirteen entrants set none of these.
+    /// Absent for a cell means the gateway's declared `path` (the dialect's standard path).
     ///
-    /// Whatever is used is RECORDED in the cell it produced, because a number taken on a
-    /// provider-pinned route and a number taken on the unified route are different measurements and
-    /// the board must not present them as the same one.
+    /// Whatever route is used is RECORDED against the cell it produced: a provider-pinned route and
+    /// the unified route are different measurements and must not be presented as the same one.
     #[serde(default)]
     pub cell_paths: std::collections::BTreeMap<String, String>,
     /// COMMANDS RUN AFTER THE GATEWAY IS UP, one per line, from a file named `commands`.
     ///
     /// Discovered by filename like `env` and `headers.json`, never declared, so every gateway is
-    /// described the same way and a reader can see the whole deployment by listing the directory.
+    /// described the same way.
     ///
-    /// This exists for one shape of gateway: the kind with no config file at all, which stores its
-    /// configuration in a database and is configured through its own admin API after it boots. There
-    /// is no file to drop for those, so the only honest way to deploy one the way its operators do
-    /// is to make the same calls its documentation tells you to make. Almost every gateway has no
-    /// `commands` file and needs none.
+    /// For gateways with no config file at all — ones that store config in a database and are
+    /// configured through their own admin API after boot. Almost every gateway needs none of this.
     ///
-    /// Lines are run in order, each through a shell, after the gateway answers as ready and before
-    /// anything is measured. A line that fails fails the run: a gateway configured halfway is worse
-    /// than one that never started, because it will answer probes and publish numbers for an
-    /// upstream that was never wired up.
+    /// Lines run in order, each through a shell, after the gateway is ready and before anything is
+    /// measured. A line that fails fails the run: a half-configured gateway would otherwise answer
+    /// probes and publish numbers for an upstream that was never wired up.
     #[serde(default, skip)]
     pub commands: Vec<String>,
     #[serde(default)]
     pub config: Vec<ConfigSetting>,
     /// Headers that select the EGRESS, keyed by dialect.
     ///
-    /// Some gateways route by config; others route only by a request header, and for those the
-    /// header IS the egress column. Without a per-column home every column would be driven
-    /// identically, every one would answer 200, and the board would publish four to six identical
-    /// columns as though they were different upstream dialects - a wrong number rather than a
-    /// missing one, and the kind that looks entirely plausible.
+    /// Some gateways route only by a request header, so for those the header IS the egress column.
+    /// Without a per-column home, every column would be driven identically and the board would
+    /// publish several identical columns as though they were different upstream dialects.
     ///
-    /// Values admit the same closed set as everything else, because one gateway's routing header
+    /// Values admit the same placeholder set as everything else, since one gateway's routing header
     /// carries the rig-assigned mock port.
     #[serde(default)]
     pub egress_headers: std::collections::BTreeMap<String, Vec<String>>,
     /// Values this gateway's own templates refer to, beyond the closed set the harness supplies.
     ///
-    /// A manifest declares its model name, its upstream URL, its bedrock path ONCE here, and every
-    /// template that needs it refers to it by name. That is the point: the shell had these as
-    /// variables read by several places each, and one of them - a model spelled in a route URI and
-    /// again in a probe path - is documented as having cost thirty-six cells when the two drifted.
+    /// A manifest declares a value like a model name or upstream URL ONCE here, and every template
+    /// that needs it refers to it by name — a value spelled out separately in two places (a route
+    /// URI and a probe path) can drift, which has previously cost measured cells.
     ///
     /// Values may themselves refer to the closed set, so `"url": "http://127.0.0.1:{MOCK_PORT}"`
     /// resolves at render time rather than being frozen at whatever port a previous run used.
@@ -321,11 +282,10 @@ pub struct Manifest {
     pub constants: std::collections::BTreeMap<String, String>,
     /// Config files the harness renders and the gateway reads.
     ///
-    /// A TEMPLATE FILE in the gateway's own directory, not a string in this manifest and not Rust.
-    /// `lib/gateway_isolation_test.sh` exempts files under `gateways/<name>/` from Rule 1 but scans
-    /// `.rs` everywhere, so a Rust function rendering a config that must contain the gateway's own
-    /// name as a top-level key - which at least one does - could not exist. As a file beside the
-    /// gateway it is legal, readable, and diffable against what the gateway actually booted with.
+    /// A TEMPLATE FILE in the gateway's own directory, not a string in this manifest and not Rust:
+    /// `lib/gateway_isolation_test.sh` exempts `gateways/<name>/` from Rule 1 but scans `.rs`
+    /// everywhere, so a per-gateway config (one requires the gateway's own name as a top-level key)
+    /// has to live as a file beside the gateway, not generated by Rust code.
     #[serde(default)]
     pub config_files: Vec<ConfigFile>,
     /// How to START this gateway. `None` for a manifest that only describes a gateway someone else
@@ -358,16 +318,13 @@ fn default_true() -> bool {
     true
 }
 
-/// How many cores a cpuset string covers, e.g. "0-3" is four.
-///
-/// This is the same arithmetic the shell manifests do inline, and it is the value the Go runtime is
-/// pinned to. A single core ("2") is one; anything unparseable is one, because claiming more
-/// parallelism than the pin allows is the direction that corrupts a measurement.
+/// How many cores a cpuset string covers, e.g. "0-3" is four. A single core ("2") is one;
+/// anything unparseable is one — claiming more parallelism than the pin allows is the direction
+/// that corrupts a measurement.
 /// Whether a path is a file this box can execute.
 ///
-/// Used to pick among declared binary candidates. On a non-unix host the mode bits are unavailable,
-/// so existence is the best available answer; the field runs on Linux and the distinction only
-/// matters there.
+/// On a non-unix host the mode bits are unavailable, so existence is the best available answer;
+/// the field runs on Linux where the distinction matters.
 fn is_executable(p: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -407,19 +364,17 @@ pub enum LaunchDecl {
         #[serde(default)]
         mounts: Vec<MountDecl>,
     },
-    /// Built from source and run directly on the box. Three entrants.
+    /// Built from source and run directly on the box.
     Native {
         /// A script in the gateway's own directory that produces the binary, run once before the
-        /// first launch and never between egress columns. It installs a toolchain, so it must not be
-        /// running during the measurement window: the shell ordered the build before the memory
-        /// baseline for exactly that reason.
+        /// first launch (never between egress columns). Installs a toolchain, so it must not run
+        /// during the measurement window.
         #[serde(default)]
         build: Option<String>,
         /// Candidate paths to the built binary, first one that exists and is executable wins.
         ///
-        /// A LIST because one entrant's crate does not emit a stable output name and the shell had to
-        /// `find` across three of them. Declaring the candidates keeps that as data a reader can see,
-        /// rather than a search whose result nothing records.
+        /// A LIST because at least one entrant's crate emits no stable output name, requiring a
+        /// search across candidates; declaring them keeps the search as visible data.
         binary: Vec<String>,
         #[serde(default)]
         args: Vec<String>,
@@ -427,14 +382,11 @@ pub enum LaunchDecl {
         env: Vec<(String, String)>,
         /// Names REMOVED from the child environment before it starts.
         ///
-        /// NOT hygiene. One entrant's config loader claims every variable sharing its prefix and
-        /// feeds it to a deny-unknown-fields deserializer, so the harness's own documented override
-        /// variables kill config load before the port binds. The binary is backgrounded, so the
-        /// launch still returns success and the only symptom is "port not listening" on every
-        /// attempt of every column.
-        ///
-        /// `std::process::Command` inherits the parent environment, and an env block can only ADD, so
-        /// without this the class is unrepresentable.
+        /// NOT hygiene: at least one entrant's config loader rejects any unknown variable sharing
+        /// its prefix, so the harness's own override variables would silently kill config load
+        /// before the port binds (launch reports success; symptom is "port not listening").
+        /// `std::process::Command` inherits the parent env and can only ADD, so removal needs its
+        /// own field.
         #[serde(default)]
         env_unset: Vec<String>,
     },
@@ -471,11 +423,8 @@ impl std::error::Error for ManifestLoadError {}
 
 /// Parse a sidecar env file: `KEY=value` sets, a leading `-` REMOVES.
 ///
-/// Removal is not a convenience. One entrant's config loader claims every variable sharing its
-/// prefix and feeds it to a deny-unknown-fields deserializer, so the harness's own override
-/// variables kill config load before the port binds - and the process is backgrounded, so the launch
-/// reports success and the only symptom is a port that never listens. An env block that can only ADD
-/// cannot express it.
+/// Removal is not a convenience — see `LaunchDecl::Native::env_unset` for why an env block that
+/// can only ADD can't express it.
 ///
 /// Deliberately parsed, never executed: nothing in the measurement path runs untrusted config.
 fn parse_env(raw: &str) -> (Vec<(String, String)>, Vec<String>) {
@@ -535,10 +484,9 @@ impl std::error::Error for ConfigRenderError {}
 pub enum ManifestError {
     Empty(&'static str),
     BadPort,
-    /// A field still carrying a shell variable that was never expanded. These manifests were
-    /// EXTRACTED from shell, where one gateway writes `GW_MODEL="$SOME_MODEL"` - one indirection away
-    /// from the literal it resolves to. Extract the wrong side of that and the field holds the
-    /// reference instead of a model name. Non-empty, so every existing check passes it.
+    /// A field still carrying a shell variable that was never expanded (manifests extracted from
+    /// shell can hold the reference, e.g. `$SOME_MODEL`, instead of the resolved value). Non-empty,
+    /// so every other emptiness check passes it.
     UnexpandedVariable {
         field: &'static str,
         raw: String,
@@ -547,7 +495,7 @@ pub enum ManifestError {
     ConfigWithoutReason(String),
     /// A launch declaration refers to something the harness does not supply. Loud rather than passed
     /// through: a `{TYPO}` reaching a container as a literal is a misconfiguration that boots and
-    /// measures fine, and publishes a number taken under the wrong settings.
+    /// measures fine under the wrong settings.
     UnknownPlaceholder {
         name: String,
         raw: String,
@@ -557,13 +505,12 @@ pub enum ManifestError {
         name: String,
     },
     /// A native `proc_match` too generic to name one process. Refused at load rather than at match
-    /// time: by then the wrong process has already been signalled or measured, and the result looks
-    /// like a number rather than like a fault.
+    /// time, since by match time the wrong process may already be signalled or measured.
     IndistinctProcMatch(String),
 }
 
 /// How deep a constant may refer to other constants before it is treated as a cycle. One real chain
-/// exists (a path built from a model name); anything much deeper is a mistake, not a design.
+/// exists (a path built from a model name); deeper is a mistake, not a design.
 const MAX_CONSTANT_DEPTH: usize = 8;
 
 impl std::fmt::Display for ManifestError {
@@ -578,9 +525,9 @@ impl std::fmt::Display for ManifestError {
             ManifestError::ConstantCycle { name } => {
                 write!(f, "constant {name:?} refers to itself, directly or through a ring of others")
             }
-            // Deliberately does NOT say where: this same error is raised for a launch declaration,
-            // a config template and a header value, and the caller knows which of those it was
-            // reading. Naming the wrong one is worse than naming none.
+            // Deliberately does NOT say where: raised for a launch declaration, config template, or
+            // header value alike, and the caller already knows which. Naming the wrong one is worse
+            // than naming none.
             ManifestError::UnknownPlaceholder { name, raw } => {
                 let shown: String = raw.chars().take(60).collect();
                 write!(
@@ -598,26 +545,18 @@ impl std::fmt::Display for ManifestError {
 
 /// PARALLELISM, SET BY THE HARNESS FOR EVERY GATEWAY, FROM THE CORES IT PINNED.
 ///
-/// The harness decides how many cores a gateway gets. It follows that the harness, not the gateway,
-/// must tell the gateway's runtime how many it got, and must tell every gateway the same way.
+/// A cpuset restricts which cores a process may run on but does not change what a runtime THINKS
+/// is available — some read the machine's online CPU count and size thread pools for the whole box
+/// while confined to a few cores, contending with itself and publishing a number nobody would
+/// deploy. Set centrally, not left to each gateway's own env block, so a dropped setting can't
+/// silently let a gateway boot unpinned.
 ///
-/// Pinning alone is not enough, and the gap is silent. A cpuset restricts which cores a process may
-/// run on; it does not change what a runtime THINKS is available. Some runtimes ask the kernel for
-/// their affinity and get the right answer; others read the machine's online CPU count and size
-/// their thread pools for a sixteen core box while confined to four. That gateway then runs with
-/// four times the threads it should have, contends with itself, and publishes a number that
-/// describes a configuration no operator would deploy.
-///
-/// Set centrally rather than left to each gateway's own env block: a per-gateway setting is easy to
-/// drop silently, since a missing one still lets the gateway boot with nothing to signal the mistake.
-///
-/// The list is deliberately runtime-standard names only. A gateway whose runtime has its own knob
-/// declares it in its own env with `{NCORE}`, because naming one entrant's variable in shared code
-/// would be per-gateway logic in the one place that must not have any.
+/// Deliberately runtime-standard names only. A gateway with its own knob declares it in its own env
+/// with `{NCORE}` instead, to keep per-gateway logic out of shared code.
 fn pinned_parallelism(ncore: u32) -> Vec<(String, String)> {
     let n = ncore.to_string();
     [
-        // Go: honours affinity already, set anyway so the value is explicit and identical everywhere.
+        // Go honours affinity already; set anyway so the value is explicit everywhere.
         "GOMAXPROCS",
         // Node/libuv worker pool.
         "UV_THREADPOOL_SIZE",
@@ -632,9 +571,8 @@ fn pinned_parallelism(ncore: u32) -> Vec<(String, String)> {
 }
 
 /// This cell's declared capability, from a manifest's `matrix` (six rows of six `'0'`/`'1'` chars,
-/// axis order `Dialect::ALL` both ways). `None` means undeclared (probe normally - backward
-/// compatible with a manifest that sets no `matrix` at all); `Some(bool)` is the declared answer,
-/// and a `Some(false)` cell must never be probed - see `Manifest::matrix`'s own doc for why.
+/// axis order `Dialect::ALL` both ways). `None` means undeclared (probe normally); `Some(false)`
+/// must never be probed — see `Manifest::matrix`'s own doc for why.
 pub fn matrix_declared_capable(matrix: &[String], ingress: &str, egress: &str) -> Option<bool> {
     let ing_i = crate::ingress::Dialect::ALL
         .iter()
@@ -675,13 +613,10 @@ impl Manifest {
             }
         }
 
-        // An extraction artefact, not a typo, and the reason it needs its own check: a field holding
-        // an unexpanded reference is non-empty, so every check above passes it, and it survives all
-        // the way to the wire. A model name that is really a shell reference is sent as the request body's model,
-        // the gateway rejects it against the model its own route declares, and `probe.rs` classifies
-        // any status from a healthy rig as `NotConfigured` - "the gateway answered, deterministically,
-        // that this pairing does not light up". The board then publishes OUR extraction bug as that
-        // gateway's own capability denial. No legitimate value of any of these fields contains `$`.
+        // A field holding an unexpanded shell reference is non-empty, so the emptiness check above
+        // passes it and it survives to the wire — e.g. sent as the request's model, rejected by the
+        // gateway, and misclassified by `probe.rs` as `NotConfigured`, publishing our own extraction
+        // bug as the gateway's capability denial. No legitimate value of these fields contains `$`.
         for (v, field) in [
             (&self.name, "name"),
             (&self.display, "display"),
@@ -716,10 +651,9 @@ impl Manifest {
         if self.runtime.declared_identity().trim().is_empty() {
             return Err(ManifestError::Empty("runtime identity"));
         }
-        // A NATIVE IDENTITY MUST BE DISTINCTIVE, checked here rather than trusted at match time. The
-        // stop path signals, and the memory reader sums, whatever command lines contain this string;
-        // a generic one selects a bystander and publishes its memory - or kills it - under this
-        // gateway's name.
+        // A NATIVE IDENTITY MUST BE DISTINCTIVE, checked here rather than trusted at match time: a
+        // generic pattern selects a bystander process and publishes its memory (or kills it) under
+        // this gateway's name.
         if let Runtime::Native { proc_match } = &self.runtime {
             if let Some(why) = proc_match_problem(proc_match) {
                 return Err(ManifestError::IndistinctProcMatch(why));
@@ -738,12 +672,10 @@ impl Manifest {
 
     /// Values a launch declaration may refer to, resolved at launch time.
     ///
-    /// A CLOSED SET, and small. `GOMAXPROCS={NCORE}` is why this exists at all: two manifests set the
-    /// Go runtime's thread count from the size of the pinned core range, and a literal there would
-    /// mean the gateway runs at the host's core count inside a four-core cpuset - which is the
-    /// comparability basis of every number on the board, not a detail. An unknown placeholder is an
-    /// error rather than being passed through, because a `{TYPO}` reaching a container as a literal
-    /// is a misconfiguration that boots and measures fine.
+    /// A CLOSED SET, and small. `GOMAXPROCS={NCORE}` is why this exists at all: a literal there would
+    /// run the gateway at the host's core count inside a smaller cpuset, corrupting the comparability
+    /// basis of every number on the board. An unknown placeholder is an error rather than passed
+    /// through, since a `{TYPO}` reaching a container as a literal boots and measures fine.
     fn substitute(
         &self,
         template: &str,
@@ -770,9 +702,8 @@ impl Manifest {
             let tail = &rest[at..];
 
             // A DOUBLED BRACE IS A LITERAL ONE, either way round. Config formats use braces of their
-            // own - one template is JSON and is nothing but braces, another documents a URL shape as
-            // `{api_base}` in a comment - so both halves have to be escapable: handling only `{{`
-            // would render a YAML `error_map: {}` as `{}}`, invalid YAML the gateway refuses to boot.
+            // own (JSON, or a URL shape documented as `{api_base}`), so both halves must be
+            // escapable: handling only `{{` would render `error_map: {}` as invalid `{}}`.
             if let Some(after) = tail.strip_prefix("{{") {
                 out.push('{');
                 rest = after;
@@ -804,10 +735,9 @@ impl Manifest {
                 "GW_AUTH" => self.auth.clone(),
                 "GW_DIR" => gw_dir.to_string_lossy().into_owned(),
                 "GW_MODEL" => self.model.clone(),
-                // A manifest's own declared constant, resolved recursively because one of them is
-                // genuinely written in terms of another: a bedrock path built from a bedrock model
-                // name. The depth bound is what makes that safe - a constant that refers to itself,
-                // directly or in a ring, stops with a named error instead of a stack overflow.
+                // A manifest's own declared constant, resolved recursively (e.g. a bedrock path
+                // built from a bedrock model constant). The depth bound stops a self- or ring-
+                // referential constant with a named error instead of a stack overflow.
                 name if self.constants.contains_key(name) => {
                     if depth >= MAX_CONSTANT_DEPTH {
                         return Err(ManifestError::ConstantCycle {
@@ -834,14 +764,14 @@ impl Manifest {
     /// The launch this manifest describes, ready to hand to `launch::launch`.
     ///
     /// `None` when the manifest declares no launch: the harness is then driving a gateway someone
-    /// else started, which is what every run did until now.
+    /// else started.
     ///
-    /// The container's `--name` is NOT taken from here. It comes from `runtime.identity()`, the same
-    /// string the memory readers and the stop path use, so the thing that gets started, the thing
-    /// that gets measured and the thing that gets stopped cannot be three different containers.
+    /// The container's `--name` is NOT taken from here — it comes from `runtime.identity()`, the
+    /// same string the memory readers and the stop path use, so the started, measured, and stopped
+    /// container can never diverge.
     ///
-    /// `gw_dir` resolves the mounts: a manifest declares its config files relative to its own
-    /// directory, because an absolute path in a manifest is a path that only works on one machine.
+    /// `gw_dir` resolves the mounts: config files are declared relative to the gateway's own
+    /// directory, since an absolute path in a manifest only works on one machine.
     pub fn launch_spec(
         &self,
         cores: &str,
@@ -859,13 +789,10 @@ impl Manifest {
             xs.iter().map(|(k, v)| Ok((k.clone(), subst(v)?))).collect()
         };
 
-        // THE BUILD STEP, wired to the pre-launch seam that already exists: a declared `build`
-        // script must actually run before launch, or a source-built entrant's launcher is told to
-        // run a binary nothing ever produced, and it never becomes ready.
-        //
-        // Run ONCE, before the first attempt, which is where the shell put it and for the same
-        // reason: it installs a toolchain and compiles, and that must not happen inside a
-        // measurement window.
+        // A declared `build` script must actually run before launch, or a source-built entrant's
+        // launcher is told to run a binary nothing produced and never becomes ready. Run ONCE,
+        // before the first attempt: it installs a toolchain and compiles, which must not happen
+        // inside a measurement window.
         let pre_launch = match decl {
             LaunchDecl::Native {
                 build: Some(script),
@@ -873,9 +800,7 @@ impl Manifest {
             } => Some(crate::launch::PreLaunchStep {
                 command: gw_dir.join(script).to_string_lossy().into_owned(),
                 args: Vec::new(),
-                // A release build of a gateway from source, on a cold box that may also be
-                // installing a toolchain. Generous on purpose: the failure this bound exists to
-                // catch is a hang, and a build that is merely slow is not a hang.
+                // Generous on purpose: this bound exists to catch a hang, not a merely slow build.
                 timeout: std::time::Duration::from_secs(30 * 60),
             }),
             _ => None,
@@ -898,26 +823,22 @@ impl Manifest {
                 };
                 crate::launch::LaunchKind::Docker {
                     image: image.clone(),
-                    // THE HARNESS WINS. The gateway's own env goes first and the pinning values
-                    // last, because a later assignment overrides an earlier one and no entrant may
-                    // opt out of the core limit it is being measured under.
+                    // THE HARNESS WINS: pinning values go last, since a later assignment overrides
+                    // an earlier one and no entrant may opt out of its core limit.
                     env: env
                         .into_iter()
                         .chain(pinned_parallelism(core_count(cores)))
                         .collect(),
-                    // Every entrant uses host networking: the gateway binds the port it declares and
-                    // the harness drives that port. A published mapping would put a NAT hop inside
-                    // every measured request.
+                    // Host networking: a published port mapping would put a NAT hop inside every
+                    // measured request.
                     port: crate::launch::PortMapping::Host,
                     mounts: mounts
                         .iter()
                         .map(|m| crate::launch::Mount {
-                            // ABSOLUTE. A container runtime reads a relative source as a named
-                            // VOLUME, not a path, and refuses it: "includes invalid characters for a
-                            // local volume name". Canonicalize where possible so the path is also
-                            // free of `..` and symlinks; fall back to joining if the file is not
-                            // there yet, so the failure is the launch reporting a missing config
-                            // rather than this silently producing a relative path again.
+                            // ABSOLUTE: a container runtime reads a relative source as a named
+                            // VOLUME, not a path, and refuses it. Canonicalize where possible; fall
+                            // back to joining if the file doesn't exist yet, so a missing config
+                            // fails the launch rather than silently producing a relative path.
                             host_path: {
                                 let p = gw_dir.join(&m.host_path);
                                 std::fs::canonicalize(&p)
@@ -941,12 +862,9 @@ impl Manifest {
                 env,
                 env_unset,
             } => {
-                // The FIRST declared candidate that exists and is executable. One entrant's crate has
-                // no stable output name, so the shell searched three; declaring them keeps the search
-                // as data. Falling back to the first candidate when none exists yet is deliberate:
-                // before the build has run there is nothing on disk, and `launch` must then fail with
-                // its own evidence rather than this returning None and looking like "no launch
-                // declared".
+                // The FIRST declared candidate that exists and is executable. Falls back to the
+                // first candidate when none exists yet (before a build runs): `launch` must then
+                // fail with its own evidence rather than this looking like "no launch declared".
                 let resolved = binary
                     .iter()
                     .map(|b| gw_dir.join(b))
@@ -990,11 +908,10 @@ impl Manifest {
 
     /// Everything wrong with this gateway's setup, in one pass.
     ///
-    /// ALL of it, not the first thing found. Someone adding a gateway wants the list, not a game of
-    /// fix-one-rerun. Every finding names the file and says what to do.
-    ///
-    /// These are the mistakes that otherwise surface as a container that starts and immediately dies,
-    /// which reads as the gateway being broken rather than as the setup being wrong.
+    /// ALL of it, not the first thing found — a game of fix-one-rerun is worse for someone adding a
+    /// gateway. Every finding names the file and says what to do. These are the mistakes that
+    /// otherwise surface as a container that starts and immediately dies, reading as the gateway
+    /// being broken rather than the setup being wrong.
     pub fn problems(&self, gw_dir: &std::path::Path) -> Vec<String> {
         let mut out = Vec::new();
 
@@ -1002,18 +919,14 @@ impl Manifest {
             out.push(format!("definition.json: {e}"));
         }
 
-        // A HEADER LINE WITH NO COLON IS SILENTLY NEVER SENT.
-        //
-        // `headers_for` parses each declared line with `resolved.split_once(':')` and no else arm, so a
-        // line missing its colon - "x-api-key bench-token" instead of "x-api-key: bench-token" - is
-        // dropped without a word. The gateway is then measured WITHOUT a header its own manifest
-        // declared: it may answer 401 on every probe and publish as a gateway that serves nothing,
-        // which is indistinguishable from one that genuinely does not. Caught here, at validate time,
-        // for the same reason the template checks below are: before the box-hours are spent.
-        // A CELL PATH THAT CANNOT SUBSTITUTE MEASURES THE WRONG ROUTE. `cell_paths_for` drops it and
-        // the cell silently falls back to the dialect's default path - a different wire than the
-        // manifest declared, published under the cell's name. Caught here for the same reason the
-        // header and template checks are: before the box-hours are spent.
+        // A HEADER LINE WITH NO COLON IS SILENTLY NEVER SENT: `headers_for` parses each line with
+        // `split_once(':')` and no else arm, so "x-api-key bench-token" (missing its colon) is
+        // dropped without a word, and the gateway measures without a header it declared — often
+        // indistinguishable from a 401 on every probe. Caught here, at validate time, before the
+        // box-hours are spent.
+        // A CELL PATH THAT CANNOT SUBSTITUTE MEASURES THE WRONG ROUTE: `cell_paths_for` drops it and
+        // falls back to the dialect's default path, publishing a different wire under the cell's
+        // name. Caught here for the same reason.
         for (k, v) in &self.cell_paths {
             if let Err(e) = self.substitute(v, "0-3", 8000, gw_dir) {
                 out.push(format!(
@@ -1039,11 +952,8 @@ impl Manifest {
             }
         }
 
-        // A BUILD SCRIPT THAT IS DECLARED BUT NOT THERE.
-        //
-        // `validate` checks config templates, not this: a declared build script that does not exist
-        // would point the launcher at a binary nothing had built, surfacing on a bench box as
-        // `never became ready` instead of here, in a second.
+        // A build script declared but not there would point the launcher at a binary nothing built,
+        // surfacing on a bench box as `never became ready` instead of here, in a second.
         if let Some(crate::manifest::LaunchDecl::Native {
             build: Some(script),
             ..
@@ -1074,28 +984,15 @@ impl Manifest {
                 ));
                 continue;
             }
-            // A CONFIG TEMPLATE IS DATA, AND MUST NOT ASK FOR A COMMAND TO BE RUN.
+            // A CONFIG TEMPLATE IS DATA, AND MUST NOT ASK FOR A COMMAND TO BE RUN: the engine only
+            // substitutes `{PLACEHOLDER}`, so a leftover shell `$(...)` (from the retired shell
+            // manifests) writes out verbatim — the gateway then boots, binds its port, answers every
+            // probe 404, and publishes as serving nothing at all.
             //
-            // A gateway is a directory of data: static config files, an env block, headers. Nothing
-            // executes to produce a config. Templates carried over from the retired shell manifests
-            // still contained `$(...)`, which that shell expanded by calling a function; the engine
-            // substitutes `{PLACEHOLDER}` and nothing else, so it wrote the text out verbatim and
-            // the gateway got a config file with a shell fragment where a provider block belonged.
-            //
-            // It failed silently in the worst possible way. The gateway booted, bound its port,
-            // answered every probe 404, and published as an entrant that serves nothing at all.
-            // A placeholder the harness cannot supply. Caught here rather than at launch, where it
-            // becomes a gateway booting with a literal `{MOCK_PORT}` in an upstream URL.
-            // A TEMPLATE WE COULD NOT READ IS NOT A TEMPLATE THAT PASSED.
-            //
-            // This was `if let Ok(raw) = ...` with no else arm, so a template that exists (the
-            // `is_file` check above passed) but cannot be read - a permissions bit, a transient EIO,
-            // an NFS hiccup on CI - skipped BOTH checks below and pushed nothing. `otb validate`
-            // reports a gateway as ok when `problems()` comes back empty, so the gate that exists
-            // precisely to catch a config with a literal `{MOCK_PORT}` in an upstream URL would pass
-            // it, with nothing distinguishing "checked and clean" from "never actually checked".
-            // That is the same silent-failure shape the comment above calls the worst possible way to
-            // fail, reproduced in the guard against it.
+            // A TEMPLATE WE COULD NOT READ IS NOT A TEMPLATE THAT PASSED: without an else arm here, a
+            // template that exists but can't be read (permissions, transient EIO, NFS hiccup) would
+            // skip both checks below and report nothing wrong, indistinguishable from "checked and
+            // clean".
             let raw = match std::fs::read_to_string(&t) {
                 Ok(raw) => Some(raw),
                 Err(e) => {
@@ -1122,9 +1019,8 @@ impl Manifest {
             }
         }
 
-        // A mount pointing at a file nothing renders. This is the one that costs the most to
-        // diagnose in the wild: the container starts, finds no config, and exits, and the only
-        // symptom is a port that never listens.
+        // A mount pointing at a file nothing renders costs the most to diagnose in the wild: the
+        // container starts, finds no config, and exits, with only a port that never listens.
         if let Some(LaunchDecl::Docker { mounts, .. }) = &self.launch {
             for m in mounts {
                 let rendered = self.config_files.iter().any(|f| f.output == m.host_path);
@@ -1157,8 +1053,8 @@ impl Manifest {
             }
         }
 
-        // The config-necessity standard, reported the same way as everything else rather than as a
-        // separate tool a maintainer has to know to run.
+        // The config-necessity standard, reported alongside everything else rather than as a
+        // separate tool.
         for f in crate::config_lint::lint(self, &Default::default()) {
             out.push(format!("definition.json: {}", f.message));
         }
@@ -1169,12 +1065,10 @@ impl Manifest {
     /// Read a gateway from its own directory: the definition, plus whatever sidecars it has.
     ///
     /// ONE FILE IS UNIFORM AND THE REST ARE THE GATEWAY'S OWN. `definition.json` has the same shape
-    /// for every entrant, so a reader comparing two gateways is comparing like with like. Everything
-    /// that differs - the env its process needs, the headers that select its upstreams, the config it
-    /// boots on - sits beside it in the form that thing naturally takes.
+    /// for every entrant; everything that differs (env, upstream-selecting headers, boot config)
+    /// sits beside it in whatever form that thing naturally takes.
     ///
-    /// Every sidecar is optional. Three entrants are configured entirely by env or headers and have
-    /// no config file at all; one has neither and is just a definition.
+    /// Every sidecar is optional; some entrants need none at all.
     pub fn load(dir: &std::path::Path) -> Result<Manifest, ManifestLoadError> {
         let def_path = dir.join("definition.json");
         let text =
@@ -1199,9 +1093,8 @@ impl Manifest {
             m.apply_env(env, unset);
         }
 
-        // One command per line. Blank lines and `#` comments are skipped so the file can explain
-        // itself, which matters more here than anywhere else: these are the only place the harness
-        // does something to a gateway rather than handing it a file.
+        // One command per line; blank lines and `#` comments are skipped so the file can explain
+        // itself.
         let commands_path = dir.join("commands");
         if commands_path.is_file() {
             let raw = std::fs::read_to_string(&commands_path).map_err(|e| {
@@ -1237,34 +1130,24 @@ impl Manifest {
 
     /// Manifest headers that name something the RIG already sends on every request of some dialect.
     ///
-    /// Ledger RIG-12's remainder. `run::headers_for` composes the dialect's own credential header
-    /// (`Dialect::auth_headers`) and then appends the manifest's `headers` and `egress_headers`
-    /// verbatim. Nothing stopped a manifest declaring `authorization` itself, and one does today -
-    /// `gateways/litellm-rust/definition.json` line 15, `"Authorization: Bearer {GW_AUTH}"`, which
-    /// collides with the bearer header the openai, openai-responses, cohere and bedrock ingress
-    /// dialects all send. Both went out on one request, and HTTP does not define which of two
-    /// same-named headers a server honours: some take the first, some the last, some join them with
-    /// a comma and fail the parse. Nothing errors. The gateway authenticates as SOMEBODY and
-    /// publishes a clean number for a request whose credential we cannot state.
+    /// `run::headers_for` composes the dialect's own credential header (`Dialect::auth_headers`)
+    /// then appends the manifest's `headers`/`egress_headers` verbatim. Nothing stops a manifest
+    /// also declaring e.g. `authorization` itself (one real manifest does), colliding with the
+    /// header a dialect sends — HTTP does not define which of two same-named headers a server
+    /// honours, so the gateway authenticates as SOMEBODY and still publishes a clean-looking number.
     ///
-    /// PRECEDENCE, NOT REFUSAL, and the live manifest above is why. Refusing at load is the tidier
-    /// rule and it would stop the whole benchmark on a first-party file this change is not allowed
-    /// to edit - trading a silently-ambiguous measurement for no measurement at all, on a gateway
-    /// whose duplicate happens to be byte-identical to the header it duplicates. So the wire is made
-    /// unambiguous instead (`run::headers_for` drops the manifest's copy and keeps the dialect's),
-    /// and the collision is DISCLOSED here so `otb validate` names the file and the header rather than
-    /// leaving the rule to be rediscovered from the code.
+    /// PRECEDENCE, NOT REFUSAL: refusing at load would stop the whole benchmark on a first-party file
+    /// this change may not edit, trading an ambiguous measurement for no measurement. Instead the
+    /// wire is made unambiguous (`run::headers_for` drops the manifest's copy, keeps the dialect's)
+    /// and the collision is DISCLOSED here so `otb validate` names it.
     ///
-    /// The rig's copy wins because the credential is the harness's to assert: `cfg.auth` is the
-    /// token this run holds (one gateway mints it at launch), and the header shape is what a real
-    /// client of that dialect sends. A manifest that could override it could have the gateway
-    /// measured under an identity the harness cannot name, which is the same defect one level up.
+    /// The rig's copy wins because the credential is the harness's to assert (`cfg.auth`); a
+    /// manifest that could override it could measure the gateway under an identity the harness
+    /// cannot name.
     ///
-    /// The name list is DERIVED from `Dialect::auth_headers` via `rig_owned_header_names`, over
-    /// every dialect, so it cannot go stale when a dialect changes how it authenticates. Every
-    /// dialect's, not just the ones this gateway declares: `egress` is a wiring declaration, the
-    /// matrix probes all six ingress dialects regardless, and a header in `headers` is sent on every
-    /// one of them.
+    /// The name list is DERIVED from `Dialect::auth_headers` via `rig_owned_header_names`, over every
+    /// dialect (not just the ones this gateway wires up), since the matrix probes all six regardless
+    /// and a header in `headers` is sent on every one of them.
     pub fn rig_owned_headers_declared(&self) -> Vec<String> {
         let owned: std::collections::BTreeSet<String> = crate::ingress::Dialect::ALL
             .iter()
@@ -1312,19 +1195,16 @@ impl Manifest {
 
     /// `cell_paths` with its placeholders resolved, the same way `headers_for` resolves theirs.
     ///
-    /// A per-cell path is exactly where a placeholder earns its keep. Bedrock's standard path embeds
-    /// the model, and a gateway's Bedrock model id is never its OpenAI one, so the cell's real route
-    /// is built from a constant the manifest already declares for its config template. Cloning these
-    /// raw would send a literal `{NAME}` to the gateway, which answers 404, and a 404 on a declared
-    /// pairing is published as the gateway not serving it - a red it did not earn, caused by us.
+    /// A per-cell path is where a placeholder earns its keep: e.g. Bedrock's standard path embeds
+    /// the model, built from a constant the manifest already declares. Sending the raw `{NAME}`
+    /// would get a 404, published as the gateway not serving a pairing it does — an unearned red
+    /// caused by us.
     ///
     /// Resolving here rather than pinning the expanded string in `cell_paths` keeps ONE source for
-    /// the value: pinning it would go stale silently the day the constant changes, reintroducing the
-    /// same unearned red with nothing to signal it.
+    /// the value, so it can't go stale the day the constant changes.
     ///
     /// A key that cannot be resolved is dropped rather than sent half-substituted, so `path_for`
-    /// falls back to the dialect's standard path - a wrong-but-honest probe of a real endpoint,
-    /// never a request for a path built out of our own template syntax.
+    /// falls back to the dialect's standard path — wrong but honest, never our own template syntax.
     pub fn cell_paths_for(
         &self,
         cores: &str,
@@ -1336,13 +1216,9 @@ impl Manifest {
             .filter_map(|(k, v)| {
                 match self.substitute(v, cores, mock_port, gw_dir) {
                     Ok(path) => Some((k.clone(), path)),
-                    // A CELL PATH THAT WOULD NOT SUBSTITUTE USED TO VANISH HERE.
-                    //
-                    // `.ok()?` dropped it silently, so a cell_path carrying a placeholder the harness
-                    // cannot supply left no entry and no word - and the cell then measured the
-                    // DIALECT'S DEFAULT path instead. A different route than the manifest declared,
-                    // published under the cell's name, which is the one thing this field exists to
-                    // prevent.
+                    // A silently-dropped cell_path would leave no entry and no word, and the cell
+                    // would measure the DIALECT'S DEFAULT path instead — a different route than
+                    // declared, published under the cell's name. Logged instead.
                     Err(e) => {
                         eprintln!(
                             "manifest: cell path for {k:?} could not be substituted ({e}), so this \
@@ -1359,8 +1235,8 @@ impl Manifest {
     /// The headers to send for one egress column: the manifest's always-on headers, then the ones
     /// that select this column.
     ///
-    /// `authorization` is added by the caller, not here, because it is the same for every column and
-    /// one gateway mints it at launch rather than declaring it.
+    /// `authorization` is added by the caller, not here: it's the same for every column and minted
+    /// at launch rather than declared.
     pub fn headers_for(
         &self,
         egress: &str,
@@ -1375,8 +1251,7 @@ impl Manifest {
             .chain(self.egress_headers.get(egress).into_iter().flatten());
         for line in lines {
             let resolved = self.substitute(line, cores, mock_port, gw_dir)?;
-            // A manifest writes headers the way they appear on the wire, "Name: value", because that
-            // is how they are read in the gateway's own docs and how they were declared in shell.
+            // Written the way they appear on the wire: "Name: value".
             if let Some((name, value)) = resolved.split_once(':') {
                 out.push((name.trim().to_string(), value.trim().to_string()));
             }
@@ -1386,13 +1261,13 @@ impl Manifest {
 
     /// Render every declared config file into the gateway's directory.
     ///
-    /// Returns the paths written, so a caller can publish them as the artifact's config record: the
-    /// bytes a gateway booted with belong in the same artifact as the numbers they produced, which is
-    /// what stops a chart being read against a config that was overwritten later.
+    /// Returns the paths written, so a caller can publish them as the artifact's config record — the
+    /// bytes a gateway booted with belong beside the numbers they produced, so a chart can't later be
+    /// read against a config that was overwritten.
     ///
-    /// A template that refers to something the harness does not supply is an ERROR, not a passthrough.
-    /// A gateway booting with a literal `{MOCK_PORT}` in its upstream URL fails in a way that looks
-    /// like the gateway being broken.
+    /// A template referring to something the harness does not supply is an ERROR, not a passthrough:
+    /// a gateway booting with a literal `{MOCK_PORT}` fails in a way that looks like the gateway
+    /// being broken.
     pub fn render_configs(
         &self,
         cores: &str,
@@ -1436,11 +1311,9 @@ impl Manifest {
     }
 }
 
-/// A minimal, valid `Manifest` for tests across this crate (config_lint.rs, suite.rs, and this
-/// module's own tests all built their own copy of this same field list; one adding a field meant
-/// three edits agreeing by hand). Callers override only the fields their test cares about with
-/// struct-update syntax (`Manifest { egress: vec![...], ..test_fixture() }`), so a new field is one
-/// edit here, not one per call site.
+/// A minimal, valid `Manifest` for tests across this crate. Callers override only the fields their
+/// test cares about with struct-update syntax (`Manifest { egress: vec![...], ..test_fixture() }`),
+/// so a new field is one edit here, not one per call site.
 #[cfg(test)]
 pub(crate) fn test_fixture() -> Manifest {
     Manifest {
@@ -1476,13 +1349,8 @@ pub(crate) fn test_fixture() -> Manifest {
 
 #[cfg(test)]
 mod tests {
-    // A HEADER WITH NO COLON WOULD NEVER REACH THE WIRE, SILENTLY.
-    //
-    // `headers_for` splits each declared line on ':' with no else arm, so a line missing its colon is
-    // dropped without a word and the gateway is measured WITHOUT a header its own manifest declared.
-    // A gateway missing its auth header answers 401 on every probe and publishes as one that serves
-    // nothing - indistinguishable from a gateway that genuinely does not. `otb validate` reports a
-    // gateway ok whenever problems() is empty, so this had to become a problem to be caught at all.
+    // A header line missing its colon is dropped without a word by `headers_for`, and the gateway
+    // measures without a header it declared — indistinguishable from one genuinely not serving.
     #[test]
     fn a_header_line_without_a_colon_is_a_validate_problem() {
         let dir = std::env::temp_dir();
@@ -1515,11 +1383,9 @@ mod tests {
         test_fixture()
     }
 
-    // THE UNEARNED RED THIS PREVENTS. A cell path built from a declared constant reached the probe
-    // as the literal `{NAME}` while the gateway's config template rendered the real route, so the
-    // probe asked for a path made of our own template syntax, got a truthful 404, and the board
-    // published a declared-capable pairing as one the gateway does not serve. Nesting is exercised
-    // because the real case is a path constant that refers to a model constant.
+    // Prevents an unearned red: an unresolved `{NAME}` reaching the probe as a literal gets a
+    // truthful 404, publishing a declared-capable pairing as unserved. Nesting is exercised because
+    // the real case is a path constant referring to a model constant.
     #[test]
     fn a_cell_path_resolves_its_placeholders_before_it_ever_reaches_a_probe() {
         let mut m = docker_manifest();
@@ -1611,9 +1477,7 @@ mod tests {
         assert!(!is_untestable_cell(&untestable, "openai", "anthropic"));
     }
 
-    // THE WHOLE POINT. RSS, HWM and stop all read ONE declaration, so they cannot name different
-    // things: a reader spelled out separately per hook could drift, reading a single pid for RSS
-    // beside a whole tree for HWM and publishing two different populations for the same gateway.
+    // RSS, HWM and stop all read ONE declaration, so they cannot name different things.
     #[test]
     fn every_reader_derives_from_one_identity() {
         let m = docker_manifest();
@@ -1637,9 +1501,8 @@ mod tests {
 
     // ---- run-scoped container identity ------------------------------------------------------------
 
-    // THE DEFECT: a container's `--name` was the manifest's name alone, identical on every run of
-    // this gateway on this box. Two overlapping runs then named ONE container, and the second run's
-    // boot-retry `docker rm -f` deleted the first run's container mid-measurement.
+    // Without scoping, `--name` would be identical on every run of this gateway on this box, and a
+    // second run's boot-retry `docker rm -f` could delete the first run's container mid-measurement.
     #[test]
     fn two_runs_of_one_gateway_cannot_name_the_same_container() {
         let declared = Runtime::Docker {
@@ -1654,14 +1517,13 @@ mod tests {
             "two concurrent runs must not name the same container"
         );
         assert!(a.identity().starts_with("gw-bench-"), "{}", a.identity());
-        // And teardown still finds its OWN: the stop path takes this same identity, and the declared
-        // name stays available for the label a cross-run sweep filters on.
+        // The declared name stays available for the label a cross-run sweep filters on.
         assert_eq!(a.declared_identity(), "gw-bench");
         assert_eq!(a.run_scope(), Some("20260729-101500-4242"));
     }
 
-    // A NATIVE IDENTITY IS UNCHANGED BY SCOPING: `proc_match` matches a command line the gateway
-    // itself produces, and no run id appears in it. Scoping it would match nothing at all.
+    // `proc_match` matches a command line the gateway itself produces; scoping it would match
+    // nothing.
     #[test]
     fn scoping_a_native_identity_leaves_the_process_match_alone() {
         let rt = Runtime::Native {
@@ -1688,9 +1550,8 @@ mod tests {
 
     // ---- a proc_match must name one process --------------------------------------------------------
 
-    // THE DEFECT: matching is a SUBSTRING against every command line on the box, so a short or
-    // generic pattern selects a crowd, and whichever member the stop path signals or the memory
-    // reader sums is a coin toss published as this gateway's.
+    // Matching is a SUBSTRING against every command line on the box, so a short or generic pattern
+    // selects a crowd.
     #[test]
     fn an_indistinct_proc_match_is_refused_at_load_not_discovered_at_match_time() {
         for bad in ["gw", "node", "server", "sh", "otb-run"] {
@@ -1756,9 +1617,7 @@ mod tests {
         assert_eq!(m.validate(), Err(ManifestError::BadPort));
     }
 
-    // Every declared setting must name which of the four necessities it satisfies. As shell this was
-    // free text a lint grepped; here a setting cannot be constructed without one, and there is no
-    // variant meaning "we wanted this feature on".
+    // A setting cannot be constructed without naming which necessity it satisfies.
     #[test]
     fn a_config_setting_must_name_its_necessity() {
         let m = Manifest {
@@ -1773,10 +1632,8 @@ mod tests {
         assert_eq!(m.config[0].reason, ConfigReason::RigBinding);
     }
 
-    // The shell manifests are one indirection deep: one gateway sets `SOME_MODEL=gpt-4o-mini` and
-    // then `GW_MODEL="$SOME_MODEL"`. Extracting the reference instead of the value yields a field
-    // that is non-empty, parses, and validates under every other rule, then goes out on the wire as a
-    // model name. The corpus shipped exactly this.
+    // Extracted-from-shell manifests can hold the reference (`$SOME_MODEL`) instead of the value;
+    // that field is non-empty and passes every other rule, then goes out on the wire as a model name.
     #[test]
     fn a_field_holding_an_unexpanded_shell_variable_is_rejected() {
         let m = Manifest {
@@ -1870,20 +1727,13 @@ mod tests {
         );
     }
 
-    // EVERY GATEWAY IS TOLD ITS CORE COUNT, BY THE HARNESS, THE SAME WAY.
-    //
-    // A cpuset restricts which cores a process may use; it does not change what a runtime believes
-    // is available. A runtime that reads the machine's online CPU count sizes its thread pools for a
-    // sixteen core box while confined to four, contends with itself, and publishes a number that
-    // describes a configuration nobody would deploy.
-    //
-    // It is the harness that decides the core count, so it is the harness that states it,
-    // identically, everywhere, rather than leaving it to each gateway's own env, where a dropped
-    // setting still lets the gateway boot with nothing to signal the mistake.
+    // A cpuset restricts which cores a process may use but does not change what a runtime believes
+    // is available; see `pinned_parallelism`'s doc for why the harness states the core count
+    // explicitly rather than trusting each gateway's own env.
     #[test]
     fn every_launched_gateway_is_told_how_many_cores_it_was_pinned_to() {
-        // Both launch kinds, because a native entrant is pinned with taskset rather than a cpuset
-        // and needs telling just as much.
+        // Both launch kinds: a native entrant is pinned with taskset rather than a cpuset and needs
+        // telling just as much.
         let mut container = docker_manifest();
         container.launch = Some(LaunchDecl::Docker {
             image: "gw:1".into(),
@@ -1924,9 +1774,8 @@ mod tests {
                     .find(|(n, _)| n == k)
                     .map(|(_, v)| v.as_str())
             };
-            // "0-3" is four cores, and that is what the runtime must be told, not the host's count.
             // Read the LAST assignment for each name: the harness appends its values after the
-            // gateway's, so a gateway that sets its own GOMAXPROCS cannot escape the pinning.
+            // gateway's, so a gateway setting its own GOMAXPROCS cannot escape the pinning.
             assert_eq!(got("GOMAXPROCS"), Some("4"), "{label}: GOMAXPROCS");
             assert_eq!(got("UV_THREADPOOL_SIZE"), Some("4"), "{label}: node pool");
             assert_eq!(got("RAYON_NUM_THREADS"), Some("4"), "{label}: rayon");
@@ -1934,14 +1783,8 @@ mod tests {
         }
     }
 
-    // A MANIFEST THAT RESTATES A HEADER THE RIG ALREADY SENDS IS DISCLOSED, NOT SILENT.
-    //
-    // Ledger RIG-12's remainder. `run::headers_for` composed the dialect's credential header and
-    // then appended the manifest's verbatim, and `gateways/litellm-rust/definition.json` declares
-    // `Authorization: Bearer {GW_AUTH}` today - so two `authorization` headers went out on one
-    // request and HTTP does not define which a server honours. The wire is resolved there (the rig's
-    // copy wins); the collision is named here, so a precedence rule nobody is told about is not the
-    // same silence as the ambiguity it replaced.
+    // See `rig_owned_headers_declared`'s doc for the header-collision defect this disclosure exists
+    // to name.
     #[test]
     fn a_manifest_restating_a_header_the_rig_owns_is_reported() {
         let m = Manifest {
@@ -1954,12 +1797,9 @@ mod tests {
             found[0].contains("authorization") && found[0].contains("headers"),
             "the report must name the header and where it was declared: {found:?}"
         );
-        // Reported case-insensitively, because HTTP header names are: the live manifest spells it
-        // with a capital A, and a rule that only caught the lowercase one would not have caught the
-        // file that motivated it. `found[0]` above is the lowercased name.
+        // Reported case-insensitively, because HTTP header names are. `found[0]` above is lowercased.
 
-        // Every dialect's, not just the ones this gateway wires up: a header in `headers` is sent on
-        // every ingress dialect the matrix probes, and the matrix probes all six regardless.
+        // Every dialect's, not just the ones this gateway wires up.
         for name in ["x-api-key", "x-goog-api-key", "anthropic-version"] {
             let m = Manifest {
                 egress_headers: [("openai".to_string(), vec![format!("{name}: whatever")])]
@@ -1996,14 +1836,12 @@ mod real_field_tests {
 
     /// Every manifest in the real field, read from the gateways' own directories.
     ///
-    /// DISCOVERED, not listed. A single file naming all thirteen would be the hand-maintained roster
-    /// `lib/gateway_isolation_test.sh` exists to prevent (that lint's scan skips `.json`, so such a
-    /// file would slip past it). Reading the directory means adding a gateway is dropping in a
-    /// directory, and nothing else in the tree learns its name.
+    /// DISCOVERED, not listed. A single file naming every entrant would be the hand-maintained
+    /// roster `lib/gateway_isolation_test.sh` exists to prevent (that lint's scan skips `.json`, so
+    /// such a file would slip past it).
     ///
-    /// A schema that only represents an invented example proves nothing: if the types cannot
-    /// describe all thirteen entrants as they actually are, the schema is wrong and no amount of
-    /// internal consistency would say so.
+    /// Uses the real field rather than an invented example: a schema that only describes a made-up
+    /// case proves nothing about whether it fits the actual entrants.
     fn field() -> BTreeMap<String, Manifest> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways");
         let mut out = BTreeMap::new();
@@ -2050,8 +1888,7 @@ mod real_field_tests {
                 !id.trim().is_empty(),
                 "{name} must declare something measurable"
             );
-            // Both readers and the stop path take this one string. Asserting it twice is the closest
-            // a test can get to asserting that a second spelling does not exist.
+            // Asserting it twice is the closest a test can get to asserting no second spelling exists.
             assert_eq!(m.runtime.identity(), id);
         }
     }
@@ -2132,19 +1969,15 @@ mod real_field_tests {
 
     /// PLANO'S TWO BOOT FAILURES, LOCKED SO A BOX IS NEVER SPENT ON THEM AGAIN.
     ///
-    /// Both cost a launched EC2 box and produced no measurement, and both are visible in the files
-    /// alone - no gateway needs to be started to see them. A config a gateway refuses at boot is
-    /// indistinguishable, from the orchestrator's side, from a gateway that is merely slow to come
-    /// up: the box waits out its readiness attempts and is torn down INCOMPLETE.
+    /// Both are visible in the files alone (no gateway needs to start), and both used to cost a
+    /// launched EC2 box that waited out its readiness attempts and was torn down INCOMPLETE.
     ///
-    /// 1. `provider_interface` beside a model prefix Plano already knows. config_generator.py:445
-    ///    rejects the pair (`provider in SUPPORTED_PROVIDERS and provider_interface is not None`)
-    ///    and the container exits. The error text says "Please provide provider interface as part of
-    ///    model name", which reads as the opposite of the rule it enforces, so this is worth
-    ///    asserting rather than trusting a future reader to re-derive.
-    /// 2. Listener port 10000. Plano always renders its prompt-gateway listener there, so an LLM
-    ///    listener on 10000 double-binds and envoy exits with "'egress_traffic' has duplicate
-    ///    address '0.0.0.0:10000'".
+    /// 1. `provider_interface` beside a model prefix Plano already knows: config_generator.py:445
+    ///    rejects the pair and the container exits. Its error text ("Please provide provider
+    ///    interface as part of model name") reads as the opposite of the rule it enforces.
+    /// 2. Listener port 10000: Plano always renders its prompt-gateway listener there, so an LLM
+    ///    listener on 10000 double-binds and envoy exits ("'egress_traffic' has duplicate address
+    ///    '0.0.0.0:10000'").
     #[test]
     fn planos_config_cannot_regress_to_the_two_forms_it_refuses_to_boot_with() {
         let f = field();
@@ -2177,21 +2010,18 @@ mod real_field_tests {
 
     /// A GATEWAY MAY ONLY CLAIM A CELL WHOSE EGRESS DIALECT IT HAS A MODEL FOR.
     ///
-    /// The matrix is what the board publishes as capability, and a claimed cell is measured: this
-    /// harness infers the upstream dialect from the request PATH, so a gateway that routes without
-    /// translating still answers 200 and the cell scores served. That is how plano's openai>anthropic
-    /// cell was about to publish a green for a request it forwarded in the OpenAI shape.
+    /// This harness infers upstream dialect from the request PATH, so a gateway that routes without
+    /// translating still answers 200 and scores served — e.g. plano's openai>anthropic cell nearly
+    /// published a green for a request forwarded in the OpenAI shape.
     ///
-    /// Path-inference is not something a unit test can check - it needs a live upstream. What CAN be
-    /// checked is the cheaper half: a claimed egress column must at least name a model to drive it
-    /// with. A column claimed with no model behind it is a claim nobody chose deliberately.
+    /// Path-inference itself needs a live upstream to check; what CAN be checked cheaply is that a
+    /// claimed egress column at least names a model to drive it with.
     #[test]
     fn no_gateway_claims_an_egress_column_it_has_no_model_for() {
         use crate::ingress::Dialect;
         for (name, m) in &field() {
-            // A manifest that names no models at all leaves model selection to the harness default;
-            // this asserts against the mixed case, where SOME columns are named and a claimed one
-            // is not - that is the drift a hand-edited matrix produces.
+            // A manifest naming no models leaves selection to the harness default; this asserts the
+            // mixed case, where SOME columns are named and a claimed one isn't.
             if m.egress_models.is_empty() {
                 continue;
             }
@@ -2212,9 +2042,8 @@ mod real_field_tests {
         }
     }
 
-    /// The Go runtime's thread count is set from the size of the pinned core range. A literal there
-    /// would run the gateway at the host's core count inside a four-core cpuset, which is not a
-    /// detail: the core split IS the comparability basis of every number on the board.
+    /// The Go runtime's thread count is set from the size of the pinned core range, not the host's —
+    /// the core split IS the comparability basis of every number on the board.
     #[test]
     fn the_core_count_placeholder_resolves_to_the_pinned_range_not_the_host() {
         use std::time::Duration;
@@ -2262,15 +2091,9 @@ mod real_field_tests {
         }
     }
 
-    /// THE THIRTY-SIX CELL DEFECT, as a test.
-    ///
-    /// One entrant's config loader claims every environment variable sharing its prefix and feeds it
-    /// to a deny-unknown-fields deserializer, so the harness's OWN documented override variables kill
-    /// config load before the port binds. The binary is backgrounded, so the launch still reports
-    /// success and the only symptom is "port not listening" on every attempt of every column.
-    ///
-    /// An env block can only ADD, and a spawned process inherits its parent's environment, so this
-    /// has to be expressible as a removal or the class cannot be prevented at all.
+    /// THE THIRTY-SIX CELL DEFECT, as a test — see `LaunchDecl::Native::env_unset`'s doc for the
+    /// underlying mechanism (a config loader rejecting unknown env vars, killing config load
+    /// silently since the launch still reports success).
     #[test]
     fn a_native_entrant_can_require_that_a_variable_is_absent_not_merely_unset_by_us() {
         use std::time::Duration;
@@ -2304,8 +2127,8 @@ mod real_field_tests {
                 !inv.env_unset.is_empty(),
                 "{name} declares variables that must not reach it, and the invocation must carry that removal: {inv:?}"
             );
-            // The removals must not merely be set to empty: an empty value is still a present
-            // variable, and a loader that rejects unknown KEYS does not care what the value is.
+            // An empty value is still a present variable, and a loader rejecting unknown KEYS
+            // doesn't care what the value is.
             for removed in &inv.env_unset {
                 assert!(
                     !inv.env.iter().any(|(k, _)| k == removed),
@@ -2316,12 +2139,9 @@ mod real_field_tests {
     }
 
     /// A doubled brace is a literal one, BOTH ways round: handling only the opening half breaks a
-    /// YAML `error_map: {}`, rendering it as `{}}`, which the gateway refuses to boot on.
-    /// A VALIDATOR THAT ONLY EVER SAYS OK HAS NOT BEEN SHOWN TO WORK.
-    ///
-    /// All thirteen real entrants pass, which is the outcome that proves nothing on its own. Each
-    /// mistake below is one that otherwise surfaces as a container which starts and immediately
-    /// dies - indistinguishable, from the outside, from the gateway being broken.
+    /// YAML `error_map: {}`, rendering it as `{}}`.
+    /// A VALIDATOR THAT ONLY EVER SAYS OK HAS NOT BEEN SHOWN TO WORK: the real entrants passing
+    /// proves nothing on its own, so this test injects the mistakes each check exists to catch.
     #[test]
     fn every_setup_mistake_the_validator_exists_for_is_actually_reported() {
         let dir = std::env::temp_dir().join(format!("otb-validate-{}", std::process::id()));
@@ -2415,8 +2235,7 @@ mod real_field_tests {
     #[test]
     fn a_launch_referring_to_something_the_harness_does_not_supply_is_refused() {
         use std::time::Duration;
-        // Built here rather than borrowed from the other test module: this one walks the real
-        // corpus, and a fixture that drifts from the real shape would prove nothing about it.
+        // Built from the real corpus rather than a fixture, which could drift from the real shape.
         let mut m = field()
             .values()
             .find(|m| m.runtime.is_docker())
@@ -2443,11 +2262,9 @@ mod real_field_tests {
         );
     }
 
-    /// EVERY DECLARED CONFIG TEMPLATE ACTUALLY RENDERS.
-    ///
-    /// Ten entrants boot from a file the harness writes. A template that refers to something the
-    /// harness does not supply produces a gateway that starts and immediately dies, which reads as
-    /// the gateway being broken - so this fails here, at the manifest, rather than there.
+    /// EVERY DECLARED CONFIG TEMPLATE ACTUALLY RENDERS. A template referring to something the
+    /// harness does not supply produces a gateway that starts and immediately dies — this fails
+    /// here, at the manifest, rather than there.
     #[test]
     fn every_declared_config_template_renders_with_nothing_left_unresolved() {
         let mut rendered = 0;
@@ -2474,12 +2291,9 @@ mod real_field_tests {
                     .substitute(&raw, "0-3", 8000, &gw_dir)
                     .unwrap_or_else(|e| panic!("{name} template {}: {e}", file.template));
 
-                // The output is deliberately NOT scanned for leftover braces. A rendered literal -
-                // a config format's own syntax, or a comment documenting a URL shape as
-                // `{api_base}` - is written `{{...}}` in the template and comes out as `{...}`,
-                // which is indistinguishable from an unresolved placeholder by looking at the
-                // result. The guarantee lives in `substitute`, which refuses an unknown name
-                // outright, so reaching this line means every placeholder was supplied.
+                // Deliberately NOT scanned for leftover braces: a rendered literal `{{...}}` comes
+                // out as `{...}`, indistinguishable from an unresolved placeholder by inspection.
+                // The guarantee lives in `substitute`, which refuses an unknown name outright.
                 assert!(
                     !body.trim().is_empty(),
                     "{name} rendered {} to nothing",
@@ -2527,15 +2341,13 @@ mod unresolvable_header_tests {
 
     // A HEADER THAT CANNOT RESOLVE MUST NOT SILENTLY BECOME NO HEADERS.
     //
-    // `validate()` rejects a header containing a shell-style `$`, but it never exercises `{...}`
-    // substitution - so a manifest declaring `Authorization: Bearer {NOT_A_PLACEHOLDER}` passes the
-    // gate `otb run` actually calls, and only fails later inside `headers_for`. That failure used to be
-    // swallowed by `.unwrap_or_default()` in `suite::run_suite_with`, which measured the entire run
-    // with an EMPTY header set: every cell fails to serve, and the board publishes `served: false` -
-    // reporting that the GATEWAY does not work when the harness dropped its credentials.
+    // `validate()` rejects a shell-style `$` but never exercises `{...}` substitution, so a header
+    // like `Authorization: Bearer {NOT_A_PLACEHOLDER}` passes validate and only fails later inside
+    // `headers_for`. That failure used to be swallowed by `.unwrap_or_default()` in
+    // `suite::run_suite_with`, measuring the run with an EMPTY header set and publishing
+    // `served: false` — blaming the gateway for the harness dropping its own credentials.
     //
-    // This pins both halves: validate() does NOT catch it (so the later refusal is load-bearing rather
-    // than belt-and-braces), and headers_for DOES return Err (so there is something to refuse on).
+    // This pins both halves: validate() does NOT catch it, and headers_for DOES return Err.
     #[test]
     fn an_unknown_placeholder_in_a_header_escapes_validate_and_fails_resolution() {
         let m = Manifest {
@@ -2555,8 +2367,8 @@ mod unresolvable_header_tests {
         );
     }
 
-    // The clean path must still resolve, or the refusal above would be indistinguishable from a
-    // manifest system that simply never works.
+    // Must still resolve, or the refusal above would be indistinguishable from a system that never
+    // works at all.
     #[test]
     fn a_manifest_with_no_placeholders_resolves_its_headers() {
         let m = Manifest {
@@ -2577,14 +2389,10 @@ mod unresolvable_header_tests {
 mod unknown_field_tests {
     use super::*;
 
-    /* A MANIFEST KEY NOBODY READS MUST FAIL AT LOAD. Serde ignored unknown fields, so writing
-    `runtime.image` - a field `Runtime::Docker` does not have, because the image lives on `launch`
-    - parsed cleanly and changed nothing. The box ran getbusbar/busbar:1.4.1 for 25 minutes under
-    the gateway key `busbar-150`, and the only reason it was caught was a human asking to log in
-    and look at the container rather than trusting the config.
-
-    The cost of the silent version is a run; the cost of the loud version is a parse error naming
-    the field. */
+    /* A MANIFEST KEY NOBODY READS MUST FAIL AT LOAD. Without deny_unknown_fields, `runtime.image`
+    (`Runtime::Docker` has no such field; the image lives on `launch`) would parse cleanly and
+    change nothing — the cost of the silent version is a wasted run; the loud version costs a parse
+    error naming the field. */
     #[test]
     fn an_image_written_where_the_schema_has_none_is_refused() {
         let json = r#"{

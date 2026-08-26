@@ -4,29 +4,20 @@
 // Process lifecycle for the things the harness starts and stops: the gateway under test and the
 // mock upstream. Ported from lib/harness.sh's `mock_stop_wait` and `gw_stop_wait`.
 //
-// THE RULE THAT CARRIES THE MOST WEIGHT. A signal only asks a process to exit; it returns before
-// the process is gone, so a fixed sleep-then-relaunch can bind the fresh process onto a port the
-// old one still holds, panicking on EADDRINUSE. `gw_stop_wait` matters just as much as
-// `mock_stop_wait` here: the gateway relaunch path is also used for the memory window, where a warm
-// process masquerading as cold idle is its own, quieter corruption.
+// A signal only asks a process to exit; it returns before the process is gone, so a fixed
+// sleep-then-relaunch can bind the fresh process onto a port the old one still holds. So: signal,
+// then POLL for actual release, escalating to SIGKILL at the halfway mark of the budget. A stop
+// that cannot confirm release is a hard error, never a silent success.
 //
-// So: signal, then POLL for actual release, escalating to SIGKILL at the halfway mark of the
-// budget. A stop that cannot confirm release is a hard error, never a silent success, because a
-// caller that proceeds anyway measures a port owned by the process it meant to replace.
+// `Lifecycle` is the seam that makes the polling/escalation logic testable without a real process
+// or socket. The syscall layer (`RealLifecycle`, shelling out to docker/ps/kill, plus the TCP
+// probe in `port_state`) is kept thin on purpose; `select_matches`, which decides which pids a
+// `proc_match` names, is the one piece worth testing directly, because getting it wrong means
+// signalling the harness instead of the gateway.
 //
-// TESTABILITY. The polling and escalation logic is the thing worth testing, and it must be tested
-// without a real process or a real socket. `Lifecycle` is the seam: it says "signal a stop", "is
-// this identity still alive", and "kill it, this hard", and every polling decision is made against
-// that trait alone. The syscall layer (`RealLifecycle`, shelling out to docker/ps/kill, and the
-// TCP connect probe in `port_state`) is kept thin on purpose, with nothing worth unit testing in it -
-// with ONE exception: `select_matches`, which decides which pids a `proc_match` names, is pure and
-// tested here, because getting it wrong means signalling the harness instead of the gateway.
-//
-// A DELIBERATE CHANGE FROM THE SHELL: `mock_stop_wait`/`gw_stop_wait` read a global port variable
-// (`MOCK_PORT`, `GW_PORT`) set by whichever suite sourced the harness. That is exactly the kind of
-// separately-spelled name manifest.rs's `Runtime::identity()` exists to rule out. Here the caller
-// passes the manifest's `Runtime` and its declared port explicitly, so there is no second, global
-// place either could be spelled differently from the manifest.
+// Unlike the shell version, which reads a global port variable (`MOCK_PORT`/`GW_PORT`) set by
+// whichever suite sourced it, the caller here passes the manifest's `Runtime` and port explicitly,
+// so there is no second, global place either could be spelled differently from the manifest.
 
 use crate::manifest::Runtime;
 use std::fmt;
@@ -46,30 +37,22 @@ pub struct ProcEntry {
 }
 
 /// Command names whose command line quotes somebody else's. The harness runs every `commands` line
-/// as `/bin/sh -c "<line>"`, and those lines routinely name the gateway (a curl at its admin API, a
-/// `docker exec` into it), so the shell's own argv contains the gateway's `proc_match` while the
-/// shell is not the gateway. Signalling it would kill the harness's own setup step; counting it as
-/// alive would make `stop_and_wait` wait for a process that is not the one being stopped. No gateway
-/// in this field is started through a shell: `launch::build_invocation` execs `docker` or `taskset`
-/// directly.
+/// as `/bin/sh -c "<line>"`, and those lines often name the gateway (a curl at its admin API, a
+/// `docker exec` into it), so the shell's own argv contains the gateway's `proc_match` without the
+/// shell being the gateway. No gateway is started through a shell — `launch::build_invocation`
+/// execs `docker` or `taskset` directly — so any match here is the wrapper, never the target.
 const WRAPPER_COMMANDS: [&str; 6] = ["sh", "bash", "dash", "zsh", "ash", "ksh"];
 
-/// Every live process, read once. `ps` rather than `pgrep -f`: this way the SUBSTRING match a
-/// manifest means is done here, on text the harness can also inspect for who owns it, instead of
-/// inside `pgrep`, which matches a REGEX (a `proc_match` containing `.` or `+` silently means
-/// something else there) and offers no way to exclude the harness from its own answer.
-/// AN EMPTY TABLE AND AN ABSENT `ps` USED TO LOOK IDENTICAL, and they mean opposite things.
+/// Every live process, read once. Uses `ps` rather than `pgrep -f`, so the SUBSTRING match a
+/// manifest's `proc_match` means is done here, instead of `pgrep`'s REGEX (where `.` or `+` in a
+/// pattern silently means something else) which also offers no way to exclude the harness itself.
 ///
-/// Both returned `Vec::new()`, so a box without `ps` on PATH reported "no process matched" for a
-/// gateway that was running perfectly - the machine-as-untrusted-input class that already cost a full
-/// gateway when `docker` was silently absent. There is no honest empty answer here: this host always
-/// has processes, so an empty table means the QUESTION failed, not that the answer is none.
-///
-/// It still returns a Vec, because every caller reasonably treats "no match" as a fact about the
-/// gateway and rewriting four call sites to thread a Result would spread the concern. What changed is
-/// that the failure is no longer SILENT: it says which of the two happened, on stderr, where the box's
-/// own fanout log captures it. A run that then reports "no running process found" has a line above it
-/// naming the real cause.
+/// An absent/failing `ps` and a genuinely empty process table both used to return `Vec::new()`, so
+/// a box without `ps` on PATH reported "no process matched" for a gateway that was running fine.
+/// This host always has processes, so an empty table means the QUESTION failed, not that the
+/// answer is none. Still returns a `Vec` (every caller treats "no match" as a fact about the
+/// gateway; threading a `Result` through four call sites isn't worth it), but a `ps` failure now
+/// logs to stderr first, so a later "no running process found" can be traced to its real cause.
 pub fn process_table() -> Vec<ProcEntry> {
     let out = match Command::new("ps")
         .args(["-Ao", "pid=,ppid=,args="])
@@ -115,23 +98,14 @@ fn program_basename(cmdline: &str) -> &str {
 
 /// Which pids a manifest's `proc_match` may legitimately name, given the whole process table.
 ///
-/// PURE, AND THE ONLY PLACE THE MATCH RULE LIVES, because the rule is what makes the difference
-/// between stopping the gateway and stopping the harness. `pkill -f <pattern>` matches a bare
-/// substring against every full command line on the box, so three families of wrong process used to
-/// qualify:
-///
-///  - THE HARNESS ITSELF. The engine's own argv names the gateway directory it was invoked with, so a
-///    `proc_match` that is a substring of it made `signal_stop` kill the run, and made `is_alive`
-///    report the gateway alive forever (it was reading the engine's own command line), so every
-///    `stop_and_wait` spent its whole budget and returned `StillHeld` and every restart failed.
-///  - THE SHELL RUNNING A `commands` LINE, which quotes the gateway's name without being it.
-///  - A SECOND ENGINE on the same box, whose argv looks exactly like ours.
-///
-/// So: self and every ancestor of self are excluded, other instances of this same program are
-/// excluded, and shell wrappers are excluded. What remains is a process whose own command line names
-/// the pattern and which is not part of the measuring apparatus. An EMPTY pattern selects NOTHING,
-/// never everything: "no identity was declared" must resolve to an absence, and `pgrep -f ""` matches
-/// every process on the box including init.
+/// PURE, and the only place the match rule lives, because it decides between stopping the gateway
+/// and stopping the harness. A bare substring match (`pkill -f <pattern>`) also picks up the
+/// harness itself (the engine's own argv names the gateway directory it was invoked with — this
+/// once made `signal_stop` kill the run and `is_alive` report the gateway alive forever), the shell
+/// running a `commands` line that quotes the gateway's name without being it, and a second engine
+/// on the same box whose argv looks identical. Self, self's ancestors, other instances of this
+/// program, and shell wrappers are all excluded here. An EMPTY pattern selects NOTHING, never
+/// everything — `pgrep -f ""` matches every process on the box including init.
 pub fn select_matches(table: &[ProcEntry], pattern: &str, self_pid: u32) -> Vec<u32> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -268,12 +242,10 @@ pub struct RealLifecycle;
 impl Lifecycle for RealLifecycle {
     fn signal_stop(&self, runtime: &Runtime) {
         match runtime {
-            // A container's stop is already synchronous (this is why the ten docker manifests were
-            // never exposed to the shell bug); `rm -f` here is also this runtime's escalation, so
-            // calling it as the first signal is not a shortcut, it is simply what "stop" means for
-            // a container.
-            // The container this run started, under its run-scoped name (`Runtime::identity`), so a
-            // concurrent run's container of the same gateway is not the one removed.
+            // A container's stop is already synchronous, and `rm -f` is also this runtime's
+            // escalation, so calling it as the first signal is simply what "stop" means for a
+            // container. Uses this run's scoped identity (`Runtime::identity`) so a concurrent
+            // run's container of the same gateway is not the one removed.
             Runtime::Docker { .. } => {
                 let _ = Command::new("docker")
                     .args(["rm", "-f", &runtime.identity()])
@@ -471,15 +443,10 @@ mod tests {
     /// line, the gateway itself, and a bystander. Every command line here contains the gateway's
     /// `proc_match`, which is exactly what `pkill -f`/`pgrep -f` could not tell apart.
     ///
-    /// The ssh session's own command line (pid 100) genuinely carries the pattern here - some sshd
-    /// builds rewrite their process title to show the command the session is running, so `ps` shows
-    /// the child's invocation inside the parent's own line. That is deliberate: an earlier version of
-    /// this fixture gave pid 100 a line ("sshd: ubuntu@pts/0") that did NOT contain the pattern, so
-    /// the "an ancestor must never be signalled" assertion below passed because pid 100 failed the
-    /// substring filter first, never because `select_matches`'s ancestor walk excluded it. Deleting
-    /// that walk entirely left every test in this module green. With the pattern genuinely present
-    /// here, only the ancestor walk keeps pid 100 out of the result, so this fixture now exercises the
-    /// logic its doc claims to.
+    /// Pid 100 (the ssh session) deliberately carries the pattern too, since some sshd builds
+    /// rewrite their process title to show the child's command. That makes the "ancestor must never
+    /// be signalled" assertion below exercise the ancestor walk itself, rather than passing only
+    /// because the substring filter happened to reject pid 100 first.
     fn a_box_mid_run() -> Vec<ProcEntry> {
         vec![
             entry(1, 0, "/sbin/init"),
@@ -503,10 +470,8 @@ mod tests {
         ]
     }
 
-    // THE DEFECT: the engine's own argv names the gateway directory it was invoked with, so a
-    // substring match selected the harness. `signal_stop` then killed the run, and `is_alive` read
-    // the engine's own command line as proof the gateway was still up - so every `stop_and_wait`
-    // burned its whole budget and returned StillHeld, and every restart after it failed.
+    // The engine's own argv names the gateway directory it was invoked with, so an unguarded
+    // substring match would select the harness itself here.
     #[test]
     fn the_harness_is_never_selected_by_the_gateways_own_proc_match() {
         let table = a_box_mid_run();

@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE STATS-LINE SHAPE: `otb loadgen`'s own stdout (`gen.rs`) is a `k=v` line, and `run.rs`'s
-// `load_window` parses it through `parse_ugen_line`, the wire contract between the loadgen child
-// process and the engine that reads its stdout. Empty output is `Absent(NotMeasured)`, never a
-// zero: that is what a timeout kill, a crash, or a hard-down gateway all look like, and none of
-// them measured anything.
+// The wire contract between the loadgen child process and the engine: `otb loadgen`'s stdout
+// (`gen.rs`) is a `k=v` line, parsed here via `parse_ugen_line`. Empty output is
+// `Absent(NotMeasured)`, never a zero - that's what a timeout kill, crash, or hard-down gateway all
+// look like, and none of them measured anything.
 
 use crate::measurement::{Absent, Measurement};
 use std::collections::BTreeMap;
@@ -51,28 +50,17 @@ fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i
     }
 }
 
-/// The throughput lane's stats, from the stats line:
+/// The throughput lane's stats, parsed from:
 /// `rps=<f64> fail=%d p50=%.2f p99=%.2f p50us=%d p99us=%d ok=%d`,
 /// optionally followed by `rigrefused=%d budgetexceeded=%d spawnfailed=%d`.
 ///
-/// `rps` IS NOT AN INTEGER ON THE WIRE - it is printed from an f64 with `{}`, so a window that
-/// completed one request in four seconds sends `rps=0.25`. This line is the protocol's only
-/// specification, and it declared `%d` here long after the producer stopped emitting one; a second
-/// generator written against the stale text would print `rps=0` for that window and be parsed
-/// without complaint, reintroducing across the process boundary exactly the truncation the f64 on
-/// `UgenStats::rps` exists to carry.
-/// The `p50`/`p99` millisecond floats are redundant with the microsecond fields actually read and are
-/// dropped here; `ok` is kept because a caller can still want it.
+/// The millisecond `p50`/`p99` floats are redundant with the microsecond fields actually read and
+/// are dropped here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UgenStats {
-    /// FRACTIONAL BELOW 1/s, so this is f64 and not i64.
-    ///
-    /// `GenStats::rps` publishes a fraction under 1/s (a rung completing one request in four seconds is
-    /// 0.25/s, not 0), and the child prints it with `{}` - so the wire carries "rps=0.25". Parsed as i64
-    /// that FAILS, and `parse_ugen_line` classifies the whole window as a HarnessError: the sub-1/s
-    /// rungs the fractional rate was introduced for would be DISCARDED rather than published, which is
-    /// strictly worse than the false `0` it replaced. The type has to follow the value across the
-    /// process boundary, not just inside the child.
+    /// Fractional below 1/s (one request in four seconds is 0.25/s, printed with `{}`). Must stay
+    /// f64: parsing it as i64 fails and `parse_ugen_line` discards the whole window as a
+    /// HarnessError, silently dropping the sub-1/s rungs this exists to carry.
     pub rps: f64,
     pub fail: i64,
     pub p50_us: i64,
@@ -131,40 +119,28 @@ pub fn parse_ugen_line(raw: &str) -> Measurement<UgenStats> {
     }
 }
 
-/// THE OTHER HALF OF THE SAME WIRE CONTRACT: how the engine tells the loadgen child what headers to
-/// send.
+/// How the engine tells the loadgen child (a separate pinned process, see `run::load_window_at`)
+/// what headers to send. Without this the child hardcoded a dummy credential in the wrong shape,
+/// so every real-auth gateway passed its probe and then failed every load-window request silently.
 ///
-/// It has to cross a process boundary because the generator runs as its own pinned child (see
-/// `run::load_window_at` for why), and until this existed it did not cross at all: the child
-/// hardcoded `authorization: Bearer dummy`. The probe authenticated with the manifest's real
-/// credential and in the right per-dialect header shape, the LOAD authenticated as the literal string
-/// "dummy" with a header name two of the six dialects do not even use, and the two paths were tested
-/// separately so nothing noticed. Every gateway whose declared auth is not literally "dummy" passed
-/// its probe and then failed every request of every load window, and the absence that reached the
-/// artifact blamed the SEARCH ("no probed concurrency passed the gate") for a credential fault.
-///
-/// AN ENVIRONMENT VARIABLE, NOT AN ARGUMENT. A credential passed on the command line is visible in
-/// `ps` to every user on the box for the whole life of the window; a child's environment is readable
-/// only by its owner. This is the same reason the minted credential is read from a file rather than
-/// exported into a command line.
+/// An environment variable, not an argument: a command-line credential is visible in `ps` to every
+/// user on the box, while a child's environment is readable only by its owner.
 pub const HEADERS_ENV: &str = "OTB_LOADGEN_HEADERS";
 
 /// Encode a header list for `HEADERS_ENV`.
 ///
-/// JSON rather than a `k: v` per line, because header VALUES are arbitrary bytes chosen by the
-/// gateway's manifest - a bearer token with a newline or a colon in it would silently split into two
-/// headers under a hand-rolled format, and sending half a routing header selects the wrong upstream
-/// and publishes a number for a pairing that was never driven.
+/// JSON rather than a `k: v` per line: header values are arbitrary bytes from the gateway's
+/// manifest, and a token containing a newline or colon would silently split under a hand-rolled
+/// format.
 pub fn encode_headers(headers: &[(String, String)]) -> String {
     serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Decode what `encode_headers` wrote.
 ///
-/// An unset or unparseable variable yields NO headers, never a default credential. A wrong credential
-/// is worse than none: no credential is a 401 the operator can read off the stats line as a total
-/// failure, whereas the placeholder that used to be hardcoded here was a wrong credential that looked
-/// exactly like a gateway falling over under load.
+/// An unset or unparseable variable yields NO headers, never a default credential: a wrong
+/// credential produces a 401 that looks like a gateway falling over under load, whereas no
+/// credential reads correctly as a total auth failure.
 pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
     raw.and_then(|s| serde_json::from_str::<Vec<(String, String)>>(s).ok())
         .unwrap_or_default()
@@ -172,13 +148,9 @@ pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    // THE FLAG THE PARENT CHECKED BUT COULD NEVER RECEIVE.
-    //
-    // The child sets `spawn_failed` when the OS refuses a thread, which means the window never ran at
-    // the concurrency it claims - a rig limit `SweepProbe::probe` stops the search on. But the flag
-    // stopped at the subprocess boundary: the stats line did not carry it and the parent hardcoded
-    // `spawn_failed: false`, so `if stats.spawn_failed` could not fire on the only path that matters
-    // and a window that never ran was read as an ordinary result of the gateway.
+    // The child sets `spawn_failed` when the OS refuses a thread (a rig limit `SweepProbe::probe`
+    // stops the search on). It must survive onto the stats line, or a window that never ran at its
+    // claimed concurrency reads as an ordinary gateway result.
     #[test]
     fn spawn_failed_survives_the_subprocess_boundary() {
         let base = "rps=1000 fail=0 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1000";
@@ -198,9 +170,8 @@ mod tests {
             "and a healthy window must not read as a spawn failure"
         );
 
-        // An OLDER generator's line has no such field. Absent means "none reported", and refusing to
-        // parse an otherwise-complete line would be worse than defaulting - the same reasoning
-        // `rig_refused` and `budget_exceeded` already carry.
+        // An older generator's line has no such field; absent means "none reported", not "none
+        // happened".
         let got = parse_ugen_line(base)
             .into_value()
             .expect("a line without the field still parses");
@@ -276,11 +247,10 @@ mod tests {
         assert!(m.is_measured());
     }
 
-    // ── the header wire, the half that used to not exist ────────────────────────────────────────
+    // ── the header wire ─────────────────────────────────────────────────────────────────────────
 
-    // Every dialect's real header SHAPE has to survive the crossing, not just a token: two of the six
-    // do not use `authorization` at all, and anthropic sends a second, mandatory header beside its
-    // key. The hardcoded line this replaces got the name wrong as well as the value.
+    // Every dialect's header SHAPE must survive the crossing, not just a token: two of six don't
+    // use `authorization` at all, and anthropic sends a second, mandatory header beside its key.
     #[test]
     fn every_dialects_own_header_shape_survives_the_process_boundary() {
         for d in crate::ingress::Dialect::ALL {
@@ -290,9 +260,8 @@ mod tests {
         }
     }
 
-    // A value carrying the characters a hand-rolled `k: v` encoding would split on. A routing header
-    // that arrives halved selects the wrong upstream, which publishes a number for a pairing that was
-    // never driven.
+    // A value carrying characters a hand-rolled `k: v` encoding would split on; a routing header
+    // that arrives halved selects the wrong upstream.
     #[test]
     fn a_hostile_header_value_crosses_intact_rather_than_splitting() {
         let hostile = vec![
@@ -319,8 +288,8 @@ mod tests {
         assert_eq!(decode_headers(Some(&encode_headers(&dupes))), dupes);
     }
 
-    // NO HEADERS, never a default credential. The placeholder that used to be hardcoded here is
-    // precisely what made a credential fault indistinguishable from a gateway collapsing under load.
+    // No headers, never a default credential - a hardcoded placeholder would make a credential
+    // fault indistinguishable from a gateway collapsing under load.
     #[test]
     fn an_unset_or_broken_header_variable_sends_nothing_rather_than_a_placeholder() {
         assert!(decode_headers(None).is_empty());
@@ -334,16 +303,9 @@ mod tests {
 mod sub_one_rate_roundtrip_tests {
     use super::*;
 
-    // THE SUBPROCESS BOUNDARY IS WHERE THE FRACTIONAL RATE ALMOST DIED.
-    //
-    // `GenStats::rps` was changed to publish a fraction below 1/s, because truncating "one request in
-    // four seconds" to `0` says the gateway carried NOTHING. The child prints that with `{}`, so the
-    // wire carries `rps=0.25` - and this parser read `rps` as an i64, which FAILS. `parse_ugen_line`
-    // then classifies the entire window as a HarnessError, so the sub-1/s rungs the change was written
-    // for would have been DISCARDED instead of published: strictly worse than the false `0` it replaced.
-    //
-    // Nothing caught it. The engine's own unit tests all sit on one side of the boundary or the other,
-    // and the format string and the parser are in different files. This pins the seam.
+    // Pins the subprocess boundary for the fractional rate: `GenStats::rps` prints sub-1/s values
+    // like `rps=0.25`, and a parser reading `rps` as i64 would fail, making `parse_ugen_line`
+    // discard the whole window as a HarnessError instead of publishing it.
     #[test]
     fn a_sub_one_per_second_rate_survives_the_stats_line_round_trip() {
         for (line, want) in [

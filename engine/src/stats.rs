@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE STEADINESS GATE: a timer says when WE stopped looking, not when the series stopped moving, so
-// a fixed-duration load would publish a gateway's mid-climb value as if it were a settled one.
-//
-// A pure spread test ("max minus min in the window is small") is not enough: a leak that is
-// asymptoting has tiny sample-to-sample deltas near its tail, so it passes a spread test while still
-// genuinely rising. The trend test (second-half mean vs first-half mean) is what catches that shape,
-// which is why `plateau_check` requires BOTH tests rather than either alone. See `plateau_check` for
-// the one-sided drift rule and the undecidable-sample-count rule.
-//
-// Not reaching a plateau is a measured result, not a failure: it is returned as `Verdict::NotSteady`
-// carrying the growth rate, which is the most informative thing this gate can say about a series that
-// never settles. A caller must publish that rather than quietly substituting the last sample.
+// The steadiness gate decides whether a series has settled, not just whether a timer stopped
+// watching it. A spread test alone misses an asymptoting leak (tiny deltas near the tail still pass
+// a spread check while genuinely rising), so `plateau_check` requires both a trend test and a range
+// test. A series that never settles publishes `Verdict::NotSteady` with its growth rate rather than
+// having the caller substitute the last sample.
 
 use crate::measurement::{Absent, Measurement};
 use serde::{Deserialize, Serialize};
@@ -31,25 +24,21 @@ impl Sample {
     }
 }
 
-/// HOW a window failed to settle. A gateway whose memory oscillates around a stable level - a
-/// garbage collector doing its job, an allocator returning and reclaiming arenas - is not leaking,
-/// however far it swings. A gateway whose memory trends upward for the whole window and is still
-/// rising at the end has no level at all, and that is the finding a reader needs.
-///
-/// Both fail the steadiness test, so publishing them under one word ("NEVER SETTLES", in red, beside
-/// a leak rate) brands a healthy sawtooth as a leak. The two are separable from numbers the test
-/// already computes: `drift` is the net movement between the window's halves, `spread` is how far it
-/// ranged. A climb has large drift. A wave has large spread and near-zero drift.
+/// How a window failed to settle. An oscillating gateway (e.g. GC cycling) is not leaking however far
+/// it swings; a climbing one has no level at all. Both fail the steadiness test, so they must not
+/// share one "not steady" label — that would brand a healthy sawtooth as a leak. `drift` (net
+/// movement between halves) and `spread` (range) separate the two: a climb has large drift, a wave
+/// has large spread and near-zero drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
     /// Trending in one direction across the window and still going at the end. Unbounded growth is
-    /// the real defect this metric exists to catch.
+    /// the defect this metric exists to catch.
     Climbing,
     /// Ranging widely but with no net trend: it returns to where it was. Not a leak.
     Oscillating,
-    /// Trending DOWNWARD across the window - still releasing memory when the window closed. Not
-    /// steady, but the opposite of a leak, and it must never be labelled as one.
+    /// Trending downward across the window — still releasing memory when it closed. Not steady, but
+    /// the opposite of a leak, and must never be labelled as one.
     Falling,
 }
 
@@ -59,64 +48,41 @@ pub enum Verdict {
     /// Both the trend test and the range test passed: the window is not moving in any direction that
     /// matters, and a caller may publish a steady-state number from it.
     ///
-    /// IT CARRIES THE MEASURED RATE TOO, and that is the point. This was a unit variant, and the caller
-    /// answered a Steady verdict by publishing `growth_rate_mib_per_min: Measured(0.0)` - substituting an
-    /// exact zero for the slope this function had just fitted. So a gateway drifting 0.9% across the
-    /// window (inside `MEMORY_TREND_PCT`, therefore "steady") published a growth rate of exactly zero,
-    /// and the number a reader would use to judge a slow leak was a constant chosen by a threshold rather
-    /// than anything measured. "Steady" is a verdict; the rate is a measurement; the artifact publishes
-    /// both, in separate fields, and neither may be derived from the other here.
+    /// Carries the fitted growth rate rather than letting a caller substitute an assumed zero: a
+    /// window drifting just under the trend bar is still measurably moving, and that rate is the
+    /// number a reader needs to spot a slow leak.
     Steady {
         growth_rate_mib_per_min: Measurement<f64>,
     },
-    /// A real, publishable result: the window did not settle. Carries the growth rate so a caller can
-    /// never say "not steady" without also saying how fast it moved, and the SHAPE of the movement,
-    /// because "did not settle" describes two very different gateways and only one of them is a
-    /// defect. See `Shape`.
+    /// The window did not settle. Carries the growth rate and the `Shape` of the movement, because
+    /// "did not settle" covers two very different gateways and only one of them is a defect.
     NotSteady {
         growth_rate_mib_per_min: Measurement<f64>,
         shape: Shape,
     },
-    /// The window could not be judged - AND IT CARRIES WHY, because there are now two causes and they
-    /// belong to different parties.
-    ///
-    /// This was a unit variant documented as meaning only "fewer than four samples". Then a second
-    /// producer appeared: `min`/`max` refuse a non-finite sample and return `Absent::HarnessError`,
-    /// which `plateau_check` turned into this same bare `Undecidable`. Both of its callers in
-    /// `metric.rs` then published `Absent::NotMeasured` with the reason "too few readings fell inside
-    /// the window" - on a FULL window, for a failure that was OURS. The evidence naming it as the rig's
-    /// was generated by `refuse_non_finite` and discarded one line later, which is the exact shape the
-    /// refusal was added to prevent.
-    ///
-    /// A unit variant cannot be published honestly by a caller that has two things to distinguish, so
-    /// the cause rides with the verdict - the same reasoning as `NotSteady` carrying its growth rate and
-    /// `StreamStop` carrying its ending.
+    /// The window could not be judged, with why: there are two distinct causes (a coverage gap vs. a
+    /// harness fault) and a caller must not conflate them — see `Undecidable`.
     Undecidable(Undecidable),
 }
 
-/// Why a window could not be judged. The two are not interchangeable: one is a coverage gap in the
-/// measurement, the other is the harness malfunctioning, and the board must never file the second as
-/// the first (invariant: never attribute the rig to the gateway).
+/// Why a window could not be judged. One is a coverage gap in the measurement, the other is the
+/// harness malfunctioning; never attribute the rig's fault to the gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Undecidable {
-    /// Fewer than four samples fell inside the window. A fact about the MEASUREMENT: not enough
-    /// evidence to judge either way, and distinct from `NotSteady` on purpose - "we could not tell"
-    /// and "we could tell and it moved" are different claims.
+    /// Fewer than four samples fell inside the window: not enough evidence to judge either way.
+    /// Distinct from `NotSteady` — "we could not tell" and "we could tell and it moved" differ.
     TooFewReadings { got: usize, need: usize },
-    /// A sample was NaN or an infinity, so no order statistic over this window is answerable. A fact
-    /// about the RIG, and it must reach the artifact as `Absent::HarnessError`.
+    /// A sample was NaN or an infinity, so no order statistic over the window is answerable. A rig
+    /// fault; must reach the artifact as `Absent::HarnessError`.
     NonFiniteSample,
-    /// The window held enough readings but did not span enough TIME to call a plateau. Distinct from
-    /// `TooFewReadings` because a dense short window and a sparse long one fail for different reasons
-    /// and a reader deserves to know which - `metric.rs` demotes a `Steady` verdict here rather than
-    /// publish "it settled" about a window too brief for settling to mean anything.
+    /// Enough readings, but not enough elapsed time to call a plateau. Distinct from
+    /// `TooFewReadings` since a dense short window and a sparse long one fail for different reasons.
     WindowTooShort,
 }
 
 impl Undecidable {
-    /// The absence variant a caller must publish for this cause. Provided here rather than left to each
-    /// caller because getting it backwards is the failure this enum exists to prevent, and there are
-    /// two callers who both got it wrong when the choice was theirs.
+    /// The absence variant a caller must publish for this cause. Centralized so the two causes can't
+    /// be swapped by a caller.
     pub fn absent_kind(&self) -> Absent {
         match self {
             Undecidable::TooFewReadings { .. } | Undecidable::WindowTooShort => Absent::NotMeasured,
@@ -124,7 +90,7 @@ impl Undecidable {
         }
     }
 
-    /// The reason string, so the two callers cannot describe the same cause differently.
+    /// The reason string, so callers cannot describe the same cause differently.
     pub fn detail(&self, window_label: &str) -> String {
         match self {
             Undecidable::TooFewReadings { got, need } => format!(
@@ -144,20 +110,16 @@ impl Undecidable {
 }
 
 impl Verdict {
-    /// Did the window settle? A NAMED PREDICATE rather than `matches!(v, Verdict::Steady { .. })` at each
-    /// site: `Steady` gained a field (the fitted slope it used to make its caller invent), and a
-    /// brace-pattern inside `prop_assert!` breaks that macro's stringification of the expression. Callers
-    /// that only ask the yes/no question should not have to spell the payload they are ignoring.
+    /// Did the window settle? A named predicate rather than `matches!(v, Verdict::Steady { .. })` at
+    /// each site: a brace-pattern inside `prop_assert!` breaks that macro's stringification.
     pub fn is_steady(&self) -> bool {
         matches!(self, Verdict::Steady { .. })
     }
 }
 
-/// Keep only the trailing `window_s` seconds of `samples`, anchored to the LAST sample's own
-/// timestamp rather than wall-clock time, so a series that ended before "now" still windows correctly.
-/// The steadiness test only ever looks at recent history: a window anchored at the start would be
-/// diluted by every series' initial ramp, so a fast-settling series would be judged on samples from
-/// before it settled.
+/// Keep only the trailing `window_s` seconds of `samples`, anchored to the last sample's own
+/// timestamp (not wall-clock time), so a series that ended before "now" still windows correctly and a
+/// fast-settling series isn't diluted by its own initial ramp.
 pub fn window(samples: &[Sample], window_s: f64) -> Vec<Sample> {
     match samples.last() {
         None => Vec::new(),
@@ -169,10 +131,8 @@ pub fn window(samples: &[Sample], window_s: f64) -> Vec<Sample> {
 }
 
 /// Least-squares slope of `mib` against `t_s`, in MiB per minute. A fit rather than
-/// endpoint-minus-endpoint on purpose: a single noisy first or last sample would otherwise set the
-/// whole reported rate. Absent when there are fewer than two samples, or when every sample shares the
-/// same timestamp (no slope is defined). Absent must stay distinguishable from a measured zero: "we
-/// did not measure a rate" and "the rate was zero" are different claims.
+/// endpoint-minus-endpoint, so a single noisy first or last sample can't set the whole reported rate.
+/// Absent (not a measured zero) when fewer than two samples, or all samples share one timestamp.
 pub fn growth_rate(samples: &[Sample]) -> Measurement<f64> {
     let n = samples.len();
     if n < 2 {
@@ -194,32 +154,27 @@ pub fn growth_rate(samples: &[Sample]) -> Measurement<f64> {
 }
 
 /// The steadiness gate. Windows `samples` to the trailing `window_s` seconds, then requires BOTH:
-///   trend: the two halves' means differ by less than `trend_pct`, IN EITHER DIRECTION.
+///   trend: the two halves' means differ by less than `trend_pct`, in either direction.
 ///   range: (max - min) across the window is less than `range_pct` of the window's mean.
 ///
-/// The trend test is TWO-SIDED, and this comment used to say the opposite - that only a rise
-/// disqualified, on the reasoning that a falling series is releasing rather than leaking. The code
-/// deliberately compares `drift.abs()` instead, and the note at that comparison explains why: a
-/// signed value against a positive threshold bounds growth ONLY, so any decline however steep is
-/// always less than the threshold and would read as settled. `Verdict::Steady`'s own contract is "not
-/// moving in any direction that matters", and a window still handing memory back at speed is moving.
-/// Falling is not treated as leaking either - it is published as its own shape (`Shape::Falling`), so
-/// the honest reading survives without the gate having to wave it through.
+/// The trend test is two-sided (compares `drift.abs()`): a signed value against a positive threshold
+/// would bound growth only, letting any decline however steep read as settled, but `Verdict::Steady`
+/// means "not moving in any direction that matters". A falling window is not treated as leaking
+/// either — it publishes as `Shape::Falling` rather than being waved through as steady.
 ///
-/// The range test then bounds how far the series may travel within the window regardless of trend, so
-/// one oscillating hard around a flat mean - no net drift, but the value read depends on which instant
-/// you sampled - is still correctly rejected.
+/// The range test then bounds how far the series may travel regardless of trend, so oscillation
+/// around a flat mean (no net drift, but the reading depends on which instant you sampled) is still
+/// rejected.
 ///
-/// An odd-sized window gives its extra sample to the SECOND half, so a late upward sample is never the
-/// one a rounding choice drops.
+/// An odd-sized window gives its extra sample to the second half, so a late upward sample is never
+/// the one a rounding choice drops.
 ///
-/// CALIBRATION NOTE, load-bearing: for a linear ramp, the window size and the thresholds trade off
-/// directly, because both tests reduce to "how far did the value move, relative to the mean, across
-/// (about) half the window". Halving `window_s` halves the elapsed time the trend test can see, so it
-/// takes DOUBLE the rate to produce the same measured drift. Concretely, on a ~120 MiB base at the
-/// default 1% trend gate: a leak has to hold under ~2.4 MiB/min to certify steady at a 60s window, but
-/// under ~4.8 MiB/min at a 30s window. Shrinking the window is not a free way to detect leaks faster;
-/// it loosens the bar. See the halving-window test below, which pins this ratio exactly.
+/// Calibration: for a linear ramp, window size and thresholds trade off directly, since both tests
+/// reduce to "how far did the value move, relative to the mean, across about half the window".
+/// Halving `window_s` halves the elapsed time the trend test can see, so it takes double the rate to
+/// produce the same measured drift — e.g. on a ~120 MiB base at a 1% trend gate, a leak must hold
+/// under ~2.4 MiB/min to certify steady at 60s but under ~4.8 MiB/min at 30s. Shrinking the window
+/// loosens the bar, it doesn't detect leaks faster. See the halving-window test below.
 pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pct: f64) -> Verdict {
     let win = window(samples, window_s);
     let n = win.len();
@@ -235,59 +190,37 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     let mean = (sum1 + sum2) / n as f64;
     let growth_rate_mib_per_min = growth_rate(&win);
 
-    // A non-positive mean makes both percentages meaningless (division by zero or sign flip), so this
-    // cannot be called steady; it is a real result (not undecidable), matching the shell original.
+    // A non-positive mean makes both percentages meaningless, so this is a real NotSteady result, not
+    // undecidable.
     if mean <= 0.0 {
         return Verdict::NotSteady {
             growth_rate_mib_per_min,
-            // No usable mean means no usable drift percentage either, so the shape cannot be told
-            // from these samples. `Oscillating` is the conservative answer: it is the one that does
-            // not accuse the gateway of leaking.
+            // No usable mean means no usable drift percentage, so the shape can't be told from these
+            // samples. `Oscillating` is the conservative answer: it doesn't accuse the gateway of leaking.
             shape: Shape::Oscillating,
         };
     }
 
     let drift = (mean2 - mean1) / mean * 100.0;
-    // THROUGH `min`/`max`, not a second inline fold. These two lines used to roll their own
-    // `fold(f64::INFINITY, f64::min)` while `stats::min` and `stats::max` sat unused a hundred lines
-    // below with unit tests of their own - so the tests read as coverage of this engine's min/max
-    // handling while the number that actually reaches the board's spread and plateau figures came from
-    // code they never touched.
-    //
-    // THE ABSENT CASE IS REACHABLE NOW, and this comment used to say it was not. It read "`win` is
-    // non-empty here ... so the absent case cannot arise" - true when min/max only failed on an empty
-    // slice. They now REFUSE a non-finite sample (a NaN or an infinity out of a /proc read or a
-    // division in the sampler) and return `Absent::HarnessError` naming how many samples were bad.
-    // `unwrap_or(±INFINITY)` threw that away: `hi - lo` became negative infinity, and the function went
-    // on to publish a `NotSteady` verdict about the GATEWAY'S memory for a window the engine had just
-    // proved was OUR malfunction. The one piece of evidence naming it as ours was generated and
-    // discarded on the same line - which is the defect shape this whole audit keeps finding.
-    //
-    // Undecidable is the honest answer: the window cannot be judged, and that is not a fact about the
-    // gateway. The caller already publishes an absence with a reason for this verdict.
+    // Goes through `min`/`max` (which refuse a non-finite sample and return `Absent::HarnessError`)
+    // rather than an inline fold, so a NaN/infinity in the window is reported as a rig fault
+    // (Undecidable) instead of silently producing a bogus spread.
     let samples: Vec<f64> = win.iter().map(|s| s.mib).collect();
     let (Some(lo), Some(hi)) = (min(&samples).copied(), max(&samples).copied()) else {
         return Verdict::Undecidable(Undecidable::NonFiniteSample);
     };
     let spread = (hi - lo) / mean * 100.0;
 
-    // MAGNITUDE, NOT SIGN. `drift` is signed - positive when the window is still climbing, negative
-    // when it is declining - but `Verdict::Steady`'s own contract is "not moving in any direction
-    // that matters", so the comparison uses `drift.abs()`: comparing the signed value against a
-    // positive threshold would bound growth only, since any decline, however steep, is always less
-    // than a positive threshold and would read as settled.
+    // `drift` is signed; comparing it directly against a positive threshold would bound growth only
+    // (any decline would read as settled). `Verdict::Steady` means "not moving in any direction that
+    // matters", hence `drift.abs()`.
     if drift.abs() < trend_pct && spread < range_pct {
-        // The fitted slope travels WITH the verdict. It is already computed above for every path, and it
-        // was being dropped on exactly the path where the caller would otherwise invent a zero.
         Verdict::Steady {
             growth_rate_mib_per_min,
         }
     } else {
-        // The shape is decided by DRIFT, the net movement between the two halves, not by spread.
-        // A window that ranged 40% but ended where it started is a wave; one that drifted upward is
-        // a climb even if it did so smoothly. The same `trend_pct` bar that decides "settled"
-        // decides "has a direction", so a window cannot be called directionless by one test and
-        // directional by the other.
+        // Shape is decided by drift (net movement between halves), not spread: a window that ranged
+        // 40% but ended where it started is a wave, not a climb.
         let shape = if drift >= trend_pct {
             Shape::Climbing
         } else if drift <= -trend_pct {
@@ -302,32 +235,14 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     }
 }
 
-/// A NON-FINITE SAMPLE MAKES AN ORDER STATISTIC UNANSWERABLE, SO IT IS REFUSED RATHER THAN SORTED.
+/// A non-finite sample makes an order statistic unanswerable, so it is refused rather than sorted.
+/// `partial_cmp(..).unwrap_or(Equal)` treats NaN as equal to everything, which is not a total order:
+/// it leaves the whole slice in an unspecified permutation, so the same samples can sort to a
+/// different median/percentile depending on arrival order.
 ///
-/// `median` and `percentile` both sorted with `a.partial_cmp(b).unwrap_or(Ordering::Equal)`, which
-/// makes a NaN compare EQUAL TO EVERYTHING. That is not a total order, and an inconsistent comparator
-/// does not merely misplace the NaN - it leaves the whole slice in an unspecified permutation. Measured
-/// on this comparator:
-///
-/// ```text
-/// one NaN in ten samples          -> [10,20,30,40,50,60,70,80,90,NaN], p99 reads NaN
-/// the same values, NaN rotated    -> [80,90,NaN,10,20,30,40,50,60,70], not sorted at all
-/// median of the same five values, NaN first vs NaN in the middle -> 30 vs 20
-/// ```
-///
-/// (Fenced as `text` deliberately: an indented block in a doc comment is a DOCTEST, and rustdoc tried
-/// to compile this table as Rust. CI caught it - `expected one of ! or ::, found NaN` - on the very
-/// commit that fixed a correctness bug, which is how a real fix gets reverted for a cosmetic reason.)
-///
-/// The last line is the one that matters: THE SAME SET OF SAMPLES PRODUCED A DIFFERENT PUBLISHED NUMBER
-/// DEPENDING ON THE ORDER THEY ARRIVED IN. A board whose premise is that every number regenerates from
-/// committed JSON cannot contain a figure that depends on arrival order, and "NaN sorts as equal to
-/// everything" is exactly the kind of undeclared rule that has no business authoring a measurement -
-/// the same fault as the frontier's tie-break falling out of `max_by` keeping the last maximum.
-///
-/// So this is a HarnessError, not a NotMeasured: a non-finite latency is the rig malfunctioning, and it
-/// must be reported as the rig's failure rather than quietly absorbed into a percentile or blamed on the
-/// gateway. `run.rs` already refuses a non-finite stream rate the same way (`StreamWindow::engine_fault`).
+/// Reported as `HarnessError`, not `NotMeasured`: a non-finite latency is the rig malfunctioning, not
+/// a property of the gateway. `run.rs` refuses a non-finite stream rate the same way
+/// (`StreamWindow::engine_fault`).
 fn refuse_non_finite(values: &[f64], what: &str) -> Option<Measurement<f64>> {
     let bad = values.iter().filter(|v| !v.is_finite()).count();
     if bad == 0 {
@@ -344,9 +259,8 @@ fn refuse_non_finite(values: &[f64], what: &str) -> Option<Measurement<f64>> {
     ))
 }
 
-/// The median of `values`. Even counts average the two middle values after sorting, matching the
-/// shell harness's own median helpers. Absent (never zero) on an empty slice, and refused outright if
-/// any sample is non-finite - see `refuse_non_finite`.
+/// The median of `values`. Even counts average the two middle values after sorting. Absent (never
+/// zero) on an empty slice; refused if any sample is non-finite (see `refuse_non_finite`).
 pub fn median(values: &[f64]) -> Measurement<f64> {
     if values.is_empty() {
         return Measurement::absent(Absent::NotMeasured);
@@ -366,15 +280,10 @@ pub fn median(values: &[f64]) -> Measurement<f64> {
     Measurement::Measured(v)
 }
 
-/// The smallest value in `values`. Absent (never zero, never an arbitrary sentinel) on an empty slice,
-/// and REFUSED on a non-finite one for the same reason `median` and `percentile` refuse it.
-///
-/// `f64::min` and `f64::max` IGNORE NaN - they return the other operand - so `reduce(f64::min)` over a
-/// slice containing one silently drops it and reports a min over the remaining samples as though the
-/// window were clean. That is quieter than the sort corruption those two had, and worse in one respect:
-/// there is no disagreement for anyone to notice. A rig that produced a non-finite latency is
-/// malfunctioning, and every order statistic over that window must say so rather than each deciding
-/// separately how much of the window to believe.
+/// The smallest value in `values`. Absent (never zero or a sentinel) on an empty slice, and refused on
+/// a non-finite one for the same reason `median`/`percentile` refuse it: `f64::min`/`f64::max` ignore
+/// NaN and return the other operand, so `reduce(f64::min)` would silently drop a bad sample and report
+/// a min over the rest as though the window were clean.
 pub fn min(values: &[f64]) -> Measurement<f64> {
     if let Some(refusal) = refuse_non_finite(values, "minimum") {
         return refusal;
@@ -396,34 +305,20 @@ pub fn max(values: &[f64]) -> Measurement<f64> {
     }
 }
 
-/// THE ONE PERCENTILE CONVENTION THIS ENGINE USES. Every published percentile - the load
-/// generator's p50/p99, the search's rung median, the streaming TTFT and inter-frame-gap
-/// percentiles - resolves its rank through here, so no two of them can mean different things by the
-/// same name.
+/// The one percentile convention this engine uses. Every published percentile (load generator,
+/// search, streaming TTFT/inter-frame-gap) resolves its rank through here, so none can mean something
+/// different by the same name.
 ///
-/// NEAREST RANK, CEILING: the 0-based index of the `ceil(n * p)`-th smallest value, clamped into
+/// Nearest rank, ceiling: the 0-based index of the `ceil(n * p)`-th smallest value, clamped into
 /// `0..n`. Never interpolates, so a published percentile is always a value some sample really
 /// produced.
 ///
-/// CEIL WON, and the engine used to be split. `metric.rs` computed `ceil(n*p)` (1-based) while
-/// `gen.rs`, `stats.rs` and `search.rs` computed `floor(n*p)` (0-based), and comments in all three
-/// places claimed the conventions matched. They agree whenever `n * p` is fractional and disagree by
-/// exactly one rank whenever it is a whole number - which is precisely the sample counts this rig
-/// chooses: n=100 TTFT samples per leg (`metric::STREAM_TTFT_SAMPLES`) puts p99 at index 98 under
-/// ceil and index 99 under floor, and index 99 of 100 IS THE MAXIMUM. That is the defect, and it is
-/// not cosmetic: floor turns a p99 into "the single worst sample", the one order statistic a tail
-/// percentile exists to avoid. `gen.rs`'s own test asserted it outright - `pct_us(0.99) == 100` over
-/// ten samples, commented "the last value" - and `metric.rs`'s asserted the opposite rule in the
-/// same crate ("the p99 must not be the max, or it is not a percentile"). Ceil is also the textbook
-/// nearest-rank definition (the smallest value at or above which at least `p` of the data falls), so
-/// the convention that survives is the one a reader of the board would assume.
+/// Ceil, not floor: at whole-number `n * p` the two disagree by exactly one rank, and floor puts p99
+/// at the last index — i.e. the maximum, not a tail percentile. Ceil is also the textbook nearest-rank
+/// definition (smallest value at or above which at least `p` of the data falls).
 ///
-/// This moves published percentiles by at most one rank, downward, on the whole-number cases. That
-/// is expected and it is the correction: the numbers it changes were the maximum wearing a
-/// percentile's name.
-///
-/// `n` must be non-zero; an empty sample set has no percentile at all and every caller answers that
-/// with an absence rather than a rank.
+/// `n` must be non-zero; an empty sample set has no percentile, and callers answer that with an
+/// absence rather than a rank.
 pub fn nearest_rank_index(n: usize, p: f64) -> usize {
     let rank = ((n as f64) * p).ceil() as usize;
     rank.clamp(1, n.max(1)) - 1
@@ -435,9 +330,7 @@ pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
     if values.is_empty() {
         return Measurement::absent(Absent::NotMeasured);
     }
-    // Same refusal as `median`, and for the same reason: with a NaN present the sort's output is an
-    // unspecified permutation, so `sorted[nearest_rank_index(..)]` would return whichever element the
-    // arrival order happened to leave at that index. Every p50 and p99 on the board comes through here.
+    // Same refusal as `median`: with a NaN present the sort output is an unspecified permutation.
     if let Some(refusal) = refuse_non_finite(values, "percentile") {
         return refusal;
     }
@@ -448,12 +341,8 @@ pub fn percentile(values: &[f64], p: f64) -> Measurement<f64> {
 
 #[cfg(test)]
 mod tests {
-    // AN ORDER STATISTIC OVER A NON-FINITE SAMPLE IS REFUSED, NOT GUESSED.
-    //
-    // The comparator was `a.partial_cmp(b).unwrap_or(Ordering::Equal)`, under which NaN is equal to
-    // everything - not a total order, so the sort's output is an unspecified permutation of the whole
-    // slice. The consequence was not a misplaced NaN but an ARRIVAL-ORDER-DEPENDENT ANSWER, which is
-    // disqualifying on a board whose premise is that every number regenerates from committed JSON.
+    // An order statistic over a non-finite sample is refused, not guessed: sorting with NaN present
+    // gives an arrival-order-dependent answer, which is disqualifying for reproducible results.
     #[test]
     fn a_non_finite_sample_is_refused_rather_than_sorted() {
         let with_nan = [10.0, 20.0, 30.0, f64::NAN, 50.0];
@@ -484,12 +373,9 @@ mod tests {
             "an infinity is equally unorderable in practice and equally a rig fault"
         );
 
-        // MIN AND MAX TOO, and they failed differently and far more quietly. `f64::min` and `f64::max`
-        // IGNORE NaN - they return the other operand - so `reduce(f64::min)` silently DROPPED the bad
-        // sample and reported a minimum over the remaining ones as though the window were clean. There
-        // is no sort to corrupt and no disagreement for anyone to notice, which is why this outlived
-        // the two order statistics that were fixed first. Every statistic over one window has to reach
-        // the same verdict about whether that window is usable.
+        // min/max fail more quietly: `f64::min`/`f64::max` ignore NaN and silently drop the bad sample
+        // rather than corrupt a sort. Every statistic over a window must reach the same verdict about
+        // whether that window is usable.
         assert!(
             matches!(min(&with_nan), Measurement::Absent { .. }),
             "min silently skipped the NaN and reported a minimum over the remaining samples"
@@ -510,10 +396,8 @@ mod tests {
         );
     }
 
-    // THE PROPERTY THE BUG ACTUALLY VIOLATED, pinned directly: a permutation of one sample set must
-    // never change the answer. This is what makes the number a measurement rather than an artifact of
-    // arrival order, and it is the assertion that fails loudest if the refusal is ever removed - the
-    // old code returned 30 for one ordering and 20 for the other.
+    // A permutation of the same sample set must never change the answer — that's what makes the
+    // number a measurement rather than an artifact of arrival order.
     #[test]
     fn an_order_statistic_never_depends_on_the_order_samples_arrived_in() {
         let a = [10.0, 20.0, 30.0, f64::NAN, 50.0];
@@ -534,14 +418,9 @@ mod tests {
         assert_eq!(percentile(&clean, 1.0), percentile(&rotated, 1.0));
     }
 
-    // A STEADY WINDOW STILL HAS A SLOPE, AND PUBLISHES IT.
-    //
-    // `Verdict::Steady` was a unit variant, and `metric.rs` answered it with
-    // `growth_rate_mib_per_min: Measured(0.0)` - substituting an exact zero for the rate this function
-    // had just fitted. So a window drifting a little under `trend_pct` (steady, correctly) published a
-    // growth rate of precisely 0.000, and the number a reader would use to spot a SLOW leak was a
-    // constant chosen by the threshold rather than anything measured. Reverting the variant to a unit
-    // and the caller to `Measured(0.0)` fails on the second assertion below.
+    // A steady window still has a slope, and publishes it rather than an assumed zero — otherwise a
+    // window drifting just under `trend_pct` would report a growth rate of exactly 0.000, hiding a
+    // slow leak.
     #[test]
     fn a_steady_verdict_carries_the_slope_it_fitted_rather_than_an_assumed_zero() {
         // Ten readings climbing gently: about 0.5% across the window, inside a 1% trend bar, so this is
@@ -698,17 +577,9 @@ mod tests {
         ));
     }
 
-    // Boundary: drift and spread comparisons are strict "<", so sitting EXACTLY on either threshold
-    // must fail, not pass. Two samples per half, chosen so drift lands at precisely 1% of the mean.
-    // A SAWTOOTH IS NOT A LEAK, AND THE VERDICT HAS TO SAY WHICH IT SAW.
-    //
-    // Both windows below fail the steadiness test, and before `Shape` existed both published as the
-    // same word - which the board renders as "NEVER SETTLES" in red beside a leak rate. One of them
-    // is a garbage collector doing its job and returning to the level it started at; the other never
-    // has a level. Branding the first as a leak is the accusation this distinction prevents.
-    //
-    // The bifrost cells on the 2026-07-29 board are the climbing shape, measured: 449 -> 537 -> 631
-    // -> 792 -> 867 MiB across the load window, still rising in the final fifth.
+    // A sawtooth and a climb both fail the steadiness test but must be told apart: one is a GC cycle
+    // returning to its starting level, the other never has a level, and branding the first as a leak
+    // is the exact accusation `Shape` prevents.
     #[test]
     fn a_sawtooth_and_a_climb_both_fail_to_settle_and_are_told_apart() {
         // A wave: swings 40 MiB peak to trough, ends where it began. Wide spread, no drift.
@@ -868,16 +739,12 @@ mod tests {
             .collect()
     }
 
-    // A DECLINE MUST FAIL THE TREND TEST EXACTLY AS A CLIMB DOES. `drift` is signed; a window whose
-    // second half runs measurably below its first half is not "steady", it is declining, and
-    // Verdict::Steady's own doc says "not moving in any direction that matters". A comparison that
-    // only bounds positive drift would call every decline steady regardless of how fast it fell.
+    // A decline must fail the trend test at the same magnitude as a climb, since `drift` is signed
+    // and `Verdict::Steady` means "not moving in any direction that matters".
     #[test]
     fn a_declining_window_fails_the_trend_test_at_the_same_magnitude_as_a_climbing_one() {
-        // Gentle on purpose: the mean must stay well clear of zero, or the window trips the earlier
-        // `mean &lt;= 0.0` short-circuit and returns NotSteady for an unrelated reason, masking whether
-        // the trend comparison itself is symmetric. A ~1.5% decline on a 100 MiB base, against a 1%
-        // trend gate and a wide range gate (so only the trend test is in play).
+        // Gentle on purpose: the mean must stay well clear of zero, or the earlier `mean <= 0.0`
+        // short-circuit masks whether the trend comparison itself is symmetric.
         let declining = linear_series(100.0, -18.0, 6.0, 12); // ~100.0 -> ~98.1 MiB over the window
         let verdict = plateau_check(&declining, 60.0, 1.0, 1.0e9);
         assert!(
@@ -914,9 +781,8 @@ mod tests {
         lo
     }
 
-    // THE CALIBRATION ARGUMENT, pinned exactly: for a linear ramp, halving the window halves how much
-    // elapsed time the trend test can see, so it takes double the rate to produce the same measured
-    // drift. This is not a rounding artifact of one example; it holds for any base and threshold.
+    // The calibration argument, pinned exactly: halving the window halves the elapsed time the trend
+    // test can see, so it takes double the rate to produce the same measured drift.
     #[test]
     fn halving_the_window_doubles_the_admissible_slope() {
         let base = 120.0;
@@ -968,13 +834,8 @@ mod tests {
         assert_eq!(percentile(&v, 1.0).copied(), Some(10.0)); // clamped to the last index
     }
 
-    // ONE CONVENTION, OR THE SAME WORD MEANS TWO THINGS ON ONE BOARD.
-    //
-    // Ledger SRCH-04: `metric.rs` resolved a rank with ceil while `gen.rs`, `stats.rs` and
-    // `search.rs` used floor, and comments in three files claimed they agreed. Over the sample
-    // counts this rig actually chooses - 100 TTFT samples a leg - floor puts p99 at index 99 of
-    // 100, which is the MAXIMUM. This pins the ranks directly so a future edit cannot quietly
-    // reintroduce the split.
+    // Pins the ranks directly (ledger SRCH-04) so a future edit cannot reintroduce a ceil/floor split:
+    // at n=100, floor would put p99 at index 99 — the maximum, not a tail percentile.
     #[test]
     fn one_nearest_rank_convention_and_a_p99_that_is_not_the_maximum() {
         // The whole-number cases are exactly where floor and ceil disagreed.
@@ -1002,13 +863,9 @@ mod tests {
     // ---- properties ---------------------------------------------------------------------------------
 
     proptest! {
-        // A rise steep enough to matter is never certified steady, at any window size, sample count,
-        // or threshold pair in a realistic range. "Steep enough to matter" is necessary and honest:
-        // the gate is a threshold, not a leak detector, and plateau.sh documents the same limit (a
-        // rate below the certifying boundary genuinely does pass, on purpose, at 1.5 MiB/min on a 120
-        // MiB base with the real 1%/60s defaults). This proves the trend test actually fires for
-        // anything past its own boundary, for any window/sample-count combination, not just the one
-        // worked example above.
+        // A rise steep enough to matter is never certified steady, for any window/sample-count/
+        // threshold combination — not just the one worked example above. The gate is a threshold, not
+        // a leak detector: a rate below the boundary genuinely does pass, on purpose.
         #[test]
         fn rising_series_above_the_trend_boundary_is_never_steady(
             window_s in 10.0f64..300.0,

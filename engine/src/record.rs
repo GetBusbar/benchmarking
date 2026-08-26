@@ -1,45 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE SHAPE OF THE ARTIFACT THIS ENGINE PUBLISHES.
+// The shape of the artifact this engine publishes, serialised by serde rather than hand-rolled string
+// concatenation. Every published metric is a `Measurement<T>` (see measurement.rs), so an unmeasured
+// cell reads as `null` and never as a 0 a chart would draw; structural fields (`served`, `status`,
+// dialect names) stay plain strings/bools/enums since that discipline is only for numbers a reader
+// could mistake for a result.
 //
-// The shape, described once and serialised by serde rather than by hand-rolled string
-// concatenation, so the compiler checks that braces balance and that a value is escaped before it
-// lands between two quotes. Every published metric is a `Measurement<T>` (see measurement.rs), so an
-// unmeasured cell reads as `null` on the wire and never as a 0 that a chart would draw. Structural
-// fields (`served`, `status`, dialect names) are not measurements and stay as plain
-// strings/bools/enums: the discipline applies to numbers a reader could mistake for a result, not to
-// labels.
-//
-// SHAPE SOURCE. This module was built by reading matrix/run.sh's `emit_cell` and its two heredocs
-// (the per-gateway `$RESULTS/$GATEWAY.json` and the snapshot-writer's embedded Python), and by
-// reading real committed snapshots under results/snapshots/. Where a field's shape could be
-// confirmed against a real snapshot, it is typed precisely. Where the shell defines a field this repo
-// has never actually populated (per-cell memory windows, a fully-measured streaming block, the box
-// qualification stage bodies), the type follows the shell source but is opt-in permissive
-// (`serde_json::Value` or `Option`) rather than guessed at, because there was no real artifact to
-// check it against. `matrix_version: 2` is the schema this module targets; older committed snapshots
-// predate several fields (rig provenance, run timing, cell_memory), which is why almost everything
-// outside the core measurement grid is `Option` with `#[serde(default)]`.
+// Built from matrix/run.sh's `emit_cell` plus real committed snapshots under results/snapshots/.
+// Fields confirmed against a real snapshot are typed precisely; fields the shell defines but this repo
+// has never populated (per-cell memory windows, a fully-measured streaming block, box-qualification
+// stage bodies) stay opt-in permissive (`serde_json::Value` or `Option`). `matrix_version: 2` is the
+// schema this module targets; older snapshots predate several fields, hence the `Option` +
+// `#[serde(default)]` outside the core measurement grid.
 
 use crate::measurement::{Absent, AbsentEntry, Measurement};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-/// `#[serde(default)]` needs a concrete `Default` impl, and `Measurement<T>` deliberately has none
-/// (a type that silently defaults would be one step from the `value_or_zero` this whole module
-/// exists to forbid). This is the one narrow, explicit exception: a field the wire OMITS entirely
-/// (as opposed to sending `null` for) is absent for the same reason a `null` is, so it fills in the
-/// same way `Measurement`'s own `Deserialize` fills in a `null`: as `NotMeasured`, never as a zero.
+/// `#[serde(default)]` needs a concrete `Default` impl, and `Measurement<T>` deliberately has none (a
+/// silent default would be one step from the `value_or_zero` this module exists to forbid). A field
+/// the wire omits entirely fills in as `NotMeasured`, the same as a `null` does, never as a zero.
 fn measurement_default<T>() -> Measurement<T> {
     Measurement::absent(Absent::NotMeasured)
 }
 
-/// A handful of list fields (memory's `rss_series`, chiefly) come back as JSON `null` rather than `[]`
-/// when the shell had nothing to put there (a memory window that never served). `Vec<T>` has no
-/// `Deserialize` for `null`, so without this the whole snapshot would fail to parse over one absent
-/// series. Folds `null` to the empty vec, the same "nothing happened here" reading `[]` already has.
+/// A handful of list fields (chiefly `rss_series`) come back as JSON `null` rather than `[]` when the
+/// shell had nothing to put there. `Vec<T>` has no `Deserialize` for `null`, so this folds `null` to
+/// the empty vec instead of failing the whole snapshot's parse.
 fn null_as_empty_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -52,20 +41,12 @@ where
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultSnapshot {
     pub schema_version: u32,
-    /// WHAT EACH PUBLISHED METRIC MEANS, keyed by metric, built from the engine's own constants.
+    /// What each published metric means, keyed by metric name. Formatted from the engine's own
+    /// constants rather than hand-written, so the definition cannot drift from the code the way a
+    /// hand-written one once did (docs said "p99 < 1s" while the engine enforced 20ms).
     ///
-    /// A number a reader cannot check is a number they have to trust, and this project's whole claim is
-    /// that they should not have to. Each entry states the quantity, the predicate that decides which
-    /// observations count, and how the measurement terminates - so "is this the peak?" is answerable from
-    /// the artifact instead of from us.
-    ///
-    /// TOP-LEVEL, NOT PER CELL, because a definition does not vary by cell: repeating it across 36 cells
-    /// would be bloat, and worse, would create 36 places for one statement to drift.
-    ///
-    /// Formatted from the constants themselves rather than hand-written, for the reason the memory
-    /// `protocol` string learned the hard way: every published surface described the retired throughput
-    /// gate as "p99 < 1 s" while the engine enforced 20 ms, a bar 96% of recorded rungs pass versus 57%.
-    /// A definition maintained by hand is a definition that will disagree with the code.
+    /// Top-level, not per cell: a definition doesn't vary by cell, and repeating it 36 times would
+    /// create 36 places for it to drift.
     #[serde(default)]
     pub definitions: std::collections::BTreeMap<String, String>,
     pub gateway: String,
@@ -259,10 +240,9 @@ pub struct Upstream {
     pub cells: HashMap<String, Cell>,
 }
 
-/// Whether/how a cell was served. Not a `Measurement`: this is a verdict label, not a number a chart
-/// could plot, and its non-`true` values are all deliberately readable strings (a reader-facing
-/// vocabulary, not an internal enum tag) exactly as the shell wrote them: `false`,
-/// `"not_configured"`, `"not_configurable"`, `"unprobed_auth"`, `"not_verified"`, `"untestable"`.
+/// Whether/how a cell was served. Not a `Measurement`: a verdict label, not a number a chart could
+/// plot. Non-`true` values are deliberately readable strings, exactly as the shell wrote them:
+/// `false`, `"not_configured"`, `"not_configurable"`, `"unprobed_auth"`, `"not_verified"`, `"untestable"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Served {
@@ -281,10 +261,8 @@ impl Default for Served {
 /// One probed (ingress, egress) pairing.
 ///
 /// Serialised by hand (see the `Serialize` impl below `CellMemory`), not derived: the wire form adds
-/// a computed `absences` map (metric name -> why it is absent) alongside the normal fields, gathered
-/// from `perf`/`stream`/`memory` at serialisation time so every one of the dozens of `Measurement`
-/// fields on this cell is covered from one place rather than needing a matching edit at each of the
-/// several call sites across the engine that build a `Cell`.
+/// a computed `absences` map (metric name -> why it is absent), gathered from `perf`/`stream`/`memory`
+/// at serialisation time so it's covered from one place rather than at every `Cell`-building call site.
 #[derive(Default, Debug, Clone, PartialEq, Deserialize)]
 pub struct Cell {
     pub served: Served,
@@ -314,39 +292,29 @@ pub struct Cell {
     /// the field exists so a future run that does carries it through unchanged.
     #[serde(default)]
     pub memory: Option<CellMemory>,
-    /// SECONDS PER METRIC GROUP for this cell, keyed by the group's own name.
-    ///
-    /// Cost belongs in the artifact for the same reason every verdict's reason does: a run that got
-    /// slower is a question, and a wall-clock total cannot answer it. Thirteen minutes a cell might
-    /// be the TTFT sample set, a stream ladder reaching a higher rung, or a gateway that slowed down,
-    /// and those have nothing in common as responses. With this, "what would halving the TTFT samples
-    /// save" is arithmetic over committed JSON rather than another run with a stopwatch.
+    /// Seconds per metric group for this cell, keyed by the group's own name. Lets a slow run be
+    /// diagnosed from committed JSON (which group got slower and why) rather than re-run with a
+    /// stopwatch.
     #[serde(default)]
     pub timings_s: Option<std::collections::BTreeMap<String, f64>>,
 }
 
-/// ONE READING OF THE SWEEP, at one declared tail-latency bound: the most throughput the gateway
+/// One reading of the sweep, at one declared tail-latency bound: the most throughput the gateway
 /// carried while 99% of requests finished under `p99_bound_us` and it failed none it accepted.
 ///
-/// The frontier of these replaces `rps_max_proxy` and `rps_sustained_20ms`, which were the same sweep
-/// collapsed to two scalars by a chosen ceiling. `frontier.rs`'s module note has the full reasoning;
-/// the short version is that throughput and tail latency rise together, so "the throughput" is a point
-/// on a curve, and picking the point for the reader both hid the tradeoff and let the two scalars
-/// invert against each other.
+/// The frontier of these replaces `rps_max_proxy` and `rps_sustained_20ms`, which collapsed the same
+/// sweep to two scalars at a chosen ceiling and let them invert against each other (see `frontier.rs`).
 ///
-/// EVERY FIELD IS EVIDENCE FOR THE ONE ABOVE IT. `rps` is the claim; `concurrency` is where it was
-/// observed; `p99_us` is the tail it ACTUALLY came with (never the bound - 4ms under a 100ms bound is
-/// not the same finding as 99ms); `first_disqualified_conc` is the lowest concurrency above it that
-/// stopped qualifying, which is what makes "this is the most under this bound" checkable instead of
-/// asserted.
+/// Every field is evidence for the one above it: `rps` is the claim, `concurrency` is where it was
+/// observed, `p99_us` is the tail it actually came with (never the bound itself), and
+/// `first_disqualified_conc` is what makes "the most under this bound" checkable rather than asserted.
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrontierReading {
     /// The bound, in microseconds. `None` is the failure-only reading: no latency constraint at all,
     /// answering "how much can it carry before it starts failing requests".
     #[serde(default)]
     pub p99_bound_us: Option<i64>,
-    /// FRACTIONAL BELOW 1/s, whole at or above it - see `GenStats::rps`. Published as a float so a
-    /// cell serving 0.25 req/s cannot report `0`, which says it carried nothing.
+    /// Published as a float (fractional below 1/s) so a cell serving 0.25 req/s doesn't report `0`.
     #[serde(default = "measurement_default")]
     pub rps: Measurement<f64>,
     #[serde(default = "measurement_default")]
@@ -355,10 +323,9 @@ pub struct FrontierReading {
     pub p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub first_disqualified_conc: Measurement<i64>,
-    /// Did the sweep RUN OUT OF RANGE while still qualifying? Then `rps` is a lower bound, not a
-    /// ceiling, and every surface must say so. The retired search published `SearchExhausted` - a null -
-    /// for this state, discarding a real measured rate because it could not prove maximality. The rate
-    /// is right either way; only the word for it changes.
+    /// True when the sweep ran out of range while still qualifying, so `rps` is a lower bound rather
+    /// than a ceiling. The retired search instead discarded the rate as `SearchExhausted`; the rate is
+    /// right either way, only the label changes.
     #[serde(default)]
     pub lower_bound: bool,
 }
@@ -369,24 +336,13 @@ pub struct FrontierReading {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SweepPoint {
     pub conc: i64,
-    /// SUCCESSFUL COMPLETIONS IN THIS WINDOW. Published so a reader - or an independent checker - can
-    /// apply the engine's own "served cleanly" rule (`frontier::Rung::served_cleanly`: `ok > 0 &&
-    /// fail == 0`) EXACTLY, rather than approximating it.
-    ///
-    /// It was not published, and that cost a real false alarm. `bench-audit.py` had to stand in
-    /// `rps > 0` for `ok > 0`, and plano at c=256 published `rps: 0, p99_us: 3398432, fail: 0` - which
-    /// that rule calls dirty. But a percentile cannot exist without a completed, timed request, so
-    /// `ok >= 1` and the window was clean; its RATE merely rounded down through the `as i64` below (one
-    /// request over a four-second window is 0.25 rps). The audit then re-derived a
-    /// `first_disqualified_conc` the engine had correctly left absent, and the disagreement had to be
-    /// settled BY HAND against the raw numbers.
-    ///
-    /// Hand-settling a disagreement between two checkers is not a solution: it does not scale, and the
-    /// next occurrence may have nobody watching. The input the rule needs is now in the artifact.
+    /// Successful completions in this window. Published so a reader can apply the engine's own
+    /// "served cleanly" rule (`frontier::Rung::served_cleanly`: `ok > 0 && fail == 0`) exactly, rather
+    /// than approximating it from `rps > 0` - which once produced a false alarm on a rung that
+    /// completed one request over four seconds (`ok >= 1`, clean) but rounded `rps` down to 0.
     #[serde(default = "measurement_default")]
     pub ok: Measurement<i64>,
-    /// See the frontier reading's `rps`: fractional below 1/s so a rung that completed one request in
-    /// four seconds is not published as having carried nothing.
+    /// See the frontier reading's `rps`: fractional below 1/s for the same reason.
     #[serde(default = "measurement_default")]
     pub rps: Measurement<f64>,
     #[serde(default = "measurement_default")]
@@ -405,67 +361,48 @@ pub struct CellPerf {
     pub gateway_c1_p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub direct_c1_p99_us: Measurement<i64>,
-    /// WHAT A REQUEST COST, in microseconds of gateway CPU.
-    ///
-    /// The throughput answer stops describing the gateway the moment it saturates its pinned cores;
-    /// this does not. At saturation two gateways deliver the same rps by definition, and the one
-    /// doing less work per request still reads lower here - which is also the figure that maps to
-    /// money, since half the CPU serves the same traffic on half the instance.
-    ///
-    /// ABSENT ON EVERY SNAPSHOT TAKEN BEFORE THIS EXISTED, and absent is the only honest rendering:
-    /// a 0 would make a gateway that was never measured look infinitely efficient.
+    /// What a request cost, in microseconds of gateway CPU. Unlike throughput, this still
+    /// distinguishes two gateways at saturation: the one doing less work per request reads lower here,
+    /// which is also the figure that maps to cost. Absent (never 0) on snapshots taken before this
+    /// existed.
     #[serde(default = "measurement_default")]
     pub cpu_us_per_request: Measurement<f64>,
     /// The same fact the way an operator sizes a box: requests served per second of CPU burned.
     #[serde(default = "measurement_default")]
     pub rps_per_cpu_second: Measurement<f64>,
-    /// The concurrency the two above were taken at, published because it is what was HELD CONSTANT.
-    /// No single concurrency is sub-saturation across a field spanning 19 to 49,000 rps, so matched
-    /// concurrency is the honest substitute for matched load - and a reader has to be able to see
-    /// which it was rather than trust that something was.
+    /// The concurrency the two above were taken at. No single concurrency is sub-saturation across a
+    /// field spanning 19 to 49,000 rps, so matched concurrency stands in for matched load, and a
+    /// reader needs to see which it was.
     #[serde(default = "measurement_default")]
     pub cost_window_conc: Measurement<i64>,
 
-    /// Requests the cost window actually completed, and the rate it carried.
-    ///
-    /// PUBLISHED SO THE COST IS CHECKABLE. `cpu_us_per_request` is CPU divided by this count, and
-    /// without it the figure re-derives from nothing. It also separates two opposite readings of a
-    /// low utilisation - a genuinely cheap gateway, or a window that simply carried less load than
-    /// the sweep did at the same concurrency - which are indistinguishable without knowing the load.
+    /// Requests the cost window actually completed, and the rate it carried. Needed to check
+    /// `cpu_us_per_request` (CPU / this count) and to tell a genuinely cheap gateway from a window
+    /// that simply carried less load than the sweep did at the same concurrency.
     #[serde(default = "measurement_default")]
     pub cost_window_ok: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub cost_window_rps: Measurement<f64>,
-    /// Utilisation of the cores the gateway was PINNED to, across the cost window. 1.0 = every
-    /// pinned core fully busy.
-    ///
-    /// THIS IS WHAT MAKES A PEAK INTERPRETABLE. A throughput number alone cannot say whether a
-    /// gateway stopped because it ran out of CPU or because something else bound it - and reading
-    /// that off the shape of a latency curve is how the ceiling was called wrong twice on
-    /// 2026-07-30. Near 1.0 the peak is a real wall; well below it, the wall is elsewhere.
+    /// Utilisation of the cores the gateway was pinned to, across the cost window (1.0 = fully busy).
+    /// Distinguishes a real CPU-bound peak (near 1.0) from one bound by something else.
     #[serde(default = "measurement_default")]
     pub cost_core_utilisation: Measurement<f64>,
     #[serde(default = "measurement_default")]
-    /// Threads in the gateway's tree during the cost window. Not a rate: it is the shape of the
-    /// concurrency model, thread-per-connection against async, on evidence rather than on a claim.
-    /// (This paragraph sat on `cost_window_ok` - a completed-request COUNT - so one field's doc
-    /// stated two mutually exclusive definitions while this one had none.)
+    /// Threads in the gateway's tree during the cost window - the shape of its concurrency model
+    /// (thread-per-connection vs. async), on evidence rather than a claim.
     pub cost_threads: Measurement<f64>,
-    /// Involuntary context switches per request - the scheduler taking the CPU away, which is what a
-    /// saturated core looks like from inside the process. The best single explainer of a tail.
+    /// Involuntary context switches per request - the scheduler taking the CPU away, i.e. a saturated
+    /// core from inside the process. The best single explainer of a tail.
     #[serde(default = "measurement_default")]
     pub cost_nonvol_ctxt_per_request: Measurement<f64>,
-    /// Major faults during the cost window. NON-ZERO MEANS THE BOX WAS SWAPPING, so the window timed
-    /// the disk; the cost figures above are re-flagged as a harness fault when this is not 0, and
-    /// this number publishes so a reader sees WHY rather than finding a hole.
+    /// Major faults during the cost window. Non-zero means the box was swapping, so the window timed
+    /// the disk rather than the gateway; the cost figures above are re-flagged as a harness fault when
+    /// this is not 0.
     #[serde(default = "measurement_default")]
     pub cost_majflt: Measurement<f64>,
-    /// THE FRONTIER: one reading per declared tail-latency bound, ascending, with the failure-only
-    /// reading last. The published throughput answer, replacing `rps_max_proxy` /
-    /// `rps_sustained_20ms`.
-    ///
-    /// Monotone non-decreasing in the bound BY CONSTRUCTION (see `frontier.rs`), so a reader can check
-    /// the sequence by eye and `bench-audit.py` asserts it.
+    /// The frontier: one reading per declared tail-latency bound, ascending, with the failure-only
+    /// reading last. Replaces `rps_max_proxy` / `rps_sustained_20ms`. Monotone non-decreasing in the
+    /// bound by construction (see `frontier.rs`); `bench-audit.py` asserts it.
     #[serde(default)]
     pub frontier: Vec<FrontierReading>,
     #[serde(default)]
@@ -488,10 +425,9 @@ macro_rules! absences_of {
         out
     }};
 }
-// NOTE: callers that need to add keys the macro cannot reach (a Vec field's per-element absences, see
-// `CellPerf::absences`) bind its result mutably and extend it, rather than the macro growing a second
-// shape. The macro's whole value is that every key it writes is `stringify!`d from the field it names
-// and so cannot drift from it; a variant taking arbitrary key expressions would give that up.
+// Callers needing keys the macro cannot reach (a Vec field's per-element absences, see
+// `CellPerf::absences`) bind its result mutably and extend it, rather than the macro taking arbitrary
+// key expressions - which would give up the stringify! guarantee that a key can't drift from its field.
 
 impl CellPerf {
     /// Every absent metric on this block, keyed by its own field name. Empty when nothing is absent.
@@ -502,11 +438,9 @@ impl CellPerf {
             added_latency_p99_us,
             gateway_c1_p99_us,
             direct_c1_p99_us,
-            // THE COST FIELDS, and leaving them out reintroduced the exact bug the comment below
-            // describes. They published a bare `null` with the reason nowhere - which for cost is
-            // worse than for most fields, because the two most likely reasons are REFUSALS the
-            // reader must see: the window had failures, or the box was swapping. An unexplained
-            // null reads as "not implemented"; the truth was "measured, and deliberately withheld".
+            // The cost fields: omitting them once published a bare null with no reason, which for
+            // cost is worse than usual since the likely reasons (window had failures, box was
+            // swapping) are refusals the reader must see.
             cpu_us_per_request,
             rps_per_cpu_second,
             cost_window_conc,
@@ -517,18 +451,9 @@ impl CellPerf {
             cost_nonvol_ctxt_per_request,
             cost_majflt,
         );
-        // AND EVERY FRONTIER READING'S OWN ABSENCES, keyed by the bound they belong to.
-        //
-        // A `Measurement` serializes an absence as a bare `null` and its REASON lives here, in the
-        // cell's sibling map - that is this artifact's central convention. So a frontier reading that
-        // could not be taken published `null` with its reason nowhere at all until these keys existed:
-        // the one state the whole `Measurement` design exists to prevent, reintroduced by a field that
-        // is a Vec rather than a scalar and so was not reachable by `absences_of!`.
-        //
-        // Keyed by the BOUND (`frontier.10ms.rps`) rather than by array index, because the index is an
-        // artifact of ordering and the bound is the identity: a reader looking up why the 10ms column is
-        // empty should not have to count columns, and inserting a bound later must not renumber the
-        // keys of every reading after it.
+        // Every frontier reading's own absences, since `Vec<FrontierReading>` is unreachable by
+        // `absences_of!`. Keyed by the bound (`frontier.10ms.rps`) rather than array index, so looking
+        // up a column doesn't require counting and inserting a bound later can't renumber later keys.
         for r in &self.frontier {
             let at = match r.p99_bound_us {
                 Some(us) => format!("{}ms", us / 1000),
@@ -540,25 +465,13 @@ impl CellPerf {
                 .record_absence(&format!("frontier.{at}.concurrency"), &mut out);
             r.p99_us
                 .record_absence(&format!("frontier.{at}.p99_us"), &mut out);
-            // NOT recorded: `first_disqualified_conc`. Its absence is not a hole - it is the positive
-            // finding that the sweep ran out of range while this bound still held, which the reading's
-            // own `lower_bound: true` states directly. Publishing it as an absence too would put one
-            // fact in the artifact twice, in two vocabularies, which is what this map exists to avoid.
+            // `first_disqualified_conc` is deliberately not recorded here: its absence is the
+            // positive finding `lower_bound: true` already states, not a hole to explain twice.
         }
-        /* AND EVERY RUNG'S OWN ABSENCES, for exactly the reason the frontier's are here.
-        `sweep_max_proxy` is a Vec of `SweepPoint`s whose `ok`/`rps`/`p99_us`/`fail` are
-        `Measurement`s, so `absences_of!` cannot reach them and nothing else walked the Vec: a rung
-        the generator returned no window for (`search`'s default `reading: None`) published
-        `{"conc":1024,"ok":null,"rps":6209.0,"p99_us":null,"fail":null}` with its reasons nowhere.
-        Three bare nulls - and these are the very inputs `frontier::Rung::served_cleanly` is
-        published for, so an external checker reading `ok: null` could not tell "no requests
-        completed" from "no window was recorded", which is the distinction that cost a real false
-        alarm on plano and had to be settled by hand.
-
-        Keyed by CONCURRENCY and its window ordinal rather than by array index, on the frontier's
-        own reasoning: the index is an artifact of ordering, while c=1024's second window is an
-        identity that survives a rung being inserted before it. The `absences_of!` guard cannot
-        police a Vec, so this is the only place these can be stated. */
+        // Every rung's own absences, for the same reason as the frontier's above: `sweep_max_proxy`
+        // is a Vec of `SweepPoint`s unreachable by `absences_of!`. Keyed by concurrency + window
+        // ordinal (not array index) so repeated windows at one concurrency don't collide and inserting
+        // a rung can't renumber existing keys.
         let mut seen_at: BTreeMap<i64, usize> = BTreeMap::new();
         for pt in &self.sweep_max_proxy {
             let n = seen_at.entry(pt.conc).or_insert(0);
@@ -574,24 +487,17 @@ impl CellPerf {
 }
 
 /// Whether/how a cell's streaming path was exercised. Like `Served`, this is a verdict label rather
-/// than a number.
+/// than a number. Full vocabulary, since the producer (`suite::cell_stream`) can emit any `Absent`
+/// token here, not just the three this doc once named:
 ///
-/// THE VOCABULARY, in full, because it used to be documented as `true` / `false` / `"untestable"`
-/// while the producer (`suite::cell_stream`) emitted the token of WHICHEVER `Absent` reason the
-/// comparison carried - so `"rig_limited"`, `"below_resolution"`, `"search_exhausted"`,
-/// `"harness_error"` and the rest could all appear at a field whose doc named three values. A
-/// consumer written against the old doc would treat every one of them as an unknown label:
-///
-/// - `true`: at least one gateway-vs-direct streaming comparison on this cell produced a number, so
-///   frames flowed through the gateway and were timed. `Cell::stream.reason` then names the token of
-///   any comparison that did NOT produce one (a cell whose gap figures measured cleanly while the
-///   TTFT legs failed is still a served stream, and used to be published as if it were not).
-/// - any `Absent` token (`"not_measured"`, `"rig_limited"`, `"untestable"`, ...): the stream was
-///   probed and NO comparison produced a number; the token is that absence's own reason, so a rig
-///   limit is never published as a claim about the gateway.
+/// - `true`: at least one gateway-vs-direct streaming comparison produced a number. `Cell::stream.reason`
+///   then names the token of any comparison that did NOT produce one.
+/// - any `Absent` token (`"not_measured"`, `"rig_limited"`, `"untestable"`, ...): probed, no comparison
+///   produced a number; the token is that absence's own reason, so a rig limit is never published as a
+///   claim about the gateway.
 /// - `"not_probed"`: the streaming group did not run on this cell at all.
-/// - `false`: never written by this engine (a bare `false` would assert the gateway does not stream,
-///   which no observation here establishes). Kept representable so older artifacts still parse.
+/// - `false`: never written by this engine (would wrongly assert the gateway does not stream). Kept
+///   representable so older artifacts still parse.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StreamServed {
@@ -609,12 +515,9 @@ impl Default for StreamServed {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellStream {
     pub stream_served: StreamServed,
-    /// The machine-readable REASON TOKEN behind a non-`true` `stream_served`, or behind a `true` one
-    /// whose TTFT half is absent - the same vocabulary `Cell::reason` uses, and the same meaning.
-    ///
-    /// It carried the absence's free-text DETAIL instead, so two fields with one name meant two
-    /// different things across the artifact, and a cell whose absence had no detail published a
-    /// `null` reason beside a status that plainly had one. The prose has its own field below.
+    /// The machine-readable reason token behind a non-`true` `stream_served` (or a `true` one whose
+    /// TTFT half is absent) - same vocabulary as `Cell::reason`. Prose lives in `stream_error` below,
+    /// not here.
     #[serde(default)]
     pub reason: Option<String>,
     /// The operator-facing detail behind `reason`, when the absence carried one. Prose: nothing may
@@ -633,30 +536,22 @@ pub struct CellStream {
     pub streams_sustained: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub streams_sustained_fps: Measurement<f64>,
-    /// The most frames/sec the MOCK can emit at `streams_sustained` concurrency, and the fraction of
-    /// it carried. The ceiling here is DERIVED from the mock's declared pacing rather than measured -
-    /// see `run::mock_frame_ceiling_fps` - so it is exact arithmetic, and a gateway reaching ~1.0 of it
-    /// is forwarding every frame as it arrives, which is the best available outcome rather than a
-    /// limit.
+    /// The most frames/sec the mock can emit at `streams_sustained` concurrency, and the fraction
+    /// carried. Derived (exact arithmetic) from the mock's declared pacing, not measured - see
+    /// `run::mock_frame_ceiling_fps`; ~1.0 means the gateway forwards every frame as it arrives.
     #[serde(default)]
     pub streams_sustained_mock_ceiling: Option<f64>,
     #[serde(default)]
     pub streams_sustained_headroom: Option<f64>,
-    /// The sweep points behind `streams_sustained`. Shaped like `SweepPoint` in run.sh's
-    /// own accumulator, but no committed snapshot has ever populated it, so each point is passed
-    /// through as opaque JSON rather than typed against an unconfirmed shape.
+    /// The sweep points behind `streams_sustained`, shaped like `SweepPoint` in run.sh's accumulator.
+    /// No committed snapshot has populated it, so kept as opaque JSON rather than typed against an
+    /// unconfirmed shape.
     #[serde(default)]
     pub sweep_streams: Vec<serde_json::Value>,
     #[serde(default)]
     pub stream_c1_note: Option<String>,
-    /// HOW MANY TTFT PROBES SURVIVED PER LEG, so a reader can weigh `added_ttft_p50_us` and
-    /// `added_ttft_p99_us`. A failed probe was dropped inside a `filter_map`, so a percentile over
-    /// three lucky samples published identically to one over a hundred - and with a single survivor the
-    /// p50 and p99 ranks collapse to the same index, which reads as a perfectly coherent pair. Mirrors
-    /// the `gateway_c1_samples`/`direct_c1_samples` METRIC-SURFACE keys, which exist for exactly
-    /// this. They are not `CellPerf` fields and never reach the wire - `suite` consumes them only to
-    /// format `c1_note` - so the sample weight behind the added-latency percentiles is recoverable
-    /// from the prose and not from a field.
+    /// How many TTFT probes survived per leg, so a reader can weigh `added_ttft_p50_us` /
+    /// `added_ttft_p99_us` (a percentile over 3 samples vs. 100 reads identically without this).
     #[serde(default = "measurement_default")]
     pub ttft_gw_samples: Measurement<i64>,
     #[serde(default = "measurement_default")]
@@ -676,28 +571,12 @@ impl CellStream {
             streams_sustained,
             streams_sustained_fps,
         );
-        // THE TWO DERIVED FIELDS INHERIT THEIR PARENT'S REASON, because they cannot state one.
-        //
-        // `streams_sustained_mock_ceiling` and `_headroom` are `Option<f64>`, not `Measurement`, so
-        // they have no slot for a reason and `absences_of!` cannot cover them. On the 2026-07-30 board
-        // that left them null on 64 cells with NO entry in the cell's absences map - nulls nobody had
-        // to explain, which is the one thing this artifact is not supposed to contain.
-        //
-        // They are DERIVED from `streams_sustained` (headroom is the carried fraction of the ceiling),
-        // so when the parent is absent they are absent for precisely the parent's reason and copying it
-        // is a statement of fact rather than an invented one. Converting them to `Measurement` would be
-        // the tidier fix and would also let them carry a reason of their OWN - worth doing if a case
-        // ever appears where they are absent while the parent is present.
-        /* THE CASE THE PARAGRAPH ABOVE SAID TO WATCH FOR HAS APPEARED, so the guard no longer hangs
-        off the parent being absent. `suite` produces both of these as `None` while
-        `streams_sustained` is MEASURED, twice: a bisect that lands on conc == 0 publishes
-        sustained 0 with no ceiling and no headroom, and `stream_rig_ceiling` returns an absence
-        whenever the mock's derived frame ceiling is not positive, which leaves `reference.copied()`
-        None and `rigbound::headroom` None beside a measured concurrency.
-
-        Both were bare nulls on a served cell - the one thing this artifact is not supposed to
-        contain - and they slipped through precisely because the old condition asked about the
-        parent rather than about the fields themselves. */
+        // The two derived fields (`streams_sustained_mock_ceiling`, `_headroom`) are `Option<f64>`,
+        // not `Measurement`, so `absences_of!` can't cover them; they inherit the parent's reason
+        // since they're derived from `streams_sustained`. The check tests the fields themselves
+        // (`is_none()`), not merely whether the parent is absent: `suite` can produce both as `None`
+        // while `streams_sustained` is measured (e.g. a bisect landing on conc == 0), which the
+        // parent-only guard used to miss, leaving a bare null on a served cell.
         for key in [
             "streams_sustained_mock_ceiling",
             "streams_sustained_headroom",
@@ -779,11 +658,10 @@ pub struct LoadRecipe {
     pub duration_s: i64,
 }
 
-/// The PER-CELL memory window (`CELL_MEM_JSON` in run.sh): its own cold-started, plateau-terminated
-/// window for one served cell. Distinct field set from `MatrixMemory` (plateau/growth-rate instead of
-/// a single post-load recipe) because it answers a different question: not "what did the peak cell do
-/// after everything else ran" but "what does THIS cell do on its own, run cold". No committed snapshot
-/// has populated this yet: typed from the shell source, kept permissive by being `Option` throughout.
+/// The per-cell memory window (`CELL_MEM_JSON` in run.sh): its own cold-started, plateau-terminated
+/// window for one served cell - what THIS cell does run cold, not what the peak cell does after the
+/// whole grid ran (that's `MatrixMemory`). No committed snapshot has populated this yet: typed from
+/// the shell source, kept permissive (`Option` throughout).
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellMemory {
     #[serde(default)]
@@ -803,53 +681,36 @@ pub struct CellMemory {
     pub peak_rss_mib: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub peak_rss_hwm_mib: Measurement<f64>,
-    /// Whether the window settled. A `Measurement`, not an `Option<bool>`, because the three states
-    /// are "it settled", "it did not settle" and "the window could not tell" - and the last of those
-    /// is an absence with a reason like every other. As an `Option` it published a bare `null` that
-    /// `absences()` below could not see (the macro walks `Measurement` fields only), so a served cell
-    /// could carry a hole with nothing anywhere saying why: the exact bare null the artifact contract
-    /// forbids. The wire form is unchanged - `Measurement` serialises to the bare value or `null`.
+    /// Whether the window settled. A `Measurement`, not `Option<bool>`: "could not tell" is an
+    /// absence with a reason like any other, and as a plain `Option` it published a bare null that
+    /// `absences()` (which walks `Measurement` fields only) could not see or explain. Wire form
+    /// unchanged.
     #[serde(default = "measurement_default")]
     pub plateaued: Measurement<bool>,
     #[serde(default = "measurement_default")]
     pub time_to_plateau_s: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub growth_rate_mib_per_min: Measurement<f64>,
-    /// How long load was applied. `Measurement` for the same reason `plateaued` is: a window that
-    /// never ran has to say so with a reason rather than with a null nothing explains.
+    /// How long load was applied. `Measurement` for the same reason `plateaued` is.
     #[serde(default = "measurement_default")]
     pub load_s: Measurement<i64>,
-    /// HOW each window failed to settle, when it did: 1 climbing, 0 oscillating, -1 falling, absent
-    /// when the window settled and there is no unsettled shape to describe.
-    ///
-    /// "Did not settle" describes two very different gateways. One climbs without bound; the other
-    /// swings around a level it keeps returning to, which is a garbage collector working, not a leak.
-    /// Published under one word they are indistinguishable, and the board renders that word as
-    /// NEVER SETTLES in red beside a leak rate - an accusation the oscillating gateway did not earn.
+    /// How the window failed to settle, when it did: 1 climbing, 0 oscillating, -1 falling, absent
+    /// when it settled. Distinguishes an unbounded climb from a GC-driven oscillation - collapsed to
+    /// one word, the board would flag the oscillating gateway as a leak it doesn't have.
     #[serde(default = "measurement_default")]
     pub shape: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub idle_shape: Measurement<f64>,
-    /* THE IDLE-LEAK VERDICT AND ITS RATE. `Memory` declares twelve fields and measures all twelve;
-    `CellMemory` carried ten, and these were the two with nowhere to land - so they were computed
-    on every served cell and then dropped, with no field, no null and no absence entry. The board
-    renders "at rest, before any load" with no verdict because `site/app.js` reads exactly these
-    two names and gets `undefined`.
-
-    A gateway whose RSS climbs at idle - which `metric.rs` calls the most damning memory result
-    there is - published identically to one holding perfectly flat. A missing key and a null mean
-    different things, and only one of them is honest. */
+    /// The idle-leak verdict and its rate - `metric.rs` calls a climb at idle the most damning memory
+    /// result there is, so a missing key here (vs. a null) must not read as "holding flat".
     #[serde(default = "measurement_default")]
     pub idle_static: Measurement<f64>,
     #[serde(default = "measurement_default")]
     pub idle_growth_rate_mib_per_min: Measurement<f64>,
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub rss_series: Vec<RssSample>,
-    /// The IDLE window's own readings, so the board can draw what the process did while nothing was
-    /// asked of it rather than collapsing a whole minute to one number. Kept apart from
-    /// `rss_series` because the two answer different questions: what it costs doing nothing, versus
-    /// what work costs it. Empty on a bundle measured before this window existed, which reads as
-    /// "not recorded" and draws nothing - never as a flat line.
+    /// The idle window's own readings, kept apart from `rss_series` since the two answer different
+    /// questions (cost at rest vs. cost under work). Empty means "not recorded", never a flat line.
     #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub idle_rss_series: Vec<RssSample>,
     #[serde(default)]
@@ -869,8 +730,8 @@ impl CellMemory {
             peak_rss_hwm_mib,
             time_to_plateau_s,
             growth_rate_mib_per_min,
-            // Covered here, not merely serialised: these two are the fields whose absence used to
-            // publish as a bare null on a served cell because they were plain `Option`s.
+            // `plateaued`/`load_s` used to publish a bare null on a served cell when they were plain
+            // `Option`s; now covered here like every other Measurement.
             plateaued,
             load_s,
             shape,
@@ -949,18 +810,11 @@ pub struct StreamingProjection {
 
 #[cfg(test)]
 mod tests {
-    /// EVERY SCALAR MEASUREMENT ON `CellPerf` MUST BE REACHABLE BY `absences()`.
-    ///
-    /// This is a STRUCTURAL guard, not a list to maintain: it serialises a perf record whose scalars
-    /// are all absent, then asserts that every key which serialised to `null` has a reason in the
-    /// sibling map. A field added to the struct but forgotten in `absences_of!` publishes a bare
-    /// `null` with its reason nowhere - the one state the whole `Measurement` design exists to
-    /// prevent.
-    ///
-    /// It has now happened twice. The frontier hit it (a Vec, unreachable by the macro) and the
-    /// comment written then did not stop me doing it again with the nine cost fields, which shipped
-    /// to a real box and published unexplained nulls. A comment warning about a trap is not a guard
-    /// against it.
+    /// Structural guard, not a list to maintain: serialises a perf record whose scalars are all
+    /// absent, then asserts every key that serialised to `null` has a reason in the sibling
+    /// `absences()` map. A field added to the struct but forgotten in `absences_of!` publishes a bare
+    /// null with no reason - this has happened twice (the frontier Vec, then the cost fields), so it's
+    /// a test rather than a comment now.
     #[test]
     fn every_absent_perf_scalar_carries_a_reason() {
         use crate::measurement::{Absent, Measurement};
@@ -986,11 +840,8 @@ mod tests {
             cost_nonvol_ctxt_per_request,
             cost_majflt,
         );
-        // NOT MEASUREMENTS, so they are given values rather than exempted by name: `c1_note` and
-        // `reverify_note` are prose and `egress_reverified` is a verdict flag. None of the three is a
-        // quantity that can be "absent for a reason", and a null there means "nothing to say", not a
-        // lost number. Filling them keeps this test about MEASUREMENTS without an exclusion list that
-        // a future non-measurement field would silently need adding to.
+        // Not measurements (`c1_note`/`reverify_note` are prose, `egress_reverified` a verdict flag),
+        // so given values rather than exempted by name - keeps the test about measurements only.
         p.c1_note = Some("test".into());
         p.reverify_note = Some("test".into());
         p.egress_reverified = Some(true);
@@ -1018,8 +869,7 @@ mod tests {
             added_latency_p99_us: Measurement::Measured(40_945),
             gateway_c1_p99_us: Measurement::Measured(41_026),
             direct_c1_p99_us: Measurement::Measured(81),
-            // A cost the fixture can round-trip: the point of this test is that every field survives
-            // serialisation, so a field left at its default would pass vacuously.
+            // A value the fixture can round-trip, so a field left at its default doesn't pass vacuously.
             cpu_us_per_request: Measurement::Measured(37.5),
             rps_per_cpu_second: Measurement::Measured(26_666.0),
             cost_window_conc: Measurement::Measured(8),
@@ -1029,9 +879,8 @@ mod tests {
             cost_threads: Measurement::Measured(9.0),
             cost_nonvol_ctxt_per_request: Measurement::Measured(0.25),
             cost_majflt: Measurement::Measured(0.0),
-            // The throughput answer is the FRONTIER now. The six scalars this fixture used to carry -
-            // `rps_max_proxy` / `rps_sustained_20ms` and their concurrency twins - were one sweep
-            // summarised twice by a chosen ceiling, and they are gone from the artifact.
+            // The throughput answer is the frontier now; `rps_max_proxy`/`rps_sustained_20ms` and
+            // their concurrency twins are gone from the artifact.
             frontier: Vec::new(),
             sweep_max_proxy: vec![SweepPoint {
                 conc: 256,
@@ -1046,12 +895,8 @@ mod tests {
         }
     }
 
-    // THE FRONTIER SURVIVES THE ARTIFACT, MONOTONICITY AND ALL.
-    //
-    // `frontier.rs` proves the ordering holds over rungs; this proves the published SHAPE keeps it.
-    // A serialization that reordered the readings, or dropped the unbounded one, would leave a board
-    // whose columns no longer read as a curve while every individual number stayed correct - and the
-    // ordering is the whole reason a reader can check us by eye.
+    // `frontier.rs` proves ordering holds over rungs; this proves the published shape keeps it, so a
+    // serialization bug can't reorder or drop readings while every individual number stays correct.
     #[test]
     fn a_serialized_frontier_keeps_its_order_and_its_monotonicity() {
         use super::*;
@@ -1128,16 +973,13 @@ mod tests {
             back.lower_bound,
             "and it is labelled a floor rather than a ceiling"
         );
-        // The REASON does not survive the envelope, and that is this artifact's convention rather than
-        // a defect: an absent `Measurement` serializes as a bare null and its reason lives in the
-        // CELL's sibling `absences` map. The test that matters is that the map carries it - the next
-        // one - and that was a real hole until the frontier's keys were added to `CellPerf::absences`.
-        // A Vec field is unreachable by `absences_of!`, so before that every absent reading published
-        // a null with its reason nowhere at all: the one state `Measurement` exists to prevent.
+        // The reason doesn't survive the envelope - that's convention, not a defect: an absent
+        // `Measurement` serializes as a bare null and its reason lives in the cell's sibling
+        // `absences` map instead (tested next).
         assert_eq!(back.first_disqualified_conc.copied(), None);
     }
 
-    // THE ABSENCE MAP CARRIES EVERY READING'S REASON, KEYED BY ITS BOUND.
+    // The absence map carries every reading's reason, keyed by its bound.
     #[test]
     fn an_absent_frontier_reading_publishes_its_reason_in_the_cells_absence_map() {
         let mut perf = sample_perf();
@@ -1177,18 +1019,10 @@ mod tests {
     use super::*;
     use crate::measurement::Absent;
 
-    // ── the published names of the memory fields are a CONTRACT, not an implementation detail ─────
-    //
-    // These structs are the producer; `site/gen-data.mjs`, `site/seal.mjs` and
-    // `site/check-consistency.mjs` are the consumer, and they read these keys by literal name out of
-    // the JSON. Nothing in either test suite crossed that boundary: renaming `peak_rss_hwm_mib` here
-    // left all 257 Rust tests green, and on the site side the rename does not raise - it reads
-    // `undefined`, so C7's `peak_rss_mib <= peak_rss_hwm_mib` invariant silently stops checking and
-    // every real peak-RSS number publishes as a null. An absent measurement is supposed to mean the
-    // rig could not measure it; here it would mean a field got renamed.
-    //
-    // Listed literally rather than derived from the struct, on purpose: a test that asked the struct
-    // for its own field names would agree with any rename and hold nothing.
+    // The published memory field names are a wire contract with `site/gen-data.mjs`, `site/seal.mjs`
+    // and `site/check-consistency.mjs`, which read these keys by literal name and silently see
+    // `undefined` (not an error) on rename. Listed literally, not derived from the struct, so a rename
+    // here can't make this test agree with itself.
     #[test]
     fn the_memory_field_names_the_site_reads_are_pinned_to_the_wire() {
         // Every field either carries a serde default or is filled here, so this deserialize also
@@ -1242,11 +1076,8 @@ mod tests {
         assert_eq!(back.load_s.copied(), Some(90));
     }
 
-    // EVERY NULL ON A SERVED CELL CARRIES A REASON. `plateaued` and `load_s` were plain `Option`s, so
-    // `absences_of!` - which walks `Measurement` fields - could not see them: a served cell whose
-    // memory window could not judge the plateau published a bare null with nothing, anywhere in the
-    // artifact, saying why. That is the exact hole the absences map exists to close, and it was open
-    // on the two memory fields that are hardest to reason about from the numbers alone.
+    // Every null on a served cell carries a reason: `plateaued`/`load_s` used to be plain `Option`s,
+    // invisible to `absences_of!`, so an unjudged plateau published a bare null with no explanation.
     #[test]
     fn a_memory_window_that_could_not_judge_the_plateau_publishes_why_not_a_bare_null() {
         let cell = Cell {
@@ -1301,16 +1132,11 @@ mod tests {
             perf: Some(sample_perf()),
             stream: Some(CellStream {
                 stream_served: StreamServed::Status("untestable".to_string()),
-                // The TOKEN in `reason` and the prose in `stream_error`: `reason` used to carry the
-                // detail string, which made one field name mean two different things depending on
-                // which block a reader was in.
+                // Token in `reason`, prose in `stream_error` - keeping them separate fields.
                 reason: Some("untestable".to_string()),
                 stream_error: Some("did not rebind the mock port".to_string()),
-                // NotMeasured, not Untestable: a `null` on the wire always deserialises back to
-                // NotMeasured (measurement.rs's Deserialize cannot recover a more specific reason
-                // from a bare null), so a round-trippable fixture must start from the reason that
-                // survives the trip. The reason-preservation behaviour itself is measurement.rs's
-                // own concern and is exercised there, not duplicated here.
+                // NotMeasured, not Untestable: a null on the wire always deserialises back to
+                // NotMeasured, so a round-trippable fixture must start from the reason that survives.
                 added_ttft_p50_us: Measurement::absent(Absent::NotMeasured),
                 added_ttft_p99_us: Measurement::absent(Absent::NotMeasured),
                 ttft_gw_samples: Measurement::absent(Absent::NotMeasured),
@@ -1423,14 +1249,9 @@ mod tests {
         assert_eq!(perf, back);
     }
 
-    // THE REGRESSION THIS PINS: `Cell`'s hand-written `Serialize` lists its fields one by one, so
-    // adding a field to the struct does not add it to the wire - the compiler cannot catch a
-    // forgotten `st.serialize_field` call the way it would catch a forgotten struct literal field.
-    // `timings_s` was added to the struct, filled by the suite ("Cost belongs in the artifact"),
-    // and dropped by this exact omission earlier today; every other test here builds a `Cell` and
-    // only checks the fields it already knows to look for, so all 15 of this module's tests and all
-    // 11 of `artifact_contract.rs` stayed green with the line missing. This test looks at the one
-    // field none of them asserted on.
+    // Regression pin: `Cell`'s hand-written `Serialize` lists fields one by one, so the compiler
+    // can't catch a forgotten `st.serialize_field` call the way it catches a forgotten struct
+    // literal field. `timings_s` was added to the struct and dropped by exactly this omission.
     #[test]
     fn timings_s_reaches_the_wire() {
         let mut cell = sample_cell();
@@ -1475,10 +1296,9 @@ mod tests {
         assert_eq!(v["added_ttft_p99_us"], serde_json::Value::Null);
     }
 
-    // THE TOKEN AND THE PROSE ARE TWO FIELDS. `CellStream.reason` shares its name with `Cell.reason`,
-    // which every consumer reads as a stable token, while the stream block put the absence's free
-    // text there instead - so branching on `reason` gave a token in one block and a sentence in the
-    // other, and a reasonless absence published a null beside a status that plainly had a reason.
+    // `CellStream.reason` must stay a stable token (like `Cell.reason`), with prose in `stream_error`
+    // - not the other way around, which made `reason` mean a token in one block and a sentence in
+    // the other.
     #[test]
     fn a_stream_block_publishes_a_reason_token_with_its_prose_in_its_own_field() {
         let cell = sample_cell();
@@ -1539,14 +1359,12 @@ mod tests {
 
     // ── the shapes the published artifact must hold ─────────────────────────────────────────────
 
-    // The invariants below are properties of the TYPES, so they are asserted against a snapshot
-    // built right here, not by scanning results/snapshots/ and asserting on whatever is committed
-    // there: a test that a `git rm` can fail is measuring the wrong thing. Whether real artifacts
-    // parse is a stronger claim and is covered where it belongs: engine/tests/end_to_end.rs drives
-    // the real binary and reads back the snapshot it actually wrote.
+    // Asserted against a snapshot built here (a property of the types), not against committed
+    // results/snapshots/ files, which a `git rm` could silently remove coverage for. Real-artifact
+    // parsing is covered separately by engine/tests/end_to_end.rs.
 
-    // The other half: a cell that was not served must not arrive carrying numbers. Fabricating a
-    // perf block for an unserved cell would publish a capability the gateway never demonstrated.
+    // A cell that was not served must not carry numbers - fabricating a perf block would publish a
+    // capability the gateway never demonstrated.
     #[test]
     fn an_unserved_cell_carries_no_perf_across_the_wire() {
         let mut snap = sample_record();
@@ -1587,10 +1405,9 @@ mod derived_stream_absence_tests {
         }
     }
 
-    /* A DERIVED FIELD IS STILL A PUBLISHED NULL. The old guard only ran when the PARENT was absent,
-    so the two cases `suite` actually produces - a bisect landing on conc == 0, and a mock frame
-    ceiling that is not positive - published `streams_sustained_mock_ceiling: null` and
-    `_headroom: null` on a served cell with nothing in the absences map to explain them. */
+    // A derived field is still a published null: the old guard only ran when the parent was absent,
+    // so a bisect landing on conc == 0 (or a non-positive mock frame ceiling) published these as null
+    // on a served cell with nothing in the absences map to explain them.
     #[test]
     fn a_measured_parent_does_not_excuse_its_derived_fields_from_carrying_a_reason() {
         let a = served_stream().absences();
@@ -1684,11 +1501,9 @@ mod sweep_rung_absence_tests {
         }
     }
 
-    /* A RUNG'S NULLS ARE PUBLISHED NULLS. sweep_max_proxy is a Vec, so absences_of! cannot reach the
-    Measurements inside it and nothing else walked it - a rung the generator returned no window
-    for published three bare nulls with its reasons nowhere. These are the very inputs
-    frontier::Rung::served_cleanly is published for, so a checker reading ok: null could not tell
-    "no requests completed" from "no window was recorded". */
+    // sweep_max_proxy is a Vec, unreachable by absences_of!, so a rung with no window used to
+    // publish three bare nulls with no reason - inputs `frontier::Rung::served_cleanly` needs, so a
+    // checker couldn't tell "no requests completed" from "no window was recorded".
     #[test]
     fn an_unmeasured_rung_states_a_reason_for_every_null_it_publishes() {
         let p = CellPerf {

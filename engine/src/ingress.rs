@@ -6,12 +6,11 @@
 // answer that dialect with a real SSE stream.
 //
 // Gemini and bedrock carry the model in the URL PATH, not the body: `path` takes the model as a
-// parameter and returns a fresh `String` on every call, so there is no global and no stored value
-// that a later step switching models per column could leave stale.
+// parameter and returns a fresh `String` per call, so there is no stored value a later step
+// switching models per column could leave stale.
 //
-// Every dialect is a variant of `Dialect`, and every function below matches on it exhaustively (no
-// wildcard arm), so a seventh dialect is a compile error here, not a silent fallthrough to whatever
-// the default arm happened to return.
+// Every function below matches `Dialect` exhaustively (no wildcard arm), so a seventh dialect is a
+// compile error here, not a silent fallthrough.
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,27 +30,18 @@ pub enum Dialect {
 
 /// Which dialects a run should walk, from the value of `OTB_DIALECTS`.
 ///
-/// UNSET AND EMPTY BOTH MEAN "ALL", and that distinction is the whole point. `std::env::var` returns
-/// `Ok("")` for a variable that is SET BUT EMPTY, and the orchestrator always exports the variable,
-/// writing an empty value for a full-grid run, so an empty string must resolve to every dialect, not
-/// to zero.
+/// UNSET AND EMPTY BOTH MEAN "ALL": `std::env::var` returns `Ok("")` for a variable that is SET BUT
+/// EMPTY, and the orchestrator always exports it, writing an empty value for a full-grid run.
 ///
-/// A value that names something we do not know is still an ERROR, not a silent fallback to all: an
-/// operator who asked for one dialect and got six would be publishing a grid they did not request.
+/// A value naming something unknown is an ERROR, not a silent fallback to all — an operator who
+/// asked for one dialect must not get six published under their name.
 pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
     let Some(list) = value.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(Dialect::ALL.to_vec());
     };
-    // EVERY UNKNOWN NAME IS AN ERROR, not just a list where they ALL are.
-    //
-    // This was `filter_map(|d| d.trim().parse().ok())` with an emptiness check after it, so a single
-    // typo was discarded in silence: `OTB_DIALECTS="openai,anthorpic"` parsed to one dialect, the
-    // emptiness check passed, and the run walked a 1-dialect grid the operator believed was 2 - with
-    // nothing on stdout, stderr, or in the artifact saying a name had been rejected. The caller in
-    // bin/otb.rs only speaks when this returns Err, so that path printed nothing either.
-    //
-    // The module already stated the right rule two lines up ("a value that names something we do not
-    // know is still an ERROR, not a silent fallback"); it was only true when every name was bad.
+    // EVERY unknown name must error, not just a list where they're all unknown: a prior
+    // `filter_map(...parse().ok())` silently discarded single typos (a 1-of-2 list parsed to 1 with
+    // no error), running a smaller grid than requested with nothing reported anywhere.
     let mut parsed: Vec<Dialect> = Vec::new();
     let mut unknown: Vec<&str> = Vec::new();
     for name in list.split(',') {
@@ -103,11 +93,10 @@ impl Dialect {
         }
     }
 
-    /// The ingress URL path a client of this dialect would POST to. `model` is a PARAMETER, taken
-    /// fresh on every call: gemini and bedrock embed it in the path, and freezing either of those
-    /// into a stored value is exactly the defect this module exists to make impossible (see the
-    /// module header). Matches lib/ingress.sh's canonical defaults (no manifest override
-    /// modelled here: that belongs to whatever composes this module with a manifest).
+    /// The ingress URL path a client of this dialect would POST to. `model` is a PARAMETER taken
+    /// fresh on every call, since gemini and bedrock embed it in the path. Matches lib/ingress.sh's
+    /// canonical defaults; no manifest override is modelled here (that's for whatever composes this
+    /// module with a manifest).
     pub fn path(&self, model: &str) -> String {
         match self {
             Dialect::Openai => "/v1/chat/completions".to_string(),
@@ -146,27 +135,21 @@ impl Dialect {
     }
 
     /// The path used to reach the mock DIRECTLY, for the added-latency baseline leg (matrix/run.sh's
-    /// `mock_direct_path`). The mock routes on these same canonical paths regardless of any
-    /// per-gateway ingress override, so this is deliberately not a function of any manifest: it is
-    /// the mock's own fixed routing, independent of whatever path the gateway under test answers on.
-    /// Numerically identical to `path` for every dialect (the mock's canonical route IS the
-    /// canonical default), kept as its own function because the two answer different questions and
-    /// a manifest override can make them diverge for the gateway-facing path but never for this one.
+    /// `mock_direct_path`). The mock always routes on these canonical paths regardless of any
+    /// per-gateway ingress override, so this is not a function of any manifest. Identical to `path`
+    /// today, but kept separate since a manifest override can make the gateway-facing `path`
+    /// diverge from it while this one never does.
     pub fn mock_direct_path(&self, model: &str) -> String {
         self.path(model)
     }
 
     /// How a client of THIS dialect authenticates, and any version header the wire requires.
     ///
-    /// The auth header is a property of the PROTOCOL, not of the gateway: a client speaking Anthropic
-    /// sends `x-api-key` and `anthropic-version` whoever it is talking to. It lives here, once, for
-    /// the same reason `path` does - thirteen copies of one table is thirteen chances to drift.
-    ///
-    /// Only three of six dialects use a bearer token; sending one to the other two draws a 401,
-    /// which `probe.rs` maps to `NotConfigured` for any status from a healthy rig - "the gateway
-    /// answered, deterministically, that this pairing does not light up" - so a wrong auth shape
-    /// would mislabel whole ROWS of the grid as the gateway's own capability denial, grey on the
-    /// board, when the cause is our request.
+    /// A property of the PROTOCOL, not the gateway (a client speaking Anthropic sends `x-api-key`
+    /// and `anthropic-version` whoever it talks to), so it lives here once rather than copied per
+    /// call site. Only three of six dialects use a bearer token; sending one to the other two draws
+    /// a 401 that `probe.rs` maps to `NotConfigured`, so a wrong auth shape would mislabel whole
+    /// rows of the grid as the gateway's own capability denial when the cause is our request.
     pub fn auth_headers(&self, auth: &str) -> Vec<(String, String)> {
         match self {
             // Anthropic's own wire: the key is x-api-key, and the version header is mandatory.
@@ -187,14 +170,10 @@ impl Dialect {
 
     /// The same probe body, asking for a stream.
     ///
-    /// The mock decides whether to stream by looking for `"stream": true` in the request body (its
-    /// own `wants_stream` dispatch), and so does every gateway under test, so the streaming probe
-    /// must be the ORDINARY body plus that one flag. Building a separate hand-written streaming body
-    /// per dialect would let the streaming and non-streaming legs drift into asking two different
-    /// questions, and the difference between them is exactly what the added-latency numbers publish.
-    ///
-    /// The flag is inserted at the front of the object rather than appended, so no trailing-comma
-    /// handling is needed for bodies that end in a nested structure.
+    /// Must be the ORDINARY body plus a `"stream":true` flag and nothing else — a hand-written
+    /// streaming body per dialect would let the streaming and non-streaming legs drift into asking
+    /// different questions, and their difference is exactly what the added-latency numbers publish.
+    /// The flag is inserted at the front so no trailing-comma handling is needed.
     pub fn stream_body(&self, model: &str) -> String {
         let body = self.body(model);
         match body.strip_prefix('{') {
@@ -207,56 +186,38 @@ impl Dialect {
     }
 
     /// Whether the mock upstream can answer this dialect's `"stream":true` request with a real SSE
-    /// stream, rather than plain JSON. Read off mock/src/main.rs's own dispatch (`wants_stream(...)
-    /// && (body is OPENAI or ANTHROPIC)`), not off a comment: only those two dialects get native SSE
-    /// frames there, because bedrock's real streaming wire shape is AWS's binary event-stream
-    /// framing (not SSE) and the mock does not synthesize responses/gemini/cohere streams at all. A
-    /// dialect this returns false for must be reported as a rig limit (the mock cannot pose the
-    /// question), never as the gateway failing to stream.
+    /// stream, rather than plain JSON. Matches mock/src/main.rs's own dispatch
+    /// (`wants_stream(...) && (body is OPENAI or ANTHROPIC)`): bedrock's real streaming wire shape
+    /// is AWS's binary event-stream framing (not SSE), and the mock does not synthesize
+    /// responses/gemini/cohere streams. `false` here must be reported as a rig limit, never as the
+    /// gateway failing to stream.
     pub fn streams_natively(&self) -> bool {
         matches!(self, Dialect::Openai | Dialect::Anthropic)
     }
 
     /// Does this SSE `data:` payload carry MODEL OUTPUT, or is it protocol scaffolding?
     ///
-    /// Ledger RIG-11. The stream reader counted every dispatched event as a delivered frame, and the
-    /// two dialects that stream do not spend the same number of events on scaffolding. Verified
-    /// against `mock/src/main.rs`'s own `StreamFrames::build`, which is what actually produces the
-    /// frames this rig measures: openai sends 1 head (a `delta` carrying only `role`) + N content
-    /// deltas + 2 tail (an empty `delta` with `finish_reason`, then `data: [DONE]`) = N+3 events;
-    /// anthropic sends 2 head (`message_start`, `content_block_start`) + N deltas + 3 tail
-    /// (`content_block_stop`, `message_delta`, `message_stop`) = N+5.
+    /// Ledger RIG-11: the stream reader used to count every dispatched event as a delivered frame,
+    /// but openai and anthropic don't spend the same number of events on scaffolding (verified
+    /// against `mock/src/main.rs`'s `StreamFrames::build`: openai = 1 head + N content deltas + 2
+    /// tail; anthropic = 2 head + N deltas + 3 tail). That offset cancels in added-TTFT/added-gap
+    /// (both legs speak the same dialect), but not in `run::StreamWindow::delivery_ratio`, a
+    /// fraction of a fixed frame budget — there a stream with zero tokens still "satisfied" 1
+    /// (openai) or 2 (anthropic) frames of budget via head events alone.
     ///
-    /// That offset CANCELS in the added-TTFT and added-gap figures, because both legs of those speak
-    /// the same dialect and the difference subtracts it away. It does NOT cancel in
-    /// `run::StreamWindow::delivery_ratio`, which is a fraction of a fixed frame budget: there, a
-    /// stream that delivered no tokens at all still satisfied 1 (openai) or 2 (anthropic) frames of
-    /// the budget before its first content delta, and the two dialects differed from each other by
-    /// exactly that. A delivery gate whose numerator counts `message_start` is not measuring
-    /// delivery.
+    /// Owned by the dialect rather than as a `[DONE]`-sniffing heuristic in `http::SseReader`,
+    /// which is transport- and protocol-agnostic by design.
     ///
-    /// OWNED BY THE DIALECT, deliberately. The alternative is a heuristic inside `http::SseReader`
-    /// sniffing for `[DONE]`, and that decoder is transport-agnostic AND protocol-agnostic on
-    /// purpose - it is fed by two lanes and knows nothing about who it is talking to. A taxonomy of
-    /// events is a property of the wire dialect, so it lives with the rest of that dialect's wire
-    /// knowledge, beside `body`, `path` and `auth_headers`.
-    ///
-    /// The rule per dialect is the real protocol's, not the mock's spelling:
-    /// - openai: a chunk is content iff a `delta` carries a non-empty `content` string. The role
-    ///   head, the `finish_reason` tail and the `[DONE]` sentinel all fail that, and `[DONE]` is not
-    ///   even JSON.
-    /// - anthropic: an event is content iff its `type` is `content_block_delta`. Every other typed
-    ///   event in that protocol is framing.
-    /// - everything else: `true`, which is what `frames` already counts. NOT a taxonomy we invented
-    ///   for a wire we cannot test: `streams_natively` is false for all four, so the mock answers
-    ///   them with plain JSON and no SSE event of theirs ever reaches this. If one ever does, it
-    ///   counts exactly as it did before, rather than being silently reclassified by a rule nobody
-    ///   validated against that protocol.
+    /// Per-dialect rule (the real protocol's, not the mock's spelling):
+    /// - openai: content iff `delta.content` is a non-empty string. Role head, `finish_reason` tail,
+    ///   and the (non-JSON) `[DONE]` sentinel all fail that.
+    /// - anthropic: content iff `type == "content_block_delta"`; every other event type is framing.
+    /// - everything else: always `true` — `streams_natively` is false for all four, so the mock
+    ///   never emits SSE for them and this is untested territory, not an invented taxonomy.
     pub fn sse_event_is_content(&self, data: &str) -> bool {
         match self {
             Dialect::Openai => {
-                // `[DONE]` is a sentinel, not JSON, so it fails at the parse and needs no special
-                // case - which is the point of asking the dialect rather than sniffing the string.
+                // `[DONE]` is a sentinel, not JSON, so it fails at the parse with no special case.
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
                     return false;
                 };
@@ -281,18 +242,16 @@ impl Dialect {
 
     /// How many events this dialect spends BEFORE its first content frame.
     ///
-    /// The half of ledger RIG-11 that a classifier alone cannot fix. A stream is read to a fixed
-    /// frame budget (`metric::STREAM_FRAME_BUDGET`), and the reader stops counting at that many
-    /// events whether or not they carried tokens - so the most content frames a budget can possibly
-    /// hold is the budget minus this. Comparing content frames against the raw budget would make
-    /// every clean openai stream read as 63/64 delivered and every clean anthropic one as 62/64,
-    /// failing `STREAM_MIN_DELIVERY_RATIO` (1.0, deliberate) on gateways that lost nothing.
+    /// The other half of ledger RIG-11: a stream is read to a fixed frame budget
+    /// (`metric::STREAM_FRAME_BUDGET`), which counts all events whether or not they carried tokens,
+    /// so the most content frames a budget can hold is the budget minus this prelude. Without the
+    /// discount, every clean openai stream reads as 63/64 delivered and anthropic as 62/64, failing
+    /// `STREAM_MIN_DELIVERY_RATIO` (1.0) on gateways that lost nothing.
     ///
-    /// Read off `mock/src/main.rs`'s `StreamFrames::build` head vectors, the same source
-    /// `sse_event_is_content` is: openai_head is one frame, anthropic_head is two. The TAIL is not
-    /// counted here - at the rig's own settings (`MOCK_STREAM_CHUNKS` 64, budget 64) the budget is
-    /// reached inside the deltas and no tail event ever arrives, and a stream that DOES reach its
-    /// tail ended early, which is a delivery shortfall this gate should see rather than excuse.
+    /// Values are the head-vector lengths from `mock/src/main.rs`'s `StreamFrames::build` (openai=1,
+    /// anthropic=2). The TAIL is deliberately not counted: at the rig's settings (`MOCK_STREAM_CHUNKS`
+    /// 64, budget 64) the budget is reached inside the deltas, so a stream that DOES reach its tail
+    /// ended early — a real shortfall this gate should see, not excuse.
     pub fn stream_prelude_frames(&self) -> u64 {
         match self {
             Dialect::Anthropic => 2,
@@ -305,10 +264,9 @@ impl Dialect {
 
     /// The header names the RIG ITSELF puts on every request of this dialect.
     ///
-    /// Derived from `auth_headers` rather than listed again, so it cannot go stale the day a dialect
-    /// changes how it authenticates. Used by `manifest::Manifest` to refuse a manifest that declares
-    /// one of these itself: see the duplicate-credential refusal there for why sending both is a
-    /// measurement fault rather than an untidiness.
+    /// Derived from `auth_headers` rather than listed again, so it can't go stale. Used by
+    /// `manifest::Manifest` to refuse a manifest that declares one of these itself — sending both is
+    /// a measurement fault, not an untidiness.
     pub fn rig_owned_header_names(&self) -> Vec<String> {
         self.auth_headers("")
             .into_iter()
@@ -318,15 +276,11 @@ impl Dialect {
 
     /// Whether a real client of this dialect authenticates by a scheme THE HARNESS CANNOT PRODUCE.
     ///
-    /// Bedrock is signed with AWS SigV4 over the request. `auth_headers` sends a bearer token
-    /// instead, which is what the field has always driven and is fine against the mock (it ignores
-    /// the signature), but a GATEWAY that verifies credentials properly will reject it - correctly.
-    /// Grading that rejection as the gateway failing publishes a red it did not earn, so a 401/403
-    /// on this dialect is recorded as unprobed rather than as a refusal. Forging signatures is the
-    /// alternative and is worse: it would make the harness assert an identity it does not hold.
-    ///
-    /// Deliberately about the DIALECT, never about a gateway: this is a limit of our instrument, and
-    /// it applies identically to every entrant.
+    /// Bedrock is signed with AWS SigV4; `auth_headers` sends a bearer token instead, which is fine
+    /// against the mock (it ignores the signature) but a gateway that verifies credentials properly
+    /// will correctly reject it. Grading that rejection as the gateway failing would publish a red
+    /// it didn't earn, so a 401/403 here is recorded as unprobed, not a refusal. Forging signatures
+    /// instead would be worse: the harness would be asserting an identity it doesn't hold.
     pub fn auth_is_unforgeable_by_the_rig(&self) -> bool {
         matches!(self, Dialect::Bedrock)
     }
@@ -369,13 +323,7 @@ impl FromStr for Dialect {
 
 #[cfg(test)]
 mod tests {
-    // A TYPO MUST NOT QUIETLY SHRINK THE GRID.
-    //
-    // `filter_map(...parse().ok())` dropped an unknown name in silence and only errored when EVERY
-    // name was bad, so `OTB_DIALECTS="openai,anthorpic"` ran a 1-dialect grid the operator believed
-    // was 2 - nothing on stderr, nothing in the artifact. The module's own rule ("a value that names
-    // something we do not know is still an ERROR, not a silent fallback") held only in the all-bad
-    // case.
+    // A typo must not quietly shrink the grid (see `dialects_from` doc for the prior bug).
     #[test]
     fn one_unknown_dialect_is_an_error_not_a_silently_smaller_grid() {
         let e = super::dialects_from(Some("openai,anthorpic"))
@@ -710,9 +658,8 @@ mod tests {
 
     // ── the SSE content taxonomy (ledger RIG-11) ────────────────────────────────────────────────
 
-    // THE FRAMES ARE THE MOCK'S OWN, copied from mock/src/main.rs's `StreamFrames::build` rather
-    // than paraphrased, because a classifier validated against invented strings classifies invented
-    // streams. openai: 1 head + N deltas + 2 tail. anthropic: 2 head + N deltas + 3 tail.
+    // Frames copied verbatim from mock/src/main.rs's `StreamFrames::build`, not paraphrased — a
+    // classifier validated against invented strings classifies invented streams.
     #[test]
     fn only_the_deltas_that_carry_a_token_count_as_content() {
         let openai_head = r#"{"id":"chatcmpl-x","object":"chat.completion.chunk","created":1,"model":"mock","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
@@ -725,8 +672,7 @@ mod tests {
             "the role chunk carries no token"
         );
         assert!(!d.sse_event_is_content(openai_finish));
-        // The sentinel is not JSON, so it fails at the parse - no `[DONE]` string match anywhere,
-        // which is exactly why this lives on the dialect and not inside the transport decoder.
+        // Not JSON, so it fails at the parse — no `[DONE]` string match needed anywhere.
         assert!(!d.sse_event_is_content("[DONE]"));
 
         let a = Dialect::Anthropic;
@@ -746,9 +692,7 @@ mod tests {
             );
         }
 
-        // Nothing is claimed about a wire this rig cannot pose the question to: those dialects get
-        // no SSE from the mock at all, and inventing a taxonomy for them would be a rule nobody
-        // validated against the real protocol.
+        // No taxonomy is claimed for dialects the mock never sends SSE for.
         for other in Dialect::ALL {
             if other.streams_natively() {
                 continue;
@@ -758,10 +702,8 @@ mod tests {
         }
     }
 
-    // THE PRELUDE IS WHY A DELIVERY RATIO NEEDS A DENOMINATOR OF ITS OWN. A fixed frame budget is
-    // spent on the head events before a single token arrives, so the most content a budget can hold
-    // is the budget minus this - and the two streaming dialects differ by exactly the two the ledger
-    // names.
+    // Why the delivery ratio needs its own denominator: budget minus prelude, and the two
+    // streaming dialects' preludes differ.
     #[test]
     fn the_two_streaming_dialects_spend_different_budget_before_the_first_token() {
         assert_eq!(Dialect::Openai.stream_prelude_frames(), 1);

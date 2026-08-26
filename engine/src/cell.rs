@@ -3,15 +3,9 @@
 //
 // One cell of the protocol matrix, and the loop over them.
 //
-// THE STATE-LEAK SURFACE THIS REMOVES. The shell accumulates each cell's result into file-scope
-// globals (CELL_PERF_JSON, CELL_STREAM_JSON, CELL_MEM_JSON, CELL_PROBE_NOTE), assigns them from a
-// dozen scattered branches, and relies on emit_cell clearing all four at the end of every
-// invocation. Miss one clear on one path and cell N+1 silently inherits cell N's numbers, which is
-// unfalsifiable from the published artifact because both values are plausible. The shell knows this
-// and clears them defensively; the discipline is real but it is a discipline.
-//
-// Here a cell OWNS its outcome. There is no shared mutable state to forget to clear, so inheritance
-// is not a bug that has to be prevented, it is a thing that cannot be written.
+// Unlike the shell version this ported from, which accumulated each cell's result into file-scope
+// globals that had to be cleared defensively between invocations, a cell here owns its outcome: there
+// is no shared mutable state for a later cell to silently inherit.
 
 use crate::probe::Verdict;
 use serde::{Deserialize, Serialize};
@@ -30,12 +24,9 @@ impl CellId {
             egress: egress.into(),
         }
     }
-    // NO `is_diagonal`. It compared this id's two strings and had no production caller: the one place
-    // that needs the fact - `reverify::reverify_cell` - compares the DIALECT that actually built the
-    // request against the parsed egress, after the parse guard, which is the stronger question. A
-    // helper duplicating it on the raw strings could disagree with the bytes that went on the wire,
-    // and its unit test read as coverage of diagonal detection in the real pipeline when nothing in
-    // that pipeline called it.
+    // No `is_diagonal`: `reverify::reverify_cell` compares the dialect that actually built the request
+    // against the parsed egress instead, which can't disagree with the bytes on the wire the way a
+    // helper on these raw strings could.
 }
 
 impl std::fmt::Display for CellId {
@@ -52,30 +43,19 @@ pub enum Served {
     Yes,
     /// The gateway answered, deterministically, that it does not serve this pairing.
     ///
-    /// CARRIES THE EVIDENCE: a bare verdict would say "this gateway does not serve this cell" and
-    /// nothing else, making a field run in which every gateway answered 4xx for a rig-side reason
-    /// indistinguishable, in the artifact, from gateways that genuinely support nothing, with the
-    /// reason unrecoverable once the box that produced it is gone.
+    /// Carries the evidence (status + body) so a rig-side 4xx isn't indistinguishable, in the
+    /// artifact, from a gateway that genuinely supports nothing.
     No(Verdict, Evidence),
     /// The rig could not pose the question, so nothing about the gateway was learned.
     Untestable(String),
-    /// The pairing is outside the gateway's OWN declared capability matrix, so it was never probed
-    /// at all. Distinct from `No`: this is not the gateway's answer about THIS pairing (no request
-    /// was ever sent for it), it is the manifest's prior, cited declaration that this pairing does
-    /// not exist for it - a status returned for an undeclared pairing would be a global gate (auth,
-    /// rate limit) firing before routing, not evidence about the pairing. See `Manifest::matrix`.
+    /// The pairing is outside the gateway's own declared capability matrix, so it was never probed at
+    /// all - distinct from `No`, which is the gateway's actual answer about a request that was sent.
+    /// See `Manifest::matrix`.
     NotConfigurable(String),
-    /// THE RIG COULD NOT AUTHENTICATE, so the gateway's refusal says nothing about the pairing.
-    ///
-    /// A real client of this dialect signs its requests (AWS SigV4 for Bedrock); the harness sends a
-    /// bearer token and does not forge signatures. A gateway that answers 401/403 to that is behaving
-    /// CORRECTLY, and recording it as a failure publishes a red it did not earn - a false claim about
-    /// somebody's product, produced entirely by us, which is the worst error this board can make.
-    ///
-    /// Distinct from `Untestable`, which says the rig could not pose the question at all: here the
-    /// question was posed and the answer is real, it just answers "you are not authenticated" rather
-    /// than anything about whether the pairing works. It carries the evidence for the same reason
-    /// `No` does - a reader must be able to see the status and body it was decided from.
+    /// The rig could not authenticate (it sends a bearer token, not a signed request e.g. AWS SigV4),
+    /// so a 401/403 here is the gateway behaving correctly, not evidence against it. Distinct from
+    /// `Untestable`: the question was posed and answered, just not about whether the pairing works.
+    /// Carries evidence for the same reason `No` does.
     UnprobedAuth(Evidence),
 }
 
@@ -114,17 +94,9 @@ impl Served {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Skipped {
-    // NO `SuiteDeadline`. It existed, was serialized, was documented as the mechanism for recording
-    // cells lost to a suite wall-clock timeout, and had a unit test - and nothing in the grid walk
-    // ever tracked elapsed suite time or built one, so no artifact could contain it. Its own doc
-    // promised a reader would see "we ran out of time" for the untouched remainder of an overrunning
-    // run; what actually happened was a short artifact with no explanation.
-    //
-    // Removed rather than tested: dead safety code is worth removing, because a variant nothing can
-    // emit makes the enum claim a distinction the run cannot draw. The real protection against losing
-    // an interrupted run is that cells now stream to disk as they finish
-    // (`run::run_grid_streaming`), which is a guarantee the code actually keeps. If an in-process
-    // deadline is ever wanted, build the clock and the constructor in the same change.
+    // No `SuiteDeadline`: it was never constructible (nothing tracked elapsed suite time), so it was
+    // removed rather than kept as a variant the run could never actually emit. An interrupted run is
+    // instead protected by cells streaming to disk as they finish (`run::run_grid_streaming`).
     /// The cell is not served, so there is nothing to measure.
     NotServed,
 }
@@ -136,12 +108,6 @@ pub struct CellOutcome {
     pub served: Served,
     /// Why this cell carries NO measurements - present exactly when it was not measured, and absent
     /// when it was.
-    ///
-    /// The doc here used to read "present only when the cell was measurable AND the suite had time for
-    /// it", which is the opposite of what the field means and would lead a reader to treat every
-    /// measured cell as skipped and every skipped one as measured. It also referred to a suite
-    /// wall-clock that no longer exists: `Skipped::SuiteDeadline` was removed once it turned out
-    /// nothing ever tracked elapsed suite time or could emit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<Skipped>,
     /// Free-text evidence for a reader: the probe's own words about what it saw.
@@ -194,9 +160,8 @@ impl CellOutcome {
         }
     }
 
-    /// The gateway refused a credential the rig cannot legitimately produce. Not measurable, and
-    /// deliberately NOT `not_served`: the note has to read as our limit, because a reader who takes
-    /// it for the gateway's answer has been told something false about somebody's product.
+    /// The gateway refused a credential the rig cannot legitimately produce. Deliberately not
+    /// `not_served`: the note must read as our limit, not the gateway's answer.
     pub fn unprobed_auth(id: CellId, evidence: Evidence) -> Self {
         let n = format!(
             "answered HTTP {} to a credential this dialect's real clients would have signed; the \
@@ -224,15 +189,8 @@ mod tests {
         );
     }
 
-    // EVERY CONSTRUCTOR `run.rs` REALLY USES, pinned here so their shape stays covered without a
-    // second, parallel grid-walking loop.
-    //
-    // The list is derived from run.rs rather than remembered: it builds `CellOutcome` through
-    // `served`, `not_served`, `untestable`, `not_configurable` and `unprobed_auth` - five, not the
-    // three this comment used to claim. The two it forgot were also the two this test never touched,
-    // so a change that left `skipped` at `None` on either of them would have passed while the comment
-    // asserted they were covered. A comment claiming coverage is worth less than nothing when the
-    // coverage is not there, because it stops the next reader from checking.
+    // Every constructor `run.rs` actually uses (`served`, `not_served`, `untestable`,
+    // `not_configurable`, `unprobed_auth`), pinned here so their shape stays covered.
     #[test]
     fn cell_outcome_constructors_carry_the_right_served_and_skipped_shape() {
         let id = CellId::new("openai", "anthropic");
@@ -255,9 +213,7 @@ mod tests {
         assert!(matches!(ut.served, Served::Untestable(_)));
         assert!(!ut.served.is_measurable());
 
-        // The two the old comment forgot. Both are rig- or config-side outcomes, so both must carry a
-        // `skipped` reason: a cell that reads as unmeasured with nothing saying why is the bare hole
-        // this whole type exists to prevent.
+        // Both are rig- or config-side outcomes, so both must carry a `skipped` reason.
         let nc = CellOutcome::not_configurable(id.clone(), "no base-url override");
         assert!(!nc.served.is_measurable());
         assert!(

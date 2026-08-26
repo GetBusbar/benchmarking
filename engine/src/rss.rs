@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// RESIDENT MEMORY OF A PROCESS TREE, ported from lib/harness.sh's `_proc_tree_field_mib` and its
+// Resident memory of a process tree, ported from lib/harness.sh's `_proc_tree_field_mib` and its
 // two callers `_rss_tree_mib` / `_hwm_tree_mib`.
 //
-// THE CONTRACT (the shell defect this preserves, in types): a live process cannot be 0 KiB
-// resident, so a summed 0 is a measurement failure wearing a real number's clothes, never a real
-// reading. An unreadable or absent /proc entry (the process exited mid-scan, a permission denial,
-// a PID namespace we cannot see, no /proc at all on a non-Linux host) contributes NOTHING to the
-// sum; it must never lower the total the way a substituted 0 would. If nothing in the tree was
-// readable, or everything that was readable summed to exactly zero, the result is
-// `Absent(NotMeasured)`, never `Measured(0.0)`. A gateway benchmark ranks memory ascending, so a
-// fabricated 0.0 would certify the gateway we simply failed to measure as the winner.
+// A live process cannot be 0 KiB resident, so a summed 0 is a measurement failure, not a
+// reading. An unreadable/absent /proc entry (exited mid-scan, permission denied, no /proc at
+// all) contributes NOTHING to the sum, never a substituted 0. If nothing was readable, or the
+// readable sum is exactly zero, the result is `Absent(NotMeasured)`, never `Measured(0.0)` -
+// a gateway benchmark ranks memory ascending, so a fabricated 0.0 would falsely win.
 //
-// The walk is separated from the syscalls by the `ProcSource` trait so the summing logic (this
-// file's actual content) is tested against fixture text, never against a real process tree.
+// The walk is separated from the syscalls by the `ProcSource` trait so the summing logic is
+// tested against fixture text, never a real process tree.
 
 use crate::manifest::Runtime;
 use crate::measurement::{Absent, Measurement};
@@ -24,10 +21,9 @@ use std::collections::BTreeSet;
 /// Everything the summing logic needs to read from `/proc`, abstracted so tests can supply fixture
 /// data instead of a real filesystem.
 pub trait ProcSource {
-    /// pid -> parent pid, for every process currently visible to this reader. A process the reader
-    /// could not resolve a parent for is simply absent from the map; that process still gets
-    /// counted if it is the root or was already discovered, but nothing beneath it can be found.
-    /// A partial map therefore only risks UNDER-counting descendants, never inventing one.
+    /// pid -> parent pid, for every process currently visible to this reader. A pid the reader
+    /// could not resolve a parent for is simply absent from the map, so a partial map only risks
+    /// UNDER-counting descendants, never inventing one.
     fn ppid_map(&self) -> BTreeMap<u32, u32>;
 
     /// The raw contents of `/proc/<pid>/status`, or `None` if the pid is unreadable or gone.
@@ -35,26 +31,16 @@ pub trait ProcSource {
 }
 
 /// Walk of the real filesystem. Parent/child links come from `/proc/<pid>/stat`'s `ppid` field
-/// (fourth field after the command, which we locate by the LAST `)` so a command name containing
-/// its own parentheses cannot shift the parse) rather than from `pgrep -P`, since there is no
-/// portable pgrep-equivalent syscall; scanning every stat file once and building the map up front
-/// gives the same parent/child answer pgrep -P would, without a subprocess per pid.
+/// (fourth field after the command, located via the LAST `)` so a command name containing its
+/// own parentheses can't shift the parse) rather than `pgrep -P`, since there's no portable
+/// pgrep-equivalent syscall.
 pub struct RealProc;
 
 impl ProcSource for RealProc {
-    // A FULL SCAN, EVERY CALL, ON PURPOSE. The memory sampler in metric.rs calls this roughly every
-    // 100ms for the whole length of a load window, so the cost is real, but caching this map across
-    // calls (or across-refreshing only pids already known) would be a correctness bug, not just a
-    // perf win: a gateway is free to spawn new worker processes under load, at any point during the
-    // window, as children of any pid already in its tree, and the only way to notice a newly spawned
-    // pid is to look at the set of pids that exist RIGHT NOW. A cached map answers "was" a question,
-    // not "is". Nor can the scan be narrowed to some subset of /proc: whether a given live pid
-    // belongs under `root_pid` is only knowable by reading that pid's own ppid, so every pid in
-    // /proc has to be read to answer "does the tree have a new member" - there is no cheaper index.
-    // A pid that gets reparented AWAY from the tree (its process's original parent died) drops out of
-    // `tree_pids`'s walk on the very next scan regardless of caching, since the walk is a fresh BFS
-    // from `root_pid` over whatever `ppid_map` currently says; that is an accepted, unrelated
-    // limitation of the walk, not something this scan's freshness could fix either way.
+    // Full scan every call, on purpose: a gateway can spawn new workers at any point in the load
+    // window, and the only way to notice one is to look at what exists RIGHT NOW - a cached map
+    // answers "was", not "is". Called ~every 100ms by the sampler in metric.rs, so the cost is real
+    // but accepted.
     fn ppid_map(&self) -> BTreeMap<u32, u32> {
         let mut map = BTreeMap::new();
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -170,14 +156,11 @@ pub fn hwm_tree_mib(root_pid: u32) -> Measurement<f64> {
 
 // ── the bridge from a declared identity to a process tree ────────────────────────────────────────
 //
-// THE LINK FROM A DECLARED IDENTITY TO A PROCESS TREE. Everything above sums a tree from a root
-// pid, and the manifest declares an identity (`Runtime`); this resolves through the SAME
-// `Runtime::identity()` the launcher's `--name` and the stop path take, so the tree measured here
-// cannot describe a different process than the one that was started or the one that gets stopped
-// (see `manifest.rs`'s module header for why that matters).
+// Everything above sums a tree from a root pid; the manifest declares an identity (`Runtime`),
+// resolved through the SAME `Runtime::identity()` the launcher's `--name` and the stop path use,
+// so the tree measured here is always the one started/stopped (see `manifest.rs`'s module header).
 //
-// A resolution failure is an ABSENCE WITH A REASON, never a zero and never a default pid. Reading
-// memory off the wrong process is worse than reading none.
+// A resolution failure is an absence with a reason, never a zero and never a default pid.
 
 /// How the root pid is discovered, abstracted so the resolution logic is testable without docker or
 /// a live process.
@@ -188,11 +171,10 @@ pub trait PidSource {
     fn matching_pid(&self, pattern: &str) -> PidLookup;
 }
 
-/// What looking a `proc_match` up on the live box produced. THREE OUTCOMES, NOT TWO: "several
-/// processes match and none of them is the parent of the others" is not the same finding as "nothing
-/// matches", and it must not be answered with a guess. The old code took the numerically smallest
-/// matching pid, which on a box where an older unrelated process happened to match published THAT
-/// process's tree as the gateway's memory - a real number, from the wrong process.
+/// What looking a `proc_match` up on the live box produced. Three outcomes, not two: "several
+/// unrelated processes match" is not the same finding as "nothing matches" and must not be
+/// answered with a guess (the old code took the smallest matching pid, which could publish an
+/// unrelated bystander process's memory as the gateway's).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PidLookup {
     /// Exactly one process matched, or several did and one of them is the ancestor of all the rest -
@@ -254,11 +236,8 @@ impl PidSource for RealPids {
         }
     }
 
-    /// THE SAME MATCH RULE THE STOP PATH USES, from `supervise::select_matches`: the harness, the
-    /// shells running `commands` lines and a second engine are excluded, and an empty pattern names
-    /// nothing. What is left is resolved by ANCESTRY rather than by pid order - the old
-    /// smallest-pid rule was a guess dressed as a heuristic, and an older bystander that happened to
-    /// match won it.
+    /// Same match rule the stop path uses (`supervise::select_matches`): harness/shell/engine
+    /// processes excluded, empty pattern names nothing. Resolved by ancestry rather than pid order.
     fn matching_pid(&self, pattern: &str) -> PidLookup {
         let table = crate::supervise::process_table();
         let pids = crate::supervise::select_matches(&table, pattern, std::process::id());
@@ -352,9 +331,8 @@ mod pid_tests {
         }
     }
 
-    // THE POINT OF THE BRIDGE: whichever kind the manifest declares, the lookup is driven by
-    // `Runtime::identity()` and nothing else, so the tree measured here is the tree that was
-    // launched and the tree that gets stopped.
+    // Whichever kind the manifest declares, the lookup is driven by `Runtime::identity()` and
+    // nothing else, so the tree measured here is the tree that was launched and stopped.
     #[test]
     fn the_lookup_is_driven_by_the_one_declared_identity() {
         let f = FakePids {
@@ -388,9 +366,8 @@ mod pid_tests {
         assert!(f.seen_docker.borrow().is_empty());
     }
 
-    // A FORKING GATEWAY: master and workers all carry the same command line, so they all match, and
-    // the tree to sum is the master's. Resolved by ANCESTRY, not by pid order - the old rule took the
-    // numerically smallest match, which is only the master by coincidence.
+    // A forking gateway: master and workers share a command line, so they all match, and the tree
+    // to sum is the master's. Resolved by ancestry, not pid order.
     #[test]
     fn several_matches_in_one_tree_resolve_to_the_ancestor_of_them_all() {
         // 40 is the master; 61 and 12 are its workers. The smallest pid is a WORKER here, so a rule
@@ -404,7 +381,7 @@ mod pid_tests {
         );
     }
 
-    // TWO UNRELATED PROCESSES ANSWER TO THE SAME PATTERN. There is no honest choice between them.
+    // Two unrelated processes answer to the same pattern: there is no honest choice between them.
     #[test]
     fn unrelated_matches_have_no_sole_root() {
         let ppid: BTreeMap<u32, u32> = [(40, 1), (900, 1)].into_iter().collect();
@@ -417,9 +394,8 @@ mod pid_tests {
         let _ = sole_tree_root(&[7, 8], &ppid);
     }
 
-    // THE DEFECT THIS REPLACES: the smallest matching pid was measured as the gateway, so an older
-    // bystander that happened to match published ITS memory under the gateway's name. Refusing is the
-    // honest answer, and the absence names what else matched.
+    // The defect this replaces: the smallest matching pid was measured as the gateway, so an older
+    // bystander could publish its own memory under the gateway's name. The absence names what matched.
     #[test]
     fn several_unrelated_matches_refuse_to_measure_rather_than_guess() {
         let f = FakePids {
@@ -447,10 +423,9 @@ mod pid_tests {
         );
     }
 
-    // AN UNDECLARED IDENTITY RESOLVES TO NOTHING. `smoke` and the rig-reference configs pass an empty
-    // `proc_match` meaning "there is no gateway process here"; `pgrep -f ""` answered with every
-    // process on the box, so init's tree could be summed and published as a gateway's RSS. Driven
-    // against the REAL box, because that is where the old behaviour lived.
+    // An empty `proc_match` means "no gateway process here"; `pgrep -f ""` used to match every
+    // process on the box, letting init's tree be summed and published as a gateway's RSS. Run
+    // against the real box since that's where the old behaviour lived.
     #[test]
     fn an_empty_declared_identity_measures_nothing_on_the_real_box() {
         assert_eq!(
@@ -468,8 +443,7 @@ mod pid_tests {
         assert_eq!(m.reason(), Some(&Absent::NotMeasured));
     }
 
-    // A process that is not there is an ABSENCE WITH A REASON. Never a zero, never a default pid:
-    // summing a tree from the wrong root publishes another process's memory as the gateway's.
+    // A process that is not there is an absence with a reason, never a zero or default pid.
     #[test]
     fn a_missing_process_is_an_absence_that_names_what_was_looked_for() {
         let f = FakePids::default();
@@ -575,14 +549,10 @@ mod tests {
             .rss(2, 2000)
             .child(3, 1);
         let got = rss(&f, 1).copied();
-        // The readable-only total: (1000+2000)/1024.
         let readable_only = (1000.0 + 2000.0) / 1024.0;
         assert_eq!(got, Some(readable_only));
-        // And it must differ from what treating the missing pid as 0 would give (same number here,
-        // since 0 contributes nothing to a sum) -- so assert against a DIFFERENT wrong total instead:
-        // a "missing = 0" implementation would still reach the same total for a genuine 0-contribution
-        // bug, so the real regression this guards is a missing pid contributing a NONZERO placeholder;
-        // pin that the total is exactly the readable sum and nothing else.
+        // Missing-as-0 would give the same total here (0 contributes nothing), so pin against a
+        // total that would only match if the missing pid contributed a nonzero placeholder instead.
         let wrong_if_missing_were_nonzero = readable_only + 1.0;
         assert_ne!(got, Some(wrong_if_missing_were_nonzero));
     }

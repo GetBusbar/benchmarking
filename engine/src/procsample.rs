@@ -1,47 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// WHAT A GATEWAY COST, not only what it delivered.
-//
-// The board could say a gateway served 46,031 rps. It could not say what that cost, and that gap
-// produced three real failures on the 2026-07-30 field run:
-//
-//   1. Peak RPS is a SATURATION number. Once a gateway fills its pinned cores the ladder stops
-//      measuring the gateway and starts measuring the box, so a faster build shows no gain at all.
-//   2. A saturated run and an unsaturated one looked identical. A ceiling was inferred from the
-//      shape of two p99 curves - wrongly, twice - because there was no utilisation figure to check
-//      the inference against.
-//   3. A swapping box publishes as a slow gateway. Nothing detected major faults, so a RIG problem
-//      was attributable to the SUBJECT, which is the one thing this project exists to prevent.
+// What a gateway cost, not only what it delivered. Peak RPS alone is a saturation number: once a
+// gateway fills its pinned cores, the ladder measures the box instead of the gateway, a faster
+// build shows no gain, and a swapping box can misread as a slow gateway rather than a rig fault.
 //
 // `cpu_us_per_request` is immune to the ceiling: at saturation two gateways deliver the same rps by
-// definition, but the one doing less work per request still reads lower. It is also the number that
-// maps to money, since a gateway costing half the CPU serves the same traffic on half the instance.
+// definition, but the one doing less work per request still reads lower, and it's the number that
+// maps to money (half the CPU per request serves the same traffic on half the instance).
 //
-// EVERYTHING HERE IS A DELTA ACROSS THE WINDOW, NEVER AN ABSOLUTE. A process's absolute `utime`
-// includes its startup, its config parse, and every load window that ran before this one; charging
-// that to this window's requests would inflate whichever cell happened to run first and make cell
+// Everything here is a DELTA across the window, never an absolute: a process's absolute `utime`
+// includes startup and every prior load window, so charging that to this window would make cell
 // order look like a gateway property.
 //
-// Counters are summed over the same PROCESS TREE `rss.rs` resolves, for the same reason it does: a
-// gateway that forks workers keeps its CPU in the children, and a parent-only reading reports a busy
-// gateway as idle.
+// Counters are summed over the same process tree `rss.rs` resolves, for the same reason: a gateway
+// that forks workers keeps its CPU in the children, and a parent-only reading reports it as idle.
 
 use crate::measurement::{Absent, Measurement};
 use crate::rss::{tree_pids, ProcSource};
 use std::collections::BTreeMap;
 
-/// Kernel USER_HZ. This is 100 on every Linux ABI regardless of the kernel's internal CONFIG_HZ -
-/// the value `/proc/<pid>/stat` reports jiffies in is fixed by the userspace ABI, not by the tick
-/// rate the kernel was built with. Hard-coding it avoids a libc dependency for `sysconf(_SC_CLK_TCK)`
-/// in a binary that otherwise needs none; if this is ever wrong, cpu figures are off by a constant
-/// factor across the whole board and would be caught by the first sanity check against wall time.
+/// Kernel USER_HZ. Fixed at 100 by the userspace ABI on every Linux (not the kernel's CONFIG_HZ),
+/// so `/proc/<pid>/stat` jiffies are always in this unit. Hard-coded to avoid a libc dependency for
+/// `sysconf(_SC_CLK_TCK)`; if wrong, every cpu figure is off by the same constant factor.
 const USER_HZ: f64 = 100.0;
 
-/// Raw counters read from one process tree at one instant. Absolute values - with ONE deliberate
-/// exception on the way out (`threads_end` publishes a LEVEL, because "how many threads did it hold"
-/// is not a question a delta answers; see its own note) only differences of
-/// two of these are ever published.
+/// Raw counters read from one process tree at one instant. Absolute values; only differences of two
+/// of these are ever published (except `threads_end`, a level - see its own note).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {
     /// utime+stime in jiffies, summed across the tree.
@@ -108,13 +93,10 @@ impl CounterSource for crate::rss::RealProc {
 
 /// Busy and total jiffies across a SET of cores, from `/proc/stat`.
 ///
-/// THIS IS THE READING THAT SETTLES THE CEILING QUESTION. When two gateways converge on the same
-/// peak, the ladder cannot say whether they are equally fast or equally stuck - and on 2026-07-30
-/// that was inferred from the shape of two p99 curves, wrongly, twice. Utilisation of the cores the
-/// gateway is PINNED to answers it directly: at ~100% the wall is the gateway's own CPU and the peak
-/// is a real ceiling; well below it, the wall is somewhere else and the peak means something else.
+/// Settles the ceiling question: when two gateways converge on the same peak, utilisation of the
+/// gateway's pinned cores says whether that's a real ceiling (~100% busy) or the wall is elsewhere.
 ///
-/// Only the pinned cores are summed. The box also runs the mock and the load generator on their own
+/// Only the pinned cores are summed - the box also runs the mock and load generator on their own
 /// cores, so a machine-wide figure would blend three processes and describe none of them.
 pub fn cpu_busy_total<S: SystemStatSource>(source: &S, cores: &[u32]) -> Option<(u64, u64)> {
     let text = source.system_stat()?;

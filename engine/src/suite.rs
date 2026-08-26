@@ -33,39 +33,22 @@ pub struct SuiteConfig {
     /// Stamped into the artifact so a number can always be traced to the engine that produced it.
     pub measured_at: String,
     pub arch: String,
-    /// WHAT THIS RAN ON, in the orchestrator's own words: instance type, core count, memory, and how
-    /// the cores were split between gateway, mock and load generator.
-    ///
-    /// Handed in exactly like `arch`, and for the same reason: the box cannot describe the shape it
-    /// was launched with. `run-on-ec2.sh` has exported it as BENCH_HARDWARE all along and
-    /// `record.rs` has always had the field, but nothing connected the two - so every published
-    /// snapshot carried `"hardware": null` while the harness knew the answer. A board whose whole
-    /// claim is that only the gateway differs between columns should be able to say what the
-    /// hardware was without asking someone to remember.
-    ///
-    /// `None` when it was never supplied, published as a literal null rather than a guess.
+    /// What this ran on: instance type, core count, memory, and the gateway/mock/loadgen core
+    /// split. Handed in orchestrator-side like `arch`, since the box cannot describe the shape it
+    /// was launched with. `None` when never supplied, published as a literal null rather than a guess.
     pub hardware: Option<String>,
-    /// WHICH COMMIT PRODUCED THIS RUN. Resolved orchestrator-side (the box's clone is checked out at
-    /// a detached commit and the engine binary is a download, so neither can work it out on the box)
-    /// and handed in like `arch` is, rather than read from the environment down here: the snapshot
-    /// writer stays a pure function of its config, which is what lets the tests assert on it.
+    /// Which commit produced this run. Resolved orchestrator-side (the box's clone is a detached
+    /// checkout and the engine binary is a download, so neither can self-identify) and handed in
+    /// like `arch`, keeping the snapshot writer a pure function of its config.
     ///
-    /// `None` when the harness could not identify itself, and that is published as a literal null.
-    /// The alternative - omitting the key - would make "this run is not reproducible" look exactly
-    /// like "this artifact predates provenance", and the whole point of the stamp is telling those
-    /// two apart when two runs disagree.
+    /// `None` publishes as a literal null rather than an omitted key, so "not reproducible" is
+    /// distinguishable from "predates provenance".
     pub engine_stamp: Option<crate::record::EngineStamp>,
-    /// WHICH INSTRUMENT TOOK THE READINGS. The mock and the load generator are half the measuring
-    /// apparatus, and `rig` is a MOVING release tag: two runs weeks apart can use different binaries
-    /// behind the same URL, so a verdict change between them could be the instrument moving rather
-    /// than the gateway, unless the run itself records which mock produced it.
+    /// Which mock binary took the readings. `rig` is a moving release tag, so two runs can use
+    /// different binaries behind the same URL; recording it lets a verdict change be attributed to
+    /// the instrument rather than the gateway. Resolved orchestrator-side like `engine_stamp`.
     ///
-    /// Resolved orchestrator-side and handed in, exactly like `engine_stamp`: the box's own rig.sh
-    /// is what fetched this binary and hashed it, and the engine cannot re-derive that.
-    ///
-    /// The MOCK only: the load generator is `otb loadgen`, a subcommand of this engine, so
-    /// `rig.engine.commit` already identifies it and a second record here would be the same fact
-    /// twice.
+    /// Mock only: the load generator is `otb loadgen`, already identified by `rig.engine.commit`.
     pub rig_mock: Option<crate::record::BinaryProvenance>,
     /// The release the rig came from, recorded beside the digests it produced.
     pub rig_release_url: Option<String>,
@@ -121,23 +104,13 @@ fn carry<T>(m: &Measurement<f64>, f: impl Fn(f64) -> T) -> Measurement<T> {
     }
 }
 
-/// Measure the RIG's own STREAM ceiling on the same cell: the mock's frames/sec at the concurrency
-/// the gateway's own stream number was taken at.
-///
-/// The streaming analogue of `rig_ceiling`, and it takes its reference the same way and for the same
-/// reason (`rigbound.rs`'s header): the rig is not equally fast at every concurrency, so a reference
-/// taken at the top of the range would systematically understate how close the gateway came to it.
-///
-/// It does NOT build a mock-facing `RunConfig` the way `rig_ceiling` has to. That dance exists so the
-/// request generator's search plumbing can be pointed at the mock; the stream window takes its
-/// address, path and headers as arguments, so the direct leg is expressed directly instead of as a
-/// gateway config with the gateway parts blanked out one field at a time.
+/// Measure the rig's own stream ceiling on the same cell: the mock's frames/sec at the concurrency
+/// the gateway's own stream number was taken at, so the reference matches the operating point
+/// instead of understating headroom at the top of the range.
 fn stream_rig_ceiling(_cfg: &SuiteConfig, _dialect: Dialect, at_conc: u32) -> Measurement<f64> {
-    // DERIVED, NOT MEASURED. See `run::mock_frame_ceiling_fps`: the direct-to-mock leg engages fewer of
-    // this box's cores than the gateway leg (the loadgen drives AND reads, with the gateway's cores
-    // idle), so it is systematically slower than the path it was meant to bound - and judging a gateway
-    // against it discarded real numbers on seven gateway/metric pairs. We own the mock, so its ceiling
-    // is arithmetic: it cannot emit frames faster than it sleeps.
+    // Derived, not measured (see `run::mock_frame_ceiling_fps`): we own the mock, so its ceiling is
+    // arithmetic (it cannot emit frames faster than it sleeps) rather than a live reference, which
+    // would be systematically slower than the gateway leg and understate the gateway.
     let ceiling = run::mock_frame_ceiling_fps(at_conc);
     if ceiling <= 0.0 {
         return Measurement::absent_because(
@@ -148,24 +121,11 @@ fn stream_rig_ceiling(_cfg: &SuiteConfig, _dialect: Dialect, at_conc: u32) -> Me
     Measurement::Measured(ceiling)
 }
 
-/// Fill the added-latency fields straight from the metric surface.
-///
-/// Unlike the peak's `rps_max_proxy`, there is no separate rig-bound verdict to compute here: the
-/// group's own two-leg comparison (gateway leg minus a direct-to-mock leg, both taken at c=1) already
-/// IS the rig correction, the same way `Streaming::measure`'s `added_ttft`/`added_gap` need no second
-/// rig judgement layered on top. So this is a plain "take", exactly the pattern `cell_memory` and
-/// `cell_stream` already use for fields with no rig-bound question to ask.
 /// Build a cell's perf block from the metric surface.
 ///
-/// ONE JUDGEMENT LEFT. This used to also derive the four throughput scalars: it read `rps_max_proxy` /
-/// `conc_at_peak` off the surface, took a live rig reference at the winning concurrency, and handed both
-/// to `apply_peak_verdict` - then did it again for the sustained pair. All of that is gone. The
-/// throughput answer is the FRONTIER, which the metric group reads off the sweep's own rungs and hands
-/// over on the series, so nothing here decides anything about it (see `frontier.rs`).
-///
-/// `rig_ceiling` went with them: it existed to measure the mock's own throughput at the winner's
-/// concurrency so a chosen fraction could decide whether to publish. Nothing suppresses now, so nothing
-/// needs that reference.
+/// The only judgement left here is added-latency/cost carry-through; throughput is the frontier,
+/// read off the sweep's own rungs by the metric group (see `frontier.rs`), so nothing here decides
+/// anything about it.
 fn judge_cell(
     _cfg: &SuiteConfig,
     _dialect: Dialect,
@@ -188,13 +148,8 @@ fn judge_added_latency(
     out.c1_note = c1_note(metrics);
 }
 
-/// Carry the cost group's fields onto the record.
-///
-/// A STRAIGHT CARRY, WITH NO JUDGEMENT APPLIED, on purpose. Every suppression this column could want
-/// has already been decided where the evidence is: the metric refuses a window that had failures
-/// (CPU divided by only the successes would describe the failures, not the work) and re-flags the
-/// cost as a harness fault when the box was swapping. Re-deciding any of that here, away from the
-/// counters, is how two rules drift apart and the artifact ends up disagreeing with itself.
+/// Carry the cost group's fields onto the record with no judgement applied: suppression (failed
+/// windows, swap-fault windows) is already decided at the source, where the evidence is.
 fn judge_cost(
     out: &mut CellPerf,
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
@@ -218,17 +173,9 @@ fn judge_cost(
     out.cost_majflt = f("cost_majflt");
 }
 
-/// HOW MUCH IS BEHIND THE c=1 PERCENTILES.
-///
-/// `c1_note` was declared and never set. The one thing worth saying there, and the one thing nothing
-/// else in the artifact says, is the SAMPLE COUNT behind each leg: a p99 over four thousand round
-/// trips and a p99 over eleven are the same published field carrying completely different weight, and
-/// a reader deciding whether to trust an added-latency figure has no other way to tell them apart.
-///
-/// `None`, not a note about zeroes, when either leg produced no count: the added-latency fields are
-/// then already absent WITH the group's own reason for it, and a second sentence restating that would
-/// be the same fact published twice in two wordings, which is precisely what `Measurement`'s reason
-/// exists to prevent.
+/// Sample count behind each c=1 leg, since a p99 over four thousand round trips and one over eleven
+/// are the same published field carrying very different weight. `None` when either leg produced no
+/// count: the added-latency fields are already absent with their own reason in that case.
 fn c1_note(metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>) -> Option<String> {
     let gw = metrics.get("gateway_c1_samples")?.copied()?;
     let direct = metrics.get("direct_c1_samples")?.copied()?;
@@ -240,14 +187,10 @@ fn c1_note(metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>)
 
 /// The published per-cell memory window, from the numbers the memory group took.
 ///
-/// This is the field `site/gen-data.mjs` reads memory from, and it reads it from NOWHERE ELSE: its
-/// own comment says memory comes solely from the per-cell window, "No fallback, and NO per-gateway
-/// memory scalar". While nothing filled this, every board built from this engine published no memory
-/// for any gateway, which is a headline metric missing entirely rather than a number being wrong.
-///
-/// Absences travel intact. A window that could not find the gateway's process tree publishes null
-/// with the reason naming the identity it looked for, never a zero: a benchmark that ranks memory
-/// ascending would otherwise certify the gateway it failed to measure as the winner.
+/// This is the sole source `site/gen-data.mjs` reads memory from — no fallback, no per-gateway
+/// scalar. Absences travel intact: a window that could not find the gateway's process tree publishes
+/// null with the reason naming the identity it looked for, never a zero, since a benchmark that
+/// ranks memory ascending would otherwise certify an unmeasured gateway as the winner.
 fn cell_memory(
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
     series: Option<&crate::metric::Series>,
@@ -261,43 +204,22 @@ fn cell_memory(
         series.map(|s| s.rss.clone()).unwrap_or_default();
     let idle_rss_series: Vec<crate::record::RssSample> =
         series.map(|s| s.idle_rss.clone()).unwrap_or_default();
-    // STEADY STATE, derived from the readings rather than left null. The trailing part of the window
-    // is where the process has stopped growing, so its median is what the gateway actually costs
-    // under sustained load, as distinct from the peak, which one spike can set. Absent when there
-    // are too few readings to have a trailing part at all, because a "steady state" computed from
-    // one sample would be the sample.
-    //
-    // ONLY THE LOAD WINDOW'S OWN READINGS. The sampler runs from before the load through the whole
-    // recovery window, so `rss_series` is load THEN recovery, and taking the trailing half of the
-    // WHOLE series mixes the two: on the 2026-07-29 run one-api's trailing half was 38s of load
-    // against 60s of recovery, and the published figure came out 1.3 MiB under what the load window
-    // measured. For a gateway that actually releases - 400 MiB under load, 50 after - the blend lands
-    // between the two and is neither, while `recovered_rss_mib` beside it already answers "does it
-    // give the memory back". Two fields the record deliberately distinguishes must not collapse into
-    // each other.
+    // Median of the trailing part of the window, where the process has stopped growing, as distinct
+    // from the peak (which one spike can set). Bounded to the load window's own readings, not the
+    // recovery window that follows it in `rss_series` — mixing the two would blend this with
+    // `recovered_rss_mib`, a field the record deliberately keeps distinct.
     let load_end = metrics.get("memory_load_s").and_then(|m| m.copied());
     let steady = steady_state(&rss_series, load_end);
-    // The plateau verdict travels as a number across the metric surface (every group speaks f64), so
-    // it is turned back into the tri-state it really is here: settled, did not settle, or could not
-    // be judged. An absent verdict must stay absent rather than collapsing to false, because "it did
-    // not settle" is a claim about the gateway and "we could not tell" is a claim about the window.
-    //
-    // AS A MEASUREMENT, not an `Option<bool>`. `.copied().map(...)` threw the group's reason away on
-    // the way through, and the record field it landed in was a plain `Option` the absences map could
-    // not see - so a served cell whose window could not judge the plateau published a bare `null`
-    // with nothing anywhere saying why, which is the one thing every other null in this artifact
-    // cannot do. Same for `load_s` below.
+    // The plateau verdict travels as f64 across the metric surface; turned back into a tri-state
+    // Measurement here (not `Option<bool>`) so "did not settle" (a gateway claim) stays distinct from
+    // "could not judge" (a window claim), and an absent verdict keeps its reason. Same for `load_s`.
     let plateaued = carry(&take("memory_plateaued"), |v| v != 0.0);
     let load_s = carry(&take("memory_load_s"), |v| v as i64);
     crate::record::CellMemory {
         // `served` here means the cell was served, which is the only reason a window ran at all.
         served: true,
-        // THE PROTOCOL, PUBLISHED. Every duration and every threshold a reader would need to check the
-        // numbers below, in the artifact, from the constants themselves - so it cannot drift from what
-        // ran. It used to say "until the trailing 60s is flat (cap 300s)", which described a load whose
-        // LENGTH depended on the gateway: the flatness test ended the measurement, so a gateway that
-        // looked settled early was asked a shorter question than one that looked busy, and their peaks
-        // were then ranked against each other. Every cell now gets the same load.
+        // Formatted from the constants that actually ran, so it can't drift from them. Every cell
+        // gets the same fixed-length load; the duration does not depend on when a gateway settles.
         protocol: format!(
             "cold restart, {}s idle read at rest, then load at c={} for {}s, then {}s with the load \
              removed. `plateaued` is a verdict over the trailing {}s, taken at the END of the load: \
@@ -319,15 +241,10 @@ fn cell_memory(
         time_to_plateau_s: take("memory_time_to_plateau_s"),
         load_s,
         plateaued,
-        // Both windows disclose their own length. idle_window_s has been null since the field was
-        // declared, because idle was one instantaneous read and there was no window to name.
         idle_window_s: Some(crate::metric::MEMORY_IDLE_S as i64),
-        // THE SLICE THE NUMBER CAME FROM, not the length of the wait. This published
-        // `MEMORY_RECOVERY_S` (60) while `recovered_rss_mib` is the median over the trailing
-        // `MEMORY_RECOVERY_MEDIAN_S` (30) - the first half still holds the descent from peak, so a median
-        // across the whole minute would report a level the process never sat at. The wait is still 60 s
-        // and the `protocol` string above still says so; this field names the window the published figure
-        // is a median of, which is what a reader checking it needs.
+        // The slice `recovered_rss_mib` is a median OVER, not the full recovery wait: the median is
+        // taken over the trailing `MEMORY_RECOVERY_MEDIAN_S`, since the first half still holds the
+        // descent from peak.
         recovery_window_s: Some(crate::metric::MEMORY_RECOVERY_MEDIAN_S as i64),
         steady_state_rss_mib: steady,
         rss_series,
@@ -370,15 +287,8 @@ fn steady_state(series: &[crate::record::RssSample], load_end_s: Option<f64>) ->
             ),
         );
     }
-    // DELEGATED RATHER THAN REPEATED. This was a hand-rolled sort-and-take-the-middle using
-    // `partial_cmp(b).unwrap_or(Ordering::Equal)` - the identical comparator, and therefore the
-    // identical defect, as `stats::median` had: a non-finite sample makes that comparator a non-total
-    // order, which leaves the whole slice in an unspecified permutation and makes the answer depend on
-    // the order the samples arrived in rather than on the samples.
-    //
-    // `stats::median` now refuses a non-finite input outright. Two implementations of one statistic
-    // means a guard added to either is absent from the other, so the duplicate is gone instead of
-    // separately patched: whatever the board's rule for a median is, there is one place it lives.
+    // Delegated to `stats::median` (which refuses non-finite input) rather than hand-rolled, so
+    // there is one place the board's median rule lives.
     crate::stats::median(&tail)
 }
 
@@ -398,21 +308,17 @@ fn cell_stream(
     // one type. Truncation here loses at most a microsecond off a latency difference.
     let us = |k: &str| -> Measurement<i64> { as_i64(metrics.get(k)) };
 
-    // A comparison COUNTS AS SERVED when it produced a number, and equally when the difference came
-    // out below what the rig can resolve: both legs delivered frames and the comparison ran; only the
-    // difference was too small to weigh. Publishing that as a status would read as "the stream did not
-    // flow", the opposite of what happened.
+    // Counts as served when a difference was obtained, or when it's below what the rig can resolve
+    // (both legs delivered frames; only the difference was too small to weigh) - not a plain `false`,
+    // which would misread as "the stream did not flow".
     let flowed = |k: &str| {
         metrics
             .get(k)
             .is_some_and(|m| m.is_measured() || matches!(m.reason(), Some(Absent::BelowResolution)))
     };
     let ttft = metrics.get("added_ttft_p50_us");
-    // THE VERDICT IS OVER EVERY STREAMING COMPARISON, NOT THE TTFT ONE ALONE. It read
-    // `added_ttft_p50_us` and nothing else, so a cell whose gap figures measured cleanly - which can
-    // only happen if frames flowed through the gateway and were timed - published `stream_served` as
-    // the TTFT leg's absence token and read as a cell that did not stream, while carrying measured
-    // streaming numbers two fields down.
+    // The verdict covers every streaming comparison, not just TTFT: a cell whose gap figures
+    // measured cleanly must not read as unserved just because the TTFT leg alone was absent.
     let (stream_served, reason, stream_error) = match ttft {
         Some(_) if flowed("added_ttft_p50_us") => {
             (crate::record::StreamServed::Bool(true), None, None)
@@ -439,10 +345,7 @@ fn cell_stream(
 
     let mut out = crate::record::CellStream {
         stream_served,
-        // THE TOKEN, and the prose in the field that is for prose. `reason` carried the absence's
-        // free-text detail while the identically named `Cell::reason` carries a token, so one name
-        // meant two things in one artifact and a cell whose absence had no detail published a null
-        // reason beside a status that plainly had one.
+        // A token here, matching `Cell::reason`; free-text detail goes in `stream_error` instead.
         reason,
         stream_error,
         added_ttft_p50_us: us("added_ttft_p50_us"),
@@ -452,9 +355,8 @@ fn cell_stream(
         stream_c1_note: stream_c1_note(metrics),
         ttft_gw_samples: as_i64(metrics.get("ttft_gw_samples")),
         ttft_direct_samples: as_i64(metrics.get("ttft_direct_samples")),
-        // THE RUNGS THE TWO STREAM SEARCHES WALKED, published whatever the verdict, for the same
-        // reason `sweep_max_proxy` is: when a ceiling is suppressed as mock-bound or absent because
-        // the search ran out of range, the rungs are the only thing that explains why.
+        // Rungs the stream searches walked, published regardless of verdict - the only thing that
+        // explains a ceiling suppressed as mock-bound or absent from running out of range.
         sweep_streams: series.map(|s| s.sweep_streams.clone()).unwrap_or_default(),
         ..Default::default()
     };
@@ -462,15 +364,10 @@ fn cell_stream(
     out
 }
 
-/// What the concurrency-1 streaming legs were actually taken over.
-///
-/// `stream_c1_note` was declared and never set. What is worth saying there, and is said NOWHERE else
-/// in the artifact, is how many frames each of the two single streams produced: the gap p50 this
-/// block publishes is a median over the intervals BETWEEN those frames, so a leg that yielded three
-/// frames and one that yielded sixty-four give the same field wildly different weight, and a reader
-/// looking at a suspicious gap has no other way to tell which they are holding. `None` when the group
-/// took no stream at all - there is nothing to describe, and a note saying "0 frames" beside an
-/// absence that already carries its own reason would be the same fact twice.
+/// What the concurrency-1 streaming legs were actually taken over: how many frames each single
+/// stream produced, since the published gap p50 is a median over the intervals between them and a
+/// leg with three frames carries very different weight than one with sixty-four. `None` when the
+/// group took no stream at all.
 fn stream_c1_note(
     metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
 ) -> Option<String> {
@@ -479,14 +376,8 @@ fn stream_c1_note(
     if gw <= 0.0 && direct <= 0.0 {
         return None;
     }
-    // WHAT IS ACTUALLY TRUE OF EACH PERCENTILE. This note used to end "the p99 fields are absent
-    // because one stream cannot support a 99th percentile" - false of `added_ttft_p99_us` on every
-    // healthy streaming cell, because that pair is taken over STREAM_TTFT_SAMPLES separate probes, not
-    // over one stream. Only the added-GAP figures come from the intervals inside a single stream, and
-    // even there the claim was wrong in the other direction: a stream carries STREAM_FRAME_BUDGET
-    // frames, so it yields that many gaps minus one - plenty for a percentile. A reader checking either
-    // statement against the artifact would have found a published p99 sitting beside a note saying it
-    // could not exist.
+    // Added-TTFT is a percentile over STREAM_TTFT_SAMPLES separate probes, NOT over one stream; only
+    // added-GAP comes from the intervals inside a single stream (STREAM_FRAME_BUDGET frames deep).
     let ttft_n = |k: &str| {
         metrics
             .get(k)
@@ -507,11 +398,9 @@ fn stream_c1_note(
     ))
 }
 
-/// Judge the streams-sustained ceiling against the MOCK's own frames/sec at the same concurrency.
-///
-/// The same shape as `judge_sustained`, and deliberately so: one cell must not contain two different
-/// answers to "was this the rig or the gateway", one of them computed with `rigbound::is_rig_bound`
-/// against a reference at the operating point and the other with a threshold invented here.
+/// Judge the streams-sustained ceiling against the mock's own frames/sec at the same concurrency.
+/// Deliberately the same shape as `judge_sustained`: one cell must not answer "was this the rig or
+/// the gateway" two different ways.
 fn judge_streams_sustained(
     cfg: &SuiteConfig,
     dialect: Dialect,
@@ -536,9 +425,8 @@ fn judge_streams_sustained(
         return;
     };
     let conc = conc_f as u32;
-    // c == 0 is `bisect_ceiling`'s own MEASURED "nothing sustains this gate": there is no concurrency
-    // to take a reference AT, and a gateway that cannot carry a single clean stream cannot have been
-    // bounded by the mock, because the mock was never asked to do anything.
+    // c == 0 is `bisect_ceiling`'s own measured "nothing sustains this gate": no concurrency to
+    // take a reference at, so the mock was never asked to do anything.
     if conc == 0 {
         out.streams_sustained = Measurement::Measured(0);
         out.streams_sustained_fps = Measurement::Measured(0.0);
@@ -549,19 +437,13 @@ fn judge_streams_sustained(
     apply_streams_sustained_verdict(out, value, conc, stream_rig_ceiling(cfg, dialect, conc));
 }
 
-/// Re-wrap an absence so its reason AND its detail survive a narrowing. The searches attach their
-/// lower bound as prose, and flattening that to a bare null is the one place "the engine discards the
-/// measurement" was literally true.
+/// Re-wrap an absence so its reason AND detail survive a narrowing, rather than flattening to a bare
+/// null. Generic in the source type too, so it also serves companion fields like
+/// `rps_max_proxy_concurrency` / `conc_at_peak` and their sustained/stream equivalents - one absence,
+/// one story, at every key that carries it.
 ///
-/// GENERIC IN THE SOURCE TYPE as well as the target, so it also serves the companion fields:
-/// `rps_max_proxy_concurrency` and `conc_at_peak` beside `rps_max_proxy`, and their sustained and
-/// stream equivalents. Those were built with `Measurement::absent(reason)`, which keeps the label and
-/// drops the evidence - "rig_limited" with no "against a rig ceiling of N at c=M" - so a reader who
-/// opened the absences map at a twin's key got strictly less than at the primary's, about a value the
-/// board is refusing to publish. One absence, one story, at every key that carries it.
-///
-/// A measured input yields `NotMeasured`, which is unreachable from the call sites (all inside an
-/// absent branch) and is the conservative answer if one ever stops being.
+/// A measured input yields `NotMeasured`, unreachable from the call sites (all inside an absent
+/// branch) and the conservative answer if one ever stops being.
 fn carry_absence<A, T>(m: &Measurement<A>) -> Measurement<T> {
     match (m.reason().cloned(), m.detail()) {
         (Some(r), Some(d)) => Measurement::absent_because(r, d),
@@ -570,23 +452,14 @@ fn carry_absence<A, T>(m: &Measurement<A>) -> Measurement<T> {
     }
 }
 
-/// Fill the streams-sustained fields from the measurement and the mock's derived ceiling. PURE, and
-/// separate from its judge, for the identical reason `apply_peak_verdict` is: the suite's own fixture
-/// points the gateway and the mock at one server, so a decision welded to a live reference would be
-/// untestable end to end.
+/// Fill the streams-sustained fields from the measurement and the mock's derived ceiling. Pure, and
+/// separate from its judge (like `apply_peak_verdict`), so the decision isn't welded to a live
+/// reference and stays testable.
 ///
-/// MATCHING THE MOCK'S RATE IS THE GATEWAY SUCCEEDING. The mock paces its deltas at a fixed interval
-/// and says so in its own header: "the pacing is the model generating tokens; the stream suite measures
-/// what a gateway ADDS on top of it". So the mock's frames/sec is not a capacity it ran out of, it is
-/// the TARGET RATE - c streams times one frame per interval. A gateway that forwards every frame as it
-/// arrives lands at ~99% of it, which is the best available outcome, and it was suppressed as
-/// rig-limited: 13 cells lost `streams_sustained` and 11 lost `cpu_fps` on the 2026-07-28 board, with
-/// agentgateway keeping pace to within 0.7% and publishing nothing.
-///
-/// Whether it SHOULD have kept pace is what the gate decides, and the gate is about delivery - frames
-/// arriving, nothing stalling, streams not erroring. That is the right question and it is asked
-/// separately, so a gateway that cannot keep pace falls short there and the shortfall is published as
-/// its own rather than hidden behind ours.
+/// Matching the mock's rate IS the gateway succeeding: the mock's frames/sec is a target rate (c
+/// streams times one frame per interval), not a capacity it ran out of, so a gateway keeping pace at
+/// ~99% must not be suppressed as rig-limited. Whether it should have kept pace is a delivery
+/// question, asked separately by the gate.
 fn apply_streams_sustained_verdict(
     out: &mut crate::record::CellStream,
     value: f64,
@@ -599,16 +472,9 @@ fn apply_streams_sustained_verdict(
     out.streams_sustained_headroom = rigbound::headroom(value, &reference);
 }
 
-/// WHAT EACH PUBLISHED METRIC MEANS, built from the constants that define it.
-///
-/// Every entry answers the three questions a reader needs to check a number rather than trust it:
-/// what quantity is this, which observations counted, and how did the measurement know to stop. The
-/// third is the one this engine got wrong for a long time - a search that stopped on a chosen flatness
-/// count published a smaller number as a "maximum" and said nothing about having chosen.
-///
-/// Formatted from the constants, never hand-written. The retired throughput gate is why: every surface
-/// described it as "p99 < 1 s" while the engine enforced 20 ms - a bar 96% of the 1632 recorded rungs
-/// pass, against 57% for the real one - so readers reasoned about a test that never ran.
+/// What each published metric means, built from the constants that define it (never hand-written,
+/// so the description can't drift from what actually ran). Every entry answers what quantity this
+/// is, which observations counted, and how the measurement knew to stop.
 fn metric_definitions() -> std::collections::BTreeMap<String, String> {
     let mut d = std::collections::BTreeMap::new();
     let bounds: Vec<String> = crate::frontier::P99_BOUNDS_US
@@ -800,10 +666,8 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
         "band_pct": QUALIFY_BAND_PCT,
         "concurrency": QUALIFY_CONCURRENCY,
         "observed_rps": observed.value().copied(),
-        // THE ARTIFACT'S OWN VOCABULARY, not a Rust Debug tag. Every other null in this snapshot
-        // says "not_measured"; this said "NotMeasured", so a consumer branching on the published
-        // token did not recognise it - and the absence's detail, the only statement of WHY the box
-        // was judged, was dropped entirely.
+        // The artifact's own token vocabulary (`.token()`), not a Rust Debug tag - every other null
+        // in this snapshot uses the same tokens.
         "observed_absent_reason": observed.reason().map(|r| r.token()),
         "observed_absent_detail": observed.detail(),
         "baseline_rps": baseline.value().copied(),
@@ -814,23 +678,13 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
 
 /// Every previous box-qualification observation available to this run.
 ///
-/// TWO SOURCES, BECAUSE THE BOX HAS NO HISTORY OF ITS OWN.
+/// Two sources, because the box has no history of its own: reading the results directory works when
+/// the engine runs where the record lives, but in the field each gateway gets a fresh EC2 instance
+/// with an empty directory, so `OTB_QUALIFY_BASELINE` is how the orchestrator hands over what it
+/// knows. The env value is appended to (not replacing) whatever the directory yields.
 ///
-/// Reading the results directory is right when the engine runs where the record lives. In the field
-/// it does not: every gateway gets a FRESH EC2 instance that fetches its own manifest and the rig,
-/// and nothing else. That directory is empty there, so the baseline was absent, so the qualification
-/// seeded instead of judging - every box, every gateway, every run since the check was written. A
-/// box running 30% slow would have seeded a fresh baseline and passed, and its gateway's whole
-/// column would have been measured on a rig nothing compared against anything.
-///
-/// `OTB_QUALIFY_BASELINE` is how the orchestrator hands over what it knows: it holds the history and
-/// the box does not. A single observation is enough to judge against - `rolling_baseline` takes the
-/// median of what it is given - and the env value is appended to whatever the directory yields
-/// rather than replacing it, so running where the record does live still uses the record.
-///
-/// The observation is the RIG's own loopback throughput at a fixed concurrency, not the gateway's,
-/// which is why one pooled baseline across gateways is the right comparison and not a per-gateway
-/// one: it is the box being qualified.
+/// The observation is the rig's own loopback throughput, not the gateway's, so one pooled baseline
+/// across gateways is the right comparison, not a per-gateway one - it is the box being qualified.
 fn qualify_history(results_dir: &Path) -> Vec<f64> {
     let mut out = qualify_history_on_disk(results_dir);
     if let Some(v) = std::env::var("OTB_QUALIFY_BASELINE")
@@ -847,16 +701,10 @@ fn qualify_history(results_dir: &Path) -> Vec<f64> {
 /// The part that reads the directory, separated so the env contribution above is testable without a
 /// filesystem and this stays a pure function of what is on disk.
 ///
-/// ONLY RUNS THAT QUALIFY CONTRIBUTE. `Outcome::qualifies_as_baseline` states the rule - a pass or a
-/// seed is a measurement taken on a box nothing was wrong with, a fail is a box that was already
-/// judged contaminated, and a skip measured nothing - but this harvested every record it could parse,
-/// so a failed qualification's rps went straight into the median that decides whether the NEXT run
-/// fails. A contaminated box would have spent its whole history dragging the band down toward itself
-/// until nothing failed the gate at all, which is the gate quietly switching itself off.
-///
-/// A record with no readable outcome does not contribute either. "Not known to qualify" is treated as
-/// "does not qualify" because the alternative is admitting a fail on the strength of it being
-/// unlabelled, and the whole point of the filter is what it keeps out.
+/// Only runs that `Outcome::qualifies_as_baseline()` contribute: a failed qualification's rps must
+/// not enter the median that decides whether the NEXT run fails, or a contaminated box could drag
+/// the band down until nothing ever fails the gate. A record with no readable outcome is treated as
+/// not qualifying, same reasoning.
 fn qualify_history_on_disk(results_dir: &Path) -> Vec<f64> {
     let Ok(entries) = std::fs::read_dir(results_dir) else {
         return Vec::new();
@@ -904,21 +752,11 @@ pub fn run_suite_with(
     gateway_addr: SocketAddr,
     metrics: &[&dyn crate::metric::Metric],
 ) -> Result<Paths, SnapshotError> {
-    // A HEADER THIS MANIFEST DECLARES THAT THE RIG ALREADY SENDS ITSELF, said once per gateway
-    // before anything is measured.
-    //
-    // Ledger RIG-12's remainder. `run::headers_for` used to emit both copies, and HTTP does not
-    // define which of two same-named headers a server honours - so a gateway authenticated as
-    // somebody and published a clean number for a request whose credential nobody could name. The
-    // wire is unambiguous now (the rig's copy wins, the manifest's is dropped), and this is the
-    // other half of that fix: a precedence rule nobody is told about is the same silence as the
-    // ambiguity it replaced.
-    //
-    // Here rather than in `Manifest::problems`, which is the "this gateway is misconfigured" gate a
-    // real entrant must pass clean. This is not a setup mistake that breaks a launch: it is a line
-    // to delete from a first-party file, and `gateways/litellm-rust/definition.json` has it today
-    // (`Authorization: Bearer {GW_AUTH}`). Once per gateway, not once per cell, because a note
-    // repeated 36 times is a note nobody reads.
+    // Ledger RIG-12: warn once per gateway (not once per cell) when the manifest declares a header
+    // the rig already sends itself. The wire picks the rig's copy and drops the manifest's, but a
+    // silent precedence rule is the same ambiguity as two headers racing - so this surfaces it.
+    // Deliberately not in `Manifest::problems` (the hard gate): a manifest with this is not
+    // misconfigured, just carrying a line that should be deleted.
     for note in cfg.manifest.rig_owned_headers_declared() {
         eprintln!("[manifest] {}: {note}", cfg.manifest.name);
     }
@@ -934,9 +772,8 @@ pub fn run_suite_with(
         load_cores: cfg.load_cores.clone(),
         gw_cores: cfg.gw_cores.clone(),
         // How to put this gateway back at rest, so the memory group can read an idle that is
-        // actually idle. Built from the SAME manifest declaration the initial launch used, so a
-        // restart cannot differ from the launch it is repeating. `None` for a manifest that declares
-        // no launch: the harness does not own that gateway's lifetime and must not bounce it.
+        // actually idle. Built from the same manifest declaration the initial launch used. `None`
+        // for a manifest with no launch: the harness does not own that gateway's lifetime.
         declared_path: cfg.manifest.path.clone(),
         cell_paths: cfg
             .manifest
@@ -963,38 +800,21 @@ pub fn run_suite_with(
         // child it spawns is still reachable - and reapable - the next time this same gateway is
         // put back at rest.
         relaunch_launcher: Default::default(),
-        // The gateway's own headers, resolved once for the run. A column whose headers cannot be
-        // resolved gets NONE rather than a partial set: sending half a routing header selects the
-        // wrong upstream and publishes a number for a pairing that was never driven.
-        // REFUSED, NOT DEFAULTED. This was `.unwrap_or_default()`, which turned an unresolvable
-        // header into an EMPTY header set and measured the whole run without it. The comment above
-        // justifies "NONE rather than a partial set" - and that reasoning is sound for a partial set -
-        // but it does not cover resolution failing outright, which is what the default silently did.
-        //
-        // The consequence was the worst this harness can produce: a gateway whose auth header failed
-        // to resolve serves nothing, every cell records `served: false`, and the board publishes that
-        // the GATEWAY does not work when the harness dropped its credentials. `otb run` calls only
-        // `manifest.validate()`, which checks headers for shell-style `$` and never exercises `{...}`
-        // substitution, so an unknown placeholder passes the gate and arrives here.
+        // The gateway's own headers, resolved once for the run. Refused via `?` rather than
+        // defaulted: a column whose headers can't resolve must fail loud, not fall back to an empty
+        // set and silently measure the whole run without auth/routing (which then publishes
+        // `served: false` as if the gateway itself were broken). `manifest.validate()` doesn't
+        // exercise `{...}` substitution, so a bad placeholder reaches here undetected.
         static_headers: cfg
             .manifest
             .headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
             .map_err(|e| crate::snapshot::SnapshotError::UnresolvableHeader {
                 detail: e.to_string(),
             })?,
-        // THE SAME REFUSAL AS `static_headers` ABOVE, because this is the same defect one lane over.
-        //
-        // `static_headers` was changed from `unwrap_or_default()` to `?` so an unresolvable header
-        // stops the run instead of measuring without it. This sibling still swallowed the identical
-        // error with `.ok()?` - and inside a `filter_map`, which is WORSE than the empty-set failure it
-        // was fixed for: the dialect is DROPPED from the map entirely, `run.rs`'s
-        // `cfg.egress_headers.get(egress)` finds nothing, and every cell on that egress runs with no
-        // routing or auth header at all. Each records `served: false`, and the board publishes that the
-        // GATEWAY does not serve that dialect when the harness dropped its headers.
-        //
-        // Collected into a Result so the first failure propagates with its manifest error, rather than
-        // filtered - a per-dialect resolution failure is a manifest defect, not a dialect this gateway
-        // declines to serve, and those two must never look alike.
+        // Same refusal as `static_headers` above: must fail loud (`?`), not silently drop a dialect
+        // whose headers can't resolve, which would record `served: false` as if the gateway declined
+        // it rather than the harness losing the headers. Collected into a Result so the first
+        // failure propagates - a resolution failure is a manifest defect, not a declined dialect.
         egress_headers: cfg
             .dialects
             .iter()
@@ -1005,11 +825,8 @@ pub fn run_suite_with(
                     .map_err(|e| crate::snapshot::SnapshotError::UnresolvableHeader {
                         detail: format!("egress {}: {e}", d.as_str()),
                     })?;
-                // headers_for prepends the always-on set; the run config carries those separately, so
-                // strip them here rather than sending each one twice.
-                // Same refusal again: this resolves the always-on set purely to subtract it, but a
-                // failure here would silently leave the duplicates in (or, with the old `.ok()?`, drop
-                // the dialect) rather than saying the manifest cannot be resolved.
+                // headers_for prepends the always-on set; strip it here since the run config carries
+                // it separately. Resolved again just to subtract, so it too must fail loud (`?`).
                 let statics = cfg
                     .manifest
                     .headers_for("", &cfg.gw_cores, cfg.mock_addr.port(), &cfg.gw_dir)
@@ -1023,22 +840,15 @@ pub fn run_suite_with(
         runtime: cfg.manifest.runtime.clone(),
     };
 
-    // THE MOCK IS PUT BACK IN ITS MEASURING STATE BEFORE ANYTHING IS MEASURED.
-    //
-    // The mock's recorder is a per-request lock in the one process whose throughput is the reference
-    // every gateway's number is judged against, so it must be off for every load window and on only
-    // for the single re-verification request per cell. `reverify_cell` already holds that invariant
-    // per cell, but the box-qualification window below runs BEFORE the first cell - and a box that
-    // boots the mock with MOCK_RECORD=1 would take that one window, the one whose rate becomes this
-    // box's rolling baseline, against a recording mock while every window after it runs against a
-    // quiet one.
+    // The mock's recorder must be off before box qualification (its baseline window runs before the
+    // first cell): a box booted with MOCK_RECORD=1 would take that baseline against a recording mock
+    // while every later window runs against a quiet one. `reverify_cell` holds this per-cell already.
     if let Some(why) = crate::reverify::quiesce_recorder(&rc) {
         eprintln!("suite: the mock's recorder could not be quiesced before the run: {why}");
     }
 
-    // THE BOX IS QUALIFIED BEFORE THE GRID, not after. The verdict is about the machine every
-    // number below is measured on, so taking it afterwards would judge a box using a reading taken
-    // once the run had already finished loading it.
+    // Qualified before the grid, not after: the verdict is about the machine everything below is
+    // measured on, so it must be taken before the run has loaded the box.
     let box_qualify = qualify_box(cfg, &qualify_history(Path::new(&cfg.results_dir)));
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
@@ -1046,23 +856,10 @@ pub fn run_suite_with(
     let mut last_egress: Option<String> = None;
     let mut written: Option<Paths> = None;
 
-    // WRITTEN INCREMENTALLY, after every egress column, not held in memory and written once at the
-    // end: these runs take hours on a box with a hard self-termination timer, so a run interrupted
-    // partway through must not lose every cell it already measured. Partial progress that survives
-    // is worth more than a complete result that might not arrive.
-    //
-    // A PROMOTE-GUARD TRIP ON ONE OF THESE CHECKPOINTS IS NOT THE SAME EVENT AS ON THE FINAL WRITE.
-    // Every checkpoint before the last is, by construction, thinner than the finished run it is
-    // partway through, so tripping the guard against a fuller prior snapshot already on disk is
-    // expected mid-run, not a sign the run went bad. Propagating it with `?` used to abort this whole
-    // function - discarding every cell already measured for the rest of the grid and never reaching
-    // the final flush that would have carried the complete run. So a checkpoint trip is logged and
-    // skipped; only the FINAL flush below, once every column has been measured, may make the guard's
-    // refusal fatal.
-    // STREAMED, so the checkpoint above is a checkpoint. This was `for result in run_grid_with(...)`,
-    // which returns a Vec: the whole grid had to finish before the loop began, so the per-column
-    // flush - and the promise in the comment above it - could never fire on an interrupted run.
-    // Busbar measured 16 of 36 cells over four hours and not one of them reached disk.
+    // Written incrementally after every egress column, not buffered to one write at the end: these
+    // runs take hours on a box with a hard self-termination timer, so an interrupted run must not
+    // lose cells already measured. A promote-guard trip on a mid-run checkpoint is expected (thinner
+    // than the finished run) and is logged and skipped; only the FINAL flush below may be fatal.
     run::run_grid_streaming(&rc, cfg.min_conc, cfg.max_conc, metrics, &mut |result| {
         let id = &result.outcome.id;
         let ing = id.ingress.clone();
@@ -1082,14 +879,9 @@ pub fn run_suite_with(
                              continuing to measure the rest of the grid"
                         );
                     }
-                    // A CHECKPOINT THAT FAILS TO WRITE MUST NOT DISCARD THE CELLS STILL TO COME.
-                    // This used to `return Err`, abandoning the rest of the grid over a write that
-                    // the FINAL flush is about to attempt again anyway - the same reasoning the
-                    // promote-guard arm above already applies, arriving by a different error. The
-                    // failure is remembered, not swallowed: if the final write also fails, that is
-                    // the error the run reports, and if it succeeds the run really is fine and this
-                    // was transient. Either way, hours of measurement are not thrown away over a
-                    // mid-run disk hiccup.
+                    // A checkpoint write failure must not abandon the rest of the grid - the final
+                    // flush will attempt the same write again and is what decides whether the run
+                    // ultimately failed.
                     Err(e) => {
                         eprintln!(
                             "suite: checkpoint after egress column {finished_egress} failed to \
@@ -1101,10 +893,8 @@ pub fn run_suite_with(
             last_egress = Some(eg.clone());
         }
 
-        // THE EVIDENCE FOR THE VERDICT, not just the verdict: `status` and `body_snippet` are
-        // recorded on every cell, so an artifact can say what the gateway actually answered instead
-        // of just "does not serve" 36 times over. Otherwise a whole field declining for one
-        // rig-side reason looks exactly like a field of gateways that support nothing.
+        // `status`/`body_snippet` are recorded on every cell so the artifact can say what the
+        // gateway actually answered, not just "does not serve".
         let (served, reason, status, snippet) = match &result.outcome.served {
             Served::Yes => (RecServed::Bool(true), None, String::new(), String::new()),
             Served::No(v, ev) => (
@@ -1147,37 +937,28 @@ pub fn run_suite_with(
             perf_dropped,
             served,
             reason,
-            // THE PATH THIS CELL WAS ACTUALLY DRIVEN AT, not the dialect's standard one recomputed
-            // after the fact. A cell measured on a provider-pinned route and a cell measured on the
-            // unified route are different measurements, and the artifact has to say which it was or
-            // the board presents them as the same number.
+            // The path this cell was actually driven at, not the dialect's standard one recomputed
+            // after the fact - a provider-pinned route and the unified route are different
+            // measurements and must not read as the same number.
             path: ing
                 .parse::<Dialect>()
                 .map(|d| run::path_for(&rc, d, &eg))
                 .unwrap_or_default(),
             status,
             body_snippet: snippet,
-            // A FAILED RE-VERIFICATION MUST BE VISIBLE WITHOUT OPENING THE PERF BLOCK. `verdict_note`
-            // is the per-cell evidence string every consumer already reads, so a cell that answered
-            // 200 without translating says so where "does this gateway serve this pairing" is
-            // answered, not only in a field a reader has to know to look for.
+            // A failed re-verification must be visible without opening the perf block, so it's
+            // surfaced through `verdict_note`, the evidence string every consumer already reads.
             verdict_note: match (result.reverify.verified, &result.reverify.note) {
                 (Some(false), Some(note)) => format!("egress not re-verified: {note}"),
                 _ => result.outcome.note.clone().unwrap_or_default(),
             },
             perf,
-            /* MEMORY IS WITHHELD ON A REFUTED CELL TOO. `withhold_if_refuted` took only perf and
-            stream, and memory was built independently right here - so a cell PROVEN to have
-            forwarded the ingress request rather than translating it published every perf and
-            stream number as `not_served` with evidence, and its `peak_rss_mib` untouched beside
-            them. `withhold_refuted_perf`'s own rule is "CPU burned serving a wire that is not
-            this pairing is not this pairing's cost", and RSS is that rule verbatim: the load
-            window drove this cell's path/model/headers, which re-verification just proved is not
-            this pairing.
-
-            It reached the board, too: `site/gen-data.mjs` reads memory solely from the per-cell
-            window, gates only on `cell.served === true` - still true for a refuted cell - and
-            never looks at `perf_dropped`. */
+            /* Memory must be withheld on a refuted cell too, same as perf/stream: a cell proven to
+            have forwarded rather than translated the request had its RSS measured under that same
+            wrong wire, so "CPU burned serving a wire that is not this pairing is not this pairing's
+            cost" applies verbatim to memory. `site/gen-data.mjs` reads memory from the per-cell
+            window gated only on `served === true`, so an untouched value here would still reach
+            the board. */
             memory: result
                 .metrics
                 .as_ref()
@@ -1206,13 +987,9 @@ pub fn run_suite_with(
         let configurable = cfg.manifest.egress.iter().any(|e| e == &eg);
         upstreams
             .entry(eg)
-            // `configurable` is whether this gateway can be POINTED at this upstream at all, which
-            // is exactly what the manifest's `egress` list declares, so it is read from there rather
-            // than hardcoded. It was `true` unconditionally, which made the field a constant: every
-            // egress column claimed to be configured, including ones the manifest never wired, and a
-            // constant that is published as an observation is the shape of a false claim even when
-            // it happens to be right. `served` stays true here because this entry is only created
-            // when a cell for this egress produced a row at all.
+            // `configurable` is whether this gateway can be pointed at this upstream at all, read
+            // from the manifest's `egress` list rather than hardcoded `true` (which would falsely
+            // claim every column configured, including ones the manifest never wired).
             .or_insert_with(|| Upstream {
                 configurable,
                 served: true,
@@ -1227,36 +1004,17 @@ pub fn run_suite_with(
     flush(cfg, &upstreams, any_served, Some(box_qualify))
 }
 
-/// A REFUTED RE-VERIFICATION WITHHOLDS THE NUMBERS, IT DOES NOT MERELY ANNOTATE THEM.
+/// A refuted re-verification withholds the numbers, not just annotates them. `Some(false)` is proof
+/// (`reverify.rs`) that the request did not reach the mock as this cell's egress dialect, so every
+/// perf/stream number was taken over the wrong wire and publishing them would state a translation
+/// throughput for a translation that never happened. `perf_dropped` records that the numbers were
+/// withheld; `verdict_note`/`egress_reverified`/`reverify_note` still carry the evidence. `None`
+/// (diagonal cell, recording off, mock unreachable) and `Some(true)` leave the blocks alone - only
+/// proof of a misroute withholds, not suspicion.
 ///
-/// `Some(false)` is leg 3 PROVING the request did not reach the mock as this cell's egress dialect
-/// (`reverify.rs`): either the gateway forwarded the ingress bytes verbatim or it emitted some third
-/// dialect. Every perf and stream number on the cell was then taken over that same wrong wire, so
-/// publishing them under `<ingress>-><egress>` states a translation throughput for a translation that
-/// did not happen - the exact false positive the guard exists to prevent, arriving through the
-/// numbers instead of through `served`.
-///
-/// `perf_dropped` was documented as the mechanism for precisely this and no writer ever set it, so a
-/// refutation published the refuted figures untouched with a note beside them. THE EVIDENCE ALL
-/// STAYS: `verdict_note` still names the refutation, `egress_reverified` still reads `false`,
-/// `reverify_note` still says what the mock actually received. What goes is the numbers, and
-/// `perf_dropped` says so in one string a consumer can branch on.
-///
-/// `None` (not checked: a diagonal cell, a mock that was not recording, a mock we could not reach)
-/// and `Some(true)` both leave the blocks alone. Only PROOF of a misroute withholds; suspicion does
-/// not, or every unrecordable run would silently stop publishing.
-///
-/// Pure, and separate from the grid loop, because this is the one branch in the suite that decides
-/// whether a measured number reaches the board at all, and the loop around it cannot be driven to a
-/// refutation from a fixture where one loopback server plays both the gateway and the mock.
-/// Build a cell's perf and stream blocks and apply the refutation withholding to BOTH, as one step.
-///
-/// Extracted from `run_suite_with` so the composition is drivable. `withhold_if_refuted` had thorough
-/// tests, but nothing tested that it was CALLED: the whole block lived inline in a function that needs
-/// a gateway, a mock and a socket to reach, so deleting the call left every test green while a cell
-/// whose egress was PROVEN MISROUTED published its numbers as an unqualified translation claim. A
-/// guard that cannot be shown to run is not a guard, which is the defect class this codebase treats as
-/// its worst, so the guard and its invocation now live behind one pure function a test can drive.
+/// Kept as one pure function (separate from the grid loop) so the withholding is independently
+/// testable: it was previously inline in a function that needs a live gateway/mock/socket to reach,
+/// so its tests could pass green while the call site itself was silently deleted.
 fn assemble_cell_measurements(
     cfg: &SuiteConfig,
     result: &crate::run::CellResult,
@@ -1270,25 +1028,17 @@ fn assemble_cell_measurements(
     let perf = match (&result.metrics, ing.parse::<Dialect>()) {
         (Some(m), Ok(d)) => {
             let mut p = judge_cell(cfg, d, m).perf;
-            // THE RUNGS THE SEARCH WALKED. Published whatever the verdict: when the peak is
-            // suppressed as rig-bound, or absent because the search never found a turnover, the
-            // sweep is the only thing that explains WHY, and a bare null with no points beside
-            // it is unreviewable.
+            // Rungs published whatever the verdict: when a peak is suppressed as rig-bound or
+            // absent, the sweep is the only thing that explains why.
             if let Some(series) = result.series.as_ref() {
-                // THE PUBLISHED THROUGHPUT ANSWER. One reading per declared tail-latency bound, off
-                // the same rungs `sweep_max_proxy` below carries - so a reader can re-derive every
-                // reading from the sweep rather than taking the frontier on trust.
+                // One frontier reading per tail-latency bound, off the same rungs `sweep_max_proxy`
+                // carries, so a reader can re-derive it rather than take it on trust.
                 p.frontier = series.frontier.clone();
                 p.sweep_max_proxy = series.sweep.clone();
             }
-            // THE ANTI-FALSE-POSITIVE GUARD, published beside the numbers it qualifies. A cell
-            // whose egress dialect was NOT PROVEN (`None`) still carries its measurements - they
-            // are real observations of what the gateway did - but it can no longer be read as an
-            // unqualified translation claim, because the flag beside them says so and the note
-            // names what the mock actually received instead. See `reverify.rs` for why `None`
-            // (diagonal cell, recording off, mock unreachable) is a first-class third answer
-            // rather than a failure. A `Some(false)` - proof of a MISROUTE - is handled below;
-            // that one does not get to publish numbers at all.
+            // The anti-false-positive guard, published beside the numbers it qualifies: a cell
+            // whose egress was not proven (`None`, see `reverify.rs`) still carries real
+            // measurements but must not read as an unqualified translation claim.
             p.egress_reverified = result.reverify.verified;
             p.reverify_note = result.reverify.note.clone();
             Some(p)
@@ -1333,19 +1083,10 @@ fn withhold_if_refuted(
     )
 }
 
-/// Strip a refuted cell's measurements, keeping the block and the evidence that refuted it.
-///
-/// The block is kept rather than dropped to `None` because `egress_reverified` and `reverify_note`
-/// live in it, and they are the finding: a cell with no perf block at all cannot say WHY it has no
-/// numbers, which is how a refutation would come to look like a cell that was never measured.
-///
-/// `NotServed` is the reason on every field, and it is the honest one out of the vocabulary: the
-/// refutation is a statement about the GATEWAY (it did not serve this pairing - it answered by
-/// speaking some other dialect upstream), not about the rig and not about a search that ran out of
-/// room. The detail carries the mock's own evidence so the null is never bare.
-///
-/// The sweeps go too. They are rps against concurrency on the same misrouted wire, and a rung is as
-/// much a published number as the ceiling drawn from it.
+/// Strip a refuted cell's measurements, keeping the block (not `None`) so `egress_reverified` and
+/// `reverify_note` can still say WHY there are no numbers. `NotServed` is the reason on every field:
+/// the refutation is a statement about the gateway, not the rig. Sweeps are cleared too - a rung is
+/// as much a published number as the ceiling drawn from it.
 fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
     let detail = format!(
         "withheld: re-verification proved the request did not reach the mock as this cell's egress \
@@ -1360,9 +1101,8 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         added_latency_p99_us: withheld(),
         gateway_c1_p99_us: withheld(),
         direct_c1_p99_us: withheld(),
-        // THE COST GOES TOO, for exactly the reason the latency legs do: CPU burned serving a wire
-        // that is not this pairing is not this pairing's cost. Withholding the rate while publishing
-        // what it cost would leave a cost-per-request for a request the cell never served.
+        // Cost is withheld too: CPU burned serving a wire that is not this pairing is not this
+        // pairing's cost.
         cpu_us_per_request: withheld_f(),
         rps_per_cpu_second: withheld_f(),
         cost_window_conc: withheld(),
@@ -1372,37 +1112,21 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         cost_threads: withheld_f(),
         cost_nonvol_ctxt_per_request: withheld_f(),
         cost_majflt: withheld_f(),
-        // THE FRONTIER GOES TOO, for the reason the sweeps do: every reading in it is rps against
-        // concurrency measured over a wire that is not this pairing, and a reading is as much a
-        // published number as a ceiling drawn from it.
         frontier: Vec::new(),
         sweep_max_proxy: Vec::new(),
-        // THE EVIDENCE, kept verbatim: this is the whole reason the block survives.
+        // Kept verbatim: the whole reason the block survives.
         egress_reverified: p.egress_reverified,
         reverify_note: p.reverify_note,
-        // A sample-count note about legs that measured the wrong wire would describe the weight of a
-        // number nobody is publishing.
         c1_note: None,
     }
 }
 
-/// The streaming half of the same withholding, and it exists because the block used to be DROPPED.
+/// The streaming half of the same withholding: same rule as `withhold_refuted_perf` (keep the block,
+/// not `None`, so `stream_served`/reason/rungs can still say why).
 ///
-/// `withhold_if_refuted` set `stream` to `None` while keeping the perf block, which contradicts the
-/// reasoning directly above: a cell with no block at all cannot say WHY it has no numbers, so a
-/// refuted stream read as a cell that was never probed rather than one whose numbers were withheld.
-/// The evidence went with it - `stream_served`, the reason, the prose and the rungs all vanished,
-/// leaving `perf_dropped`'s sentence as the only thing that said otherwise, and that is prose.
-///
-/// Same rule as the perf half, for the same reason: `NotServed` on every measurement (the refutation
-/// is a statement about the GATEWAY - it answered by speaking some other dialect upstream), the
-/// mock's own evidence as the detail so no null is bare, and the sweeps dropped because a rung
-/// measured on a misrouted wire is as much a published number as the ceiling drawn from it.
-/// Every measured field of a refuted cell's memory window, withheld with the reason - same rule and
-/// same wording as `withhold_refuted_perf`, applied to the resource the load window consumed.
-///
-/// The series are cleared as well as the scalars: a curve drawn from a window served over the wrong
-/// wire is the same false claim as a number taken from it, and the board draws whatever it is given.
+/// Every measured field of a refuted cell's memory window, withheld with the reason - same rule as
+/// `withhold_refuted_perf`. Series are cleared too: a curve drawn from a misrouted window is the same
+/// false claim as a scalar taken from it.
 fn withhold_refuted_memory(m: crate::record::CellMemory, why: &str) -> crate::record::CellMemory {
     let detail = format!(
         "withheld: re-verification proved the request did not reach the mock as this cell's egress \
@@ -1445,8 +1169,6 @@ fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::re
     crate::record::CellStream {
         added_ttft_p50_us: withheld(&detail),
         added_ttft_p99_us: withheld(&detail),
-        // The counts are withheld with the percentiles they weigh: publishing a sample count beside a
-        // withheld number would describe the weight of a figure this cell is refusing to state.
         ttft_gw_samples: withheld(&detail),
         ttft_direct_samples: withheld(&detail),
         added_gap_p50_us: withheld(&detail),
@@ -1456,11 +1178,8 @@ fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::re
         streams_sustained_mock_ceiling: None,
         streams_sustained_headroom: None,
         sweep_streams: Vec::new(),
-        // A note about how many frames the c=1 legs read would describe the weight of a number
-        // nobody is publishing, exactly as the perf half's sample-count note would.
         stream_c1_note: None,
-        // THE EVIDENCE, kept verbatim: whether it streamed at all, and why it says what it says.
-        // This is the whole reason the block survives rather than becoming a None.
+        // Kept verbatim: the whole reason the block survives rather than becoming a None.
         stream_served: s.stream_served,
         reason: s.reason,
         stream_error: s.stream_error,
@@ -1484,30 +1203,18 @@ fn gateway_build(cfg: &SuiteConfig) -> Option<String> {
         .ok()?;
     match &spec.kind {
         crate::launch::LaunchKind::Docker { image, .. } => Some(image.clone()),
-        // A gateway built from source on the box has no image to name. Its identity is the runtime
-        // the manifest declares, which is at least the thing the memory reader and the stop path
-        // agree on, rather than a version string invented here.
+        // A gateway built from source has no image to name; fall back to the runtime identity the
+        // manifest declares, which the memory reader and the stop path already agree on.
         _ => Some(spec.runtime.identity().to_string()),
     }
 }
 
 /// Build the record from what has been measured so far and write it.
-/// THE CONFIG THE GATEWAY ACTUALLY RAN FROM, captured into the same artifact as the numbers.
 ///
-/// `ResultSnapshot.config` existed, was serialized, was read by `gen-data.mjs` as its FIRST choice of
-/// config source, and nothing ever filled it: the field fell through to `Default`, so every gateway
-/// on the board published `config: {files: {}}` and every drawer read "Config: not published".
-///
-/// That is not cosmetic. The config is the evidence for the claim the whole board rests on - that
-/// each gateway was measured as it ships, not as we tuned it. Without it a reader is asked to take
-/// that on trust, which is the one thing this project refuses to ask.
-///
-/// Read at flush time from the gateway's own directory, so what lands in the artifact is the text
-/// the process was actually started with rather than a template re-rendered later - the exact class
-/// of bug this field's own doc comment describes ("a chart read against a config that was since
-/// overwritten on disk"). A file that cannot be read is skipped rather than failing the run: a
-/// finished measurement must not be discarded over its own provenance, and an absent config still
-/// renders honestly as "not published".
+/// The config the gateway actually ran from, captured into the artifact as evidence the gateway was
+/// measured as it ships, not as tuned. Read at flush time from the gateway's own directory so it's
+/// the text the process actually started with, not a template re-rendered later. A file that cannot
+/// be read is skipped, not fatal: a finished measurement must not be discarded over its provenance.
 fn rendered_config(cfg: &SuiteConfig) -> crate::record::ConfigFiles {
     let mut files = std::collections::HashMap::new();
     for f in &cfg.manifest.config_files {
@@ -1532,9 +1239,8 @@ fn flush(
     any_served: bool,
     box_qualify: Option<serde_json::Value>,
 ) -> Result<Paths, SnapshotError> {
-    // The rig block exists if ANY part of it does: box_qualify, the engine stamp and the mock
-    // provenance are independent facts about the instrument, so keying the whole block off just one
-    // of them (box_qualify) would let a run with no qualification file drop the engine commit too.
+    // The rig block exists if any part of it does: box_qualify, engine stamp and mock provenance are
+    // independent facts, so keying it off just one would drop the others when that one is missing.
     let rig = (box_qualify.is_some() || cfg.engine_stamp.is_some() || cfg.rig_mock.is_some()).then(
         || crate::record::RigProvenance {
             arch: Some(cfg.arch.clone()),
@@ -1546,9 +1252,7 @@ fn flush(
             box_qualify,
         },
     );
-    // Resolved once and used at BOTH levels. `gateway_build` re-resolves the manifest's launch spec,
-    // and the matrix must name the same build the root does or the two levels of one artifact would
-    // disagree about what was measured.
+    // Resolved once and used at both the root and matrix levels so the two never disagree.
     let build =
         gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
@@ -1556,12 +1260,9 @@ fn flush(
         definitions: metric_definitions(),
         config: rendered_config(cfg),
         gateway: cfg.manifest.name.clone(),
-        // WHAT WAS MEASURED, not what measured it: the engine identifies itself in rig.engine,
-        // where it belongs, so this field must be the gateway's own build string, not the engine's,
-        // or every gateway's artifact would claim the same build and a reader could not tell which
-        // image produced a number. Falls back to the engine string only when the manifest declares
-        // no launch, i.e. when the harness did not start the thing it measured and genuinely does
-        // not know its build.
+        // The gateway's own build string, not the engine's (which lives in rig.engine) - otherwise
+        // every artifact would claim the same build. Falls back to the engine string only when the
+        // manifest declares no launch and the harness genuinely doesn't know the build.
         build: build.clone(),
         measured_at: cfg.measured_at.clone(),
         arch: Some(cfg.arch.clone()),
@@ -1570,13 +1271,9 @@ fn flush(
         matrix: Matrix {
             gateway: cfg.manifest.name.clone(),
             served: any_served,
-            // WHICH PHASES THIS RUN WAS TOLD TO MEASURE. The consumer reads these to detect a
-            // degraded run and refuses to publish one over a complete one, so an inaccurate flag
-            // here is a claim about the run itself. All three phases are in `metric::METRICS` and
-            // every served cell goes through all of them, so all three are on. Leaving them to
-            // `..Default::default()` published `cell_stream: false` on every snapshot the engine has
-            // ever written - the run declaring it had not measured streaming while carrying a full
-            // streaming block on every cell.
+            // Which phases this run measured. The consumer reads these to detect a degraded run and
+            // refuse to publish it over a complete one, so this must reflect reality, not
+            // `..Default::default()` (which would falsely claim streaming was never measured).
             cell_perf_sweep: true,
             cell_stream: true,
             cell_memory: Some(true),
@@ -1585,11 +1282,8 @@ fn flush(
             // both places, and a reader that finds it in one and not the other cannot tell which is
             // authoritative.
             rig,
-            // THE SAME REASONING, FOR THE SAME REASON, one level down. The root's hardware/arch/build
-            // were filled and the matrix's were left at Default, so the block that holds every number
-            // could not say what machine or build produced them: exactly the "hardware: null" episode
-            // the root's own field comment records, repeating inside the block a reader exports and
-            // diffs on its own. There is nothing to derive here - the values are already in hand.
+            // Mirrored one level down for the same reason as `rig` above: the matrix is exported and
+            // diffed on its own, so it needs its own build/arch/hardware, not just the root's.
             build,
             arch: Some(cfg.arch.clone()),
             hardware: cfg.hardware.clone(),
@@ -1604,19 +1298,11 @@ fn flush(
 
 #[cfg(test)]
 mod tests {
-    // A DEFINITION THAT DRIFTS FROM THE CODE IS WORSE THAN NO DEFINITION.
-    //
-    // The retired throughput gate is the case: every surface said "p99 < 1 s" while the engine enforced
-    // 20 ms - a bar 96% of the 1632 recorded rungs pass, against 57% for the real one - so a reader
-    // reasoning carefully about our numbers reasoned about a test we never ran. This asserts the
-    // published text is generated FROM the constants, by checking it says what those constants
-    // currently say. Change a constant without regenerating and this fails.
+    // A published definition that drifts from the code is worse than no definition, so this asserts
+    // the text is generated FROM the constants by checking it says what they currently say.
     #[test]
     fn the_cost_definition_names_the_concurrency_that_was_actually_used() {
-        // GENERATED FROM THE CONSTANT, not retyped beside it. The whole value of the cost column is
-        // that every gateway was measured at the SAME concurrency; a definition naming a different
-        // number than the code used would describe a comparison that never happened, and is exactly
-        // the drift this file's definitions exist to make impossible.
+        // Generated from the constant, not retyped beside it, so it cannot drift from the code.
         let d = super::metric_definitions();
         let c = d.get("perf.cost").expect("cost has a definition");
         assert!(
@@ -1682,11 +1368,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    // A RUN MUST NOT DECLARE ITSELF DEGRADED WHILE CARRYING THE DATA IT SAYS IT SKIPPED. The
-    // consumer reads these three flags to spot a probe-only run and refuses to publish one over a
-    // complete one, so they are a claim about the run. `..Default::default()` left cell_stream
-    // false on every snapshot the engine has ever written: the run stating it did not measure
-    // streaming while every served cell carried a full streaming block.
+    // A run must not declare itself degraded while carrying the data it says it skipped - the
+    // consumer reads these three flags to spot a probe-only run.
     #[test]
     fn a_full_run_declares_every_phase_it_actually_measured() {
         let dir = tmpdir("phases");
@@ -1755,12 +1438,9 @@ mod tests {
         }
     }
 
-    /// A metric that measures nothing and watches the RESULTS DIRECTORY instead.
-    ///
-    /// The only way to prove a checkpoint is a checkpoint is to look at the disk while the grid is
-    /// still running. Interrupting a run mid-flight inside a test is not something this harness can
-    /// do; observing, from inside a cell, whether earlier cells have already reached disk is exactly
-    /// equivalent and is deterministic.
+    /// A metric that measures nothing and watches the results directory instead: this test can't
+    /// interrupt a run mid-flight, so it observes from inside a cell whether earlier cells already
+    /// reached disk, which is deterministic and equivalent.
     struct SnapshotWatcher {
         dir: std::path::PathBuf,
         seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
@@ -1786,12 +1466,8 @@ mod tests {
         }
     }
 
-    // THE CONFIG IS THE EVIDENCE FOR THE CLAIM THE BOARD RESTS ON.
-    //
-    // `ResultSnapshot.config` existed, serialized, and was gen-data's FIRST choice of config source -
-    // and nothing ever filled it. Every gateway published `config: {files: {}}`, so every drawer read
-    // "Config: not published", on all 13 gateways of a finished run. Without it the claim that each
-    // gateway ran as it ships is something a reader has to take on trust.
+    // The config is the evidence for the claim the board rests on - that each gateway ran as it
+    // ships - so `ResultSnapshot.config` must actually be filled, not left at its zero value.
     #[test]
     fn the_snapshot_carries_the_config_the_gateway_ran_from() {
         let dir = tmpdir("config-capture");
@@ -1833,9 +1509,8 @@ mod tests {
             "an unreadable config is absent, not fatal"
         );
 
-        // AND THAT IT IS ACTUALLY CALLED. Everything above passes with the one line that wires this
-        // into the snapshot deleted - which is exactly how the field came to be empty on a finished
-        // board in the first place. The assertion that matters is on what reached the disk.
+        // And that it is actually wired into the snapshot - the assertion that matters is on what
+        // reached disk, not merely on what `rendered_config` can compute.
         cfg.manifest.config_files = vec![crate::manifest::ConfigFile {
             template: "config.gen.yaml.tmpl".into(),
             output: "config.gen.yaml".into(),
@@ -1850,22 +1525,10 @@ mod tests {
         );
     }
 
-    // A PARTIAL RUN MUST LEAVE ITS MEASUREMENTS ON DISK.
-    //
-    // suite.rs has flushed a snapshot at every egress-column boundary for a long time, under a
-    // comment promising that "a run interrupted partway through must not lose every cell it already
-    // measured". The promise could not be kept: the loop iterated `run_grid_with`, which returns a
-    // `Vec`, so the ENTIRE grid had to finish before the first flush could run. Nothing enforced the
-    // difference, because every test ran the grid to completion, where both shapes look identical.
-    //
-    // busbar measured 16 of 36 cells across four hours on a box with a self-termination timer. The
-    // loop never started. Zero snapshots were written, and every one of those measurements died with
-    // the instance - the run log records only where the time went, never a single value.
-    //
-    // This watches the results directory from inside the cells themselves: with two dialects the
-    // grid is two egress columns, so by the time the second column is being measured the first
-    // column's checkpoint must already be on disk. Collecting the grid first makes every cell see an
-    // empty directory, which is precisely the bug.
+    // A partial run must leave its measurements on disk: a snapshot must flush at each egress-column
+    // boundary as the grid runs, not only after the whole grid completes, or an interrupted run loses
+    // everything measured so far. This watches the results directory from inside the cells themselves
+    // so the checkpoint ordering is asserted directly rather than assumed.
     #[test]
     fn cells_reach_disk_while_the_grid_is_still_running() {
         let dir = tmpdir("partial-run-survives");
@@ -1899,10 +1562,10 @@ mod tests {
         );
     }
 
-    // A CHECKPOINT PROMOTE-GUARD TRIP MUST NOT ABORT THE WHOLE RUN. The incremental flush after
-    // an egress column is a thinner, unfinished view of the run, so tripping the guard against a
-    // fuller prior snapshot on disk is expected mid-run - it must not stop the remaining columns
-    // from being measured and written, only the FINAL flush's guard trip may be fatal.
+    // A checkpoint promote-guard trip must not abort the whole run: the incremental flush after an
+    // egress column is a thinner, unfinished view, so tripping the guard against a fuller prior
+    // snapshot is expected mid-run and must not stop the remaining columns. Only the final flush's
+    // guard trip may be fatal.
     #[test]
     fn a_checkpoint_promote_guard_trip_does_not_abort_the_rest_of_the_grid() {
         let dir = tmpdir("checkpoint-guard");
@@ -2014,9 +1677,8 @@ mod tests {
             paths.historical.exists(),
             "the timestamped copy must land too"
         );
-        // THE CASE THAT WAS BROKEN: site/gen-data.mjs reads matrix.measured_at, not the snapshot
-        // root's - a snapshot whose matrix carries no stamp of its own renders as "never measured"
-        // on the board no matter how fresh the run actually was.
+        // site/gen-data.mjs reads matrix.measured_at, not the snapshot root's - a matrix with no
+        // stamp of its own renders as "never measured" regardless of how fresh the run was.
         assert_eq!(
             back.matrix.measured_at, back.measured_at,
             "matrix.measured_at must mirror the snapshot root's, or the board reads this run as unmeasured"
@@ -2025,14 +1687,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A number that cannot be traced to the code that produced it is not evidence. The engine used
-    // to build the rig block solely from the box-qualification file, so the commit never reached the
-    // artifact at all: the first real EC2 run wrote a snapshot whose rig.engine was null even though
-    // the orchestrator had exported BENCH_ENGINE_COMMIT to the box.
-    //
-    // Note the box_qualify: None here. That is the half that was actually broken - the stamp has to
-    // survive on a run that carries no qualification, because the two are independent facts about
-    // the instrument and neither may suppress the other.
+    // A number that cannot be traced to the code that produced it is not evidence. The engine stamp
+    // and box qualification are independent facts about the instrument; box_qualify: None here checks
+    // the stamp still reaches the artifact when no qualification runs beside it.
     #[test]
     fn the_commit_that_produced_a_run_reaches_the_artifact_without_a_box_qualification() {
         let dir = tmpdir("stamp");
@@ -2127,17 +1784,11 @@ mod tests {
         assert_eq!(out.gateway_c1_p99_us.copied(), None);
     }
 
-    // NOT COVERED HERE BY DESIGN: an end-to-end suite test driving the whole pipeline with the gateway
-    // and mock pointed at the same server. `cfg_for`'s fixture (sweep_duration_s: 1, max_conc: 2) is too
-    // tight for `search::saturation_plateau` to complete even one probe before its own deadline
-    // interrupts it, so the search always returns zero sweep points and the verdict path is never
-    // reached at all. The behaviour that matters - a measurement AT the reference reaches the board,
-    // carrying the reference and the fraction of it - is covered directly and deterministically by
-    // `a_peak_at_the_rig_ceiling_is_published_with_its_headroom_not_withheld` and its sustained and
-    // stream counterparts, which drive the pure functions with a reference equal to the observation.
-    // Growing the fixture until a real search completes would trade a fast deterministic test for a
-    // slow one whose result depends on two live measurement passes against the same loopback server -
-    // real flakiness for no coverage the pure suites do not already give.
+    // Not covered here by design: an end-to-end suite test can't reach the verdict path because
+    // `cfg_for`'s tight fixture never lets `search::saturation_plateau` complete a probe. That
+    // behaviour is covered directly by the pure-function tests below instead (e.g.
+    // `a_peak_at_the_rig_ceiling_is_published_with_its_headroom_not_withheld`), which is
+    // deterministic where a live end-to-end version would be flaky for no extra coverage.
 
     // ── the two stream verdicts: the same mock-bound machinery, one lane over ────────────────────
 
@@ -2159,9 +1810,8 @@ mod tests {
     #[test]
     fn a_stream_rate_that_matches_the_paced_mock_is_published_with_its_headroom() {
         let mut out = crate::record::CellStream::default();
-        // The field case: agentgateway carried 12275 frames/sec against a 12360 "ceiling" at c=256 -
-        // within 0.7% of a mock whose rate is c x (1000 / 20ms) by construction - and published
-        // nothing at all. Thirteen cells lost this metric that way in the 2026-07-28 run.
+        // Matching the mock's paced rate (c x 1000/20ms by construction) is the success case, not a
+        // rig-bound suppression - a gateway keeping pace within 0.7% must still publish its rate.
         apply_streams_sustained_verdict(&mut out, 12_275.0, 256, Measurement::Measured(12_360.0));
         assert_eq!(
             out.streams_sustained_fps.copied(),
@@ -2301,10 +1951,8 @@ mod tests {
 
     #[test]
     fn the_stream_c1_note_states_the_weight_behind_each_published_percentile() {
-        // THIS TEST USED TO ENCODE THE BUG. It asserted the note "must say why the p99 fields are
-        // absent" - but `added_ttft_p99_us` is published on every healthy streaming cell, taken over
-        // STREAM_TTFT_SAMPLES separate probes rather than over one stream. So the note asserted a
-        // reason for an absence that was not absent, and the test held it there.
+        // `added_ttft_p99_us` is published on every healthy streaming cell (taken over
+        // STREAM_TTFT_SAMPLES separate probes, not one stream), so the note must not claim it's absent.
         let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
             std::collections::BTreeMap::new();
         metrics.insert("gateway_c1_frames", Measurement::Measured(64.0));
@@ -2385,11 +2033,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A DECLINED CELL MUST SAY WHAT IT WAS TOLD: status, body_snippet and verdict_note must be
-    // populated, not left at their defaults, or a not_configured verdict carries no evidence once
-    // the box that produced it is gone. Otherwise a rig-side failure that makes every probe return
-    // 4xx is indistinguishable, in the published artifact, from a gateway that genuinely supports
-    // nothing, which is the single most damaging thing this board can get wrong.
+    // A declined cell must publish status, body_snippet and verdict_note, not defaults - otherwise a
+    // rig-side failure that makes every probe return 4xx is indistinguishable from a gateway that
+    // genuinely supports nothing.
     #[test]
     fn a_declined_cell_publishes_the_status_and_body_it_was_declined_with() {
         let dir = tmpdir("declined");
@@ -2422,14 +2068,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // THE BOX HAS NO HISTORY, SO THE BASELINE HAS TO BE HANDED TO IT.
-    //
-    // `qualify_history` read the results directory, which is right where the engine runs beside the
-    // record and empty where it actually runs: every gateway gets a fresh EC2 instance carrying its
-    // manifest and the rig and nothing else. So the baseline was absent, the qualification seeded
-    // instead of judging, and every snapshot in results/ says outcome "seed", baseline_samples 0,
-    // drift null - on every box, for every gateway, since the check was written. A guard that always
-    // seeds cannot catch the box it exists to catch.
+    // The box has no history of its own - each gateway gets a fresh EC2 instance - so the baseline
+    // must be handed to it via OTB_QUALIFY_BASELINE, or the qualification only ever seeds and can
+    // never catch a bad box.
     #[test]
     fn a_handed_baseline_lets_the_box_qualification_actually_judge() {
         let empty = std::path::Path::new("/nonexistent-results-dir-for-this-test");
@@ -2456,7 +2097,7 @@ mod tests {
         std::env::set_var("OTB_QUALIFY_BASELINE", "497862");
         assert_eq!(qualify_history(empty), vec![497_862.0]);
 
-        // A healthy box - the widest real deviation across the 2026-07-28 field was 4.4% - passes.
+        // A healthy box within the band passes.
         let judge_at = |rps: f64| {
             crate::qualify::judge(
                 Measurement::Measured(rps),
@@ -2473,19 +2114,14 @@ mod tests {
             "the slowest real box of the field must still pass"
         );
         assert_eq!(judge_at(509_142.0), "pass", "and so must the fastest");
-        // The box this guard exists for: far enough under that its gateway's whole column would
-        // have been measured on a rig nothing compared against anything.
+        // Far enough under the baseline that the box itself, not the gateway, is the problem.
         assert_eq!(judge_at(300_000.0), "fail");
 
         std::env::remove_var("OTB_QUALIFY_BASELINE");
     }
 
-    // WHAT IT RAN ON MUST REACH THE ARTIFACT.
-    //
-    // `run-on-ec2.sh` has exported BENCH_HARDWARE since the field moved to dedicated boxes, and
-    // `record.rs` has always had the field, but nothing joined them: every snapshot of the
-    // 2026-07-28 run published "hardware": null. A board whose entire claim is that only the gateway
-    // differs between columns cannot state the hardware it differed on.
+    // What the run executed on must reach the artifact: a board whose whole claim is that only the
+    // gateway differs between columns cannot leave the hardware unstated.
     #[test]
     fn the_snapshot_carries_the_hardware_it_was_handed() {
         let dir = tmpdir("hardware-provenance");
@@ -2519,10 +2155,8 @@ mod tests {
         );
     }
 
-    // THE BLOCK THAT HOLDS THE NUMBERS MUST NAME WHAT PRODUCED THEM. The snapshot root's
-    // hardware/arch/build were filled and `matrix`'s were left at `Default` - null, null, empty - so
-    // the "hardware: null" episode the root's own comment records repeated one level down, inside the
-    // block that a reader exports, diffs and archives on its own.
+    // The block holding the numbers must name what produced them too, not just the snapshot root -
+    // `matrix` is exported, diffed and archived on its own.
     #[test]
     fn the_matrix_block_names_the_box_and_build_that_produced_its_numbers() {
         let dir = tmpdir("matrix-provenance");
@@ -2551,12 +2185,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A FAILED QUALIFICATION MUST NEVER SEED THE BASELINE IT FAILED AGAINST.
-    //
-    // `Outcome::qualifies_as_baseline` stated the rule and nothing called it: the harvest took every
-    // record on disk, so a contaminated box's own low reading joined the median that decides whether
-    // the next run fails - the gate slowly moving toward whatever the sick box was doing until
-    // nothing failed it at all.
+    // A failed qualification must never seed the baseline it failed against, or the gate would
+    // slowly drift toward whatever a sick box was doing until nothing failed it at all.
     #[test]
     fn only_a_qualifying_run_contributes_to_the_rolling_baseline() {
         let dir = tmpdir("qualify-history");
@@ -2591,10 +2221,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A CELL WHOSE STREAM DEMONSTRABLY FLOWED MUST NOT READ AS ONE THAT DID NOT. `stream_served` was
-    // derived from `added_ttft_p50_us` alone, so a cell whose gap figures measured cleanly - which
-    // can only happen if frames arrived through the gateway and were timed - published the TTFT
-    // leg's absence token as its status while carrying measured streaming numbers two fields down.
+    // A cell whose stream demonstrably flowed must not read as one that did not: `stream_served` must
+    // reflect a clean gap measurement even when the TTFT leg alone failed.
     #[test]
     fn gap_figures_that_measured_make_a_served_stream_even_when_the_ttft_legs_failed() {
         let dir = tmpdir("stream-status");
@@ -2632,9 +2260,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // A stream that produced nothing at all still publishes the reason as the STATUS, and now also as
-    // a token in `reason` - which used to hold the free-text detail, and was null whenever the
-    // absence had none, so the one field a consumer would branch on was prose or nothing.
+    // A stream that produced nothing still publishes the reason as the status, and also as a token in
+    // `reason` (a consumer branches on that field, so it must never be prose-or-nothing).
     #[test]
     fn a_stream_that_produced_nothing_publishes_its_reason_as_a_token() {
         let dir = tmpdir("stream-status-none");
@@ -2660,15 +2287,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // STEADY STATE IS WHAT IT COSTS UNDER LOAD, NOT WHAT IT COSTS AFTER.
-    //
-    // The sampler runs from before the load through the whole recovery window, so the series is load
-    // THEN recovery. Taking the trailing half of the WHOLE series therefore reports where memory
-    // settled after the load stopped, which is `recovered_rss_mib`'s question. The fixture is the
-    // shape that makes the two answers differ: a gateway that holds 400 MiB under load and releases
-    // to 50 MiB, with a recovery window longer than the load window - exactly the profile the blend
-    // flatters. Measured on the 2026-07-29 field run at 1.3 MiB for one-api, which barely releases;
-    // this fixture is what a gateway that does release looks like.
+    // Steady state is what it costs UNDER LOAD, not after. The sampler runs load then recovery as one
+    // series; taking the trailing half unbounded reports the post-load level instead, which is
+    // `recovered_rss_mib`'s question. This fixture (400 MiB under load, releases to 50) is the shape
+    // that makes the two answers differ.
     #[test]
     fn steady_state_reads_the_load_window_not_the_recovery_that_follows_it() {
         let sample = |t: i64, mib: f64| crate::record::RssSample {
@@ -2702,10 +2324,8 @@ mod tests {
         );
     }
 
-    // EVERY NULL ON A SERVED CELL CARRIES A REASON, including the two that used to travel as plain
-    // `Option`s. `.copied().map(...)` threw the memory group's own reason away on the way into the
-    // record, and the record field it landed in was invisible to the absences map, so a window that
-    // could not judge the plateau published a bare null and nothing anywhere said why.
+    // Every null on a served cell must carry a reason reachable from the absences map, not a bare
+    // `Option` that silently drops the group's own explanation.
     #[test]
     fn a_memory_window_carries_the_groups_reason_for_an_unjudged_plateau() {
         let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =

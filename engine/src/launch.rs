@@ -1,42 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// STARTING A GATEWAY FROM ITS MANIFEST, with the boot discipline lib/harness.sh already earned the
-// hard way.
+// Starts a gateway from its manifest, matching the retry discipline of lib/harness.sh's
+// `harness_launch_ready`.
 //
-// TWO RULES CARRY THIS FILE.
-//
-// First, a launch that never becomes ready is a hard, typed error, never a "launched" value the
-// caller could mistake for success. `harness_launch_ready` exists because a gateway that loses a
-// port race or is merely slow to bind must not fail the whole cell on the first try; it retries a
-// bounded number of times (`HARNESS_BOOT_ATTEMPTS`, default 3), kills the partial process between
-// attempts, and only after every attempt fails does it report failure, with the evidence (attempt
-// count, last port state) attached rather than a bare "no". `launch` below is that same shape typed:
-// `Result<Launched, LaunchError>` with no way to construct a `Launched` except by actually observing
-// readiness.
-//
-// Second, `LaunchSpec::runtime` is a `manifest::Runtime`, the SAME identity `Runtime::identity()`
-// gives the memory readers and `supervise::stop_and_wait`. A docker launch's `--name` and a native
-// launch's process match are read from this one field, never restated as a second string on the
-// spec, so there is no way for the thing this file starts to differ from the thing the readers
-// measure and the stop path targets (see `manifest.rs`'s module header for why that matters).
-//
-// PINNING IS NOT OPTIONAL. The comparability basis of the whole benchmark is "same box, same load,
-// one gateway at a time, same cores"; an unpinned gateway is measured on different hardware than a
-// pinned one. `LaunchSpec::validate` refuses to build an invocation for a spec with no CPU list.
-//
-// THE ESCAPE HATCH. Most manifests are pure data: an image or a binary, env, a port, cores. A few
-// genuinely need one imperative step first (building a binary from source, rendering a config file a
-// static mount cannot express). `PreLaunchStep` is that step, modelled as an explicit command plus
-// its arguments, never a shell string: it is a field a reader can see on the spec ("this entrant runs
-// a pre-launch step"), it runs once before the retry loop with its own timeout, and a failure aborts
-// the launch loudly before anything is spawned. There is deliberately no field that takes an
-// arbitrary script; that is exactly how a declarative model erodes back into shell.
-//
-// TESTABILITY. Argument construction (`build_invocation`) and the retry/readiness loop (`launch_with`)
-// are pure functions over a `Launcher` trait; the actual `std::process::Command` spawn
-// (`RealLauncher`) is a thin wrapper with nothing worth unit testing in it. Tests drive a fake
-// `Launcher` with scripted outcomes, exactly as `supervise.rs` drives a fake `Lifecycle`.
+// - `launch` returns `Result<Launched, LaunchError>`; `Launched` has no public constructor other
+//   than actually observing readiness, so success can never be assumed.
+// - `LaunchSpec::runtime` is the same `manifest::Runtime` identity used by the memory readers and
+//   `supervise::stop_and_wait` (see `manifest.rs`), so the launched target, the measured target, and
+//   the stopped target can never disagree.
+// - CPU pinning is mandatory (`LaunchSpec::validate` rejects an empty core list): an unpinned launch
+//   would be measured on different hardware than every pinned one.
+// - `PreLaunchStep` is a typed escape hatch (command + args, not a shell string) for the rare
+//   manifest needing one imperative step before launch; it runs once, before the retry loop, and
+//   failure aborts before anything is spawned.
+// - `build_invocation` and `launch_with` are pure over a `Launcher` trait, so tests drive a fake
+//   `Launcher` instead of real processes, as `supervise.rs` does with `Lifecycle`.
 
 use crate::manifest::Runtime;
 use crate::supervise::{self, PortState, ReadyOutcome};
@@ -90,24 +69,17 @@ pub enum LaunchKind {
         binary: String,
         args: Vec<String>,
         env: Vec<(String, String)>,
-        /// Names REMOVED from the inherited environment before the process starts.
-        ///
-        /// An env block can only ADD, and `std::process::Command` inherits the parent environment, so
-        /// without this there is no way to express "this must not be set". One entrant needs it: its
-        /// config loader claims every variable sharing its prefix and rejects unknown fields, so the
-        /// harness's own override variables kill config load before the port binds - and because the
-        /// binary is backgrounded, the launch reports success and the only symptom is a port that
-        /// never listens.
+        /// Names removed from the inherited environment before the process starts. Needed because an
+        /// env block can only add, and `Command` otherwise inherits everything: one entrant's config
+        /// loader claims every var sharing its prefix and rejects unknown fields, so without this its
+        /// config load fails silently (backgrounded process, port never listens).
         env_unset: Vec<String>,
     },
 }
 
-/// The smallest possible escape hatch, explicitly marked. A manifest that cannot be expressed as
-/// pure launch data (a source build, a config render that needs more than a static file) declares
-/// one of these; it runs once, before the retry loop, and its failure is loud and immediate. This is
-/// deliberately NOT "run this shell string": the command and its arguments are typed fields, so a
-/// reader can see exactly which entrants use the hatch and what they run, by grepping the manifests
-/// for this type rather than reading a script.
+/// A typed escape hatch for a manifest that needs one imperative step (a source build, a config
+/// render) before launch. Runs once before the retry loop; failure aborts immediately. Deliberately
+/// not a shell string, so what each entrant runs is greppable rather than hidden in a script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreLaunchStep {
     pub command: String,
@@ -222,12 +194,9 @@ pub fn build_invocation(spec: &LaunchSpec) -> Invocation {
                 "--name".to_string(),
                 name,
             ];
-            // LABELS SO A SWEEP CAN FIND THIS RUN'S CONTAINERS WITHOUT GUESSING AT NAMES. The name
-            // is run-scoped precisely so one run cannot remove another's container, which leaves a
-            // question the name alone no longer answers: which containers belong to this run, and
-            // which gateway is any given one. `docker ps --filter label=otb.run=<id>` answers the
-            // first and `label=otb.gateway=<name>` the second, the same way run-on-ec2.sh's teardown
-            // filters boxes on `tag:run` rather than parsing instance names.
+            // Labels let a sweep find this run's containers without parsing names: `otb.run=<id>`
+            // for "which run", `otb.gateway=<name>` for "which gateway" (names are run-scoped so one
+            // run can't remove another's container).
             args.push("--label".to_string());
             args.push(format!("otb.gateway={}", spec.runtime.declared_identity()));
             if let Some(scope) = spec.runtime.run_scope() {
@@ -307,17 +276,13 @@ pub enum LaunchError {
     NeverReady {
         attempts: u32,
         last_port_state: PortState,
-        /// What the last attempt's spawn said, when it said anything. A container runtime that
-        /// REFUSES the invocation - a rejected mount, a name in use, a cpuset it will not honour -
-        /// reports it here and nowhere else, and without it every such refusal is indistinguishable
-        /// from a gateway that started and never bound its port. An absent measurement is supposed to
-        /// publish a reason; "never became ready" with nothing behind it is barely one.
+        /// The spawn error, if the runtime refused the invocation outright (rejected mount, name in
+        /// use, cpuset denied). Without this such refusals are indistinguishable from a gateway that
+        /// started but never bound its port.
         last_spawn_error: Option<String>,
-        /// WHAT THE GATEWAY ITSELF SAID before it died. A container that starts, rejects its config
-        /// and exits has already explained the failure in its own log, and that log was destroyed a
-        /// line later by the `stop()` between attempts, which for docker is `rm -f`. The failure then
-        /// reads as "never became ready; port state: Free" for a config typo, a bad mount and an
-        /// unsupported flag alike. Captured BEFORE the teardown that removes it.
+        /// The gateway's own log, captured before `stop()` tears it down (docker's `stop` is `rm -f`,
+        /// which deletes the log). Without this, a config typo and an unsupported flag both just read
+        /// "never became ready".
         last_output: Option<String>,
     },
 }
@@ -387,21 +352,13 @@ pub trait Launcher {
     }
 }
 
-/// THE DIRECTORY A `commands` LINE'S RELATIVE PATHS RESOLVE AGAINST.
+/// The directory a `commands` line's relative paths (`> .minted-auth`, `-f config.yaml`) resolve
+/// against. Without this, such paths resolve against the engine's inherited cwd instead of the
+/// gateway directory `resolve_minted_auth` reads from, so a minted credential goes missing silently.
 ///
-/// A commands line is transcribed from the gateway's own documentation, and such a line writes and
-/// reads relative paths (`> .minted-auth`, `-f config.yaml`). Run with the engine's inherited cwd,
-/// that artifact lands wherever the operator happened to launch `otb` from, which is not where
-/// anything looks for it: `resolve_minted_auth` reads `<gw_dir>/.minted-auth`, so a credential minted
-/// into the wrong directory is silently not found and the run authenticates with the manifest's
-/// placeholder.
-///
-/// A PROCESS-WIDE VALUE, SET ONCE, and that is the deliberate part. The commands are replayed by
-/// `run::restart_to_rest` on every memory-phase restart, and that call site has no gateway directory
-/// to pass (its `RunConfig` carries the relaunch spec and the command lines, not the directory). A
-/// second spelling of the directory - one for the initial launch, one for the replay - is exactly the
-/// drift `manifest.rs`'s single-identity rule exists to rule out, so there is one, set by the binary
-/// before the first command runs and never changed after.
+/// Process-wide and set once: `run::restart_to_rest` replays commands on every memory-phase restart
+/// without a gateway directory to pass, so a second directory value for the replay would be exactly
+/// the kind of drift `manifest.rs`'s single-identity rule rules out.
 static COMMANDS_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Declare the directory every `commands` line runs in. Set once, by the binary, before any command
@@ -416,12 +373,9 @@ pub fn commands_dir() -> Option<&'static std::path::Path> {
     COMMANDS_DIR.get().map(std::path::PathBuf::as_path)
 }
 
-/// Run ONE line from a gateway's `commands` file, through a shell, with a hard timeout, in the
-/// directory `set_commands_dir` declared.
-///
-/// A shell because these lines are what a gateway's own documentation tells an operator to type,
-/// and those instructions use pipes, quoting and redirection. The alternative is a bespoke argv
-/// encoding that every author would have to learn in order to transcribe a documented curl.
+/// Run one line from a gateway's `commands` file through a shell, with a hard timeout, in the
+/// directory `set_commands_dir` declared. A shell because these lines are transcribed from a
+/// gateway's own docs and use pipes, quoting, and redirection.
 pub fn run_line(line: &str, timeout: Duration) -> Result<(), String> {
     run_line_in(commands_dir(), line, timeout)
 }
@@ -493,17 +447,11 @@ fn run_with_timeout_in(
 
 /// Hard-kill everything below `root` in the process tree.
 ///
-/// FREEZE FIRST, THEN KILL. Signalling the tree one layer at a time loses a race the timeout path
-/// cannot afford: kill the leaf `sleep` and its parent shell wakes up and runs the NEXT command in
-/// the line (the `touch`, the `curl` that reconfigures the gateway) before the signal aimed at it
-/// arrives. SIGSTOP on the whole tree first means nothing in it is scheduled again at all, so the
-/// SIGKILL that follows lands on a tree that cannot have advanced.
-///
-/// Reads one process table snapshot (`supervise::process_table`) rather than creating a process
-/// group: `unsafe_code` is forbidden in this crate, so `setsid` before exec is not available, and a
-/// `setsid` binary is not present on every platform a contributor runs the tests on. The accepted
-/// limitation is a grandchild already reparented away from `root` before the snapshot - its link to
-/// this tree is gone from the kernel's own records at that point, so nothing could have found it.
+/// SIGSTOP the whole tree before SIGKILLing it: killing leaf-first risks a parent shell waking and
+/// running its next command before the signal reaches it. Uses a process-table snapshot
+/// (`supervise::process_table`) rather than a process group, since `unsafe_code` is forbidden here
+/// so `setsid` isn't available. Accepted gap: a grandchild already reparented away from `root` before
+/// the snapshot is untraceable.
 fn kill_descendants(root: u32) {
     let table = crate::supervise::process_table();
     let mut tree: Vec<u32> = vec![root];
@@ -520,9 +468,8 @@ fn kill_descendants(root: u32) {
     if descendants.is_empty() {
         return;
     }
-    // The root is frozen along with them: it is the shell that would otherwise start the next
-    // command in the line. Its own SIGKILL comes from the caller's `Child::kill`, which is the only
-    // way to also reap it.
+    // Root is frozen too (it's the shell that would start the next command), but killed by the
+    // caller's `Child::kill` instead, which is the only way to also reap it.
     signal_tree("-STOP", &tree);
     signal_tree("-KILL", descendants);
 }
@@ -536,11 +483,9 @@ fn signal_tree(signal: &str, pids: &[u32]) {
         .status();
 }
 
-/// Collects a native gateway's `Child`, if there is one, so the OS releases its process table entry
-/// instead of leaving a zombie behind. `blocking`: `stop()` calls this only once the process is
-/// already confirmed dead (or the kill budget gave up), so a `wait` there reaps instantly rather than
-/// hanging; `spawn()`'s own backstop cleanup uses `try_wait` instead, since a stale child there might
-/// genuinely still be alive and must never block a fresh spawn.
+/// Reaps a native gateway's `Child` so the OS releases its process table entry. `blocking`: `stop()`
+/// only calls this after confirming the process is dead, so it can block; `spawn()`'s backstop uses
+/// `try_wait` since a stale child there might still be alive.
 fn reap_native_child(slot: &mut Option<std::process::Child>, blocking: bool) {
     if let Some(mut child) = slot.take() {
         if blocking {
@@ -551,30 +496,22 @@ fn reap_native_child(slot: &mut Option<std::process::Child>, blocking: bool) {
     }
 }
 
-/// The real syscall layer: shells out via `std::process` exactly as the docker/taskset invocations
-/// `build_invocation` describes, and delegates readiness/stop to `supervise`. Kept thin on purpose;
-/// the logic worth testing lives in `launch_with`, not here.
+/// The real syscall layer: shells out via `std::process` per `build_invocation`, delegates
+/// readiness/stop to `supervise`. Kept thin; the logic worth testing lives in `launch_with`.
 ///
-/// `native_child` holds the `Child` handle for a native (non-docker) spawn. A docker launch has
-/// nothing to hold here (`docker run -d` is already waited on synchronously in `spawn`, and `stop`
-/// goes through `docker rm -f`); a native gateway IS the child, spawned once and left running for the
-/// whole measurement, and only THIS PROCESS (its real parent) can ever reap it. `stop`'s `pkill -f`
-/// kills it, but a `pkill` from another process cannot collect the exit status: the kernel leaves a
-/// zombie entry until the actual parent calls `wait`. Discarding the `Child` instead of holding it
-/// would leave `stop()`'s `pkill` killing the process without ever reaping it, an unbounded number of
-/// zombies over an eight-hour run with retries on every flaky boot.
+/// `native_child` holds the `Child` for a native spawn (docker needs nothing here: `docker run -d`
+/// waits synchronously and `stop` is `docker rm -f`). A native gateway IS the child, and only this
+/// process, as its real parent, can reap it — `stop`'s `pkill -f` kills it but can't collect the exit
+/// status, so without holding the `Child` here, zombies would accumulate over a long run.
 #[derive(Default)]
 pub struct RealLauncher {
     native_child: Option<std::process::Child>,
 }
 
 impl RealLauncher {
-    /// Collect whatever native child this launcher already holds. Exists for `restart_to_rest`,
-    /// which stops and restarts a gateway through the SAME `RealLauncher` for every cell rather than
-    /// a fresh one per call, so the `Child` a previous restart spawned is still here to be waited on
-    /// before the next one replaces it. Callers must confirm the process is actually gone first (a
-    /// `supervise::stop_and_wait` that returned `Ok`) - as `stop()` does above - so the blocking
-    /// `wait()` here always reaps instantly rather than risking a hang on a live process.
+    /// Reaps whatever native child this launcher already holds. Used by `restart_to_rest`, which
+    /// reuses the same `RealLauncher` across restarts. Callers must confirm the process is already
+    /// dead (e.g. via `supervise::stop_and_wait`) before calling, since this blocks on `wait()`.
     pub(crate) fn reap_previous_native_child(&mut self) {
         reap_native_child(&mut self.native_child, true);
     }
@@ -594,16 +531,9 @@ impl Launcher for RealLauncher {
 
     fn spawn(&mut self, spec: &LaunchSpec) -> Result<(), String> {
         let inv = build_invocation(spec);
-        // A CONTAINER START IS WAITED ON; A NATIVE GATEWAY IS NOT.
-        //
-        // `docker run -d` returns as soon as the container is created, so its exit status and stderr
-        // are available immediately and are the ONLY place a refusal appears - a rejected mount, a
-        // cpuset the daemon will not honour, a name already in use. Dropping the child made every one
-        // of those look identical to a gateway that started and never bound its port, and the
-        // published absence could name the attempts but not the cause.
-        //
-        // A native gateway IS the child and runs for the whole measurement, so waiting on it would
-        // hang the run forever.
+        // A container start is waited on synchronously (`docker run -d`'s exit status/stderr is the
+        // only place a refusal like a rejected mount or duplicate name appears); a native gateway IS
+        // the child and runs for the whole measurement, so waiting on it would hang forever.
         if matches!(spec.kind, LaunchKind::Docker { .. }) {
             let out = Command::new(&inv.program)
                 .args(&inv.args)
@@ -659,10 +589,8 @@ impl Launcher for RealLauncher {
         supervise::port_state(spec.port)
     }
 
-    /// Read back what the container printed. The tail only: a whole log would bury the reason it is
-    /// being read for. Sixty lines rather than twenty because a gateway that boots, prints a banner
-    /// and a page of startup warnings, and only then fails, pushed the actual error out of a shorter
-    /// window: one entrant's capture was twenty lines of nginx warnings and no error at all.
+    /// Reads back the container's tail (60 lines — 20 was too short: one entrant's boot banner and
+    /// startup warnings pushed the actual error out of that window).
     fn diagnostics(&mut self, spec: &LaunchSpec) -> Option<String> {
         if !spec.runtime.is_docker() {
             return None;
@@ -737,11 +665,9 @@ pub fn launch_with(
                 attempts: attempt,
             });
         }
-        // READ ITS LOG BEFORE KILLING IT. For docker, `stop` is `rm -f`, which takes the container
-        // and its log with it, so reading it after that stop would arrive with no evidence.
-        // Keep the last explanation we actually got. A later attempt whose log cannot be read (the
-        // runtime refused the invocation outright, so there is no container to ask) must not erase
-        // the reason an earlier attempt already gave.
+        // Read the log before killing it (docker's `stop` is `rm -f`, which removes it too). Only
+        // overwrite `last_output` if this attempt actually produced one, so a later attempt with no
+        // log to read doesn't erase an earlier attempt's explanation.
         if let Some(said) = launcher.diagnostics(spec) {
             last_output = Some(said);
         }
@@ -824,11 +750,8 @@ mod tests {
             .unwrap_or_default()
     }
 
-    // A `Child` a launcher never waits on becomes exactly the zombie this whole mechanism exists to
-    // prevent: the process finishes, the OS keeps its exit status pending collection, and nothing
-    // ever asks for it. This spawns a real, instantly-exiting process, confirms (as a sanity check on
-    // the test itself, not the fix) that it really does sit as a zombie before anyone reaps it, then
-    // proves `reap_native_child` collects it.
+    // Spawns a real, instantly-exiting process, confirms it sits as a zombie before anyone reaps it
+    // (sanity check on the test), then proves `reap_native_child` collects it.
     #[test]
     fn reap_native_child_collects_a_finished_process_not_just_the_handle() {
         let child = Command::new("/bin/sh")
@@ -871,11 +794,8 @@ mod tests {
         dir
     }
 
-    // THE DEFECT: a `commands` line is transcribed from a gateway's own docs and writes relative
-    // paths (`> .minted-auth` is the one that already matters). Run with the engine's inherited cwd,
-    // that artifact landed wherever otb was started from, and `resolve_minted_auth` - which reads
-    // `<gw_dir>/.minted-auth` - never saw it, so the run silently authenticated with the manifest's
-    // placeholder.
+    // Regression test for the defect `COMMANDS_DIR` fixes: a `commands` line writing a relative path
+    // (`> .minted-auth`) must land in the gateway directory, not the engine's cwd.
     #[test]
     fn a_commands_line_writes_its_relative_artifact_into_the_gateway_directory() {
         let dir = scratch("cwd");
@@ -892,10 +812,8 @@ mod tests {
         );
     }
 
-    // A LINE THAT HANGS MUST NOT LEAVE ITS GRANDCHILDREN RUNNING. Killing only the spawned shell let
-    // a backgrounded curl or `docker exec` outlive the timeout and keep configuring the gateway after
-    // the timeout had been reported and measurement had moved on - a gateway reconfigured mid-window
-    // is not the gateway that was measured.
+    // A timed-out line must not leave grandchildren running (killing only the spawned shell would let
+    // a backgrounded process keep reconfiguring the gateway after measurement moved on).
     #[test]
     fn a_timed_out_commands_line_takes_its_grandchildren_with_it() {
         let dir = scratch("tree-kill");
@@ -968,9 +886,8 @@ mod tests {
         );
     }
 
-    // A RUN-SCOPED NAME, AND LABELS SO THE RUN CAN STILL FIND ITS OWN. Two overlapping runs of the
-    // same gateway used to name one container, so the second run's retry-loop `docker rm -f` deleted
-    // the first run's container mid-measurement.
+    // Regression test: two overlapping runs of the same gateway used to share one container name, so
+    // the second run's retry-loop `docker rm -f` deleted the first run's container mid-measurement.
     #[test]
     fn a_containers_name_is_scoped_to_the_run_that_created_it() {
         let mut spec = docker_spec();
@@ -1267,13 +1184,8 @@ mod tests {
         assert_eq!(fake.spawn_calls, 1);
     }
 
-    // THE EVIDENCE MUST OUTLIVE THE TEARDOWN.
-    //
-    // A failed attempt is torn down before the next one, and for docker that teardown is `rm -f`,
-    // which takes the container's log with it. Without reading the log BEFORE that stop, a config
-    // typo, a rejected mount and an unsupported flag would all surface identically as "never became
-    // ready; last port state: Free", so the launcher reads the log first and the reason travels in
-    // the error.
+    // Regression test: the log must be read before teardown (docker's `stop` is `rm -f`, which
+    // deletes it), or every failure reads identically as "never became ready".
     #[test]
     fn a_gateway_that_never_came_up_carries_what_it_said_before_it_died() {
         struct Dying {

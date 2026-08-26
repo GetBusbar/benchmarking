@@ -1,27 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE TYPE THIS ENGINE EXISTS FOR.
+// The board's central discipline: an absent measurement publishes null with a reason, and is never
+// substituted by 0, a default, a previous run's value, or a search-range edge.
 //
-// The board's central discipline is that an absent measurement publishes null WITH A REASON, and is
-// never substituted by 0, by a default, by a previous run's value, or by the edge of a search range.
-// Shell has no type for absence, so unset, empty, and "0" are the same three bytes of nothing: a
-// convention enforced by discipline alone is one `rps="${rps:-0}"` away from silently turning an
-// unprobed rung into a measured zero.
-//
-// `Measurement<T>` makes the mistake unrepresentable rather than discouraged. There is no way to
-// reach a number without matching on the absent case, and there is no constructor that produces a
-// value and a reason together, or neither. A conversion to a plottable/rankable number is explicit
-// and returns `Option`, so a caller that wants a default has to write the default down where a
-// reviewer can see it.
+// `Measurement<T>` makes that mistake unrepresentable rather than discouraged: there is no way to
+// reach a number without matching the absent case, no constructor produces a value and a reason
+// together, and conversion to a plain number is explicit (`Option`), so a caller that wants a
+// default has to write it down where review can see it.
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::fmt;
 
-/// Why a measurement is absent. Every variant is a thing the harness can *prove*, not a guess: the
-/// board renders these to a reader, so a wrong reason is as bad as a wrong number. In particular
-/// `RigLimited` and `HarnessError` must never be swapped: doing so would publish a bug of our own as
-/// a rig race, or a rig race as a bug of our own.
+/// Why a measurement is absent. Every variant is a thing the harness can prove, not a guess — a wrong
+/// reason is as bad as a wrong number. `RigLimited` and `HarnessError` must never be swapped: that
+/// would publish a bug of ours as a rig race or vice versa.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Absent {
@@ -185,14 +178,10 @@ impl<T> Measurement<T> {
         }
     }
 
-    // NO `suppress` / `suppress_because`. They were documented as "how a value that was really taken,
-    // but cannot honestly be published, stops being a number" and had no production caller: every real
-    // suppression path (`suite::apply_peak_verdict` and its siblings) ASSIGNS
-    // `absent_because(RigLimited, detail)` to the field instead. Their semantics could not have served
-    // those sites even if wired - they preserve an existing absence, and those fields arrive already
-    // absent carrying `NotMeasured`, so suppressing would have kept the weaker reason and thrown away
-    // the rig-limited one. A tested helper standing beside the path it claims to be reads as coverage
-    // of that path, which is worse than no helper at all.
+    // No `suppress`/`suppress_because` helper: real suppression paths (`suite::apply_peak_verdict`
+    // and siblings) assign `absent_because(RigLimited, detail)` directly, since those fields already
+    // arrive absent with `NotMeasured` and a "preserve existing absence" helper would keep the weaker
+    // reason instead.
 }
 
 impl<T: Copy> Measurement<T> {
@@ -296,13 +285,9 @@ mod tests {
         assert_eq!(v.copied(), Some(12.5));
     }
 
-    // Suppression is how a rig-limited or range-exhausted number stops being published. It must
-    // DISCARD the value: keeping it recoverable is how a raw ungated number escapes to a renderer.
-    //
-    // Driven through `absent_because`, which is what the real suppression paths call
-    // (`suite::apply_peak_verdict` and its siblings assign one of these to the field). This test used
-    // to drive `suppress_because` - a helper with no production caller - so it asserted this invariant
-    // about a function no run ever executed while reading as coverage of the path that matters.
+    // Suppression must discard the value, not just hide it: keeping it recoverable is how a raw
+    // ungated number escapes to a renderer. Driven through `absent_because`, what the real
+    // suppression paths (`suite::apply_peak_verdict` and siblings) actually call.
     #[test]
     fn a_suppressed_number_discards_the_value_and_records_why() {
         let m: Measurement<f64> = Measurement::absent_because(
@@ -355,11 +340,9 @@ mod tests {
         Absent::HarnessError,
     ];
 
-    // THE TOKEN AND THE WIRE FORM ARE THE SAME STRING, OR THE BOARD LIES ABOUT ITSELF. `token()` is
-    // hand-written and the serialised form comes from the derive, so nothing but a test holds the
-    // two together: a variant renamed on one side and not the other would publish a reason under one
-    // name in the snapshot and render it under another, and a reader has no way to tell that the
-    // "rig_limited" they are looking at and the "rig_limited" in the file are the same claim.
+    // `token()` is hand-written and the serialised form comes from the derive, so only a test holds
+    // them together: a variant renamed on one side and not the other would publish under one name
+    // and render under another.
     #[test]
     fn every_reason_serialises_as_exactly_its_published_token_and_reads_back_unchanged() {
         for reason in ALL {
@@ -377,11 +360,8 @@ mod tests {
         }
     }
 
-    // A snapshot is a struct of measurements, not a bare number, so the field-level behaviour is
-    // what actually ships: an absence must appear as an explicit `null` KEY rather than a missing
-    // one. A dropped key is indistinguishable from a metric the harness does not know about, and a
-    // consumer that fills missing keys with a default is exactly how a zero gets invented for a
-    // measurement that was never taken.
+    // An absence must appear as an explicit `null` key, never a missing one: a dropped key is
+    // indistinguishable from a metric the harness doesn't know about.
     #[test]
     fn an_absent_field_is_an_explicit_null_key_never_an_omitted_one() {
         #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -420,9 +400,8 @@ mod tests {
         );
     }
 
-    // The default is what `..Default::default()` hands out for free to every metric a struct does
-    // not explicitly set. A derive-supplied `Measured(0)` would be the cardinal defect of this whole
-    // engine, granted silently to every field anyone forgets.
+    // The default is what `..Default::default()` hands out to every metric a struct doesn't
+    // explicitly set; `Measured(0)` here would silently grant the cardinal defect to any forgotten field.
     #[test]
     fn the_default_measurement_is_absent_and_unmeasured_never_a_zero() {
         let m: Measurement<f64> = Measurement::default();
@@ -432,10 +411,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));
     }
 
-    // `map` on a measured value must carry the value through the conversion. The absent case is
-    // already pinned above; this is the other half, and without it a `map` that dropped the value
-    // (returning the default absence) would turn every converted metric into a null and look like a
-    // conservative, correct refusal rather than the data loss it is.
+    // The other half of the absent-case test above: `map` must carry a measured value through, or a
+    // buggy `map` that dropped it would look like a conservative refusal rather than data loss.
     #[test]
     fn map_carries_a_measured_value_through_the_conversion() {
         let m: Measurement<u32> = Measurement::Measured(1300);
@@ -444,11 +421,8 @@ mod tests {
         assert!(mapped.is_measured());
     }
 
-    // An absence WITHOUT a detail still records why, and still carries no number. The value-less form
-    // exists for the cases where the reason alone is the whole story, and it must not become a quiet
-    // no-op that leaves a rig-limited number publishable. Driven through `absent`, which is what the
-    // real paths call - this used to drive the `suppress` helper, which had no production caller, so
-    // the invariant was asserted about a function no run executed.
+    // The value-less absence form still carries no number for every reason, exercised through
+    // `absent`, what the real paths call.
     #[test]
     fn an_absence_without_a_detail_still_carries_no_number() {
         for reason in ALL {

@@ -1,32 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE TWO SEARCH SHAPES, PORTED FROM SHELL AND MADE PURE.
-//
-// THERE ARE EXACTLY TWO, AND EVERY METRIC GOES THROUGH ONE OF THEM. A third shape living in one
-// metric's own module is how two measurements that should agree stop agreeing, so the rule is one
-// function per shape, used everywhere that shape occurs.
+// The two search shapes, ported from shell and made pure. Exactly two, and every metric goes
+// through one of them — a third shape living in a metric's own module is how two measurements
+// that should agree stop agreeing.
 //
 // GATE metrics (sustained rps, sustained concurrent streams) are pass/fail and monotone in
 // concurrency: `bisect_ceiling` finds the true integer ceiling, proven by the ceiling passing and
 // ceiling+1 having been measured and failing.
 //
-// CEILING metrics (peak throughput, cpu-bound frames/sec) rise and then PLATEAU: past saturation
-// more concurrency buys queueing rather than throughput (Little's Law), so the curve wobbles around
-// a level instead of falling away from a summit. `climb_rungs` measures every rung the same
-// way - the same windows, the same median, the same spread - and stops when two consecutive rungs
-// stop buying more than that rung's own measured wobble.
+// CEILING metrics (peak throughput, cpu-bound frames/sec) rise and then plateau: past saturation
+// more concurrency buys queueing rather than throughput (Little's Law), so the curve wobbles
+// around a level instead of falling away from a summit. `climb_rungs` measures every rung the same
+// way (same windows, same median, same spread) and stops on the predicate flip described below,
+// never on a heuristic "flatness" judgment.
 //
-// It replaced a unimodal peak search that demanded a turnover a healthy gateway never produces, and
-// then a cleverer version of itself: one with a single-window fast path, a separate calibration
-// step, an escalation to medians and a confirm step, each updating the running best differently.
-// That version was cheaper and it was wrong on real gateways four times running, in ways that could
-// not be traced by reading it - it published a search-range bound as one gateway's maximum, and a
-// third of the curve as another's. Uniform measurement is the property that makes this predictable
-// from the curve alone.
+// This replaced an earlier peak search (calibration step, medians, confirm step, each updating the
+// running best differently) that was cheaper but wrong on real gateways repeatedly — publishing a
+// search-range bound as one gateway's maximum, and a third of the curve as another's. Uniform
+// measurement is what makes the result predictable from the curve alone.
 //
 // Both searches are generic over `Probe` so they run against a synthetic curve in tests with no
-// process, mock, or network involved. A `None` from the probe is a stopped clock (a deadline, or a
+// process, mock, or network involved. A `None` from the probe is a stopped clock (deadline, or a
 // window that produced nothing), never a failed gate; the search halts and reports what it proved,
 // never a fabricated number.
 
@@ -34,18 +29,12 @@ use crate::measurement::{Absent, Measurement};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// What a load window observed BESIDE its rate: the latency it ran at and the requests it lost.
+/// What a load window observed besides its rate: the latency it ran at and the requests it lost.
 ///
-/// The load generator computes both for every window it runs and always has. They used to die at
-/// this boundary, because `Sample` carried a rate and a verdict and nothing else - so a sweep of 33
-/// windows published 33 rates and threw away 33 latency readings it had already paid for. The cost
-/// of that was not the lost evidence, it was the second search: `rps_sustained_20ms` could not be
-/// read off the throughput sweep, so it re-drove the whole cell minutes later, after the memory
-/// group had restarted the gateway. The two published throughput numbers then described two
-/// different states of the same gateway, and on three cells of the 2026-07-28 run the "sustained"
-/// number came out ABOVE the "maximum" one. Neither reading was wrong; they were not simultaneous.
-///
-/// Carrying this is what lets one sweep answer both questions from one set of windows.
+/// Carrying this lets one sweep answer both the throughput and sustained-latency questions from a
+/// single set of windows. Without it, `rps_sustained_20ms` had to re-drive the whole cell in a
+/// second search minutes later — after the memory group had restarted the gateway — so the two
+/// published throughput numbers described two different, non-simultaneous states of the gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Reading {
     /// `None` when the window ran but reported no percentile. Absent, not zero: a gate that needs a
@@ -89,8 +78,8 @@ impl Sample {
 }
 
 /// A concurrency probe. `None` means the window produced nothing (deadline fired, or the caller's
-/// own wall clock ran out) -- distinct from `Some(Sample { passed: false, .. })`, which is a real,
-/// measured gate failure.
+/// own wall clock ran out), distinct from `Some(Sample { passed: false, .. })`, a real, measured
+/// gate failure.
 pub trait Probe {
     fn probe(&mut self, concurrency: u32) -> Option<Sample>;
 }
@@ -102,7 +91,7 @@ pub struct ProbedPoint {
     pub passed: bool,
     pub value: f64,
     /// What the window observed, when the probe measures it. Published beside the rate so a reader
-    /// can re-derive BOTH throughput answers from the one sweep rather than taking the pair on trust.
+    /// can re-derive both throughput answers from the one sweep rather than taking the pair on trust.
     pub reading: Option<Reading>,
 }
 
@@ -138,13 +127,11 @@ impl<'p, P: Probe> Search<'p, P> {
         Some(sample)
     }
 
-    /// A DELIBERATE re-probe of a concurrency, bypassing the memo.
+    /// A deliberate re-probe of a concurrency, bypassing the memo.
     ///
-    /// Used only to calibrate this rig's own measurement noise, where the whole point is that
-    /// identical conditions do NOT produce identical numbers - something the cache hides by
-    /// construction, since it would hand back the first window's answer and report a spread of zero.
-    /// Each repeat is recorded as its own point, so the published sweep carries the evidence the
-    /// noise floor was derived from rather than asking a reader to take it on trust.
+    /// Used to measure this rig's own noise, where identical conditions do NOT produce identical
+    /// numbers — something the cache would hide by returning the first window's answer. Each
+    /// repeat is recorded as its own point so the sweep carries the evidence, not just the number.
     fn sample_repeat(&mut self, c: u32) -> Option<Sample> {
         let sample = self.probe.probe(c)?;
         self.points.push(ProbedPoint {
@@ -158,26 +145,21 @@ impl<'p, P: Probe> Search<'p, P> {
     }
 }
 
-/// THE ONE LADDER BOTH SEARCHES CLIMB.
+/// The one ladder both searches climb.
 ///
-/// Two searches hand-rolled the same doubling loop, and that is how they came to disagree: the
-/// plateau search was fixed to climb from the floor after it opened a 1..65536 run by asking for
-/// 32768 concurrent connections, the fix was written as a comment inside that function, and the gate
-/// search kept probing the top of its range outright for another day. Raising the engine ceiling to
-/// 65536 then made the untouched one open by asking a gateway for 65536 concurrent streams.
-///
-/// A rule that lives in one function protects one function. This is the rule as code, used by both,
-/// so "where do we probe next" has a single answer and cannot drift again. `no_search_leaps_past_the
-/// _ladder_it_climbed` holds every search in this module to it, including any added later.
+/// Two searches used to hand-roll the same doubling loop separately, and drifted: one was fixed to
+/// climb from the floor instead of opening at the top of the range, the other wasn't, until the
+/// range widened and it started asking a gateway for 65536 concurrent streams outright. Shared here
+/// so "where do we probe next" has one answer. `no_search_leaps_past_the_ladder_it_climbed` holds
+/// every search in this module to it, including any added later.
 struct Ladder {
     current: u32,
     max: u32,
 }
 
 impl Ladder {
-    /// Starts AT THE FLOOR, always. The opening request a gateway sees must never be a function of
-    /// how wide the range was set: that is what makes a wider search a more dangerous one, and it is
-    /// the defect this type exists to make unrepresentable.
+    /// Starts at the floor, always: the opening request a gateway sees must never be a function of
+    /// how wide the range was set.
     fn from_floor(min_conc: u32, max_conc: u32) -> Self {
         Self {
             current: min_conc.max(1),
@@ -206,17 +188,15 @@ impl Ladder {
 /// The result of a gate-ceiling bisection: `Measured(n)` iff `n` passes and `n+1` was measured and
 /// failed (or `n == 0`, the measured "nothing sustains this gate" answer).
 ///
-/// `Absent(SearchExhausted)` covers TWO OPPOSITE ENDINGS, and the "iff" that stood here claimed one:
-///   * the top of the range still passed - the true ceiling is at least `max_conc`, a LOWER bound
-///     the search chose rather than a ceiling the gate proved; and
-///   * the search FLOOR already failed - the ceiling is below `min_conc`, an UPPER bound.
+/// `Absent(SearchExhausted)` covers two opposite endings, both carrying a `detail` that says which:
+///   * the top of the range still passed — the true ceiling is at least `max_conc`, a LOWER bound
+///     the search chose rather than a ceiling the gate proved; or
+///   * the search floor already failed — the ceiling is below `min_conc`, an UPPER bound.
 ///
-/// Both are honestly absent and both carry a `detail` that says which happened, so no number is
-/// wrong today. But the token is the only machine-readable field, and a consumer branching on it
-/// cannot tell "carries fewer than the floor" from "carries more than the ceiling" - which is the
-/// same defect `frontier.rs` refuses by name for its own pair of absences. Splitting it needs a new
-/// vocabulary variant carried through `token()`, the python field lists and the site's seal, so it
-/// is recorded rather than done in the hour before a field run.
+/// KNOWN GAP: the `SearchExhausted` token itself doesn't distinguish these two cases (only
+/// `detail`'s text does), the same ambiguity `frontier.rs` refuses by name for its own pair of
+/// absences. Splitting it needs a new vocabulary variant threaded through `token()`, the python
+/// field lists, and the site's seal — not done yet.
 #[derive(Debug, Clone, Serialize)]
 pub struct BisectResult {
     pub ceiling: Measurement<u32>,
@@ -232,14 +212,10 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
     } else {
         (max_conc, min_conc)
     };
-    // ZERO CONCURRENCY IS NOT A LOAD WINDOW, and this search probed it literally.
-    //
-    // `Ladder::from_floor` floors the CLIMB at 1, but the opening probe here is taken at `min_conc`
-    // before the ladder is built, so a configured floor of 0 (`OTB_MIN_CONC=0`) asked the gateway
-    // for zero concurrent requests and then anchored the whole bisection on whatever that window
-    // claimed - a "pass" at c=0 is a window that sent nothing and lost nothing, so it passes any
-    // gate by construction. `climb_rungs` already carries the same floor for the same
-    // reason; this is that rule applied to the search that was still missing it.
+    // Zero concurrency is not a load window: `Ladder::from_floor` floors the climb at 1, but the
+    // opening probe here is taken at `min_conc` before the ladder exists, so a configured floor of 0
+    // would ask for zero concurrent requests and anchor the bisection on a "pass" that sent and lost
+    // nothing — passing any gate by construction. `climb_rungs` applies the same floor.
     let min_conc = min_conc.max(1);
     let max_conc = max_conc.max(1);
     let mut s = Search::new(probe);
@@ -254,13 +230,10 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
         }
     };
     if !lo_sample.passed {
-        // A FAILING FLOOR ONLY PROVES THE CEILING IS BELOW THE FLOOR.
-        //
-        // When the floor is 1 there is nowhere left to look, so nothing sustains the gate and 0 is a
-        // real measured result. For any higher floor it proves only that the ceiling lies somewhere
-        // in [0, min_conc-1], and not one of those values was probed. Returning 0 there would
-        // publish a specific number the search never established, which is the same fabrication as
-        // publishing the range bound at the top end, just at the other end of the range.
+        // A failing floor only proves the ceiling is below the floor. At floor=1 there's nowhere
+        // left to look, so 0 is a real measured result. At any higher floor it only proves the
+        // ceiling is somewhere in [0, min_conc-1], none of which was probed — returning 0 there
+        // would fabricate a number the search never established.
         return if min_conc <= 1 {
             BisectResult {
                 ceiling: Measurement::Measured(0),
@@ -277,24 +250,12 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
         };
     }
 
-    // CLIMB TO THE FAILURE; NEVER OPEN AT THE TOP OF THE RANGE.
-    //
-    // This probed `max_conc` as its first move after the floor, so the opening request of the
-    // streams gate was the whole range at once. That is the same defect the plateau climb already
-    // carries a comment about - "a start derived from the range made a WIDER range open with a
-    // HIGHER first probe, which is how a 1..65536 run began by asking for 32768 concurrent
-    // connections" - and raising the engine ceiling to 65536 made this one strictly worse: the first
-    // thing a gateway would have been asked for is sixty-five thousand concurrent streams.
-    //
-    // It is not only unkind to a fragile gateway, it measures the wrong thing. A rig that opens
-    // beyond what the gateway can carry learns only that the top failed, and the failure it records
-    // may be its own: the load generator, the mock and the gateway all meet the wall together and
-    // nothing in the result says which one hit it first.
-    //
-    // Doubling from the floor never asks for more than twice what the gateway has ALREADY been shown
-    // to sustain, so every probe is one the previous probe justified. The contract is unchanged: a
-    // ceiling is only `Measured` with a pass at n and a measured failure above it, and a range whose
-    // top still passes is still `SearchExhausted` rather than a published bound of ours.
+    // Climb to the failure; never open at the top of the range. A rig that opens beyond what the
+    // gateway can carry learns only that the top failed, and the failure recorded may be the rig's
+    // own (load generator, mock, and gateway all hitting the wall together with nothing to say who
+    // hit it first). Doubling from the floor never asks for more than twice what's already been
+    // shown to sustain. Contract unchanged: `Measured` requires a pass at n and a measured failure
+    // above it; a range whose top still passes stays `SearchExhausted`.
     let mut a = min_conc;
     let mut b = None;
     let mut ladder = Ladder::from_floor(min_conc, max_conc);
@@ -356,13 +317,12 @@ pub fn bisect_ceiling<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> 
 /// three is what makes a rung's number resistant to one unlucky window.
 pub const WINDOWS_PER_RUNG: usize = 3;
 
-/// Nearest-rank p50 over a sorted slice: the SAME convention every other published percentile in
-/// this engine uses, because it resolves its rank through the one function they all call
-/// (`stats::nearest_rank_index`) rather than reimplementing it. It returns a value some window
-/// actually produced rather than the average of two that none did.
+/// Nearest-rank p50 over a sorted slice: the same convention every other published percentile in
+/// this engine uses, resolved through the one shared `stats::nearest_rank_index` rather than
+/// reimplemented, so it returns a value some window actually produced rather than an average.
 ///
-/// The rank moved out of here as part of ledger SRCH-04: this file's floor and `metric.rs`'s ceil
-/// disagreed by one rank on every even window count, while three comments claimed they matched.
+/// SRCH-04: this file's floor and `metric.rs`'s ceil used to disagree by one rank on every even
+/// window count despite comments claiming they matched — moved here to share the one function.
 pub fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
     if sorted.is_empty() {
         return None;
@@ -370,40 +330,25 @@ pub fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
     Some(sorted[crate::stats::nearest_rank_index(sorted.len(), 0.5)])
 }
 
-/// WALK THE LADDER AND PROBE. DECIDE NOTHING.
-///
-/// Returns every rung probed, in probe order, and no verdict. The caller reads whatever answer it
-/// wants off them - see `frontier.rs`, which reads the throughput answer at six different tail-latency
+/// Walks the ladder and probes; decides nothing. Returns every rung probed, in probe order, and no
+/// verdict — see `frontier.rs`, which reads the throughput answer at six different tail-latency
 /// bounds from one call to this.
 ///
-/// THIS REPLACED the old `saturation_plateau` (since deleted; these are the only references left to
-/// it, and they are historical). The difference is the whole point: that function climbed AND
-/// decided: it judged each rung against its own measured wobble floored at `WOBBLE_FLOOR = 0.02`,
-/// counted `FLAT_RUNGS_TO_STOP = 3` consecutive non-improvers, required `MIN_SATURATION_CONC = 16`
-/// before believing saturation, and then picked a winner with `published_winner`. Four chosen numbers,
-/// and every one of them could move a published throughput figure:
+/// This replaced `saturation_plateau`, which climbed AND decided: judged each rung against its own
+/// measured wobble, counted consecutive non-improvers, required a minimum concurrency before
+/// believing saturation, then picked a winner. Every one of those thresholds could move a published
+/// number — e.g. kong's climb once stopped at c=32 and published 15909, which the sustained reading
+/// of the very same windows then beat at 17898. Once nothing judges the shape of the curve, every
+/// probed rung is a rung the frontier can consider; there's no peak to locate or flatness to detect.
 ///
-///   - Stopping early publishes a smaller number as the gateway's maximum. kong's own case, recorded in
-///     the retired constant's doc: at FLAT=2 the climb stopped at c=32 and published 15909, which the
-///     sustained reading of the SAME windows then beat at 17898. A maximum another reading beats is not
-///     a maximum.
-///   - Judging "improvement" against a noise floor decided which of two real rungs got published.
-///   - And a climb that ran to the top still improving was converted into an ABSENCE
-///     (`Absent::SearchExhausted`), discarding a real measured rate for failing to prove maximality.
+/// The stopping rule is a predicate flip, not a count: the climb stops when a rung produces no
+/// clean window at all (`SweepProbe`'s `passed` is `fail == 0`). Past that point more concurrency
+/// can't un-fail those requests, and a rung that fails every window contributes to no reading at
+/// any bound (`frontier::Rung::served_cleanly`), so continuing costs load for nothing, and stopping
+/// can never lower a published number.
 ///
-/// None of that is needed once nothing is looking for the shape of a curve. Every rung probed is a rung
-/// the frontier considers, so there is no "peak" to locate and no flatness to detect.
-///
-/// THE STOPPING RULE IS A PREDICATE FLIP, NOT A COUNT. The climb stops when a rung produces no clean
-/// window at all - `SweepProbe`'s `passed` is `fail == 0`, so that means every window at this
-/// concurrency lost at least one request the gateway had accepted. Past that point more concurrency
-/// cannot un-fail those requests, and a rung that fails every window contributes to no reading at any
-/// bound (see `frontier::Rung::served_cleanly`). So continuing would cost load and add nothing, and
-/// stopping cannot lower a published number - which is exactly what could not be said of the flat-run
-/// counter it replaces.
-///
-/// It also still climbs to `max_conc` when nothing fails, and that is a LOWER BOUND rather than a
-/// ceiling. `frontier::Reading::is_lower_bound` reports it as one instead of throwing the rate away.
+/// Still climbs to `max_conc` when nothing fails — that's a LOWER BOUND, not a ceiling;
+/// `frontier::Reading::is_lower_bound` reports it as one instead of discarding the rate.
 pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec<ProbedPoint> {
     // Normalised the same way every other search here normalises, so a reversed range is a caller's
     // typo rather than a silently empty climb.
@@ -414,8 +359,8 @@ pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec
     };
     let mut s = Search::new(probe);
     let mut ladder = Ladder::from_floor(min_conc, max_conc);
-    // The floor is probed FIRST: `Ladder::next` doubles before it yields, so reading it before the
-    // floor would skip the floor entirely and open the climb at twice the intended concurrency.
+    // The floor is probed first: `Ladder::next` doubles before it yields, so skipping this would
+    // open the climb at twice the intended concurrency.
     let mut c = ladder.floor();
     loop {
         let mut any_clean = false;
@@ -429,7 +374,7 @@ pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec
             };
             match sample {
                 Some(sm) => any_clean |= sm.passed,
-                // The RIG could not run this window. Not a finding about the gateway, so the climb
+                // The rig could not run this window; not a finding about the gateway, so the climb
                 // ends with what it has rather than reading the failure as a ceiling.
                 None => return s.points,
             }
@@ -544,10 +489,9 @@ mod tests {
         }
     }
 
-    // THE TIE-BREAK EXPERIMENT, kept as a test because it is the cheapest possible statement of the
-    // rule. The gate is FIXED; only the harness's own search floor moves. If an interrupted search
-    // published a confirmed rung, the answer would track the FLOOR (1, 8, 16, 64) and carry zero
-    // bits about the gateway, which is precisely how unrelated gateways come to share a number.
+    // The gate is fixed; only the harness's own search floor moves. If an interrupted search
+    // published a confirmed rung, the answer would track the floor (1, 8, 16, 64) and carry zero
+    // bits about the gateway.
     #[test]
     fn an_interrupted_search_never_publishes_the_harness_own_floor() {
         for floor in [1u32, 8, 16, 64] {
@@ -561,7 +505,7 @@ mod tests {
                 None,
                 "floor={floor} leaked into the published ceiling, which is a readout of our config"
             );
-            // The measurement is NOT lost: every probed rung still travels.
+            // The measurement is not lost: every probed rung still travels.
             assert!(
                 !r.points.is_empty(),
                 "the probed trace must survive an absent verdict"
@@ -594,7 +538,7 @@ mod tests {
         assert_eq!(b.ceiling.copied(), None);
     }
 
-    // Interrupted BEFORE anything passed: genuinely unmeasured, so absent.
+    // Interrupted before anything passed: genuinely unmeasured, so absent.
     #[test]
     fn bisect_interrupted_before_any_pass_is_unmeasured() {
         // fires_after: 0 means even the floor probe returns nothing.
@@ -607,10 +551,9 @@ mod tests {
         assert_eq!(r.ceiling.reason(), Some(&Absent::NotMeasured));
     }
 
-    // Interrupted AFTER a confirmed pass must still report no ceiling, not the confirmed rung: the
-    // probed trace survives on every path including this one, so nothing is discarded, and at this
-    // point the only successful probe IS the floor, so returning it would publish our own search
-    // configuration as the gateway's ceiling. The lower bound belongs in the evidence, not the value.
+    // Interrupted after a confirmed pass must still report no ceiling, not the confirmed rung: the
+    // only successful probe here is the floor, so returning it would publish our own search
+    // configuration as the gateway's ceiling.
     #[test]
     fn bisect_interrupted_after_a_pass_is_absent_with_the_bound_as_evidence() {
         let mut probe = Interrupter {
@@ -635,7 +578,7 @@ mod tests {
             .contains("at least 1"));
     }
 
-    // The partial answer is still a LOWER BOUND, never the search range: an interrupted run must
+    // The partial answer is still a lower bound, never the search range: an interrupted run must
     // not report the top of the range it never confirmed.
     #[test]
     fn an_interrupted_bisect_never_reports_the_unconfirmed_top() {
@@ -647,11 +590,9 @@ mod tests {
         assert_ne!(r.ceiling.copied(), Some(1000));
     }
 
-    // A FAILING FLOOR ABOVE ONE PROVES ONLY THAT THE CEILING IS BELOW THE FLOOR, and not one value
-    // in [0, floor-1] was probed. Returning 0 there publishes a specific number the search never
-    // established, which is the same fabrication as publishing the range bound at the top end, just
-    // at the other end of the range. The `Measured(0)` answer is reserved for a floor of one, where
-    // there is genuinely nowhere left to look.
+    // A failing floor above one proves only that the ceiling is below the floor; no value in
+    // [0, floor-1] was probed, so returning 0 there would fabricate a number. `Measured(0)` is
+    // reserved for a floor of one, where there is genuinely nowhere left to look.
     #[test]
     fn a_failing_floor_above_one_is_absent_never_the_measured_zero_reserved_for_c_equals_one() {
         let mut probe = MonotoneGate { ceiling: 0 };
@@ -667,7 +608,7 @@ mod tests {
             "the reason must name the floor that failed, got {:?}",
             r.ceiling.detail()
         );
-        // The refusal is about the FLOOR, not about the gate: with a floor of one the identical gate
+        // The refusal is about the floor, not the gate: with a floor of one the identical gate
         // yields a real measured zero, and the two answers must not be interchangeable.
         let mut same_gate = MonotoneGate { ceiling: 0 };
         assert_eq!(
@@ -694,9 +635,8 @@ mod tests {
         );
     }
 
-    // A RANGE OF ONE PROVES NOTHING ABOUT A CEILING. The single rung passed, and nothing above it
-    // was ever probed, so the answer is a lower bound: publishing it would report the caller's own
-    // one-point range as the gateway's ceiling.
+    // A range of one proves nothing about a ceiling: the single rung passed, nothing above it was
+    // probed, so the answer is a lower bound, not the gateway's ceiling.
     #[test]
     fn a_single_point_range_that_passes_is_exhausted_not_a_ceiling() {
         let mut probe = MonotoneGate { ceiling: 1000 };
@@ -736,9 +676,8 @@ mod tests {
         }
     }
 
-    // THE LADDER IS WALKED WHOLE, and the climb stops on the predicate flip: the first rung where no
-    // window served cleanly. Nothing counts flat rungs, so nothing can stop short of a rung the
-    // frontier would have read.
+    // The ladder is walked whole; the climb stops on the predicate flip (first rung where no window
+    // served cleanly), never on a flat-rung count.
     #[test]
     fn the_climb_stops_when_requests_start_failing_not_when_the_curve_flattens() {
         let mut probe = CleanToLimit { limit: 1024 };
@@ -753,9 +692,8 @@ mod tests {
             vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048],
             "every doubling from the floor, plus the first failing rung, and then stop"
         );
-        // The first failing rung IS probed and IS returned - it is the evidence that the one below it
-        // is a boundary rather than a place we stopped. `frontier` needs it for
-        // `first_disqualified_conc`.
+        // The first failing rung is probed and returned as evidence the rung below is a real
+        // boundary, not just where we stopped; `frontier` needs it for `first_disqualified_conc`.
         assert!(points.iter().any(|p| p.concurrency == 2048 && !p.passed));
         assert!(
             !points.iter().any(|p| p.concurrency == 4096),
@@ -763,17 +701,15 @@ mod tests {
         );
     }
 
-    // THE REGRESSION THE OLD STOP RULE CAUSED. kong's curve creeps up by less than its own
-    // window-to-window wobble, so `FLAT_RUNGS_TO_STOP = 3` fired while throughput was still rising and
-    // the climb stopped at c=32 - publishing 15909 as the maximum, which the sustained reading of the
-    // same windows then beat at 17898. Here the same shape must be climbed to the end.
+    // Regression test: kong's curve creeps up by less than its own window-to-window wobble, so the
+    // old flat-run counter fired early and stopped at c=32, publishing 15909 as the maximum — beaten
+    // by the sustained reading of the same windows at 17898. This shape must climb to the end.
     #[test]
     fn a_curve_that_creeps_inside_its_own_noise_is_still_climbed_to_the_end() {
         struct Creeping;
         impl Probe for Creeping {
             fn probe(&mut self, c: u32) -> Option<Sample> {
-                // Gains ~3% per doubling - smaller than a noisy gateway's window spread, which is
-                // exactly the shape the flat-run counter mistook for saturation.
+                // Gains ~3% per doubling, smaller than a noisy gateway's window spread.
                 Some(Sample::new(
                     15_000.0 * (1.0 + 0.03 * f64::from(c.ilog2())),
                     true,
@@ -799,9 +735,8 @@ mod tests {
         );
     }
 
-    // A rung that fails EVERY window ends the climb; a rung that fails only some does not. The stop
-    // condition is "no clean window at all", because a single clean window is still a real observation
-    // the frontier can read.
+    // A rung that fails every window ends the climb; one that fails only some does not, since a
+    // single clean window is still a real observation the frontier can read.
     #[test]
     fn a_rung_with_one_clean_window_does_not_end_the_climb() {
         struct FlakyAtOneRung {
@@ -827,8 +762,8 @@ mod tests {
         );
     }
 
-    // Every rung gets `WINDOWS_PER_RUNG` windows, so the frontier reads a rate backed by repeats rather
-    // than by one lucky window. The memo may serve the FIRST window; the repeats must be real.
+    // Every rung gets `WINDOWS_PER_RUNG` windows, so the frontier reads a rate backed by repeats
+    // rather than one lucky window. The memo may serve the first window; the repeats must be real.
     #[test]
     fn every_rung_is_probed_the_full_number_of_windows() {
         let mut probe = CleanToLimit { limit: 64 };
@@ -839,8 +774,8 @@ mod tests {
         }
     }
 
-    // A RIG THAT CANNOT RUN A WINDOW ENDS THE CLIMB WITH WHAT IT HAS, and does not read as a ceiling.
-    // The distinction is the project's central rule: our failure is never their result.
+    // A rig that cannot run a window ends the climb with what it has, never reading its own failure
+    // as the gateway's ceiling.
     #[test]
     fn a_rig_that_stops_answering_ends_the_climb_without_inventing_a_limit() {
         struct DiesAt {

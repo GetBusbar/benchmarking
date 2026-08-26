@@ -1,32 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// THE ENGINE, STATED ONCE: for every configured cell, run every metric.
+// For every configured cell, run every metric in `METRICS`. A metric is in `METRICS` or it does
+// not exist: `site/gen-data.mjs` reads each field solely from here with no fallback, so this list
+// is the one place an implemented-but-unreachable measurement would be caught.
 //
-// WHY THIS EXISTS. A metric is in `METRICS` or it does not exist, and `METRICS` is one thing a
-// human can read in full: a module can be finished and unit-tested against fakes with nothing in
-// the real run ever calling it, and a per-module test suite reporting green cannot catch that a
-// module is unreachable. `site/gen-data.mjs` takes memory SOLELY from the per-cell window, with no
-// fallback, so an unreachable `rss` module would mean a board that publishes no memory at all. This
-// list is the one place a measurement being "implemented, tested, and silently never taken" cannot
-// happen.
+// The unit is a GROUP, not one metric per field: several published numbers (e.g. idle/peak/hwm/
+// recovered RSS, or a peak and its concurrency) are readings off ONE window/search, and splitting
+// them would re-run the measurement and risk two populations published under one name. `fields()`
+// declares what a group promises; `measure()` is checked against it so a shortfall fails a test
+// instead of leaving a silent hole.
 //
-// WHY A GROUP AND NOT A FUNCTION PER NUMBER. The obvious shape is one metric per published field.
-// It is wrong on the physics: idle, peak, high-water and recovered RSS are four readings of ONE load
-// window, and a peak search yields the peak AND the concurrency it happened at from ONE search.
-// Splitting those into separate metrics would re-run the window and re-run the search, which is both
-// slower and, worse, DIFFERENT - two windows are two populations, and publishing an idle from one
-// beside a peak from another is exactly the two-populations defect this rewrite exists to end.
-//
-// So the unit is a procedure with several named outputs. `fields()` declares what a group promises
-// to fill; `measure()` returns what it actually filled. The two are checked against each other, so a
-// group that quietly returns fewer numbers than it advertises is a test failure rather than a hole
-// in the artifact.
-//
-// EVERY OUTPUT IS A `Measurement`. Not an f64, not an Option. A metric that cannot measure returns
-// an absence WITH A REASON, and there is no way to return a bare number instead. That invariant kept
-// being violated one wiring at a time precisely because each call site re-decided how to represent
-// "we didn't get it".
+// Every output is a `Measurement<f64>`, never a bare f64/Option: a metric that cannot measure
+// returns an absence WITH A REASON.
 
 use crate::cell::CellId;
 use crate::ingress::Dialect;
@@ -36,10 +22,8 @@ use std::collections::BTreeMap;
 
 /// Everything a metric is allowed to know about the cell it is measuring.
 ///
-/// Deliberately small. A metric gets the cell's identity and the rig's configuration and nothing
-/// else - in particular it does not get the gateway's capability declaration, because `probe.rs`
-/// already records what happened when a declaration was allowed to reach a measurement decision: the
-/// same observation was published two different ways, and the declared cell was tried harder.
+/// Deliberately small: no gateway capability declaration. `probe.rs` documents why - letting a
+/// declaration reach a measurement decision let the declared cell be tried harder than others.
 pub struct CellCtx<'a> {
     pub cfg: &'a RunConfig,
     pub id: &'a CellId,
@@ -53,45 +37,34 @@ pub struct CellCtx<'a> {
 /// The names a group fills, paired with what it measured.
 pub type Filled = Vec<(&'static str, Measurement<f64>)>;
 
-/// THE EVIDENCE BEHIND THE SCALARS.
-///
-/// A group's headline numbers are summaries: a peak is one point out of a sweep, an idle and a peak
-/// RSS are two readings out of a series. Until this existed there was nowhere for the underlying
-/// points to go - `measure()` returned scalars and nothing else - so the searches collected their
-/// probed points and the memory sampler collected its readings, and both were dropped on the floor
-/// at the trait boundary. The published artifact carried `sweep_max_proxy: []` and `rss_series: []`
-/// on every cell, which means no number on the board could be re-derived, charted, or checked
-/// against the measurement it came from.
+/// The evidence behind the headline scalars: a peak is one point out of a sweep, so the raw probed
+/// points/readings travel here too, letting every published number be re-derived and charted rather
+/// than trusted blind.
 ///
 /// Empty is honest and common: a group that took no series simply returns none.
 #[derive(Default)]
 pub struct Series {
-    /// The frontier read off `sweep` below. Structured rather than a flat field for the same reason the
-    /// sweep is: it is a sequence, and the group machinery's `Filled` carries scalars.
+    /// The frontier read off `sweep` below. Structured rather than a flat field: it's a sequence,
+    /// and `Filled` carries only scalars.
     pub frontier: Vec<crate::record::FrontierReading>,
     /// One entry per concurrency the throughput search actually probed, in probe order.
     pub sweep: Vec<crate::record::SweepPoint>,
-    /// One entry per concurrency the SUSTAINED-throughput search actually probed, in probe order.
-    /// Kept apart from `sweep` above rather than merged into it: the two are two different searches
-    /// (a unimodal max search and a monotone gate bisection) over the same concurrency axis, and
-    /// merging their rungs would make it impossible to tell which point came from which search.
+    /// One entry per concurrency the SUSTAINED-throughput search probed. Kept apart from `sweep`:
+    /// they are two different searches (unimodal max vs. monotone gate bisection) over the same
+    /// concurrency axis, and merging their rungs would hide which point came from which search.
     pub sweep_sustained: Vec<crate::record::SweepPoint>,
     /// One entry per resident-memory reading taken across the load window.
     pub rss: Vec<crate::record::RssSample>,
-    /// One entry per reading taken across the IDLE window, before any load. Kept apart from `rss`
-    /// rather than prepended to it: they answer different questions (what it costs doing nothing,
-    /// versus what work costs it), and a reader must be able to see the idle window's own shape to
-    /// judge whether the baseline every other memory figure is measured against was itself steady.
+    /// One entry per reading taken across the IDLE window, before any load. Kept apart from `rss`:
+    /// they answer different questions (cost at rest vs. cost under work), and a reader needs to see
+    /// the idle window's own shape to judge whether the baseline was itself steady.
     pub idle_rss: Vec<crate::record::RssSample>,
     /// One entry per concurrency the STREAMS-SUSTAINED gate search probed, and one per concurrency
-    /// the CPU-frames/sec peak search probed. Kept apart from each other and from the two request
-    /// sweeps above for the same reason those two are kept apart: four searches over one concurrency
-    /// axis, and merging any pair of them would make it impossible to say which search a rung came
-    /// from or which gate it was judged against.
+    /// the CPU-frames/sec peak search probed. Kept apart from each other and from the two sweeps
+    /// above so a rung's originating search/gate is never ambiguous.
     ///
-    /// `serde_json::Value` rather than `SweepPoint`, because `record.rs` types these two as opaque
-    /// JSON: no committed snapshot has ever carried one, so there was no real artifact to pin a shape
-    /// against. `run::StreamPoint::to_json` is where the shape is decided.
+    /// `serde_json::Value` rather than `SweepPoint` because `record.rs` types these as opaque JSON
+    /// (no committed snapshot has carried one yet); `run::StreamPoint::to_json` decides the shape.
     pub sweep_streams: Vec<serde_json::Value>,
 }
 
@@ -127,10 +100,8 @@ pub trait Metric: Sync {
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured;
 }
 
-/// THE ENGINE'S ENTIRE MEASUREMENT SURFACE.
-///
-/// Adding a number to the board is: implement a group, add it here. Removing one is deleting it from
-/// this list, which is a visible act rather than a call that quietly stopped happening.
+/// The engine's entire measurement surface. Adding a number to the board means implementing a
+/// group and adding it here; removing one means deleting it from this list.
 pub const METRICS: &[&dyn Metric] = &[
     &Throughput,
     &Memory,
@@ -155,13 +126,9 @@ pub fn process_cell(
     process_cell_with(ctx, METRICS)
 }
 
-/// The same loop over an EXPLICIT list.
-///
-/// `METRICS` is the engine's real surface, but a caller that reads it from a global cannot be tested
-/// without performing every measurement for real - which is how adding the streaming group turned a
-/// 0.4 second unit suite into a 160 second one, two twenty-second network timeouts per cell against a
-/// fixture that holds its connection open. A test that slow stops being run, and a gate that stops
-/// being run is not a gate.
+/// The same loop over an EXPLICIT list, so tests can run a subset of `METRICS` instead of every
+/// measurement for real (adding the streaming group to a global-reading test once turned a 0.4s
+/// unit suite into 160s).
 pub fn process_cell_with(
     ctx: &CellCtx<'_>,
     metrics: &[&dyn Metric],
@@ -174,19 +141,10 @@ pub fn process_cell_with(
     let mut series = Series::default();
     let mut timings: BTreeMap<&'static str, f64> = BTreeMap::new();
     for m in metrics {
-        // ONE LINE PER GROUP, BEFORE IT RUNS, to stderr. A cell's wall clock is dominated by these
-        // groups, not by the probe, so a run that only speaks when a cell FINISHES goes dark for
-        // minutes at a time and an operator cannot tell a slow sweep from a wedged box. Printed
-        // before rather than after: the interesting case is the group that never returns.
-        // TIMED, AND THE TIME IS PUBLISHED. A run that is slower than the last one is a question
-        // nobody can answer from a wall-clock total: "agentgateway took 13 minutes a cell" does not
-        // say whether that was the TTFT distribution, a stream ladder climbing to a higher rung, or a
-        // gateway that got slower. Each group's own seconds are recorded per cell, so the answer is
-        // arithmetic on the artifact rather than a rerun with a stopwatch.
-        //
-        // Printed before AND after: before, because the interesting case is the group that never
-        // returns and an operator watching a live box needs to see which one it was; after, because
-        // that line is what makes the cost greppable out of a finished run's log.
+        // Logged before AND after each group: before, so an operator watching a live box can see
+        // which group is stuck rather than going dark for minutes; after, so the group's own seconds
+        // are greppable from a finished log and per-cell timing can answer "what got slower" without
+        // a stopwatch rerun. The timing itself is also published in `timings` below.
         eprintln!("[phase] {} {}", ctx.id, m.name());
         let started = std::time::Instant::now();
         let produced = m.measure(ctx);
@@ -198,14 +156,12 @@ pub fn process_cell_with(
             took.as_secs_f64()
         );
         timings.insert(m.name(), took.as_secs_f64());
-        // Series ACCUMULATE across groups rather than overwrite: the sweep comes from throughput and
-        // the readings come from memory, and a later group returning none must not erase an earlier
-        // group's evidence.
+        // Series ACCUMULATE across groups rather than overwrite: a later group returning none for a
+        // field must not erase an earlier group's evidence for it (e.g. throughput fills the sweep,
+        // memory fills the RSS readings).
         if !produced.series.sweep.is_empty() {
             series.sweep = produced.series.sweep;
         }
-        // Guarded the same way, and for the same reason: a later group returning no frontier must not
-        // erase the throughput group's.
         if !produced.series.frontier.is_empty() {
             series.frontier = produced.series.frontier;
         }
@@ -218,12 +174,10 @@ pub fn process_cell_with(
         if !produced.series.sweep_streams.is_empty() {
             series.sweep_streams = produced.series.sweep_streams;
         }
-        // THE IDLE WINDOW WAS MEASURED AND THEN DROPPED ON THE FLOOR. The memory group samples a full
-        // idle window and returns it as `Series.idle_rss`, and this accumulator - a hand-written chain
-        // with one clause per field - simply had no clause for it. So `CellMemory.idle_rss_series` was
-        // published empty on every cell, the site's idle sparkline had nothing to draw, and the idle
-        // verdict beside it described a series no reader could see. Nothing failed: an accumulator that
-        // forgets a field looks exactly like a group that produced none.
+        // This accumulator is a hand-written chain, one clause per field - it once had no clause for
+        // `idle_rss`, so the idle window was measured but silently dropped on every cell. An
+        // accumulator that forgets a field looks exactly like a group that produced none; see the
+        // regression test `no_series_field_is_dropped_by_the_accumulator` below.
         if !produced.series.idle_rss.is_empty() {
             series.idle_rss = produced.series.idle_rss;
         }
@@ -256,27 +210,21 @@ impl Metric for Throughput {
         "throughput"
     }
 
-    /// NO SCALAR FIELDS. This group's whole output is the FRONTIER, which is a sequence and so travels
-    /// on the series beside the sweep it is read from - `Filled` carries scalars.
-    ///
-    /// It used to declare five: `rps_max_proxy` / `conc_at_peak` and `rps_sustained_20ms` /
-    /// `rps_sustained_20ms_concurrency` / `conc_at_sustained`. Those were one set of windows summarised
-    /// twice, once by a plateau search and once by a gate bisection, each collapsing a tradeoff curve to
-    /// a point chosen by a constant. See `frontier.rs`.
+    /// No scalar fields: this group's whole output is the FRONTIER, a sequence, so it travels on
+    /// `series` beside the sweep it's read from rather than in `Filled`. It replaced five scalars
+    /// (`rps_max_proxy`/`conc_at_peak`/`rps_sustained_20ms`/...) that each collapsed the same
+    /// tradeoff curve to one point chosen by a constant. See `frontier.rs`.
     fn fields(&self) -> &'static [&'static str] {
         &[]
     }
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         let perf = crate::run::sweep_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
-        // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
-        // point is that one sweep answers the throughput question at every bound, and the two scalars
-        // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
+        // The frontier is read off the rungs this sweep already probed - no extra measurement. See
+        // `frontier.rs`.
         //
-        // A rung with no window reading contributes nothing - not a zero. `ok`/`fail` of 0/0 fails
-        // `served_cleanly`, so such a rung is disqualified from every bound rather than counted as a
-        // clean one, which is the same rule the sweep points below follow when they publish an absent
-        // `fail` rather than a fabricated 0.
+        // A rung with no window reading contributes nothing, not a zero: `ok`/`fail` of 0/0 fails
+        // `served_cleanly`, disqualifying the rung from every bound rather than counting it clean.
         let rungs: Vec<crate::frontier::Rung> = perf
             .points
             .iter()
@@ -297,8 +245,8 @@ impl Metric for Throughput {
                     p99_bound_us: bound.map(|b| b as i64),
                     rps: Measurement::Measured(r.rps),
                     concurrency: Measurement::Measured(i64::from(r.concurrency)),
-                    // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
-                    // latency reading, which only the unbounded reading can select.
+                    // The tail the winning rung actually produced. Absent only when the rung carried
+                    // no latency reading (possible only for the unbounded reading).
                     p99_us: match r.p99_us {
                         Some(p) => Measurement::Measured(p as i64),
                         None => Measurement::absent_because(
@@ -308,8 +256,8 @@ impl Metric for Throughput {
                     },
                     first_disqualified_conc: match r.first_disqualified_conc {
                         Some(c) => Measurement::Measured(i64::from(c)),
-                        // Not a hole: the sweep ran out of range while this bound still held, which is
-                        // exactly what `lower_bound` beside it reports.
+                        // Not a hole: the sweep ran out of range while this bound still held - see
+                        // `lower_bound` beside it.
                         None => Measurement::absent_because(
                             Absent::SearchExhausted,
                             "every rung above this one also held this bound, so the sweep ran out of \
@@ -319,13 +267,12 @@ impl Metric for Throughput {
                     },
                     lower_bound: r.is_lower_bound(),
                 },
-                // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
-                // entry would make the frontier's length vary per cell and a reader could not tell a
-                // bound that yielded nothing from a bound we forgot to report.
+                // A bound nothing qualified for is still a published column, carrying WHY - dropping
+                // it would make the frontier's length vary per cell.
                 None => {
                     let absent = crate::frontier::absence_for(&rungs, bound);
-                    // Generic over the measurement's type: `rps` is f64 (fractional below 1/s) while
-                    // its siblings are counts, and one absence has to be spellable for both.
+                    // Generic over the measurement's type: `rps` is f64, its siblings are counts, and
+                    // one absence has to be spellable for both.
                     let carry = |()| -> Measurement<f64> {
                         match (absent.reason().cloned(), absent.detail()) {
                             (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
@@ -351,25 +298,18 @@ impl Metric for Throughput {
                 }
             })
             .collect();
-        // THE SWEEP TRAVELS WITH THE PEAK. Each probed rung becomes a published point, so a reader
-        // can see the shape the search walked and re-derive the maximum rather than trusting it.
+        // The sweep travels with the peak: each probed rung becomes a published point, so a reader
+        // can see the shape the search walked and re-derive the maximum rather than trust it.
         //
-        // `p99_us` and `fail` come from the window itself. They used to be published absent here,
-        // under the true-at-the-time note that the search's gate recorded only whether a rung PASSED
-        // and not the latency behind that verdict - but the generator had measured both all along
-        // and `Sample` was throwing them away. Re-deriving the maximum was possible from these
-        // points; re-deriving the 20ms answer was not, which is why the engine went and measured the
-        // cell a second time to get it. A rung that somehow arrives without a reading is still
-        // absent rather than zero, because "measured no failures" and "nothing was measured" are
-        // different facts and only one of them is true.
+        // `p99_us` and `fail` come from the window itself, not a fabricated 0 when absent: "measured
+        // no failures" and "nothing was measured" are different facts.
         let sweep = perf
             .points
             .iter()
             .map(|pt| crate::record::SweepPoint {
                 conc: i64::from(pt.concurrency),
-                // From the same window as everything else on this rung. Absent - never a fabricated 0 -
-                // when no window reported, for the reason `fail` is: "completed nothing" and "nothing
-                // was measured" are different facts, and only one of them is about the gateway.
+                // Absent, never a fabricated 0, when no window reported: "completed nothing" and
+                // "nothing was measured" are different facts.
                 ok: match pt.reading {
                     Some(r) => Measurement::Measured(r.ok as i64),
                     None => Measurement::absent(Absent::NotMeasured),
@@ -398,69 +338,44 @@ impl Metric for Throughput {
 
 /// The concurrency the memory window runs at.
 ///
-/// A CONSTANT, not the cell's peak, and that is the whole point. Memory is compared ACROSS gateways,
-/// so every gateway's window must be the same load; taking each one at its own peak concurrency
-/// would measure thirteen different workloads and rank them as if they were one. It is deliberately
-/// not derived from core count either: the search maxima are, because a search explores the box, but
-/// a comparison recipe that moves with the hardware makes two boxes' numbers incomparable.
+/// A constant, not the cell's own peak: memory is compared ACROSS gateways, so every window must be
+/// the same load, or ranking would compare thirteen different workloads as if they were one. Also
+/// not derived from core count - a comparison recipe that moves with the hardware would make two
+/// boxes' numbers incomparable.
 pub const MEMORY_WINDOW_CONCURRENCY: u32 = 32;
 
 /// How often the resident-memory sampler reads the tree during the window.
 const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// LOAD RUNS UNTIL MEMORY STOPS MOVING, NOT FOR A FIXED TIME.
+/// Load runs until memory stops moving, not for a fixed time: a fixed window reports wherever the
+/// gateway happened to be at cutoff, so gateways that settle at different speeds would be compared
+/// at different points on their own curves. Running until the trailing window is flat measures the
+/// same thing on every entrant - where it actually levels off.
 ///
-/// A fixed window reports where memory happened to be when we stopped watching. If a gateway is
-/// still climbing when the window ends, its "peak" is a property of our stopwatch rather than of the
-/// gateway, and two gateways that settle at different speeds are compared at different points on
-/// their own curves. Running until the trailing window is flat measures the same THING on every
-/// entrant: where it actually levels off.
+/// Three-way verdict: `Steady` is a settled number, `NotSteady` carries the growth rate (a gateway
+/// that never levels off is published with how fast it climbed), `Undecidable` means too few
+/// samples - deliberately not the same claim as "it moved".
 ///
-/// The three-way verdict is why this is worth doing at all. `Steady` is a settled number.
-/// `NotSteady` carries the growth rate, so a gateway that never levels off is published as exactly
-/// that, with how fast it climbed, which is a more useful finding than any peak. `Undecidable` means
-/// too few samples to judge, which is deliberately NOT the same claim as "it moved".
-///
-/// The cap is not a fallback, it is the whole reason a leak terminates: a gateway that never settles
-/// would otherwise run forever. Hitting it is a result (`NotSteady`), never an error.
+/// The cap is not a fallback but the reason a leak terminates: hitting it is a result (`NotSteady`),
+/// never an error.
 pub const MEMORY_PLATEAU_WINDOW_S: f64 = 60.0;
 pub const MEMORY_LOAD_S: u64 = 300;
 
-/// AND THEN WATCH IT FOR A MINUTE WITH THE LOAD GONE.
-///
-/// Peak answers what a gateway costs while working. It does not answer whether it gives any of that
-/// back, and those are different questions about a service that will run for months. A gateway that
-/// climbs to 120 MiB and returns to 8 is a different proposition from one that climbs to 120 and
-/// stays there, and a peak alone cannot tell them apart.
-///
-/// So load stops, sampling continues for this long, and the trailing reading is published as
-/// recovered. The same 60 seconds as the settle window, so the two halves of the curve are directly
-/// comparable to a reader.
+/// After load stops, sampling continues for this long and the trailing reading publishes as
+/// recovered: peak answers what a gateway costs while working, not whether it gives memory back
+/// afterward, and a peak alone can't tell a gateway that returns to 8 MiB apart from one that stays
+/// at 120. Same duration as the settle window so the two halves of the curve are comparable.
 pub const MEMORY_RECOVERY_S: u64 = 60;
-/// The trailing slice of that window the published `recovered_rss_mib` is the MEDIAN OF.
-///
-/// Not the whole 60 s, deliberately: the first half still holds the descent from peak as allocators
-/// return pages, so a median over the full window would sit between the loaded and the recovered level
-/// and report neither. The trailing half is the part that has stopped moving.
-///
-/// NAMED, AND PUBLISHED, because it was neither. It was the expression `MEMORY_RECOVERY_S / 2.0` inline
-/// at the one call site, while `CellMemory.recovery_window_s` published 60 and the chart subtitle read
-/// "recovered RSS at the end of the 60 s recovery window". The number was a median over the trailing 30.
-/// A gateway still releasing memory across that minute therefore published a figure the stated window
-/// would not produce, and nothing in the artifact let a reader tell. The artifact now discloses the slice
-/// the number actually came from.
+/// The trailing slice of the recovery window that `recovered_rss_mib` is the MEDIAN of - not the
+/// whole 60s, since the first half still holds the allocator's descent from peak and would average
+/// neither level meaningfully. Named as its own constant (previously an inline `/ 2.0` while the
+/// published `recovery_window_s` claimed 60 and the chart subtitle disagreed with what was measured)
+/// so the artifact discloses the slice the number actually came from.
 pub const MEMORY_RECOVERY_MEDIAN_S: u64 = MEMORY_RECOVERY_S / 2;
-/// How long the process is watched BEFORE any load, and why it is a window rather than a reading.
-///
-/// Idle used to be one instantaneous sample taken the moment the restart returned. Two things are
-/// wrong with that. A process that is still settling - lazy allocation, warm-up threads, a runtime
-/// still building its pools - reads momentarily LOW, and every growth figure derived from idle is
-/// then overstated, on a column the board ranks ascending. And a gateway that leaks while doing
-/// NOTHING is invisible: with a single sample there is no second point to compare against.
-///
-/// The same 60 seconds as the recovery window, deliberately. It makes idle and `recovered_rss_mib`
-/// the same kind of measurement taken the same way, which is the only footing on which "did it give
-/// the memory back" is a fair question.
+/// How long the process is watched BEFORE any load - a window, not a single instantaneous sample,
+/// because a still-settling process reads momentarily low (overstating growth figures derived from
+/// it) and a gateway leaking with nothing asked of it is invisible with only one point. Same
+/// duration as the recovery window so idle and `recovered_rss_mib` are directly comparable.
 pub const MEMORY_IDLE_S: u64 = 60;
 /// Percent the trailing window's two halves may differ by, and percent spread within it, before the
 /// window counts as still moving. The values the shell suite used, kept so the two agree.
@@ -469,52 +384,36 @@ pub const MEMORY_RANGE_PCT: f64 = 2.0;
 
 /// Whether a steady verdict may be BELIEVED, given how the series grew since the last window.
 ///
-/// A DEAD SAMPLER LOOKS EXACTLY LIKE A SETTLED GATEWAY, and that is the whole problem. The load loop
-/// snapshots the shared series between windows and breaks the moment `plateau_check` returns `Steady`.
-/// If the sampler thread dies partway through - a panic on an unexpected /proc shape for one
-/// gateway's process tree is enough - the series simply stops growing. Every later snapshot is the
-/// same frozen tail, and a frozen tail has zero drift and zero spread, which is the textbook
-/// definition of steady. So the loop would publish "settled after N seconds" plus a peak that is
-/// really "whatever was captured before the sampler died", about a gateway that may have kept
-/// climbing for minutes afterwards - and the panic that caused it was thrown away by
-/// `let _ = sampler.join()`, so nothing in the log or the artifact said so.
-///
-/// The discriminator is growth: a live sampler at ten readings a second adds samples between windows,
-/// and a settled gateway still produces new samples that happen to be flat. No new samples at all is
-/// not a measurement of the gateway, it is the absence of measurement.
+/// A dead sampler looks exactly like a settled gateway: if the sampler thread dies mid-window, the
+/// series stops growing, and a frozen tail has zero drift/spread - the textbook definition of
+/// steady. So the loop would publish "settled" plus a peak that is really "whatever was captured
+/// before the sampler died". The discriminator is growth: a live sampler keeps adding samples
+/// between windows even when the gateway itself is flat; zero new samples means no measurement, not
+/// a calm gateway.
 fn steady_is_believable(samples_before: usize, samples_now: usize) -> bool {
     samples_now > samples_before
 }
 
 /// Has the series existed long enough for a steadiness verdict to MEAN anything?
 ///
-/// `stats::window` selects by timestamp - everything at or after `last.t_s - window_s` - so a series
-/// only six seconds long yields a "sixty second window" holding six seconds of data. `plateau_check`'s
-/// own `n < 4` guard cannot catch that: this sampler takes ten readings a second, so six seconds is
-/// sixty samples, comfortably past four.
+/// `stats::window` selects by timestamp, so a series only six seconds long yields a "sixty second
+/// window" holding six seconds of data; `plateau_check`'s own `n < 4` guard doesn't catch this since
+/// this sampler takes ten readings/sec. Those six seconds would then be judged against thresholds
+/// chosen for a full minute, and a gateway climbing slowly barely drifts that fast - so the first
+/// load window could come back `Steady` and understate the peak.
 ///
-/// It then judges those six seconds against `MEMORY_TREND_PCT` and `MEMORY_RANGE_PCT`, thresholds
-/// chosen for a full minute, and a gateway still climbing slowly barely drifts across six seconds. So
-/// the FIRST load window could come back Steady, break the loop, and publish a steady state the
-/// gateway had not reached - understating its peak with a reading taken before it stopped moving.
-///
-/// Kept OUT of `plateau_check`, which is a general statistic with other callers and its own tests
-/// asserting that four samples suffice to judge. What is specific to this loop is the decision to
-/// STOP, and that is the decision that must not be made early.
-///
-/// Deliberately separate from `steady_is_believable`: the two answer different questions and demand
-/// opposite responses. A series that stopped GROWING means the sampler is gone and the whole group is
-/// void; a series that is merely too SHORT means keep measuring. Folding them together would abort a
-/// perfectly healthy cell on its first window.
+/// Kept OUT of `plateau_check` (a general statistic with its own callers/tests) because the decision
+/// to STOP is specific to this loop. Kept separate from `steady_is_believable`: a series that
+/// stopped growing means the sampler is gone (abort), a series that's merely too short means keep
+/// measuring (do not abort) - folding them together would abort a healthy cell on its first window.
 fn window_is_long_enough(span_s: f64) -> bool {
     span_s >= MEMORY_PLATEAU_WINDOW_S
 }
 
-/// The unsettled SHAPE as a number, because the metric surface carries `f64` and nothing else.
+/// The unsettled SHAPE as a number, since the metric surface only carries `f64`.
 ///
-/// 1 climbing, 0 oscillating, -1 falling. Signed on purpose: the sign IS the direction, so a reader
-/// or a consumer that only understands "greater than zero is bad" gets the right answer without a
-/// lookup table, and the neutral shape sits at zero between the two.
+/// 1 climbing, 0 oscillating, -1 falling. Signed on purpose: the sign IS the direction, so "greater
+/// than zero is bad" is correct without a lookup table.
 fn shape_code(shape: crate::stats::Shape) -> f64 {
     match shape {
         crate::stats::Shape::Climbing => 1.0,
@@ -525,12 +424,11 @@ fn shape_code(shape: crate::stats::Shape) -> f64 {
 
 /// Memory: what the gateway's process tree costs at rest and under load.
 ///
-/// FOUR READINGS OF ONE WINDOW, which is why this is a group. Taking idle from one window and peak
-/// from another would publish two populations side by side for the same gateway, the same class of
-/// defect `manifest.rs` describes for a reader whose identity is not declared once.
+/// Four readings of ONE window, which is why this is a group: taking idle from one window and peak
+/// from another would publish two populations side by side for the same gateway.
 ///
 /// `peak` is sampled, so it can miss a spike between polls; `hwm` is the kernel's own high-water
-/// mark, updated on every charge, so it cannot. Both are published because they answer different
+/// mark, updated on every charge, so it cannot. Both are published since they answer different
 /// questions and disagreeing is informative.
 pub struct Memory;
 
@@ -542,12 +440,11 @@ impl Metric for Memory {
     fn fields(&self) -> &'static [&'static str] {
         &[
             "memory_idle_mib",
-            // Whether the process was STILL or GROWING while nothing was asked of it, and the rate
-            // if it grew. A leak with no load is the most damning memory result there is and the
-            // single-sample idle could not see it at all.
+            // Whether the process was still or growing with nothing asked of it, and the rate if it
+            // grew - a leak at idle is the most damning result and a single-sample idle couldn't see it.
             "memory_idle_static",
             "memory_idle_growth_rate_mib_per_min",
-            // HOW each window failed to settle, when it did. See `shape_code`.
+            // How each window failed to settle, when it did. See `shape_code`.
             "memory_idle_shape",
             "memory_shape",
             "memory_peak_mib",
@@ -566,8 +463,8 @@ impl Metric for Memory {
         let mut pid = match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
             Some(p) => p,
             None => {
-                // No process to measure. Every field carries the SAME reason: one cause, one
-                // explanation, rather than three independently-worded absences for one fact.
+                // No process to measure. Every field carries the SAME reason - one cause, one
+                // explanation - rather than independently-worded absences for one fact.
                 let why = crate::rss::root_pid(&ctx.cfg.runtime);
                 let reason = why.reason().cloned().unwrap_or(Absent::NotMeasured);
                 let detail = why
@@ -591,18 +488,11 @@ impl Metric for Memory {
 
         // ── PUT IT BACK AT REST FIRST ────────────────────────────────────────────────────────────
         //
-        // METRICS runs Throughput BEFORE Memory on the same process with nothing in between, so
-        // reading `idle` here without first restarting the process would read post-load RSS under
-        // the name "idle": allocators do not return memory to the OS promptly, so the reading would
-        // stay high and, worse, ORDER-DEPENDENT, since each cell would inherit whatever the previous
-        // cell's load left resident, making the same gateway measure differently at cell 1 and cell
-        // 20 and two gateways no longer comparable at all - the one thing this board exists to do.
-        //
-        // So the process is restarted and only then read. All four readings still come from ONE
-        // window on ONE process, which is what this group is for; the window now simply starts where
-        // it claims to. If the harness does not own the gateway's lifetime there is no way to return
-        // it to rest, and idle is published ABSENT with that reason rather than as a number we know
-        // was taken under load.
+        // METRICS runs Throughput before Memory on the same process, so reading `idle` here without
+        // restarting first would read post-load RSS under the name "idle" - allocators don't return
+        // memory promptly, and the reading would also be order-dependent across cells. So the process
+        // is restarted and only then read; if the harness doesn't own the gateway's lifetime it can't
+        // be returned to rest, and idle publishes ABSENT with that reason instead of a polluted number.
         // Filled by the idle window below and published beside the load series, so the site can draw
         // the two windows as two curves on one scale rather than collapsing idle to a single number.
         let mut idle_series: Vec<crate::stats::Sample> = Vec::new();
@@ -619,12 +509,10 @@ impl Metric for Memory {
                 &ctx.cfg.relaunch_launcher,
                 &ctx.cfg.relaunch_commands,
             ) {
-                // A FAILED RESTART ABORTS THE WHOLE GROUP, not just the idle reading. The old
-                // behaviour marked idle absent and fell through to the sampler and the load
-                // window - against a gateway in an unknown state (possibly relaunched but with
-                // its post-boot configuration half-replayed), with `pid` still pointing at the
-                // pre-restart tree. Every number that window produced would be the rig's own
-                // failure wearing the gateway's name. HarnessError, because that is what it is.
+                // A failed restart aborts the WHOLE group, not just idle: falling through to the
+                // sampler/load window would measure a gateway in an unknown state, with `pid` still
+                // pointing at the pre-restart tree, so every number would be the rig's own failure
+                // wearing the gateway's name.
                 Err(e) => {
                     let f: Filled = self
                         .fields()
@@ -649,13 +537,8 @@ impl Metric for Memory {
                 Ok(()) => match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
                     Some(fresh) => {
                         pid = fresh;
-                        // WATCH IT DO NOTHING, FOR AS LONG AS THE RECOVERY WINDOW WATCHES IT REST.
-                        //
-                        // This was one instantaneous read. A process still settling read low, which
-                        // overstated every growth figure derived from idle, and a gateway that leaks
-                        // with no load at all was invisible because one sample has nothing to
-                        // compare against. The window is sampled at the same interval as the load
-                        // window, so `idle_series` is the same shape of evidence as `rss_series`.
+                        // Sampled at the same interval as the load window, so `idle_series` is the
+                        // same shape of evidence as `rss_series`.
                         let idle_start = std::time::Instant::now();
                         while idle_start.elapsed().as_secs() < MEMORY_IDLE_S {
                             if let Some(v) = crate::rss::rss_tree_mib(fresh).copied() {
@@ -666,9 +549,8 @@ impl Metric for Memory {
                             }
                             std::thread::sleep(MEMORY_SAMPLE_INTERVAL);
                         }
-                        // The MEDIAN of the window, not its first or last reading: the same
-                        // discipline `steady_state` uses, so one allocator spike cannot set the
-                        // baseline every other memory figure is measured against.
+                        // The MEDIAN of the window, not first/last reading, so one allocator spike
+                        // cannot set the baseline every other memory figure is measured against.
                         let vals: Vec<f64> = idle_series.iter().map(|s| s.mib).collect();
                         if vals.is_empty() {
                             Measurement::absent_because(
@@ -695,11 +577,8 @@ impl Metric for Memory {
         // for as long as it actually ran instead of for as long as it was expected to.
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let peak_seen = std::sync::Arc::new(std::sync::Mutex::new(f64::NEG_INFINITY));
-        // KEEP THE READINGS, not just their maximum. The sampler already visits the tree every
-        // MEMORY_SAMPLE_INTERVAL, so folding each reading into a running max and discarding it would
-        // leave `rss_series` empty and the peak a number with no curve behind it. Whether memory
-        // climbed and plateaued or spiked once is the difference between a leak and a burst, and
-        // neither is visible from a single scalar.
+        // Keep the readings, not just their maximum: whether memory climbed and plateaued or spiked
+        // once is the difference between a leak and a burst, invisible from a single scalar.
         let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::stats::Sample>::new()));
         let sampler = {
             let stop = std::sync::Arc::clone(&stop);
@@ -713,10 +592,9 @@ impl Metric for Memory {
                             *p = p.max(v);
                         }
                         if let Ok(mut s) = series.lock() {
-                            // Sub-second precision internally. The published series carries whole
-                            // seconds, but the plateau test compares the two halves of a trailing
-                            // window, and at ten readings a second a truncated stamp would put them
-                            // all in the same bucket and make the trend meaningless.
+                            // Sub-second precision internally: the plateau test compares two halves
+                            // of a trailing window, and at ten readings/sec a truncated stamp would
+                            // bucket them together and make the trend meaningless.
                             s.push(crate::stats::Sample::new(
                                 started.elapsed().as_secs_f64(),
                                 v,
@@ -729,23 +607,21 @@ impl Metric for Memory {
         };
 
         let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
-        // THE CELL'S OWN MODEL, never the bare declared one: most gateways route on the model name,
-        // so a fixed model would drive this window at a different upstream than the cell it is
-        // published under (run::model_for's own contract).
+        // The cell's own model, never the bare declared one: most gateways route on the model name,
+        // so a fixed model would drive this window at a different upstream than the cell it's
+        // published under (`run::model_for`'s own contract).
         let body = ctx
             .dialect
             .body(&crate::run::model_for(ctx.cfg, &ctx.id.egress));
-        // The SAME headers the probe authenticated this cell with. A memory window driven with the
-        // wrong credential measures a process serving 401s, which is a different workload from the
-        // one every other gateway's window is compared against.
+        // The same headers the probe authenticated this cell with - the wrong credential would
+        // measure a process serving 401s, a different workload from what every other window compares.
         let headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
 
         // ── LOAD UNTIL IT STOPS MOVING ───────────────────────────────────────────────────────────
         //
-        // Repeated windows rather than one long one, because the plateau test needs to be asked
-        // between windows: a single fixed window can only ever report where memory was when the
-        // clock ran out. The loop ends when the trailing minute is flat, or at the cap, and the cap
-        // being reached is a RESULT (the gateway never settled) rather than a failure.
+        // Repeated windows rather than one long one, since the plateau test needs to be asked
+        // between windows. The loop ends when the trailing minute is flat, or at the cap; hitting the
+        // cap is a RESULT (never settled), not a failure.
         let load_started = std::time::Instant::now();
         let mut ran = None;
         let mut verdict =
@@ -754,8 +630,8 @@ impl Metric for Memory {
                 need: 4,
             });
         let mut settled_at = None;
-        // How many samples the series held when it was last looked at, so a series that stops growing
-        // is distinguishable from a gateway that stopped moving.
+        // Samples the series held when last looked at, so a series that stops growing is
+        // distinguishable from a gateway that stopped moving.
         let mut samples_before = 0usize;
         let mut sampler_died = false;
         loop {
@@ -775,15 +651,13 @@ impl Metric for Memory {
                 MEMORY_TREND_PCT,
                 MEMORY_RANGE_PCT,
             );
-            // A STEADY VERDICT OFF A SERIES THAT DID NOT GROW IS THE SAMPLER'S DEATH, NOT THE
-            // GATEWAY'S CALM. See `steady_is_believable`.
+            // A steady verdict off a series that did not grow is the sampler's death, not the
+            // gateway's calm. See `steady_is_believable`.
             let span = taken.last().map(|s| s.t_s).unwrap_or(0.0)
                 - taken.first().map(|s| s.t_s).unwrap_or(0.0);
             let grew = steady_is_believable(samples_before, taken.len());
             samples_before = taken.len();
-            // TOO SOON TO BELIEVE IT. Not a failure and not the gateway's answer - just a window that
-            // has not lasted long enough for `plateau_check`'s thresholds to mean what they were chosen
-            // to mean. Keep loading. See `window_is_long_enough`.
+            // Too soon to believe it - keep loading. See `window_is_long_enough`.
             if verdict.is_steady() && !window_is_long_enough(span) {
                 verdict =
                     crate::stats::Verdict::Undecidable(crate::stats::Undecidable::WindowTooShort);
@@ -798,21 +672,12 @@ impl Metric for Memory {
                 sampler_died = true;
                 break;
             }
-            // THE VERDICT IS RECORDED, NOT ACTED ON. When the trailing window first reads flat this
-            // notes WHEN, and keeps loading.
-            //
-            // It used to `break` here, and that is the same defect the throughput scalars had one lane
-            // over: a threshold deciding when to stop measuring, and therefore deciding the number.
-            // `MEMORY_TREND_PCT = 1.0` and `MEMORY_RANGE_PCT = 2.0` are the values the shell suite used,
-            // kept so the two agree - nothing derives them - and stopping on them bounded
-            // `peak_rss_mib`, `load_s` and everything read from the tail of the series. The field data
-            // shows what that cost: across 66 cells on the 2026-07-29 board `load_s` ran from 6 seconds
-            // to 301, median 201. A gateway that looked flat early was never asked the question a
-            // gateway that looked busy was asked, and their peaks were then ranked against each other.
-            //
-            // So every cell now gets the same `MEMORY_LOAD_S`. That costs ~8.4 minutes per gateway
-            // (+55% of this phase), which is wall-clock this run can afford because the gateways run one
-            // to a box, and it buys a peak that means the same thing on every row.
+            // THE VERDICT IS RECORDED, NOT ACTED ON: when the trailing window first reads flat this
+            // notes WHEN and keeps loading, rather than `break`ing here. Breaking early would let a
+            // threshold decide when to stop measuring (and thus decide the number) - a gateway that
+            // looked flat early would never be asked the question a busy-looking one was, yet their
+            // peaks would be ranked against each other. So every cell now runs the full
+            // `MEMORY_LOAD_S`, buying a peak that means the same thing on every row.
             if verdict.is_steady() && settled_at.is_none() {
                 settled_at = Some(load_started.elapsed().as_secs() as i64);
             }
@@ -822,10 +687,9 @@ impl Metric for Memory {
         }
         let load_s = load_started.elapsed().as_secs() as i64;
 
-        // THE VERDICT, TAKEN OVER THE FULL LOAD. The loop's last `plateau_check` ran mid-load and only
-        // to note `settled_at`; the published verdict must describe the window the artifact says was
-        // measured, which is all of it. A cell that settled at 90s and then climbed again for 200 more
-        // is NOT steady, and the mid-load reading would have said it was.
+        // The verdict, taken over the FULL load: the loop's last `plateau_check` ran mid-load only to
+        // note `settled_at`, but the published verdict must describe the whole measured window. A
+        // cell that settled at 90s and then climbed for 200 more is NOT steady.
         if !sampler_died {
             let full: Vec<crate::stats::Sample> =
                 series.lock().map(|s| s.clone()).unwrap_or_default();
@@ -851,15 +715,13 @@ impl Metric for Memory {
         // ── THEN WATCH IT WITH THE LOAD GONE ─────────────────────────────────────────────────────
         //
         // The sampler is still running, so this is simply a minute of quiet appended to the same
-        // series. What it shows is whether the gateway hands memory back, which a peak cannot say.
+        // series, showing whether the gateway hands memory back - which a peak cannot say.
         std::thread::sleep(std::time::Duration::from_secs(MEMORY_RECOVERY_S));
 
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        // THE JOIN RESULT IS THE ONLY EVIDENCE THE SAMPLER PANICKED. It was discarded with `let _`,
-        // which is how a sampler could die mid-window and leave a plausible, self-consistent memory
-        // result behind it with nothing anywhere saying the readings had stopped. The comment a few
-        // lines below already anticipated the panic ("a poisoned lock means the sampler thread
-        // panicked") - it handled the consequence and threw away the cause.
+        // The join result is the only evidence the sampler panicked (previously discarded with
+        // `let _`, so a mid-window sampler death left a plausible, self-consistent result with
+        // nothing saying the readings had stopped).
         if sampler.join().is_err() {
             sampler_died = true;
             eprintln!(
@@ -869,12 +731,9 @@ impl Metric for Memory {
             );
         }
 
-        // A DEAD SAMPLER ABORTS THE WHOLE GROUP, for the same reason a failed restart does above:
-        // every number this window produced is the rig's own failure wearing the gateway's name. The
-        // peak is whatever was captured before the thread died, the series stops there, and the
-        // plateau verdict taken from that frozen tail describes our instrument rather than the
-        // gateway. Publishing any of it - even as "settled" with a smaller peak - would be worse than
-        // publishing nothing, because it is self-consistent and a reader has no way to tell.
+        // A dead sampler aborts the WHOLE group, same reason as a failed restart above: the peak/
+        // series/verdict all describe our instrument's failure, not the gateway, and publishing any
+        // of it would be worse than nothing since it looks self-consistent.
         if sampler_died {
             let f: Filled = self
                 .fields()
@@ -896,9 +755,8 @@ impl Metric for Memory {
         }
 
         let peak = match (ran, peak_seen.lock().ok().map(|p| *p)) {
-            // A window that never ran means the peak was never put under load. Publishing the idle
-            // reading as a peak would be a number taken under a different condition than the one it
-            // claims, so it is an absence.
+            // A window that never ran means the peak was never put under load - absence, not the
+            // idle reading under a false name.
             (None, _) => Measurement::absent_because(
                 Absent::NotMeasured,
                 "the load window did not run, so no memory reading was taken under load".to_string(),
@@ -910,12 +768,12 @@ impl Metric for Memory {
             ),
         };
 
-        // Take the readings back off the sampler. A poisoned lock means the sampler thread panicked,
-        // which is a lost series and not a reason to lose the scalars beside it.
+        // A poisoned lock means the sampler thread panicked - a lost series, not a reason to lose
+        // the scalars beside it.
         let taken: Vec<crate::stats::Sample> = series.lock().map(|s| s.clone()).unwrap_or_default();
 
-        // RECOVERED: where the curve ends, after the load has been gone for a minute. Taken from the
-        // trailing recovery window rather than the single last reading, so one sample cannot set it.
+        // Recovered: where the curve ends after load has been gone for a minute, taken from the
+        // trailing recovery window (not the single last reading) so one sample can't set it.
         let recovered = {
             let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_MEDIAN_S as f64;
             let tail: Vec<f64> = taken
@@ -925,23 +783,19 @@ impl Metric for Memory {
                 .collect();
             crate::stats::median(&tail)
         };
-        // The plateau verdict, published rather than kept. "Never settled" is a real finding about a
-        // gateway and it must arrive WITH the rate it was climbing at, which is what NotSteady
-        // carries; "we could not tell" stays a third, distinct answer.
-        // The shape rides with the verdict. "Never settled" describes both a gateway climbing without
-        // bound and one oscillating around a level it keeps returning to, and only the first is a
-        // leak - publishing them under one word brands a working garbage collector as a defect.
+        // The plateau verdict is published, carrying the climb rate ("never settled" alone would not
+        // distinguish it from "we could not tell"). The shape rides with it too: "never settled"
+        // covers both unbounded climbing and oscillation around a level, and only the first is a
+        // leak - conflating them would brand a working garbage collector as a defect.
         let mut memory_shape = Measurement::absent_because(
             Absent::NotMeasured,
             "a settled window has no unsettled shape to describe".to_string(),
         );
         let (plateaued, growth) = match &verdict {
-            // STEADY PUBLISHES THE MEASURED SLOPE, NOT A ZERO. This substituted `Measured(0.0)` for the
-            // rate `plateau_check` had just fitted, so a window drifting 0.9% across the minute - inside
-            // `MEMORY_TREND_PCT`, hence steady - published a growth rate of exactly 0.000, and the number
-            // a reader would use to spot a slow leak was a constant a threshold chose. `plateaued` is the
-            // verdict and this is the measurement; the artifact publishes both, and neither is derived
-            // from the other.
+            // Steady publishes the measured slope, never a substituted 0.0: a window drifting 0.9%
+            // (inside `MEMORY_TREND_PCT`, hence steady) still has a real fitted rate a reader could
+            // use to spot a slow leak. `plateaued` is the verdict, this is the measurement - the
+            // artifact publishes both, neither derived from the other.
             crate::stats::Verdict::Steady {
                 growth_rate_mib_per_min,
             } => (Some(true), growth_rate_mib_per_min.clone()),
@@ -952,17 +806,13 @@ impl Metric for Memory {
                 memory_shape = Measurement::Measured(shape_code(*shape));
                 (Some(false), growth_rate_mib_per_min.clone())
             }
-            // THE CAUSE DECIDES THE VARIANT AND THE WORDS, because this arm used to assert one cause
-            // for both. It published `NotMeasured` with "too few readings fell inside the settle
-            // window" - on a FULL window - whenever a non-finite sample made the window unjudgeable,
-            // filing a harness malfunction as a coverage gap and erasing the rig-vs-gateway distinction.
+            // The cause decides the variant and the wording, rather than one hardcoded reason for
+            // every kind of undecidable window (previously filed a harness malfunction as a plain
+            // coverage gap).
             crate::stats::Verdict::Undecidable(cause) => {
-                /* AND THE SHAPE CANNOT CLAIM IT SETTLED EITHER. `memory_shape`'s default reads "a
-                settled window has no unsettled shape to describe", which is right beside `Steady`
-                and wrong beside this: the verdict's whole content is that we could NOT tell
-                whether it settled. These details ride into the board's tooltips verbatim, so the
-                cell said "we could not determine this" on one field and "it settled" on the one
-                next to it, about the same window. */
+                // `memory_shape`'s default ("a settled window has no unsettled shape") is wrong here:
+                // the verdict's whole content is that we could NOT tell whether it settled, so the
+                // shape must say that too rather than implicitly claiming it settled.
                 memory_shape =
                     Measurement::absent_because(cause.absent_kind(), cause.detail("settle window"));
                 (
@@ -971,16 +821,13 @@ impl Metric for Memory {
                 )
             }
         };
-        // THE SAME PLATEAU TEST THE LOAD WINDOW USES, pointed at the idle window. Reusing it rather
-        // than inventing a second rule means "still" means the same thing on both halves of the
-        // curve, and a reader comparing them is comparing like with like.
-        /* NO IDLE WINDOW AT ALL IS NOT A THIN ONE. `idle_series` is only filled on the path where
-        the harness owns the gateway's lifetime and the restart found a fresh tree; on every other
-        path it stays EMPTY because no idle window was ever opened. Both defaults below described
-        a window that ran - "produced too few readings", "a settled idle window" - so a cell that
-        correctly said "the harness does not own this gateway's lifetime" on `memory_idle_mib`
-        published, right beside it, three fields telling two different false stories about a 60s
-        sampling window that never existed. */
+        // The SAME plateau test the load window uses, pointed at the idle window, so "still" means
+        // the same thing on both halves of the curve.
+        //
+        // No idle window at all is NOT the same as a thin one: `idle_series` stays empty whenever no
+        // idle window was opened (any path but the harness-owns-lifetime + fresh-tree one), so the
+        // defaults below must say "never ran" rather than implying a window that ran and produced
+        // too little.
         let no_idle_window = idle_series.is_empty();
         let never_ran =
             "no idle window was opened for this cell, so nothing was sampled - which is \
@@ -1007,17 +854,15 @@ impl Metric for Memory {
                 Measurement::absent_because(Absent::NotMeasured, why),
             )
         } else {
-            // The verdict CARRIES the rate, so "it moved" can never be published without saying how
-            // fast - that coupling is the enum's own design and this reuses it rather than computing
-            // a second, independently-derived number beside it.
+            // The verdict carries the rate, so "it moved" can never publish without saying how fast.
             match crate::stats::plateau_check(
                 &idle_series,
                 MEMORY_IDLE_S as f64,
                 MEMORY_TREND_PCT,
                 MEMORY_RANGE_PCT,
             ) {
-                // Same fix as the load window above: the flag is the verdict, the rate is the
-                // measurement, and a steady idle window still has a fitted slope worth publishing.
+                // Same fix as the load window above: a steady idle window still has a fitted slope
+                // worth publishing rather than a substituted zero.
                 crate::stats::Verdict::Steady {
                     growth_rate_mib_per_min,
                 } => (Measurement::Measured(1.0), growth_rate_mib_per_min),
@@ -1028,8 +873,6 @@ impl Metric for Memory {
                     idle_shape = Measurement::Measured(shape_code(shape));
                     (Measurement::Measured(0.0), growth_rate_mib_per_min)
                 }
-                // Same fix as the load window above: this sibling carried the identical false reason,
-                // and `plateau_check` was changed once while neither of its two consumers was read.
                 crate::stats::Verdict::Undecidable(cause) => {
                     let why = cause.detail(&format!("{MEMORY_IDLE_S}s idle window"));
                     (
@@ -1081,15 +924,9 @@ impl Metric for Memory {
                         Some(t) => Measurement::Measured(t as f64),
                         None => Measurement::absent_because(
                             Absent::NotMeasured,
-                            // Reason strings ride into the board's tooltips verbatim, so this one states
-                            // what the window measured and stops there - no verdict on the gateway.
-                            //
-                            // AND IT NAMES THE SHAPE, because "no steady state" describes two opposite
-                            // gateways. busbar openai>openai ends the window at -0.43 MiB/min - still
-                            // RELEASING memory - and read identically to one still climbing. `Shape`
-                            // already exists for exactly this ("the opposite of a leak, and it must
-                            // never be labelled as one") and was being discarded one line before the
-                            // sentence a reader actually sees.
+                            // Reason strings ride into the board's tooltips verbatim, and this one
+                            // names the SHAPE: "no steady state" alone reads the same for a gateway
+                            // still climbing as for one still releasing memory, which are opposites.
                             no_plateau_detail(&verdict),
                         ),
                     },
@@ -1102,35 +939,26 @@ impl Metric for Memory {
 
 /// How long a streaming probe waits, and how many frames it reads.
 ///
-/// Public because the CONCURRENT stream windows (`run::stream_window`, behind the two groups at the
-/// bottom of this file) must read a stream exactly the way the c=1 probe here does. Two readers with
-/// two budgets would measure two different stream lengths and publish the difference as a property of
-/// the gateway.
+/// Public because the CONCURRENT stream windows (`run::stream_window`, behind the two groups below)
+/// must read a stream exactly the way the c=1 probe here does - two readers with two budgets would
+/// measure two different stream lengths and publish the difference as a gateway property.
 pub const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 pub const STREAM_FRAME_BUDGET: usize = 64;
 
 /// The hard ceiling on TOTAL SSE events a delivery-budgeted read will spend (`http::SseBudget`).
 ///
-/// A read budgeted in CONTENT frames stops when the tokens arrive, so something else has to stop it
-/// when they do not: a peer emitting nothing but `ping`s would otherwise be bounded only by
-/// `STREAM_TIMEOUT`, and twenty seconds per lane at high concurrency is a search that never returns.
-///
-/// 4x the frame budget, which is 256 events for the 63 content frames an openai lane wants. That is
-/// room for THREE framing events per token - far past anything a real protocol does (the mock spends
-/// 3 events on openai framing and 5 on anthropic, in TOTAL, and a ping-heavy gateway adds one event
-/// per keepalive interval) while still bounding the read at a fixed cost. Generous on purpose: the
-/// ceiling exists to stop a pathological peer, not to judge a gateway's framing style, and a ceiling
-/// tight enough to bind on a real stream would be the constant-denominator defect again in another
-/// shape.
+/// A read budgeted in content frames stops when the tokens arrive, so a peer emitting nothing but
+/// `ping`s needs a separate bound or it's only limited by `STREAM_TIMEOUT` - too slow to search at
+/// high concurrency. 4x the frame budget gives room for three framing events per token, generous
+/// past anything a real protocol does, since the ceiling exists to stop a pathological peer, not to
+/// judge a gateway's framing style.
 pub const STREAM_EVENT_CEILING: usize = 4 * STREAM_FRAME_BUDGET;
 
-/// How many single-token streams the TTFT distribution is taken over, per leg.
-///
-/// A percentile needs samples, and one stream yields exactly one time-to-first-token - which is why
-/// `added_ttft_p99_us` was absent on every cell ever published rather than measured. 100 is the
-/// smallest sample where a 99th percentile is a real order statistic rather than a restatement of
-/// the maximum, and it is affordable because a TTFT sample reads ONE frame and stops: milliseconds
-/// each, not the ~1.3s a full paced stream takes.
+/// How many single-token streams the TTFT distribution is taken over, per leg. A percentile needs
+/// samples - one stream yields exactly one time-to-first-token. 100 is the smallest sample where a
+/// 99th percentile is a real order statistic rather than a restatement of the max, and it's
+/// affordable since a TTFT sample reads ONE frame and stops (milliseconds, not the ~1.3s a full
+/// paced stream takes).
 pub const STREAM_TTFT_SAMPLES: usize = 100;
 
 /// Streaming: what the gateway ADDS to a stream, rather than what the stream costs.
@@ -1140,11 +968,9 @@ pub const STREAM_TTFT_SAMPLES: usize = 100;
 /// to first token is a property of the rig and would otherwise be charged to whichever gateway
 /// happened to be measured on a slow box.
 ///
-/// A dialect the MOCK cannot stream is a rig limit, not a gateway failure. `Dialect::streams_natively`
-/// already records which two dialects the mock answers with real SSE frames, and its comment is
-/// explicit that a dialect it returns false for must be reported as the rig being unable to pose the
-/// question. Publishing a gateway as "does not stream" because our mock cannot ask is the exact
-/// harness-bug-as-gateway-property inversion the project forbids.
+/// A dialect the MOCK cannot stream is a rig limit, not a gateway failure: `Dialect::streams_natively`
+/// records which dialects the mock answers with real SSE frames, and a `false` there must be reported
+/// as the rig being unable to pose the question rather than the gateway failing to stream.
 pub struct Streaming;
 
 impl Metric for Streaming {
@@ -1153,10 +979,7 @@ impl Metric for Streaming {
     }
 
     /// The last two are surface-only, feeding `CellStream.stream_c1_note` rather than a published
-    /// number of their own, for the same reason `AddedLatency` carries its sample counts: this group
-    /// takes ONE stream per leg, and how many frames each leg actually produced is the difference
-    /// between a gap p50 over sixty-odd intervals and one over two. Nothing else in the artifact
-    /// records it, and it comes from the same two streams the differences do.
+    /// number: how many frames each leg produced from the one stream per leg this group takes.
     fn fields(&self) -> &'static [&'static str] {
         &[
             "added_ttft_p50_us",
@@ -1165,12 +988,9 @@ impl Metric for Streaming {
             "added_gap_p99_us",
             "gateway_c1_frames",
             "direct_c1_frames",
-            // HOW MANY TTFT PROBES SURVIVED, per leg. The percentiles above are taken over whatever
-            // came back out of `STREAM_TTFT_SAMPLES` attempts, and a failed probe was dropped inside a
-            // `filter_map` - so a p99 over three lucky samples published identically to one over a
-            // hundred, and with a single survivor the p50 and p99 ranks collapse to the same index and
-            // the pair reads as coherent. `AddedLatency` publishes `gateway_c1_samples` and
-            // `direct_c1_samples` for exactly this reason; the streaming group stated no weight at all.
+            // How many TTFT probes survived, per leg. A failed probe is dropped inside `filter_map`,
+            // so without this a p99 over three lucky samples would publish identically to one over a
+            // hundred, with no way for a reader to tell the weight behind it.
             "ttft_gw_samples",
             "ttft_direct_samples",
         ]
@@ -1194,17 +1014,14 @@ impl Metric for Streaming {
             ));
         }
 
-        // THE HEADER SHAPE IS THE DIALECT'S, NOT A HARDCODED BEARER. This was
-        // `authorization: Bearer <auth>` for every dialect, which is the wrong header NAME for two of
-        // the six (anthropic sends `x-api-key` plus a mandatory version header, gemini sends
-        // `x-goog-api-key`), so those two rows' streaming legs were driven unauthenticated and their
-        // 401s read as the gateway not streaming. The gateway leg additionally carries whatever
-        // routing headers the manifest needs to select this egress column, exactly as the probe does;
-        // the direct leg carries the dialect's own auth and nothing else, because routing headers
-        // select an upstream INSIDE a gateway and mean nothing to the mock.
+        // The header shape is the dialect's, not a hardcoded bearer: anthropic sends `x-api-key` plus
+        // a version header, gemini sends `x-goog-api-key`, so a fixed `authorization: Bearer` header
+        // would 401 those legs and read as "does not stream". The gateway leg additionally carries
+        // whatever routing headers the manifest needs to select this egress column; the direct leg
+        // carries only the dialect's own auth, since routing headers mean nothing to the mock.
         let gw_headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let direct_headers = ctx.dialect.auth_headers(&ctx.cfg.auth);
-        // The cell's own model (run::model_for): a fixed model would stream against the wrong
+        // The cell's own model (`run::model_for`): a fixed model would stream against the wrong
         // upstream on any model-routed gateway's translation cell.
         let model = crate::run::model_for(ctx.cfg, &ctx.id.egress);
         let body = ctx.dialect.stream_body(&model);
@@ -1247,30 +1064,22 @@ impl Metric for Streaming {
         };
 
         // The two legs above are read only to PROVE a stream arrives on each: the published TTFT
-        // figures come from the sample set below, because one observation cannot carry a percentile
-        // and a p50 from one stream beside a p99 from a hundred is two populations wearing one name.
+        // figures come from the sample set below, since one observation cannot carry a percentile -
+        // a p50 from one stream beside a p99 from a hundred is two populations wearing one name.
         let _ = (gw_ttft, direct_ttft);
 
-        // A TTFT DISTRIBUTION, because a column that can never hold a number should either be
-        // measured or deleted.
+        // A TTFT distribution, not a single sample: one stream yields exactly one
+        // time-to-first-token, so a real p99 needs `STREAM_TTFT_SAMPLES` streams.
         //
-        // `added_ttft_p99_us` was absent on all 69 served cells of the 2026-07-28 run, suppressed
-        // with "one stream was taken, which cannot support a 99th percentile". That was true and it
-        // was not a reason to keep publishing the field: one stream yields exactly one
-        // time-to-first-token, so the fix is more streams, not a better excuse.
-        //
-        // It is cheap, which is the part I had wrong when I called it a cost decision. A TTFT sample
-        // does not need the whole stream - `post_json_sse` takes a frame budget, and a budget of ONE
-        // returns on the first EVENT. Not the first token: `SseBudget::Events(1)` counts events, and a
-        // dialect that opens with scaffolding (openai sends a role delta, anthropic a `message_start`)
-        // satisfies it before any content arrives. What this measures is therefore time-to-first-EVENT,
-        // which is the honest name for it - and it is the same quantity on both legs, so the difference
-        // still isolates what the gateway added. That is milliseconds, not the ~1.3s a full
-        // 64-frame paced stream takes. `STREAM_TTFT_SAMPLES` of them per leg is well under a second.
+        // Cheap because it does not need the whole stream: `post_json_sse` with a frame budget of ONE
+        // returns on the first EVENT (`SseBudget::Events(1)`), not the first content token - a dialect
+        // that opens with scaffolding (openai's role delta, anthropic's `message_start`) satisfies it
+        // before content arrives. This measures time-to-first-EVENT, the same quantity on both legs,
+        // so the difference still isolates what the gateway added; milliseconds per sample rather
+        // than the ~1.3s a full 64-frame paced stream takes.
         //
         // Percentile per leg, THEN differenced - the same shape `AddedLatency` publishes for the
-        // non-streaming case - so the two "added" families mean the same thing rather than two
-        // things sharing a name.
+        // non-streaming case - so the two "added" families mean the same thing.
         let ttft_samples =
             |addr: std::net::SocketAddr, path: &str, headers: &[(String, String)]| -> Vec<u64> {
                 (0..STREAM_TTFT_SAMPLES)
@@ -1294,9 +1103,8 @@ impl Metric for Streaming {
         let direct_path = ctx.dialect.mock_direct_path(&model);
         let mut gw_ttfts = ttft_samples(ctx.cfg.gateway_addr, &gw_path, &gw_headers);
         let mut direct_ttfts = ttft_samples(ctx.cfg.mock_addr, &direct_path, &direct_headers);
-        // LOSS IS REPORTED, not merely counted. A leg that sheds most of its probes still produces a
-        // publishable percentile, so the count below is what lets a reader weigh it - and a large loss
-        // is worth a line on stderr while the run is still happening.
+        // Loss is reported, not merely counted: a leg shedding most of its probes still produces a
+        // publishable percentile, and a large loss is worth a line on stderr while the run happens.
         for (leg, got) in [("gateway", gw_ttfts.len()), ("direct", direct_ttfts.len())] {
             if got < STREAM_TTFT_SAMPLES {
                 eprintln!(
@@ -1309,34 +1117,24 @@ impl Metric for Streaming {
         let direct_n = direct_ttfts.len() as f64;
         gw_ttfts.sort_unstable();
         direct_ttfts.sort_unstable();
-        // The rank comes from `stats::nearest_rank_index`, the engine's ONE percentile convention,
-        // rather than being spelled out again here. Ledger SRCH-04: this expression used to carry
-        // its own ceil while `gen.rs`, `stats.rs` and `search.rs` each carried their own floor, and
-        // the comments here claimed all four agreed. Over the 100 samples this leg takes they
-        // disagree by a rank on every percentile whose `n * p` is a whole number.
+        // The rank comes from `stats::nearest_rank_index`, the engine's ONE percentile convention
+        // (ledger SRCH-04: this used to reimplement its own ceil while other modules used floor,
+        // disagreeing by a rank on every percentile whose `n * p` is a whole number).
         let ttft_pct = |v: &[u64], pct: f64| -> Option<f64> {
             if v.is_empty() {
                 return None;
             }
             Some(v[crate::stats::nearest_rank_index(v.len(), pct)] as f64)
         };
-        // BOTH PERCENTILES COME FROM THE SAME SAMPLES, or they are not percentiles of one thing.
-        //
-        // The first version of this took p99 from the sample set and left p50 as the single full
-        // stream measured above. The 2026-07-28 validation run showed exactly what that produces:
-        // every cell published a p99 BELOW its p50 (523/428, 514/451, 501/359), which no percentile
-        // pair over one distribution can do. Two populations wearing one name.
-        //
-        // The sample set is the distribution now, for both. It is also the better one: 100 samples
-        // per leg against the single stream the p50 used to come from.
+        // Both percentiles come from the SAME samples, or they are not percentiles of one thing: an
+        // earlier version took p99 from the sample set but left p50 as the single stream measured
+        // above, which could (and did) publish a p99 below its own p50.
         let added_ttft_at = |pct: f64| {
             match (ttft_pct(&gw_ttfts, pct), ttft_pct(&direct_ttfts, pct)) {
             (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
             // A gateway cannot be faster than the upstream it proxies, so a negative difference is
-            // noise - and saying so beats clamping it to a zero that claims the gateway added
-            // nothing measurable. Same rule as the gap percentiles above. `BelowResolution`, not
-            // `NotMeasured`: this is the comparison's best possible outcome, and the site renders
-            // the two apart.
+            // rig noise. `BelowResolution`, not `NotMeasured`: this is the comparison's best possible
+            // outcome, and the site renders the two apart from a clamped-zero claim of no added cost.
             (Some(g), Some(d)) => Measurement::absent_because(
                 Absent::BelowResolution,
                 format!(
@@ -1367,21 +1165,12 @@ impl Metric for Streaming {
             gap_percentile_us(&o.frame_offsets_us, pct)
         };
 
-        // Percentile per leg, THEN difference - the same shape `AddedLatency` publishes
-        // (`gateway_c1_p99_us` minus `direct_c1_p99_us`), so the streaming and non-streaming added
-        // figures mean the same thing rather than two things with one name.
-        // A NEGATIVE RAW DIFFERENCE IS BELOW RESOLUTION, NOT A MEASURED ZERO.
-        //
-        // Both legs carry the mock's ~20ms pacing, so this extracts a microsecond-scale signal by
-        // differencing two ~20,000us numbers. When the gateway's own tail at a percentile lands under
-        // the mock's, the raw difference is negative - physically impossible for a proxy, so it is
-        // noise. Clamping that to 0 publishes "the gateway added nothing" with a precision this rig
-        // does not have, and it produced incoherent pairs in the 2026-07-28 run: aisix p50=4 p99=0,
-        // helicone p50=3 p99=0, plano p50=1 p99=0, tensorzero p50=1 p99=0. A p99 below its own p50
-        // cannot come from one distribution.
-        //
-        // Absent with the reason instead. "Too small for this rig to see" is a different statement
-        // from "zero", and only one of them is true.
+        // Percentile per leg, THEN difference - same shape as `AddedLatency`'s
+        // `gateway_c1_p99_us`/`direct_c1_p99_us`, so streaming and non-streaming "added" figures mean
+        // the same thing. A negative raw difference is below-resolution rig noise, not a measured
+        // zero: both legs carry the mock's ~20ms pacing, so this extracts a microsecond signal by
+        // differencing two ~20,000us numbers, and a proxy cannot legitimately beat its own upstream.
+        // Clamping to 0 would claim a precision this rig doesn't have.
         let added_gap_at = |pct: f64| {
             match (gap_pct(&through_gateway, pct), gap_pct(&direct, pct)) {
             (Some(g), Some(d)) if g >= d => Measurement::Measured(g - d),
@@ -1402,9 +1191,6 @@ impl Metric for Streaming {
         };
 
         let fields: Filled = vec![
-            // The single-stream `added_ttft` is no longer published as the p50: it was one
-            // observation, and the p99 beside it came from a hundred. It stays computed above
-            // because the early-return path uses the same frames to prove a stream arrived at all.
             ("added_ttft_p50_us", added_ttft_p50),
             ("added_ttft_p99_us", added_ttft_p99),
             ("added_gap_p50_us", added_gap_at(0.50)),
@@ -1417,9 +1203,8 @@ impl Metric for Streaming {
                 "direct_c1_frames",
                 Measurement::Measured(direct.frame_offsets_us.len() as f64),
             ),
-            // The weight behind the two added-TTFT percentiles above. Always MEASURED, including when
-            // it is zero: "no probe came back" is a fact about this cell, and an absence here would be
-            // the one number a reader needs to judge the percentiles going missing itself.
+            // Always MEASURED, even at zero: "no probe came back" is itself the fact a reader needs
+            // to judge the percentiles going missing.
             ("ttft_gw_samples", Measurement::Measured(gw_n)),
             ("ttft_direct_samples", Measurement::Measured(direct_n)),
         ];
@@ -1430,36 +1215,27 @@ impl Metric for Streaming {
 /// Added latency: what the gateway adds to a single request's round trip at concurrency 1, over the
 /// same request taken straight to the mock.
 ///
-/// ONE PAIRED COMPARISON, TWO NUMBERS PLUS THEIR OWN RAW READINGS - which is why this is a group
-/// rather than two: `added_latency_p99_us` and `gateway_c1_p99_us`/`direct_c1_p99_us` come from the
-/// SAME two windows, and re-running either leg to fill a field the other group forgot would put the
-/// difference and its own operands on two different populations, exactly the defect this file's
-/// module doc names for peak-and-concurrency.
+/// One group, not two: `added_latency_p99_us` and `gateway_c1_p99_us`/`direct_c1_p99_us` come from
+/// the SAME two windows, and re-running either leg to fill a field the other forgot would put the
+/// difference and its own operands on two different populations.
 ///
-/// Concurrency 1 on purpose: throughput is what a gateway does under load, but added latency is
-/// asking a narrower question - what does ONE request cost, with nothing else contending for the
-/// gateway's attention - and any concurrency above 1 reintroduces queueing delay into a number that
-/// is supposed to isolate the gateway's own per-request overhead.
+/// Concurrency 1 on purpose: added latency asks what ONE request costs with nothing else contending
+/// for the gateway; any higher concurrency reintroduces queueing delay into a number meant to
+/// isolate per-request overhead.
 pub struct AddedLatency;
 
-/// Whether a c=1 window's own reading may be trusted as a leg of the added-latency comparison: it
-/// produced at least one success, and did so with no failure. A window that mixed successes and
-/// failures is not "what this leg costs", it is a window neither leg completed cleanly - the same
-/// clean-window bar `SweepProbe` uses for a throughput rung (`fail == 0 && ok > 0`). A free function,
-/// like `run::sustained_gate_passes`, so the boundary can be pinned directly without a subprocess
-/// load window behind it.
+/// Whether a c=1 window's own reading may be trusted as a leg of the comparison: at least one
+/// success and zero failures - the same clean-window bar `SweepProbe` uses for a throughput rung.
+/// A free function so the boundary can be pinned directly without a subprocess load window behind it.
 fn clean_c1_leg(ok: u64, fail: u64) -> bool {
     ok > 0 && fail == 0
 }
 
-/// The added-latency difference itself: the gateway leg's reading minus the direct-to-mock leg's, at
-/// microsecond resolution. A gateway cannot legitimately answer faster than the upstream it proxies -
-/// a negative raw difference is rig noise (two separate processes, two separate windows, run one
-/// after the other on a real box), and publishing it as a negative added latency would claim the
-/// gateway returned a response before the mock itself had produced one, which a proxy cannot do.
-/// `BelowResolution` rather than a clamped 0, the SAME rule as `Streaming::measure`'s `added_ttft`
-/// and `added_gap`: all six published differences say "too small for this rig to see" the same way,
-/// instead of two of them claiming a measured zero with a precision the rig does not have.
+/// The added-latency difference: gateway leg minus direct-to-mock leg, at microsecond resolution.
+/// A gateway cannot legitimately answer faster than the upstream it proxies, so a negative raw
+/// difference is rig noise (two separate processes/windows on a real box). `BelowResolution` rather
+/// than a clamped 0 - the SAME rule as `Streaming::measure`'s `added_ttft`/`added_gap` - so all six
+/// published differences say "too small to see" the same way instead of claiming a false precision.
 fn added_latency_diff(gateway_us: u64, direct_us: u64) -> Measurement<f64> {
     if gateway_us >= direct_us {
         Measurement::Measured((gateway_us - direct_us) as f64)
@@ -1480,14 +1256,11 @@ impl Metric for AddedLatency {
         "added_latency"
     }
 
-    /// The last two are NOT published as their own artifact numbers. They exist because
-    /// `CellPerf.c1_note` is an advisory string about these very legs, and the only thing worth
-    /// saying there is HOW MANY round trips each p99 was computed over: a p99 taken across four
-    /// thousand samples and one taken across eleven are the same field with wildly different weight,
-    /// and nothing else in the artifact says which this is. They ride the metric surface rather than
-    /// being recomputed in `suite.rs`, because the counts belong to the SAME two windows the
-    /// percentiles came from, and a second pair of windows to count them would be the two-populations
-    /// defect this file's module doc names.
+    /// The last two are NOT published as their own artifact numbers - they feed `CellPerf.c1_note`,
+    /// saying HOW MANY round trips each p99 was computed over (a p99 across four thousand samples and
+    /// one across eleven are wildly different weight for the same field name). They ride the metric
+    /// surface rather than being recomputed in `suite.rs` since the counts belong to the SAME windows
+    /// the percentiles came from.
     fn fields(&self) -> &'static [&'static str] {
         &[
             "added_latency_p50_us",
@@ -1514,28 +1287,21 @@ impl Metric for AddedLatency {
             f.into()
         };
 
-        // The cell's own model on BOTH legs (run::model_for): the gateway leg must reach this
+        // The cell's own model on BOTH legs (`run::model_for`): the gateway leg must reach this
         // cell's upstream, and the direct leg must ask the mock the same question.
         let model = crate::run::model_for(ctx.cfg, &ctx.id.egress);
         let body = ctx.dialect.body(&model);
         let gw_path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let direct_path = ctx.dialect.mock_direct_path(&model);
 
-        // THE SAME DURATION EVERY OTHER WINDOW IN THIS ENGINE USES, not a second magic number.
+        // The same duration every other window in this engine uses (`cfg.sweep_duration_s`), rather
+        // than a second magic number - one knob for "how long is a load window" instead of two that
+        // can silently drift apart. At c=1 the sample count is duration/RTT rather than
+        // duration*concurrency, but still comfortably hundreds to low thousands of samples.
         //
-        // At concurrency 1 a window's sample count is duration / round-trip-time rather than
-        // duration * concurrency, so it is naturally smaller than a saturating sweep window's - but
-        // `cfg.sweep_duration_s` is already sized to run a 36-cell grid across 13 gateways in a
-        // reasonable box-time (6s in production, per `bin/otb.rs`'s default), and 6 seconds of
-        // serial round trips against anything answering in single-digit milliseconds - every dialect
-        // this rig drives - is hundreds to low thousands of samples, comfortably enough for a stable
-        // p99. Reusing the constant that already governs every other window keeps one knob for "how
-        // long is a load window" rather than two that can silently drift apart.
-        // THE TWO LEGS AUTHENTICATE DIFFERENTLY, ON PURPOSE. The gateway leg carries everything the
-        // probe carried, including whatever routing headers the manifest needs to select this egress
-        // column. The direct leg carries the DIALECT's own auth shape and nothing else: routing
-        // headers select an upstream INSIDE a gateway and mean nothing to the mock, exactly as
-        // `mock_healthy` already reasons about its own request.
+        // The two legs authenticate differently on purpose: the gateway leg carries whatever routing
+        // headers the manifest needs to select this egress column; the direct leg carries only the
+        // dialect's own auth, since routing headers mean nothing to the mock.
         let gw_headers = crate::run::headers_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
         let direct_headers = ctx.dialect.auth_headers(&ctx.cfg.auth);
         let gw = crate::run::load_window(ctx.cfg, &gw_path, &body, &gw_headers, 1);
@@ -1554,10 +1320,10 @@ impl Metric for AddedLatency {
                     .to_string(),
             );
         };
-        // A LEG WITH ANY FAILURE IS NOT A LATENCY READING OF THAT LEG. The counts publish in the
-        // detail because they ARE the finding when everything failed - the site renders "failed -
-        // 0/14201 ok" off exactly this sentence - and the budget-exceeded share separates "the
-        // gateway refused" from "the response outran a bound of ours".
+        // A leg with any failure is not a latency reading of that leg. The counts publish in the
+        // detail since they ARE the finding when everything failed (the site renders "failed -
+        // 0/14201 ok" from this sentence), and the budget-exceeded share separates a gateway refusal
+        // from a response outrunning a bound of ours.
         let not_clean = |leg: &str, s: &crate::gen::GenStats| {
             let budget = if s.budget_exceeded > 0 {
                 format!(
@@ -1597,8 +1363,7 @@ impl Metric for AddedLatency {
             ("added_latency_p99_us", added_p99),
             ("gateway_c1_p99_us", Measurement::Measured(gw_p99 as f64)),
             ("direct_c1_p99_us", Measurement::Measured(direct_p99 as f64)),
-            // The successful round trips behind each percentile. Both legs are already known clean
-            // here (`clean_c1_leg` above returned true for each), so `ok` IS the sample count.
+            // Both legs are already known clean (`clean_c1_leg` returned true), so `ok` IS the count.
             ("gateway_c1_samples", Measurement::Measured(gw.ok as f64)),
             ("direct_c1_samples", Measurement::Measured(direct.ok as f64)),
         ];
@@ -1606,45 +1371,20 @@ impl Metric for AddedLatency {
     }
 }
 
-// SUSTAINED THROUGHPUT WAS A METRIC GROUP AND IS NOT ONE ANY MORE.
-//
-// It measured the highest concurrency holding p99 under a fixed ceiling with errors under 0.1%, and
-// the rate it sustained there. The FRONTIER replaced it: rather than one scalar under one chosen
-// ceiling, the board now publishes a reading at each declared bound, so "how much can it carry under
-// a tail I accept" is answered across the whole axis instead of at a single point somebody picked.
-//
-// The struct outlived the group. `pub struct SustainedThroughput;` sat here with a full doc comment
-// describing a live bisection search, no `impl Metric` anywhere in the crate, and no entry in
-// `METRICS` - and this file's own module doc says "a metric is in `METRICS` or it does not exist".
-// Its doc also cited `search::saturation_plateau`, which is itself deleted. A test comment further
-// down claimed the struct HAD been added to `METRICS`, so a reader had two mutually-contradicting
-// statements and neither matched the list six lines from the top of the file.
-//
-// Deleted rather than left inert: an unreachable metric group with authoritative-sounding
-// documentation is worse than no documentation, because it reads as a description of what runs.
+// Sustained throughput was a metric group and is not one any more: it measured the highest
+// concurrency holding p99 under a fixed ceiling with errors under 0.1%. The FRONTIER replaced it -
+// rather than one scalar under one chosen ceiling, the board publishes a reading at each declared
+// bound. The struct itself (`SustainedThroughput`, with no `impl Metric` and no `METRICS` entry) was
+// deleted rather than left inert: unreachable documentation reads as a description of what runs.
 
 // ── the two concurrent-stream groups ──────────────────────────────────────────────────────────────
 //
-// WHY TWO GROUPS AND NOT ONE, decided by this file's own rule: numbers from ONE search share a group,
-// numbers from SEPARATE searches do not.
-//
-// `streams_sustained` and `streams_sustained_fps` come from one `bisect_ceiling` over a monotone
-// pass/fail gate (the README's "99.9% of expected frames, no stall past 2x the pace, under 0.1%
-// stream errors"), and the frames/sec is read straight off the winning rung of that same bisection -
-// so they are one group for the same reason `Throughput`'s peak and its concurrency are: two numbers
-// off ONE search.
-//
-// THE SECOND GROUP IS GONE, AND SO IS THE FUNCTION THIS PARAGRAPH USED TO NAME. It said `cpu_fps` and
-// `cpu_fps_concurrency` "come from a `saturation_plateau` over a saturating curve" - present tense,
-// about a metric that was RETIRED (of the 16 cells publishing both it and `streams_sustained_fps`, 4
-// had it inverted below the proven delivery boundary, 5 were redundant within 1%, and 7 were measured
-// at a concurrency where the delivery gate did not hold) and a search function that has since been
-// deleted outright. Two dead things described as live, in one sentence.
-//
-// The RULE it was illustrating still stands and is why this note survives at all: numbers from ONE
-// search share a group, numbers from SEPARATE searches do not. Folding two searches into one group
-// means either running the wrong algorithm for some of the numbers or running two searches and
-// calling it one - the two failure modes the module doc names.
+// Two groups, not one, per this file's rule: numbers from ONE search share a group, numbers from
+// SEPARATE searches do not. `streams_sustained`/`streams_sustained_fps` come from one
+// `bisect_ceiling` over a monotone pass/fail gate, so they're one group like `Throughput`'s peak and
+// its concurrency. A second group (`cpu_fps`, over a `saturation_plateau` search) was retired: 4 of
+// 16 cells had it inverted below the proven delivery boundary, 5 were redundant, 7 were measured
+// where the delivery gate did not hold, and the search function is now deleted.
 //
 // Sharing a window driver (`run::stream_window`) is NOT sharing a search: sharing the instrument is
 // what makes numbers comparable, sharing a search is what makes them one population.
@@ -1653,15 +1393,12 @@ impl Metric for AddedLatency {
 ///
 /// A stream carrying `STREAM_FRAME_BUDGET` frames yields that many gaps minus one, so a gap
 /// percentile is a real distribution even from a single stream - unlike time-to-first-token, of
-/// which a stream produces exactly one. Conflating those two is what left `added_gap_p99_us` absent
-/// on all 69 served cells of the 2026-07-28 run while charts.py drew a chart from it.
+/// which a stream produces exactly one.
 ///
 /// Nearest-rank through `stats::nearest_rank_index`, the engine's single percentile convention, so a
-/// published percentile is always a gap some pair of frames actually produced rather than an
-/// interpolation between two that neither did - and so it means the same thing as the load
-/// generator's p99 it is published beside, which it did not before ledger SRCH-04 was closed.
-/// `None` when there is no gap at all: a single frame has no inter-frame time, and a zero there
-/// would read as instant delivery.
+/// published percentile is always a gap some pair of frames actually produced, never an
+/// interpolation. `None` when there is no gap at all: a single frame has no inter-frame time, and a
+/// zero there would read as instant delivery.
 fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
     let mut gaps: Vec<u64> = frame_offsets_us
         .windows(2)
@@ -1674,44 +1411,33 @@ fn gap_percentile_us(frame_offsets_us: &[u64], pct: f64) -> Option<f64> {
     Some(gaps[crate::stats::nearest_rank_index(gaps.len(), pct)] as f64)
 }
 
-// THE STREAM SEARCHES TAKE THE ENGINE'S FULL CEILING, like the throughput searches always did.
-//
-// They used to be clamped to their own lower bound and a helper relabelled anything that hit it as
-// the rig's limit rather than the gateway's. Both are gone: `run::stream_window` drives one tokio
-// task per lane now instead of one OS thread, so the reason for the clamp - 65536 threads being
-// scheduler thrashing rather than a bigger gateway - no longer exists. Honest labelling of our own
-// ceiling was the right thing while the ceiling was real; removing the ceiling is better.
+// The stream searches take the engine's full ceiling, like the throughput searches always did:
+// `run::stream_window` drives one tokio task per lane instead of one OS thread, so the old clamp to
+// avoid 65536-thread scheduler thrashing no longer applies.
 
-/// WHICH SIDE OF THE CELL CANNOT BE STREAMED, if either.
+/// Which side of the cell cannot be streamed, if either.
 ///
 /// The frames come from the MOCK, standing in for the upstream, so a cell can only be streamed when
-/// BOTH ends can carry one: the ingress dialect has to be posable as a stream, and the egress
-/// upstream has to answer with real SSE frames. Only openai and anthropic do
-/// (`Dialect::streams_natively`, which mirrors the mock's own dispatch).
+/// BOTH ends can carry one: the ingress dialect must be posable as a stream, and the egress upstream
+/// must answer with real SSE frames. Only openai and anthropic do (`Dialect::streams_natively`).
 ///
-/// Guarding on the ingress alone - which all three stream groups did - checks the wrong end. In the
-/// 2026-07-28 field run 20 served cells were ingress openai or anthropic (so the guard let them
-/// through) with egress bedrock, cohere or gemini (so the mock produced no frames at all). Every
-/// window came back `stream_errors == streams, frames: 0` at every concurrency from 1 to 4096, and
-/// the cells published "no concurrency from 1 to 4096 passed the gate": our own rig limit, written
-/// down as the gateway failing to stream. That is the harness-bug-as-gateway-property inversion this
-/// module's own doc forbids, and the untestable branch to state it correctly already existed.
+/// Guarding on the ingress alone checks the wrong end: an ingress that streams paired with an egress
+/// that doesn't (e.g. bedrock/cohere/gemini) makes the mock produce zero frames at every concurrency,
+/// which reads as the gateway failing to stream when it is actually a rig limit.
 fn stream_blocked_by(ctx: &CellCtx<'_>) -> Option<String> {
     if !ctx.dialect.streams_natively() {
         return Some(ctx.dialect.as_str().to_string());
     }
-    // An egress the mock cannot stream blocks the cell just as completely, and it is the end the
-    // frames actually come from. An egress that does not parse as a dialect is left alone: the
-    // measurement below will say what it found rather than this guessing on its behalf.
+    // An egress the mock cannot stream blocks the cell just as completely - it's the end the frames
+    // actually come from. An egress that does not parse as a dialect is left alone.
     match ctx.id.egress.parse::<crate::ingress::Dialect>() {
         Ok(eg) if !eg.streams_natively() => Some(eg.as_str().to_string()),
         _ => None,
     }
 }
 
-/// A dialect the mock cannot stream is a rig limit, not a gateway failure - the same fact
-/// `Streaming::measure` opens with, and it must be stated identically here or the same rig limit
-/// would be published two different ways in one cell.
+/// A dialect the mock cannot stream is a rig limit, not a gateway failure - must be stated
+/// identically to `Streaming::measure`'s opening fact, or the same rig limit is published two ways.
 fn stream_untestable_named(side: &str) -> Measurement<f64> {
     Measurement::absent_because(
         Absent::Untestable,
@@ -1751,21 +1477,10 @@ impl Metric for StreamsSustained {
             Some(v) => Measurement::Measured(*v),
             None => carry(&found.fps),
         };
-        /* THE HEADLINE FIELD KEEPS ITS EVIDENCE. `fps` goes through `carry`, which preserves the
-        detail; this used bare `absent()`, which drops it - so the rate published
-        "still passing at the top of the range (4096)" while `streams_sustained`, the field this
-        group is NAMED after, published a bare token with nothing to re-derive it from. The
-        reader got the explanation on the sibling and a shrug on the number they came for.
-
-        It also prefers the CONCURRENCY's own reason now. Mirroring the rate's was only correct
-        while the two could not disagree; if the search ever resolves a rate without a
-        concurrency, the old code discarded whatever the concurrency actually said and published
-        `not_measured` over it.
-
-        (The comment that stood here cited `Throughput`'s concurrency field as precedent. That
-        field does not exist - `Throughput::fields()` returns `&[]` - and where `Throughput` does
-        carry an absence it uses `carry_i`, which preserves the detail, i.e. the opposite of what
-        this code did.) */
+        // The headline field keeps its evidence: `fps` goes through `carry`, which preserves the
+        // detail, so `streams_sustained` (the field this group is named after) doesn't publish a
+        // bare token while its sibling `fps` gets an explanation. Also prefers the CONCURRENCY's own
+        // reason where it has one, rather than always mirroring the rate's.
         let conc = match found.concurrency.value() {
             Some(c) => Measurement::Measured(f64::from(*c)),
             None => match (
@@ -1793,32 +1508,27 @@ impl Metric for StreamsSustained {
     }
 }
 
-/// WHAT THE CELL COST, at one concurrency shared by every gateway.
+/// What the cell cost, at one concurrency shared by every gateway.
 ///
-/// The throughput ladder answers "how fast" and stops answering it the moment a gateway saturates
-/// its pinned cores - past that point it measures the box. Cost per request does not have that
-/// ceiling: at saturation two gateways deliver the same rps BY DEFINITION, and the one doing less
-/// work per request still reads lower. It is also the figure that maps to money.
+/// The throughput ladder stops answering "how fast" the moment a gateway saturates its pinned cores
+/// - past that it measures the box. Cost per request has no such ceiling: at saturation two gateways
+/// deliver the same rps by definition, and the one doing less work per request still reads lower.
 ///
-/// ONE CONCURRENCY, DECLARED, AND THE SAME FOR EVERYONE. There is no concurrency that is
-/// sub-saturation for every entrant - this field spans 19 rps to 49,000 - so "matched load" is
-/// impossible and matched CONCURRENCY is the honest substitute. The number is published beside the
-/// cost so a reader knows what was held constant, rather than having to trust that something was.
+/// One concurrency, declared, same for everyone: there is no concurrency that is sub-saturation for
+/// every entrant (this field spans 19 rps to 49,000), so matched CONCURRENCY is the honest
+/// substitute for matched load, published beside the cost so a reader knows what was held constant.
 pub struct Cost;
 
-/// The rung every gateway's cost is taken at. Small enough that the fast entrants are not yet
-/// queueing on their own cores, large enough that a gateway which only performs with concurrency is
-/// not judged on a serial round trip. It is NOT tuned per gateway: the instant this varies by
-/// entrant, the column stops being a comparison.
+/// The rung every gateway's cost is taken at. Small enough that fast entrants aren't yet queueing on
+/// their own cores, large enough that a gateway which only performs with concurrency isn't judged on
+/// a serial round trip. NOT tuned per gateway - varying it by entrant would break the comparison.
 pub const COST_WINDOW_CONCURRENCY: u32 = 8;
 
 /// Why a cell has no time-to-plateau, in the words a reader sees.
 ///
-/// IT NAMES THE SHAPE, because "no steady state" describes two opposite gateways. busbar
-/// openai>openai ends its window at -0.43 MiB/min - still RELEASING memory - and read identically to
-/// one still climbing toward a leak. `Shape` exists for exactly this distinction ("the opposite of a
-/// leak, and it must never be labelled as one") and was being discarded one line before the sentence
-/// that reaches the board.
+/// Names the SHAPE, because "no steady state" alone describes two opposite gateways: one still
+/// releasing memory reads the same as one still climbing toward a leak without it. `Shape` exists
+/// for exactly this distinction.
 ///
 /// Pure, so the wording can be tested: this string is the whole finding for a reader who never opens
 /// the artifact.
@@ -1873,8 +1583,7 @@ impl Metric for Cost {
             f.into()
         };
 
-        // The same request every other window on this cell drives, from the same helpers: a cost
-        // measured against a different question is not this cell's cost.
+        // The same request every other window on this cell drives, from the same helpers.
         let model = crate::run::model_for(ctx.cfg, &ctx.id.egress);
         let body = ctx.dialect.body(&model);
         let path = crate::run::path_for(ctx.cfg, ctx.dialect, &ctx.id.egress);
@@ -1894,9 +1603,9 @@ impl Metric for Cost {
                  charge a cost against"
             ));
         };
-        // A WINDOW WITH FAILURES IS NOT A COST READING. CPU spent refusing requests is real CPU, but
-        // dividing it by the requests that succeeded would report a gateway that failed most of the
-        // window as extravagantly expensive - a statement about the failure, not about the work.
+        // A window with failures is not a cost reading: CPU spent refusing requests is real CPU, but
+        // dividing it by only the successes would report a mostly-failing gateway as extravagantly
+        // expensive - a statement about the failure, not the work.
         if stats.fail > 0 {
             return all_absent(format!(
                 "the c={COST_WINDOW_CONCURRENCY} cost window had {} failure(s) alongside {} success(es); \
@@ -1912,28 +1621,22 @@ impl Metric for Cost {
                 "cost_window_conc",
                 Measurement::Measured(f64::from(COST_WINDOW_CONCURRENCY)),
             ),
-            // THE WINDOW'S OWN LOAD, published so the cost is CHECKABLE.
-            //
-            // Without these, `cpu_us_per_request` is unverifiable: it can only be re-derived from the
-            // request count it was divided by, and that count lived nowhere. Auditing the first
-            // cost-carrying snapshot, I could not tell whether a low utilisation meant the gateway
-            // was cheap or the window had simply carried less load than the sweep's rung at the same
-            // concurrency - two opposite readings of the same number, with nothing in the artifact to
-            // separate them. Every published number must re-derive from what is published beside it.
+            // The window's own load, published so the cost is CHECKABLE: without these,
+            // `cpu_us_per_request` cannot be re-derived from what's published beside it, and a low
+            // utilisation could mean either a cheap gateway or an under-loaded window - two opposite
+            // readings the artifact must be able to tell apart.
             ("cost_window_ok", Measurement::Measured(stats.ok as f64)),
             ("cost_window_rps", Measurement::Measured(stats.rps())),
-            // THE READING THAT SAYS WHETHER THE PEAK IS A CEILING. At ~1.0 the gateway had filled the
-            // cores it was given and the throughput number is a wall; well below it, the limit is
-            // somewhere else and the peak means something else.
+            // Whether the peak is a ceiling: at ~1.0 the gateway filled its cores and the throughput
+            // number is a wall; well below it, the limit is elsewhere.
             ("cost_core_utilisation", util),
             ("cost_threads", cost.threads_end),
             ("cost_nonvol_ctxt_per_request", cost.nonvol_ctxt_per_request),
             ("cost_majflt", cost.majflt),
         ];
-        // A SWAPPING BOX IS NOT A SLOW GATEWAY. Major faults mean pages came from disk during the
-        // window, so what was timed is the disk. The numbers still publish - a reader must see why the
-        // row looks wrong rather than find a hole - but the cost figures are re-flagged as a HARNESS
-        // fault so nothing ranks on them.
+        // A swapping box is not a slow gateway: major faults mean pages came from disk, so what was
+        // timed is the disk. Numbers still publish (a reader must see why the row looks wrong) but
+        // the cost figures are re-flagged HarnessError so nothing ranks on them.
         if cost.swapped {
             let why = "the box took major page faults during this window, so it was swapping and \
                        this cost describes the disk rather than the gateway"
@@ -1950,13 +1653,8 @@ impl Metric for Cost {
 
 #[cfg(test)]
 mod tests {
-    /* A GATEWAY HANDING MEMORY BACK MUST NEVER READ LIKE ONE LEAKING IT.
-    
-       39 cells on the 2026-08-03 board carry no time-to-plateau, and they got one sentence between
-       them: "memory reached no steady state inside the load cap". busbar has the most (11), and its
-       openai>openai cell ends the window at -0.43 MiB/min - RELEASING memory - which is the opposite
-       of the reading that sentence invites. `Shape` already separated these three cases; the string
-       a reader actually sees did not. */
+    // A gateway handing memory back must never read like one leaking it: `Shape` already separates
+    // climbing/falling/oscillating, and the reader-facing string must reflect that distinction.
     #[test]
     fn the_no_plateau_reason_says_which_way_memory_was_moving() {
         use crate::stats::{Shape, Verdict};
@@ -1996,16 +1694,10 @@ mod tests {
         assert!(!undecidable.contains("climbing") && !undecidable.contains("falling"), "{undecidable}");
     }
 
-    // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.
-    //
-    // `process_cell_with` merges each group's Series into the cell's with a hand-written chain, one
-    // clause per field - and it had no clause for `idle_rss`. The memory group measured a full idle
-    // window, returned it, and the accumulator dropped it, so `CellMemory.idle_rss_series` published
-    // empty on every cell and the site's idle sparkline had nothing to draw. Nothing failed, because an
-    // accumulator that forgets a field is indistinguishable from a group that produced none.
-    //
-    // This drives a metric that returns EVERY field populated and asserts every one arrives. A field
-    // added to `Series` and forgotten in the merge now fails here instead of publishing silence.
+    // Every `Series` field must survive the accumulator in `process_cell_with` (see its comment on
+    // `idle_rss` above for the regression this guards). Drives a metric with EVERY field populated
+    // and asserts every one arrives, so a field added to `Series` and forgotten in the merge fails
+    // here instead of publishing silence.
     #[test]
     fn no_series_field_is_dropped_by_the_accumulator() {
         struct FullSeries;
@@ -2071,14 +1763,7 @@ mod tests {
         );
     }
 
-    // A SIX-SECOND WINDOW CANNOT SETTLE A SIXTY-SECOND QUESTION.
-    //
-    // `stats::window` selects by timestamp, so a series only six seconds long yields a "sixty second
-    // window" holding six seconds of data - and `plateau_check`'s `n < 4` guard waves it through,
-    // because at ten readings a second six seconds is sixty samples. Those six seconds were then
-    // judged against thresholds chosen for a full minute, and a gateway still climbing slowly barely
-    // drifts across six seconds, so the FIRST load window could declare a plateau and publish a steady
-    // state the gateway had not reached.
+    // A six-second window cannot settle a sixty-second question. See `window_is_long_enough`'s doc.
     #[test]
     fn a_plateau_verdict_needs_a_window_that_actually_lasted() {
         assert!(
@@ -2096,20 +1781,7 @@ mod tests {
         assert!(super::window_is_long_enough(300.0), "and longer is fine");
     }
 
-    // A DEAD SAMPLER MUST NOT READ AS A SETTLED GATEWAY.
-    //
-    // The load loop snapshots the shared RSS series between windows and breaks the moment
-    // `plateau_check` says `Steady`. When the sampler thread dies - a panic on an unexpected /proc
-    // shape for one gateway's tree is enough - the series stops growing, so every later snapshot is
-    // the same frozen tail. A frozen tail has zero drift and zero spread, which is exactly what
-    // steady looks like. The loop would then publish "settled after N seconds" and a peak that is
-    // really "whatever was captured before the thread died", about a gateway that may have gone on
-    // climbing for minutes - and `let _ = sampler.join()` had already thrown away the panic, so
-    // nothing in the log or the artifact said the readings had stopped.
-    //
-    // The discriminator is growth. At ten readings a second a LIVE sampler adds samples between
-    // windows, and a genuinely settled gateway still produces new samples that happen to be flat.
-    // No new samples at all is not a measurement of the gateway.
+    // A dead sampler must not read as a settled gateway. See `steady_is_believable`'s doc.
     #[test]
     fn a_frozen_rss_series_is_not_a_settled_gateway() {
         assert!(
@@ -2133,8 +1805,8 @@ mod tests {
     use super::*;
 
     /// A group that lies: it declares two fields and returns one. The engine must fill the gap with
-    /// an absence carrying a reason, never leave the key out, because a missing key and a null are
-    /// different statements and only one of them is true.
+    /// an absence carrying a reason, never leave the key out - a missing key and a null are different
+    /// statements.
     struct Forgetful;
     impl Metric for Forgetful {
         fn name(&self) -> &'static str {
@@ -2296,17 +1968,12 @@ mod tests {
         );
     }
 
-    // A FAILED RESTART ABORTS THE WHOLE MEMORY GROUP. The old behaviour marked only idle absent
-    // (NotMeasured) and fell through to the sampler and the load window - against a gateway in an
-    // unknown state, with the pre-restart pid still in hand - so every number that window produced
-    // was the rig's own failure wearing the gateway's name. This pins the fix: EVERY declared field
-    // is absent with reason HarnessError, the shared detail says the window never ran, and no
-    // series is produced (the sampler and load window are never started).
+    // A failed restart aborts the WHOLE memory group (every field absent, reason HarnessError, no
+    // series produced) rather than falling through to measure a gateway in an unknown state.
     //
-    // The fixture: a real marker process stands in for the gateway tree so `root_pid` resolves, and
-    // the relaunch spec's stop path matches nothing (stopping "succeeds" instantly) while its
-    // binary does not exist, so `restart_to_rest` fails fast on any platform - the FAILURE path
-    // needs no taskset, unlike run.rs's restart tests that need the launch to SUCCEED.
+    // Fixture: a real marker process stands in for the gateway tree so `root_pid` resolves; the
+    // relaunch spec's stop path matches nothing (so stopping "succeeds" instantly) while its binary
+    // doesn't exist, so `restart_to_rest` fails fast on any platform.
     #[test]
     fn a_failed_restart_to_rest_makes_every_memory_field_a_harness_error_and_skips_the_window() {
         if std::process::Command::new("sh")
@@ -2336,8 +2003,7 @@ mod tests {
         cfg.relaunch = Some(crate::launch::LaunchSpec {
             runtime: crate::manifest::Runtime::Native {
                 // Deliberately NOT the marker: the stop path must succeed (nothing to stop) so the
-                // failure under test is the relaunch itself, and the marker process survives to
-                // prove the load window never drove anything.
+                // failure under test is the relaunch itself.
                 proc_match: format!("{marker}-relaunch-matches-nothing"),
             },
             kind: crate::launch::LaunchKind::Native {
@@ -2451,28 +2117,10 @@ mod tests {
         );
     }
 
-    // ── the reachability list itself carries the two new groups ────────────────────────────────
-    //
-    // `no_two_groups_claim_the_same_artifact_field` and `every_group_declares_what_it_fills` above
-    // already run over `METRICS`, so being IN that list is what makes a group reachable per this
-    // file's own module doc ("a metric is in `METRICS` or it does not exist"). This test names the
-    // field those tests would silently miss if a future edit dropped `AddedLatency` back out of the
-    // list without anything else failing.
-    //
-    // It used to say "adding `AddedLatency`/`SustainedThroughput` to that list", which was false for
-    // the second: `SustainedThroughput` was never in `METRICS`, had no `impl Metric`, and has now
-    // been deleted along with the group the frontier replaced.
-    // ── the two concurrent-stream groups ────────────────────────────────────────────────────────
-
-    // The same gate for the concurrent-stream group. `CellStream` declared these fields and NOTHING in
-    // the engine ever filled them: the artifact carried the keys, always null, on every cell of every
-    // gateway ever published. A group that falls back out of `METRICS` returns the board to exactly
-    // that state with nothing else failing, which is what this holds.
-    //
-    // ONE GROUP, NOT TWO. `cpu_fps` is retired - see `run.rs`'s own note for the field evidence: 4 of
-    // 16 cells had it INVERTED below the proven delivery boundary, 5 were redundant with
-    // `streams_sustained_fps`, and 7 were measured at a concurrency where the delivery gate did not
-    // hold at all.
+    // Being IN `METRICS` is what makes a group reachable; this test names the field the two tests
+    // above would silently miss if `AddedLatency` were dropped from the list without anything else
+    // failing. Also covers the concurrent-stream group (`cpu_fps` is retired - see the note above
+    // `StreamsSustained`).
     #[test]
     fn the_stream_group_is_reachable_from_metrics() {
         let names: Vec<&str> = METRICS.iter().map(|m| m.name()).collect();
@@ -2503,14 +2151,8 @@ mod tests {
         }
     }
 
-    // THE FRAMES COME FROM THE EGRESS, SO THE EGRESS DECIDES WHETHER THERE ARE ANY.
-    //
-    // All three stream groups guarded on the INGRESS dialect alone. In the 2026-07-28 field run that
-    // let 20 served cells through with an ingress that streams (openai, anthropic) and an egress the
-    // mock cannot stream (bedrock, cohere, gemini). Every window came back with
-    // `stream_errors == streams` and `frames: 0` at every concurrency from 1 to 4096, and the cells
-    // published "no concurrency from 1 to 4096 passed the gate" - the rig's own limit, recorded as
-    // the gateway failing to stream.
+    // The frames come from the egress, so the egress decides whether there are any - see
+    // `stream_blocked_by`'s doc for why guarding on ingress alone is wrong.
     #[test]
     fn a_cell_whose_egress_cannot_stream_is_the_rigs_limit_not_the_gateways() {
         let cfg = crate::run::test_fixture(
@@ -2562,13 +2204,8 @@ mod tests {
         assert_eq!(stream_blocked_by(&ctx(Dialect::Openai, "anthropic")), None);
     }
 
-    // THE GAP DISTRIBUTION IS INSIDE THE STREAM.
-    //
-    // `added_gap_p99_us` was absent on all 69 served cells of the 2026-07-28 run, suppressed with
-    // "one stream was taken, which cannot support a 99th percentile". That is true of TTFT, which a
-    // stream produces exactly one of. It is not true of gaps: a stream carrying STREAM_FRAME_BUDGET
-    // frames yields that many gaps minus one. charts.py draws two charts from these fields, so the
-    // board had a permanently empty chart while the data sat in the frame offsets.
+    // The gap distribution is inside the stream: unlike TTFT (one per stream), a stream carrying
+    // STREAM_FRAME_BUDGET frames yields that many gaps minus one, so it is a real distribution.
     #[test]
     fn the_gap_percentiles_come_from_the_gaps_inside_one_stream() {
         // Offsets in us: gaps of 10, 10, 10, 10, 100. The tail is the whole point of a p99, and a
@@ -2595,34 +2232,24 @@ mod tests {
         assert_eq!(gap_percentile_us(&[], 0.5), None);
     }
 
-    // A COLUMN THAT CAN NEVER HOLD A NUMBER IS EITHER MEASURED OR DELETED.
-    //
-    // `added_ttft_p99_us` was absent on all 69 served cells of the 2026-07-28 run - and on every run
-    // before it - because one stream yields exactly one time-to-first-token. The excuse was true;
-    // keeping the field anyway was the defect. charts.py draws from it.
-    //
-    // The fix is samples, and they are cheap: a TTFT reads ONE frame and stops, so a sample is
-    // milliseconds rather than the ~1.3s a full 64-frame paced stream takes.
+    // A column that can never hold a number is either measured or deleted: one stream yields exactly
+    // one time-to-first-token, so a real p99 needs samples, which are cheap (a TTFT reads ONE frame
+    // and stops).
     #[test]
     fn a_ttft_percentile_needs_samples_and_the_sample_count_makes_one_real() {
         // 100 is the smallest count where a 99th percentile is a real order statistic rather than a
         // restatement of the maximum: nearest-rank puts it at index 99 of 100, not at the top.
-        // (No `assert!(SAMPLES >= 100)` here: an assertion over a constant cannot fail, which is the
-        // exact species of dead guard this audit spent the day removing. The rank checks below use
-        // the constant and would break if it were lowered, which is the real protection.)
-        // The rank is the ENGINE's, not this module's: `stats::nearest_rank_index` is what
-        // `ttft_pct` calls, and calling it here too is what makes this a check on production rather
-        // than on a formula retyped in a test. It used to be retyped, and it was retyped with the
-        // ceil convention while `gen.rs` and `search.rs` used floor - ledger SRCH-04, the split this
-        // now cannot come back from.
+        // (No `assert!(SAMPLES >= 100)`: an assertion over a constant cannot fail. The rank checks
+        // below use the constant itself and would break if it were lowered, which is the real check.)
+        // Uses the ENGINE's own `stats::nearest_rank_index` (what `ttft_pct` calls) rather than a
+        // formula retyped here, per ledger SRCH-04 (a retyped ceil vs. floor mismatch).
         let idx_of = crate::stats::nearest_rank_index;
         assert_eq!(idx_of(STREAM_TTFT_SAMPLES, 0.99), 98);
         assert!(
             idx_of(STREAM_TTFT_SAMPLES, 0.99) < STREAM_TTFT_SAMPLES - 1,
             "the p99 must not be the max, or it is not a percentile"
         );
-        // One sample cannot support one: that was the whole problem, and it is why the field was
-        // empty rather than wrong.
+        // One sample cannot support a percentile: the p99 IS that sample.
         assert_eq!(
             idx_of(1, 0.99),
             0,
@@ -2636,13 +2263,8 @@ mod tests {
         assert_eq!(v[idx_of(v.len(), 0.50)], 50);
     }
 
-    // WHAT A CELL COST, PER GROUP, IN THE ARTIFACT.
-    //
-    // A wall-clock total cannot answer the only question worth asking about a slow run. "Thirteen
-    // minutes a cell" might be the TTFT sample set, a stream ladder reaching a higher rung, or a
-    // gateway that got slower, and those have nothing in common as responses. Without per-group
-    // seconds the answer is another run with a stopwatch; with them it is arithmetic on committed
-    // JSON.
+    // What a cell cost, per group, in the artifact: a wall-clock total cannot answer what made a slow
+    // run slow, but per-group seconds make it arithmetic on committed JSON instead of a stopwatch rerun.
     #[test]
     fn every_group_that_runs_reports_what_it_cost() {
         let cfg = crate::run::test_fixture(
@@ -2681,14 +2303,8 @@ mod tests {
         }
     }
 
-    // A p99 BELOW ITS OWN p50 IS TWO POPULATIONS WEARING ONE NAME.
-    //
-    // The 2026-07-28 validation run published exactly that on every streaming cell it measured:
-    // 523/428, 514/451, 501/359, 513/461. No percentile pair over one distribution can do it. The
-    // cause was that the p50 came from a single full stream while the p99 came from a hundred
-    // single-token samples - both defensible numbers, neither comparable to the other.
-    //
-    // Asserted as an ordering over one sample set, which is the property that was violated.
+    // A p99 below its own p50 is two populations wearing one name - no percentile pair over one
+    // distribution can produce it. Asserted here as an ordering over one sample set.
     #[test]
     fn the_ttft_percentiles_come_from_one_sample_set_so_p99_can_never_sit_below_p50() {
         let pct = |v: &[u64], p: f64| {
@@ -2712,8 +2328,7 @@ mod tests {
             "and on a distribution with a real tail it must be strictly above"
         );
 
-        // The differencing keeps that ordering: both legs are percentiles of their own sample set at
-        // the same rank, so a gateway that adds a constant adds it at every percentile.
+        // Differencing keeps the ordering: both legs are percentiles of the same rank.
         let direct: Vec<u64> = samples.iter().map(|v| v / 2).collect();
         let add = |p: f64| (pct(&samples, p) - pct(&direct, p)).max(0.0);
         assert!(
@@ -2721,19 +2336,13 @@ mod tests {
             "the ADDED figures must hold the same ordering"
         );
 
-        // One sample cannot support a p99 that means anything: it is that sample, and it equals the
-        // p50 rather than sitting below it.
+        // One sample cannot support a p99 that means anything: it equals the p50 rather than sitting
+        // below it.
         assert_eq!(pct(&[500], 0.99), pct(&[500], 0.50));
     }
 
-    // A DIFFERENCE THE RIG CANNOT SEE IS NOT A MEASURED ZERO.
-    //
-    // Both streaming legs carry the mock's ~20ms pacing, so an added-gap figure is a microsecond
-    // signal extracted by differencing two ~20,000us numbers. When the gateway's tail at a percentile
-    // lands under the mock's, the raw difference is negative - impossible for a proxy, therefore
-    // noise. Clamping it to 0 published "added nothing" with precision this rig does not have, and
-    // produced pairs that cannot exist: aisix p50=4 p99=0, helicone p50=3 p99=0, plano p50=1 p99=0,
-    // tensorzero p50=1 p99=0 in the 2026-07-28 run.
+    // A difference the rig cannot see is not a measured zero: clamping a negative raw diff to 0
+    // claims a precision this rig doesn't have and can produce a p99 below its own p50.
     #[test]
     fn a_percentile_difference_below_the_rigs_resolution_is_absent_not_zero() {
         // The rule, stated over the raw pair the engine differences.

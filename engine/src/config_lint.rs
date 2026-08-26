@@ -3,18 +3,14 @@
 //
 // Config necessity, as a lint over Manifest values.
 //
-// The shell counterpart, lib/gateway_config_lint.sh, enforces this standard: every gateway config is
-// the bare minimum required to run. A setting appears only if it is required to boot, to point an
-// upstream at the test mock, to expose an ingress path the matrix drives, or to bind the port or
-// cores the rig requires. We do not turn features on, we do not turn them off, and we do not restate
-// a default: a restated default is still a line we wrote, and it silently becomes an override the
-// day upstream changes what the default is.
+// Mirrors lib/gateway_config_lint.sh's standard: a gateway config is the bare minimum required to
+// run — a setting appears only if required to boot, to point an upstream at the test mock, to
+// expose an ingress path the matrix drives, or to bind the rig's port/cores. Restated defaults are
+// disallowed: they silently become overrides the day upstream changes the default.
 //
-// The shell lint reads a free-text GW_CONFIG_WHY block and greps for one of four words. Here the
-// four necessities are ConfigReason, an enum a ConfigSetting cannot be built without, so rule 1 below
-// is not really a check, it is a comment explaining why the type already made the violation
-// unrepresentable. What the type cannot catch is: a restated default, an empty key or value, and two
-// settings fighting over one key. Those are what this module checks.
+// The shell lint's four necessities are ConfigReason here, an enum a ConfigSetting cannot be built
+// without — rule 1 below is unrepresentable by construction, not actually checked. What the type
+// cannot catch (restated default, empty key/value, duplicate key) is what this module checks.
 
 use crate::manifest::{ConfigReason, Manifest};
 use std::collections::BTreeMap;
@@ -52,43 +48,33 @@ pub struct Finding {
     pub message: String,
 }
 
-/// Whether any finding in the list should stop a run. Everything this lint checks is a fairness
-/// defect rather than a style nit, so today every rule blocks; this stays a function rather than a
-/// blanket `!findings.is_empty()` call site so a future Warn-only rule does not have to touch callers.
+/// Whether any finding should stop a run. Every rule blocks today, but this stays a function
+/// rather than `!findings.is_empty()` so a future Warn-only rule doesn't require touching callers.
 pub fn blocks(findings: &[Finding]) -> bool {
     findings.iter().any(|f| f.severity == Severity::Block)
 }
 
-/// `key -> value` a gateway is known to ship with out of the box, pulled from the gateway's own
-/// docs. Passed in rather than frozen into this lint, so the check is data-driven and does not go
-/// stale the day upstream changes what the default is.
+/// `key -> value` a gateway ships with out of the box, from the gateway's own docs. Passed in
+/// rather than frozen into this lint so the check stays data-driven as upstream defaults change.
 pub type Defaults = BTreeMap<String, String>;
 
-/// Lint one manifest's declared config against the necessity standard. `defaults` is the known
-/// default value for any setting key this gateway is documented to ship with; a setting whose value
-/// matches its entry is a restated default rather than an override.
+/// Lint one manifest's declared config against the necessity standard. A setting whose value
+/// matches its entry in `defaults` is a restated default rather than an override.
 ///
-/// A manifest with an empty `config` is the ideal case, not a violation, so it returns no findings:
-/// the bare minimum required to run was zero settings, which is exactly what this lint exists to
-/// protect.
+/// An empty `config` is the ideal case, not a violation: it returns no findings.
 pub fn lint(manifest: &Manifest, defaults: &Defaults) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
 
     for setting in &manifest.config {
         let key = setting.key.trim();
-        // ConfigSetting carries no dedicated value field: the generated config file a gateway
-        // actually reads lives outside this struct, and `note` is documented as free text for a
-        // human, never load bearing. It is nonetheless the only place a recorded value can live
-        // today, so this lint reads it from there. A struct with a real value field would be the
-        // cleaner home for this check; until one exists, treat this as best-effort rather than
-        // authoritative on manifests that leave `note` blank for a setting that does carry a value.
+        // `note` is documented as free-text for humans, not load-bearing, but it's the only place a
+        // recorded value lives today — reading it here is best-effort, not authoritative, on
+        // manifests that leave `note` blank for a setting that does carry a value.
         let value = setting.note.trim();
 
-        // Rule 1 is enforced by the type, not by this function: `ConfigSetting::reason` is a
-        // `ConfigReason`, one of RequiredToBoot / UpstreamToMock / ExposesIngress / RigBinding, and
-        // there is no way to construct a setting without choosing one. A build that compiles cannot
-        // hold a setting whose necessity is "we wanted the feature on".
+        // Rule 1 is enforced by the type, not here: ConfigSetting::reason is a ConfigReason, so a
+        // build that compiles cannot hold a setting whose necessity is "we wanted the feature on".
         let _: ConfigReason = setting.reason;
 
         if key.is_empty() {
@@ -102,8 +88,7 @@ pub fn lint(manifest: &Manifest, defaults: &Defaults) -> Vec<Finding> {
                     manifest.name, setting.key
                 ),
             });
-            // No key to index duplicates or defaults by, so there is nothing further to check on
-            // this entry.
+            // No key to index duplicates or defaults by.
             continue;
         }
 
@@ -173,8 +158,7 @@ mod tests {
         }
     }
 
-    // THE CASE A NAIVE LINT GETS WRONG. A gateway that needs no configuration is the ideal, not an
-    // error, so an empty config list must come back clean.
+    // A gateway needing no configuration is the ideal, not an error.
     #[test]
     fn a_manifest_with_zero_settings_passes() {
         let m = base();
@@ -314,9 +298,8 @@ mod real_field_tests {
     use super::*;
     use std::collections::BTreeMap as Map;
 
-    /// Discovered from the gateways' own directories, not listed in one file. Same reason as
-    /// `manifest::real_field_tests::field`: a single file naming every entrant is the roster the
-    /// isolation lint exists to prevent.
+    /// Discovered from the gateways' own directories rather than listed in one file — same reason
+    /// as `manifest::real_field_tests::field`.
     fn field() -> Map<String, Manifest> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways");
         let mut out = Map::new();
@@ -332,9 +315,8 @@ mod real_field_tests {
         out
     }
 
-    // No defaults table is claimed for the real field here: this test proves the lint runs over
-    // every entrant without panicking, it does not assert the real field is clean. What it says is
-    // reported by the caller of this module, not asserted away in a test.
+    // Proves the lint runs over every entrant without panicking; does not assert the real field is
+    // clean (that's reported by the caller, not this test).
     #[test]
     fn the_lint_runs_over_every_real_manifest_without_panicking() {
         let f = field();

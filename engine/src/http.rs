@@ -1,34 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// A minimal HTTP/1.1 client over std::net::TcpStream, sufficient for what this harness actually
-// does and nothing more: every probe is a plain JSON POST to 127.0.0.1.
+// Minimal HTTP/1.1 client over std::net::TcpStream: every probe is a plain JSON POST to
+// 127.0.0.1. No external deps on purpose - no async runtime whose own scheduler could perturb
+// the latency being measured, and no TLS/redirects since none are needed here.
 //
-// NO EXTERNAL DEPENDENCIES, on purpose. An HTTP stack would drag an async runtime and dozens of
-// transitive crates into a statically-shipped binary whose whole job is producing numbers people
-// are asked to trust, and whose own scheduler could perturb the latency this harness is
-// simultaneously measuring. std is enough for one host, one dialect, no TLS, no redirects.
-//
-// THE DISTINCTION THIS FILE EXISTS TO PRESERVE. probe.rs classifies a persistent-transient probe
-// on `Observation.status: Option<u16>`: `None` means the gateway may never have been reached,
-// `Some(status)` means it answered. Collapsing "connection refused" and "the gateway sent a 503"
-// into the same shape would let a rig failure (nobody listening on the port) get published as a
-// gateway verdict. `Outcome` keeps a real response, a connection failure, a timeout and a
-// malformed/partial response as four distinct things so that distinction survives past this file.
+// `Outcome` deliberately keeps "never reached", "connection failed", "timed out" and "malformed"
+// distinct from a real response: collapsing them would let a rig failure (nobody listening) get
+// published as a gateway verdict (see `Observation.status: Option<u16>` in probe.rs).
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 /// A header, as sent or received. Kept as a plain pair list (never a map) so duplicate header
-/// names survive: some dialects distinguish repeated headers from a single comma-joined one, and a
-/// map would silently collapse them before the caller ever saw that they differed.
+/// names survive - a map would silently collapse them before the caller could see they differed.
 pub type Headers = Vec<(String, String)>;
 
-/// A response the peer actually produced: it accepted the connection, sent a status line, and (at
-/// least started to) send a body. Whether that status is 200 or 503 is irrelevant here; both are
-/// evidence ABOUT THE GATEWAY. Sorting a 5xx into "no response" is exactly the bug this type
-/// prevents.
+/// A response the peer actually produced (status line + body received), whatever the status code.
+/// A 5xx is still evidence about the gateway, not a "no response".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
@@ -55,23 +45,14 @@ impl HttpResponse {
     }
 }
 
-/// The result of one `post_json` call. Never reached, timed out, malformed, and answered are four
-/// outcomes, not shades of one "it failed" outcome: a caller (probe.rs) needs to tell "the gateway
-/// was never reached" apart from "the gateway answered with a 5xx", and a curl-style `000` collapses
-/// exactly that distinction.
+/// The result of one `post_json` call. Never-reached, timed-out, malformed, and answered are kept
+/// as four distinct outcomes rather than one "it failed", so a caller (probe.rs) can tell "never
+/// reached" apart from "answered with a 5xx" - a curl-style `000` would collapse that.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// THE RIG REFUSED TO SEND, and this is the one variant that describes US.
-    ///
-    /// Every other variant is a claim about the PEER - it refused the connection, it never answered,
-    /// it sent bytes that do not parse. This one is the opposite: the request could not be framed
-    /// without smuggling something onto the wire, so nothing was sent and the gateway was never
-    /// asked. Reusing `ConnectionFailed` or `Malformed` for it would charge a gateway with a fault
-    /// of ours, which is the exact attribution inversion this engine refuses everywhere else.
-    ///
-    /// A caller must therefore never grade this as the gateway failing. It is loud on purpose: the
-    /// manifest that caused it is a first-party file with a defect in it, and the run should stop
-    /// pointing at that rather than publish a red.
+    /// The request could not be framed without smuggling something onto the wire, so nothing was
+    /// sent - unlike every other variant, this is a claim about US, not the peer. Never grade it
+    /// as the gateway failing; the defect is in the manifest that produced it.
     RigRefused(String),
     /// A complete, well-formed HTTP response, whatever its status.
     Response(HttpResponse),
@@ -82,10 +63,8 @@ pub enum Outcome {
     /// connection was live, the peer just never (yet) answered. A hung gateway must not hang the
     /// suite, so this is always reached within the caller's timeout, never later.
     TimedOut,
-    /// Something was read, but it was not a complete, parseable HTTP response: a garbled status
-    /// line, a stream that closed mid-header, a chunk length that will not parse. This is not a
-    /// success and must never be read as one; the bytes actually seen travel with it for a human
-    /// to inspect, because throwing them away is how a rig defect masquerades as a clean failure.
+    /// Something was read but did not parse as a complete HTTP response. Never a success; carries
+    /// the bytes actually seen so a human can inspect them.
     Malformed { seen: Vec<u8>, message: String },
 }
 
@@ -106,10 +85,8 @@ fn is_timeout(e: &io::Error) -> bool {
 }
 
 /// Reads one line (through and including the trailing `\n`, if any) a byte at a time, honouring an
-/// absolute wall-clock `deadline` rather than a fixed per-call timeout. One byte at a time is slow
-/// for a general HTTP client; for a control-plane probe that reads a few hundred bytes it is
-/// immaterial, and it makes "how many bytes had we seen when this went wrong" exact rather than
-/// approximate, which matters for `Malformed`.
+/// absolute wall-clock `deadline` rather than a fixed per-call timeout. Byte-at-a-time is slow but
+/// keeps the `Malformed` byte count exact rather than approximate.
 fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
     let mut buf = Vec::new();
     loop {
@@ -128,9 +105,7 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
                 if buf.ends_with(b"\n") {
                     return ReadOutcome::Full(buf);
                 }
-                // A line with no bound would let a peer that never sends "\n" grow this
-                // unboundedly; a probe response has no legitimate reason to have a header or
-                // status line this long, so treat it as malformed rather than as an allocator.
+                // Bound the line: no legitimate header/status line is this long.
                 if buf.len() > 64 * 1024 {
                     return ReadOutcome::Eof(buf);
                 }
@@ -145,38 +120,22 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
     }
 }
 
-/// Hard ceiling on any response body we will accumulate from the gateway under test.
-///
-/// The gateway is arbitrary third-party software and its response length is ITS claim, not ours. An
-/// allocation failure calls abort() unconditionally: not a panic, nothing catches it, and an
-/// eight-hour run dies with no operator watching. A probe response has no legitimate reason to
-/// approach this, so exceeding it is Malformed rather than a measurement.
+/// Hard ceiling on any response body accumulated from the gateway under test. Response length is
+/// the peer's claim, not ours; an allocation failure past this would abort() unconditionally
+/// (uncatchable), so exceeding it is Malformed rather than a measurement.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-/// Ceiling on the size of a response HEAD - status line plus all header lines together.
-///
-/// `read_line` caps ONE line at 64 KiB and `MAX_BODY_BYTES` caps every body framing, but nothing capped
-/// the NUMBER of header lines: a peer answering with a status line followed by an endless stream of
-/// short, legal headers grew `raw` and the `headers` Vec until the probe deadline, with only that
-/// 10-second timeout standing between the engine and its own memory.
-///
-/// The peer here is one of fourteen third-party gateways, several built from upstream at whatever
-/// revision the manifest pins - this file already treats it as untrusted with the engine's address
-/// space. A header-accumulation loop (a proxy echoing Via or Set-Cookie on an internal retry) is a
-/// mundane bug in somebody else's code that should cost that gateway its cell, not the whole run.
-///
-/// 256 KiB is far above any real response head and far below anything that matters to the box.
+/// Ceiling on the size of a response HEAD (status line + all header lines together). `read_line`
+/// caps one line and `MAX_BODY_BYTES` caps the body, but nothing else bounds the NUMBER of header
+/// lines a peer can send - an accumulation loop in a third-party gateway should cost that
+/// gateway's cell, not the run's memory. 256 KiB is far above any real response head.
 const MAX_HEAD_BYTES: usize = 256 * 1024;
 
 /// Reads exactly `n` bytes (a known Content-Length or chunk body), honouring `deadline`.
 fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> ReadOutcome {
-    // NEVER RESERVE WHAT THE PEER ASKED FOR. `n` arrives from the gateway under test, as a
-    // Content-Length header or a chunk-size line. A declared length of usize::MAX makes
-    // Vec::reserve panic on capacity overflow, and a merely enormous one reaches the allocator,
-    // whose failure handler calls abort() unconditionally: not a panic, so nothing can catch it,
-    // and the eight-hour run dies with no operator watching. The one component we are measuring is
-    // the one we must not trust with our address space. Grow as bytes actually arrive instead, and
-    // let the existing body cap reject an over-long response as malformed.
+    // Never reserve `n` up front: it's the peer's claimed Content-Length/chunk-size, and
+    // usize::MAX would panic Vec::reserve while a merely huge value could abort() the allocator.
+    // Grow as bytes actually arrive; the body cap below still rejects an over-long response.
     let mut buf: Vec<u8> = Vec::with_capacity(n.min(64 * 1024));
     if n > MAX_BODY_BYTES {
         return ReadOutcome::Err(io::Error::other(format!(
@@ -211,14 +170,8 @@ fn read_exact_deadline(stream: &mut TcpStream, deadline: Instant, n: usize) -> R
 fn read_to_close(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
     let mut buf = Vec::new();
     loop {
-        // THE CAP APPLIES HERE TOO. This framing has no declared length to check up front - the
-        // peer just streams until it closes the connection, or doesn't - so MAX_BODY_BYTES must be
-        // enforced against what has actually accumulated instead, checking only the declared
-        // Content-Length path would let this loop and the chunked one below grow without limit for
-        // as long as the deadline allowed: on loopback, tens of seconds is enough to reach
-        // gigabytes. The allocator's failure handler calls abort() unconditionally, so that is not a
-        // panic this harness can catch - it is the eight-hour run dying outright, and it is exactly
-        // what MAX_BODY_BYTES exists to prevent.
+        // No declared length here, so MAX_BODY_BYTES must be checked against what has actually
+        // accumulated rather than up front, or a peer that never closes grows this unboundedly.
         if buf.len() > MAX_BODY_BYTES {
             return ReadOutcome::Err(io::Error::other(format!(
                 "close-delimited body exceeded the {MAX_BODY_BYTES} byte cap before the peer closed the connection"
@@ -355,11 +308,9 @@ fn read_head(
         if stripped.is_empty() {
             break;
         }
-        // obs-fold (RFC 7230 3.2.4): a line starting with SP/HTAB continues the PREVIOUS header's
-        // value rather than starting a new one. Obsolete, but legal, and real front ends (some
-        // proxies wrapping a long Location or a multi-line Warning) still emit it; a continuation
-        // line does not fit parse_header_line's "name: value" shape, so it must be folded here
-        // rather than dropped, or that header's value would be silently truncated.
+        // obs-fold (RFC 7230 3.2.4): a line starting with SP/HTAB continues the previous header's
+        // value. Obsolete but legal and still emitted by some proxies; fold it here or the value
+        // is silently truncated.
         if stripped.first().is_some_and(|b| *b == b' ' || *b == b'\t') {
             if let Some(last) = headers.last_mut() {
                 let cont = String::from_utf8_lossy(stripped).trim().to_string();
@@ -425,14 +376,9 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
             Err(_) => return malformed(&seen, format!("unparseable chunk size {size_hex:?}")),
         };
         if size == 0 {
-            // Trailing headers (rare, usually absent) run up to the final blank line.
-            //
-            // CAPPED FOR THE SAME REASON THE RESPONSE HEAD IS, and this loop was missed when that cap
-            // was added: `read_line` bounds ONE line at 64 KiB and `MAX_BODY_BYTES` bounds `body`, but
-            // nothing bounded the NUMBER of trailer lines or the growth of `seen`. A peer that sends a
-            // terminal `0\r\n` and then legal trailers forever, never sending the closing blank line,
-            // grows this at loopback speed for the whole deadline. Fixing read_head's loop and leaving
-            // this one is the half-fix shape this audit keeps finding.
+            // Trailing headers (rare, usually absent) run up to the final blank line. Capped the
+            // same as the response head: nothing else bounds the number of trailer lines a peer
+            // can send after the terminal `0\r\n`.
             loop {
                 if seen.len() > MAX_HEAD_BYTES {
                     return malformed(
@@ -485,11 +431,9 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
         seen.extend_from_slice(&chunk);
         body.extend_from_slice(&chunk);
         chunk_count += 1;
-        // THE AGGREGATE, not just each chunk. read_exact_deadline above already rejects any SINGLE
-        // chunk declared larger than MAX_BODY_BYTES, but nothing stopped an unbounded NUMBER of
-        // legally-sized chunks: a peer sending chunks just under the cap, back to back, for as long
-        // as the deadline allows, grew `body` without limit. Checked after appending so the final
-        // over-cap chunk is still visible in the Malformed evidence.
+        // Aggregate cap, not just per-chunk: read_exact_deadline already rejects one oversized
+        // chunk, but an unbounded number of legally-sized chunks could still grow `body` forever.
+        // Checked after appending so the over-cap chunk is still in the Malformed evidence.
         if body.len() > MAX_BODY_BYTES {
             return malformed(
                 &seen,
@@ -528,15 +472,11 @@ pub fn post_json(
 
 /// The same client, issuing a GET with no body.
 ///
-/// EXISTS FOR THE MOCK'S OWN CONTROL PLANE, not for the gateways: `/__mock/state` is the only thing
-/// this harness reads with a GET, and it is the evidence behind the egress re-verification verdict
-/// (see `reverify.rs`). It goes through the same `Outcome` discipline as every POST rather than a
-/// second, looser reader, because "the mock could not be reached" and "the mock answered, and its
-/// recorder is empty" are the two answers that verdict turns on, and a client that collapsed them
-/// would publish a rig failure as proof a gateway did not translate.
+/// Used only for the mock's own control plane (`/__mock/state`, the evidence behind the egress
+/// re-verification verdict in `reverify.rs`), going through the same `Outcome` discipline as POST
+/// so "mock unreachable" and "mock answered, recorder empty" stay distinct.
 ///
-/// No `content-type` is sent: a GET with no body has no type to declare, and `post_json`'s default
-/// exists for the opposite reason (a gateway that 415s a typeless JSON body).
+/// No `content-type` is sent: a GET with no body has nothing to declare a type for.
 pub fn get(
     addr: SocketAddr,
     path: &str,
@@ -546,26 +486,17 @@ pub fn get(
     send("GET", addr, path, &[], headers, timeout, false)
 }
 
-/// WHY THIS REQUEST CANNOT BE PUT ON THE WIRE, or `None` when it can.
+/// Why this request cannot be put on the wire, or `None` when it can.
 ///
-/// Every request this engine sends is assembled by interpolating a manifest-supplied path and
-/// manifest-supplied header pairs into the HTTP framing with `format!`. HTTP/1.1 has exactly one
-/// terminator for a header and one for the request line, so a `\r` or `\n` anywhere in those strings
-/// does not produce a header with a strange value - it produces EXTRA HEADERS, or a whole second
-/// request, chosen by whoever wrote the manifest rather than by the harness. A `:` inside a header
-/// NAME renames the header and turns the rest into a value. A space in the path rewrites the request
-/// line's HTTP version. NUL is refused for the same reason a name is: nothing downstream of this
-/// process has to agree with us about where a C string ends.
+/// Requests are assembled by interpolating manifest-supplied path/headers into HTTP framing with
+/// `format!`; a `\r`/`\n` anywhere in those strings would inject extra headers or a second
+/// request, a `:` in a header name would rename it, a space in the path would rewrite the request
+/// line's HTTP version. NUL is refused for the same reason.
 ///
-/// ONE VALIDATOR, THREE LANES. Ledger RIG-12 was closed for the load lane only: `gen.rs`'s
-/// `build_request` grew these rules while `send` (the probe and re-verify lanes) and
-/// `build_sse_request` (the streaming lane) kept interpolating the SAME manifest headers raw. A rule
-/// enforced on one of three lanes is not enforced; it is a lane a reader thinks is covered. This is
-/// the rule, and all three call it.
-///
-/// The answer is prose because the only honest thing to do with it is refuse loudly and name the
-/// header - manifests are first-party files, so this is a defect to fix in one, never a gateway
-/// property to publish.
+/// RIG-12: this rule must be enforced identically by all three request-building lanes (`send`
+/// here, `gen.rs::build_request`, and `build_sse_request`) - it was once fixed in only one, which
+/// left the others injectable. Manifests are first-party, so a hit here is a manifest defect, not
+/// a gateway property.
 pub fn unsendable_request(path: &str, headers: &[(String, String)]) -> Option<String> {
     // The request target is interpolated into the request LINE, where a space or a line break is
     // just as much of a second request as one in a header.
@@ -600,9 +531,7 @@ fn send(
     timeout: Duration,
     json_body: bool,
 ) -> Outcome {
-    // REFUSED BEFORE THE CONNECT, so a request we will not send never even touches the gateway: a
-    // connection opened and abandoned is a connection the peer logged and had to clean up for a
-    // request of ours that was never valid.
+    // Refused before the connect: a request we will not send should never touch the gateway.
     if let Some(why) = unsendable_request(path, headers) {
         return Outcome::RigRefused(why);
     }
@@ -620,11 +549,9 @@ fn send(
     request.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
-    // a gateway that requires content-type on a JSON body would otherwise answer 415 to the probe
-    // and be published as NOT SERVING a pairing it would have loaded fine, a gateway property
-    // asserted from a malformed request of ours, the worst direction for this error to run. A
-    // caller may still override it below.
+    // Must match gen.rs::build_request: a gateway requiring content-type on JSON would otherwise
+    // 415 the probe and get published as not serving a pairing it would have loaded fine. A
+    // caller may still override this below.
     if json_body
         && !headers
             .iter()
@@ -752,51 +679,30 @@ impl FillStatus for Outcome {
 pub enum SseEnd {
     /// Collected as many frames as the caller asked for; the stream may have had more.
     FrameBudgetReached,
-    /// The read was budgeted in CONTENT frames (`SseBudget::Content`) and hit the total-event ceiling
-    /// before that many tokens arrived.
-    ///
-    /// A DELIVERY SHORTFALL, NOT AN ERRORED STREAM, and the two must stay apart: the peer answered
-    /// 200, framed correctly and kept sending - it just spent the whole ceiling on events that
-    /// carried no token. `stream_errored` therefore leaves it alone and the delivery ratio fails the
-    /// gate on the count, which is the honest reading. It is one of two ends that say the read
-    /// stopped for OUR bound rather than the stream's own (`FrameBudgetReached` is the other, and
-    /// the satisfied version of it): a caller seeing this knows the ceiling
-    /// binds here and can weigh the counts accordingly.
+    /// Budgeted in CONTENT frames (`SseBudget::Content`) and hit the total-event ceiling before
+    /// that many tokens arrived. A delivery shortfall, not an errored stream: the peer answered
+    /// 200 and kept sending, it just spent the ceiling on non-content events. `stream_errored`
+    /// leaves this alone; the delivery ratio fails the gate on the count instead.
     EventCeilingReached,
-    /// The deadline passed. On a stream that goes quiet this is expected and is not an error by
-    /// itself: `frames` still reports whatever arrived before then, which must not be discarded
-    /// just because the stream never explicitly finished.
+    /// The deadline passed. Not an error by itself; `frames` still reports whatever arrived.
     Timeout,
     /// The peer closed the connection (a normal, deliberate end of stream).
     StreamClosed,
     /// The connection could not be made at all - by the PEER's doing (refused, unreachable, reset).
     ConnectionFailed(String),
-    /// The connection could not be made because THIS HOST ran out: ephemeral source ports
-    /// (EADDRNOTAVAIL) or file descriptors (EMFILE/ENFILE).
-    ///
-    /// Split from `ConnectionFailed` because they are opposite claims. A refused connection is the
-    /// gateway declining; a host with no source ports left never asked it anything. Both used to
-    /// count as an errored stream, so a stream search at high concurrency could exhaust the rig and
-    /// publish the exhaustion as the gateway's stream ceiling - the same defect the load generator
-    /// had, in the path that reaches high concurrency soonest.
+    /// The connection could not be made because THIS HOST ran out of ephemeral source ports
+    /// (EADDRNOTAVAIL) or file descriptors (EMFILE/ENFILE). Split from `ConnectionFailed` because
+    /// a host with no source ports left never asked the gateway anything - conflating the two
+    /// let a stream search at high concurrency publish our own exhaustion as the gateway's ceiling.
     RigExhausted(String),
-    /// THE RIG REFUSED TO SEND. Not a claim about the peer at all - see `Outcome::RigRefused`, which
-    /// is the same fact on the non-streaming lanes.
-    ///
-    /// Distinct from `RigExhausted`, which is also ours but is a resource limit reached honestly
-    /// mid-run. This one is a request the harness would have had to smuggle to send, so it did not
-    /// send it: no connection was made and the gateway was never asked. It must never count toward
-    /// an errored stream or a failing rung.
+    /// The rig refused to send - not a claim about the peer. Same fact as `Outcome::RigRefused` on
+    /// the non-streaming lanes; must never count toward an errored stream or a failing rung.
     RigRefused(String),
     /// The response head itself did not parse (wrong status line, broken headers): there is no
     /// stream to read frames from at all.
     Malformed(String),
-    /// The peer answered, and answered with something that is not an event stream.
-    ///
-    /// An immediate, informative answer rather than a wait. Without this the probe sits until its
-    /// deadline on every target that replies with plain JSON - which is most cells, since a gateway
-    /// only streams where it is configured to - so a twenty second timeout was being burned twice per
-    /// cell to learn something the content-type stated up front. Carries the type it did send.
+    /// The peer answered with something that is not an event stream. Settled immediately rather
+    /// than waiting out the deadline on every plain-JSON target. Carries the type it did send.
     NotAnEventStream(String),
 }
 
@@ -805,50 +711,26 @@ pub struct SseOutcome {
     pub status: Option<u16>,
     pub frames: Vec<String>,
     /// Microseconds from the request being written to each frame arriving, one entry per frame in
-    /// `frames`, in order.
-    ///
-    /// Frames alone cannot answer a single question the board asks about streaming: every published
-    /// streaming field is a TIMING (time to first token, and the gaps between tokens after it), so
-    /// the reader must carry a timestamp alongside each frame, not just the frame.
-    ///
-    /// Measured from the write, not from the connect, so a slow DNS or TCP handshake is not charged
-    /// to the gateway's first token.
+    /// `frames`, in order. Measured from the write, not the connect, so a slow handshake is not
+    /// charged to the gateway's first token.
     pub frame_offsets_us: Vec<u64>,
-    /// How many of `frames` carried MODEL OUTPUT rather than protocol scaffolding, as the request's
-    /// own dialect classifies them (`ingress::Dialect::sse_event_is_content`).
+    /// How many of `frames` carried MODEL OUTPUT rather than protocol scaffolding, per the
+    /// request's dialect (`ingress::Dialect::sse_event_is_content`).
     ///
-    /// Ledger RIG-11: `frames` counts every dispatched SSE event, which is right for anything that
-    /// wants the whole stream (fps, gap timings, "did it stream at all") and wrong for a DELIVERY
-    /// ratio - openai spends 3 events and anthropic 5 on framing, so a stream could satisfy part of
-    /// a frame budget having delivered no tokens, and the two dialects differed by two.
-    ///
-    /// Equals `frames.len()` when the caller passed no dialect: no taxonomy was supplied, so nothing
-    /// is claimed about which events were content and this reads exactly as `frames` does.
+    /// RIG-11: `frames.len()` counts every dispatched event, which is wrong for a delivery ratio -
+    /// dialects spend a different number of events on framing, so two gateways delivering the same
+    /// tokens could score differently. Equals `frames.len()` when no dialect is supplied.
     pub content_frames: u64,
     pub end: SseEnd,
 }
 
 // ─────────────────────────────────── the transport-agnostic SSE reader ───────────────────────────
 //
-// ONE DECODER, FED BY BOTH TRANSPORTS.
-//
-// The framing this has to get right is not small: HTTP head parsing, `Transfer-Encoding: chunked`
-// (sizes in hex, extensions after `;`, the CRLF after each chunk's data, the terminal zero chunk and
-// its trailers), and WHATWG SSE event assembly on top of that, where consecutive `data:` lines join
-// with "\n" and a blank line dispatches the event. Writing that twice - once against a blocking
-// socket and once against an async one - is two copies of the same intricate rules, and the copy
-// that drifts produces a plausible frame count with corrupted timings rather than an error. Nothing
-// would fail loudly.
-//
-// So it is written ONCE here, over bytes, with no socket in it at all. It cannot block, so the async
-// lane can drive it; it cannot await, so the blocking lane can drive it; and it is a pure state
-// machine, so it can be tested directly with hand-written byte sequences including the boundaries a
-// live socket almost never produces on demand - a chunk header split across two reads, a `data:`
-// line split across two chunks, a frame completed by the very last byte before EOF.
-//
-// The arrival timestamp is passed IN rather than read from a clock, for the same reason: the
-// published streaming numbers are timings, so the moment a frame is credited has to be controllable
-// by a test rather than whatever the machine did.
+// One decoder, fed by both transports (blocking and async), rather than two hand-rolled copies of
+// the same chunked+SSE framing rules that could silently drift and produce a plausible frame count
+// with corrupted timings. It is a pure byte-in state machine with no socket and no clock of its
+// own: it cannot block or await, so either transport can drive it, and the arrival timestamp is
+// passed in so tests can control exactly when a frame is credited.
 
 /// What the decoder wants next.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -859,42 +741,23 @@ pub enum Step {
     Done(SseEnd),
 }
 
-/// WHAT STOPS THE READ: a count of dispatched events, or a count of CONTENT frames with a ceiling on
-/// the events spent getting them.
+/// What stops the read: a count of dispatched events, or a count of CONTENT frames with a ceiling
+/// on the events spent getting them.
 ///
-/// Ledger RIG-11's remainder, and the half a classifier alone could not fix. `Events` was the only
-/// mode, and `run::stream_window` divides the content frames it collected by a denominator computed
-/// as `STREAM_FRAME_BUDGET - Dialect::stream_prelude_frames()` - a CONSTANT read off the mock's own
-/// layout. The numerator, though, is measured on the GATEWAY's stream, and under `Events` every
-/// non-content event the gateway emits beyond the mock's prelude consumes a budget slot and displaces
-/// exactly one content frame. Against `STREAM_MIN_DELIVERY_RATIO = 1.0` that is not a rounding
-/// difference, it is a rung that fails on arithmetic: anthropic's real SSE protocol sends `ping`
-/// events, a TRANSLATION cell has the gateway re-emitting the stream in the client's dialect with
-/// framing that is ITS own rather than the mock's, and any gateway with a keepalive does the same.
-/// A gateway that lost nothing failed at every rung, and the delivery shortfall the board published
-/// was ours.
-///
-/// `Content` asks the question the metric is actually asking - "did every token arrive" - by reading
-/// until the tokens arrive. A gateway that inserts framing then spends more EVENTS to deliver the
-/// same content, and the ratio reflects delivery instead of the gateway's framing style. It is the
-/// same correction `STREAM_STALL_MULTIPLIER` (2 -> 10) got on the other clause of the same gate: a
-/// bound calibrated on the mock's behaviour, applied to gateways that do not share it.
+/// RIG-11: under plain `Events`, a non-content event (anthropic's `ping`, a translating gateway's
+/// own framing, any keepalive) consumes a budget slot and displaces a content frame, so a gateway
+/// that lost nothing could still fail the delivery-ratio gate on arithmetic. `Content` reads until
+/// the tokens themselves arrive, bounded by `event_ceiling` so a peer that pings forever cannot
+/// hang the read - hitting the ceiling short of `frames` is `SseEnd::EventCeilingReached`, a real
+/// shortfall that must still fail the gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SseBudget {
-    /// Stop after this many dispatched events, whatever they carried. What every non-delivery caller
-    /// wants: the `Streaming` group's gap distribution reads the stream AS FRAMED, and a TTFT sample
-    /// wants the first event off the wire.
+    /// Stop after this many dispatched events, whatever they carried. What every non-delivery
+    /// caller wants (gap distribution as framed, or the first event for TTFT).
     Events(usize),
-    /// Stop once `frames` events the dialect classifies as CONTENT have arrived, or at `event_ceiling`
-    /// total events, whichever comes first.
-    ///
-    /// BOUNDED, because the ceiling is the only thing between this and a peer that pings forever.
-    /// `SseEnd::EventCeilingReached` says which bound stopped the read, and hitting it short of
-    /// `frames` is a real delivery shortfall that must still fail the gate.
-    ///
-    /// With no dialect every event counts as content (`SseReader::dialect`), so this degenerates to
-    /// `Events(frames)` under the ceiling - which is exactly right for the four dialects the mock
-    /// never streams.
+    /// Stop once `frames` CONTENT-classified events have arrived, or at `event_ceiling` total
+    /// events, whichever comes first. With no dialect every event counts as content, so this
+    /// degenerates to `Events(frames)` under the ceiling.
     Content { frames: u64, event_ceiling: usize },
 }
 
@@ -926,35 +789,23 @@ pub struct SseReader {
     /// Decoded body bytes not yet split into lines.
     body: Vec<u8>,
     /// How far the front of `raw` / `body` has already been searched for the current phase's
-    /// delimiter and proven not to contain one. Searches resume here instead of at index 0,
-    /// because a peer that trickles a few bytes per read otherwise makes every feed() rescan
-    /// the whole accumulated buffer - O(fragments * bytes) inside the timed streaming window
-    /// whose TTFT/gap numbers are published. Mirrors gen.rs::read_response's `scanned` cursor.
-    /// The stored value is the full scanned length; the terminator-length overlap is applied at
-    /// read time, same as gen.rs. Reused by whichever phase owns the buffer: the head is fully
-    /// drained (cursor back to 0) before Phase::Chunked/Identity begins.
+    /// delimiter, so a peer trickling a few bytes per read doesn't make feed() rescan the whole
+    /// buffer each time (O(fragments * bytes) inside the timed TTFT/gap window). Mirrors
+    /// gen.rs::read_response's `scanned` cursor; reset to 0 when a phase hands the buffer off.
     raw_scanned: usize,
     body_scanned: usize,
     status: Option<u16>,
     /// Data lines accumulated for the event that has not been dispatched yet.
     pending: Option<String>,
-    /* EVENT BOUNDARIES SEEN, INCLUDING THE ONES CARRYING NO `data:`.
-    `frames` only grows for events that carried a data line, so the `Content` budget's event
-    ceiling - the thing standing between this read and a peer that pings forever - could not see
-    a comment keepalive (`:\n\n`) or a bare `event: ping\n\n` at all. Those are the canonical SSE
-    keepalive and what most reverse proxies inject, so against such a peer the ceiling never
-    fired and every lane in the window burned the full STREAM_TIMEOUT instead of returning
-    `EventCeilingReached`. Counting dispatches rather than data frames makes the documented bound
-    actually hold. */
+    // Event boundaries seen, including ones with no `data:` line (comment keepalives, `event:
+    // ping`). `frames` alone can't drive the `Content` budget's event ceiling since a peer that
+    // only sends keepalives would never trip it; counting dispatches makes the ceiling hold.
     events_seen: usize,
     frames: Vec<String>,
     offsets_us: Vec<u64>,
     budget: SseBudget,
-    /// Which wire dialect these events are in, when the caller knows. The decoder does NOT inspect
-    /// payloads itself - it asks the dialect (`sse_event_is_content`), because a taxonomy of events
-    /// belongs to the protocol and this state machine is deliberately ignorant of both transport and
-    /// protocol. `None` means no taxonomy was supplied and every event counts, exactly as `frames`
-    /// does.
+    /// Which wire dialect these events are in, when known. The decoder never inspects payloads
+    /// itself; it asks the dialect (`sse_event_is_content`). `None` means every event counts.
     dialect: Option<crate::ingress::Dialect>,
     content_frames: u64,
     finished: Option<SseEnd>,
@@ -1032,11 +883,8 @@ impl SseReader {
                         if let Some(step) = self.drain_body(elapsed_us) {
                             return step;
                         }
-                        // The terminal chunk ends the BODY, and any `data:` lines still held were
-                        // never dispatched: SSE dispatches on the blank line. Held lines are dropped
-                        // here for the same reason `finish` drops them - a fragment the peer never
-                        // terminated is not a frame it delivered - so which way the stream ended
-                        // cannot change whether the fragment counts.
+                        // SSE dispatches on the blank line, so any held `data:` lines were never
+                        // dispatched and are dropped here, same as `finish` does.
                         self.pending = None;
                         return self.finish_with(SseEnd::StreamClosed);
                     }
@@ -1049,20 +897,11 @@ impl SseReader {
         }
     }
 
-    /// The peer stopped sending, or the deadline passed. Whatever arrived still counts: a stream
-    /// that goes quiet is not an error, and discarding its DISPATCHED frames would publish nothing
-    /// for a gateway that streamed perfectly well up to that point.
-    ///
-    /// AN EVENT THE PEER NEVER TERMINATED IS NOT A DELIVERED FRAME. This used to flush the held
-    /// `data:` lines as one more frame, stamped at the close or the deadline - so a gateway that
-    /// died mid-event was credited with delivering the fragment that killed it, and the fabricated
-    /// arrival time (the timeout instant, up to the whole stream timeout after the last real byte)
-    /// entered the gap samples as a stall no frame arrival ever produced. Dropped rather than
-    /// stamped: SSE dispatches on the blank line, so a fragment is an event that never happened, and
-    /// there is no honest arrival time for a frame the peer never finished writing.
-    ///
-    /// Takes no arrival time on purpose: there is nothing left here that could honestly be stamped
-    /// with one, and a parameter for it is an invitation to stamp something again.
+    /// The peer stopped sending, or the deadline passed. Whatever was already dispatched still
+    /// counts. A held (undispatched) `data:` fragment is dropped, not flushed: stamping it with a
+    /// fabricated arrival time (the close/deadline instant) used to enter the gap samples as a
+    /// stall no real frame arrival produced. No arrival-time parameter on purpose, so it can't
+    /// happen again.
     pub fn finish(mut self, end: SseEnd) -> SseOutcome {
         self.pending = None;
         let end = self.finished.clone().unwrap_or(end);
@@ -1209,15 +1048,8 @@ impl SseReader {
                     }
                     None => self.pending = Some(data),
                 }
-                // THE ONE BUFFER `MAX_BODY_BYTES` DID NOT COVER.
-                //
-                // That cap guards `raw` and `body`, and both DRAIN INTO this one via `take_front` - so
-                // the bound did not transfer. A peer that sends `data:` lines and never the blank line
-                // that ends a frame grows `pending` for as long as the deadline allows, and this
-                // file's own note on the close-delimited path spells out where that goes: the
-                // allocator's failure handler calls abort() unconditionally, so it is not a panic the
-                // harness can catch, it is the whole run dying. Malformed rather than a new variant:
-                // an event stream with no frame boundary is exactly a framing fault of the peer's.
+                // `MAX_BODY_BYTES` guards `raw` and `body` but not `pending`: a peer sending
+                // `data:` lines and never the terminating blank line would grow this unboundedly.
                 if self.pending.as_ref().map(String::len).unwrap_or(0) > MAX_BODY_BYTES {
                     return Some(self.finish_with(SseEnd::Malformed(format!(
                         "a single SSE frame exceeded the {MAX_BODY_BYTES} byte cap without a frame \
@@ -1296,22 +1128,11 @@ fn take_front(buf: &mut Vec<u8>, scanned: &mut usize, upto: usize) -> Vec<u8> {
 
 /// Byte offset just past the blank line that ends the response head, if it has all arrived.
 fn find_head_end(buf: &[u8]) -> Option<usize> {
-    /* THE EARLIER TERMINATOR WINS, because both searches run over a buffer that already contains
-    BODY bytes from the same read. This used to consult the bare-LF form only when no `\r\n\r\n`
-    existed ANYWHERE, so a CRLF pair occurring later in the SSE body beat the bare-LF blank line
-    that actually ended the head - and everything between them was drained as if it were head.
-
-    Concretely, for a peer that sends an LF-terminated head and CRLF-terminated frames (both legal;
-    SSE permits CRLF line endings) arriving in one segment:
-
-        HTTP/1.1 200 OK\nContent-Type: text/event-stream\n\ndata: alpha\r\n\r\ndata: beta\n\n
-
-    the head was taken as ending after `data: alpha`, that frame was never seen by the body
-    reader, and time-to-first-token was credited to the SECOND frame. A silently lost frame and an
-    overstated TTFT, on a gateway doing nothing wrong.
-
-    `\r\n\r\n` is `0D 0A 0D 0A` and does not contain `0A 0A`, so the two searches cannot match
-    inside one another and `min` is exactly "whichever blank line came first". */
+    // The earlier terminator wins: the buffer may already contain body bytes from the same read,
+    // so a CRLF pair later in an SSE frame must not beat an earlier bare-LF blank line that
+    // actually ended the head (e.g. an LF head followed by CRLF frames arriving in one segment) -
+    // that used to drop a frame and overstate TTFT. `\r\n\r\n` cannot contain `\n\n`, so `min` is
+    // exactly "whichever blank line came first".
     let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
     // Tolerate bare-LF heads, which some minimal peers (and this repo's own test servers) emit.
     let lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
@@ -1367,18 +1188,9 @@ pub fn post_json_sse(
     };
 
     let write_deadline = deadline.saturating_duration_since(Instant::now());
-    /* RUNNING OUT OF OUR OWN CLOCK IS A TIMEOUT, NOT THE PEER REFUSING.
-    `set_write_timeout` rejects a zero duration (`InvalidInput`, "cannot set a 0 duration
-    timeout"), and `write_deadline` is exactly zero whenever the connect consumed the whole
-    budget - routine at the concurrencies `stream_window` drives. This returned
-    `ConnectionFailed`, whose own doc two hundred lines up says "by the PEER's doing (refused,
-    unreachable, reset)", so `run::StreamErrorKinds` filed it under `connect_failed` and
-    `stream_errored` counted it against the gateway. A lane that ran out of OUR clock was charged
-    to them.
-
-    The blocking non-streaming lane already calls this same event `Outcome::TimedOut`; the two
-    lanes simply disagreed. `Timeout` is also what the caller gets if the deadline expires one
-    microsecond later, so this removes a discontinuity as well as a misattribution. */
+    // A zero write_deadline means the connect consumed the whole timeout budget - our clock, not
+    // the peer refusing. Must map to `Timeout`, not `ConnectionFailed`, matching what the blocking
+    // lane already calls this case and what the caller gets one microsecond later anyway.
     if write_deadline.is_zero() {
         return SseOutcome {
             status: None,
@@ -1448,18 +1260,11 @@ pub fn post_json_sse(
     }
 }
 
-/// The same SSE read, driven by tokio instead of a blocked thread.
-///
-/// ONE LANE PER TASK, NOT PER OS THREAD. `run::stream_window` used to spawn a thread per lane, which
-/// is why the concurrent-stream searches were capped far below the throughput searches: 65536
-/// threads is scheduler thrashing, not a bigger gateway, and a field run that tried it sat at a
-/// 1-minute load average over 24,000 and never converged. That cap was OUR limit reaching the board
-/// as the gateway's - 15 cells of the 2026-07-28 run published no cpu_fps because the search "was
-/// still climbing" when the harness stopped.
-///
-/// The decoding is NOT duplicated here: this feeds the same `SseReader` the blocking lane feeds, and
-/// sends the same bytes via the same `build_sse_request`. The only thing that differs between the
-/// two lanes is who owns the waiting, which is the only thing that should.
+/// The same SSE read, driven by tokio instead of a blocked thread. One lane per task rather than
+/// per OS thread, since a thread-per-lane design capped concurrent-stream searches far below
+/// throughput searches (thousands of OS threads is scheduler thrashing, not a bigger gateway).
+/// Feeds the same `SseReader` and sends the same bytes via `build_sse_request` as the blocking
+/// lane, so the two differ only in who owns the waiting.
 pub async fn post_json_sse_async(
     addr: SocketAddr,
     path: &str,
@@ -1490,13 +1295,9 @@ pub async fn post_json_sse_async(
         Err(why) => return ended(SseEnd::RigRefused(why)),
     };
 
-    /* ONE DEADLINE FOR THE WHOLE LANE, exactly as the blocking lane does.
-    This gave `timeout` to the connect, another `timeout` to the write, and then started a FRESH
-    `timeout` for the reads - so a lane could legitimately run to 3x what its caller asked for,
-    while this function's own doc says "the only thing that differs between the two lanes is who
-    owns the waiting". `stream_window` sizes its search on the assumption that a lane is bounded
-    by STREAM_TIMEOUT, so an overrunning window costs the whole run wall-clock the schedule never
-    budgeted, and the two lanes' timeout-derived samples were not the same quantity. */
+    // One deadline for the whole lane (connect + write + reads), as the blocking lane does.
+    // Giving each phase its own fresh `timeout` let a lane run to 3x what the caller asked for,
+    // which `stream_window` doesn't budget for and would desync the two lanes' timeout samples.
     let lane_deadline = tokio::time::Instant::now() + timeout;
 
     let connect = tokio::time::timeout_at(lane_deadline, tokio::net::TcpStream::connect(addr));
@@ -1512,9 +1313,8 @@ pub async fn post_json_sse_async(
         Err(_) => return ended(SseEnd::Timeout),
     }
 
-    // Clock from the WRITE, exactly as the blocking lane does, so a slow handshake is not charged to
-    // the gateway's first token and the two lanes' numbers mean the same thing. The DEADLINE is the
-    // lane's, set before the connect; only the TTFT origin is the write.
+    // Clock from the write, as the blocking lane does, so a slow handshake isn't charged to the
+    // gateway's first token. The deadline stays the lane's (set before the connect).
     let sent_at = std::time::Instant::now();
     let deadline = lane_deadline;
     let mut reader = SseReader::new(budget, dialect);
@@ -1536,11 +1336,9 @@ pub async fn post_json_sse_async(
     }
 }
 
-/// WHICH SIDE FAILED TO CONNECT.
-///
-/// EADDRNOTAVAIL means this host has no ephemeral source port left; EMFILE/ENFILE mean it has no
-/// descriptor left. Neither is the gateway declining anything - it was never asked. Everything else
-/// (refused, unreachable, reset) is the peer's, and stays a connection failure.
+/// Which side failed to connect: EADDRNOTAVAIL (no ephemeral source port) or EMFILE/ENFILE (no
+/// descriptor) mean this host ran out, not the gateway declining. Everything else stays a
+/// connection failure.
 fn connect_end(e: &std::io::Error) -> SseEnd {
     let ours = matches!(
         e.kind(),
@@ -1573,9 +1371,7 @@ fn build_sse_request(
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
     request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
-    // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching gen.rs's build_request: a gateway
-    // that requires content-type on a JSON body would otherwise answer 415 to the probe and be
-    // published as NOT SERVING a pairing it would have loaded fine.
+    // Must match gen.rs::build_request, same reasoning as in `send`.
     if !headers
         .iter()
         .any(|(n, _)| n.eq_ignore_ascii_case("content-type"))
@@ -1600,9 +1396,8 @@ mod tests {
     use std::thread;
 
     /// Binds an ephemeral port, hands the accepted connection to `serve` on a background thread,
-    /// and returns the address to connect to. `serve` gets the raw request bytes read so far are
-    /// not parsed for it; it owns the whole connection and decides what, if anything, to write
-    /// back and when.
+    /// and returns the address to connect to. `serve` owns the whole connection and decides what,
+    /// if anything, to write back and when.
     fn spawn_server<F>(serve: F) -> SocketAddr
     where
         F: FnOnce(StdTcpStream) + Send + 'static,
@@ -1853,13 +1648,9 @@ mod tests {
         assert_eq!(outcome.end, SseEnd::StreamClosed);
     }
 
-    // EVERY PUBLISHED STREAMING NUMBER IS A TIMING. Time to first token, and the gaps between
-    // tokens after it - the frames themselves are never published, so the reader must carry a
-    // timestamp alongside each frame, not just the frame.
-    //
-    // A server that holds a known pause before the first frame and a different known pause between
-    // the rest is what makes the two quantities separable: if the offsets were fabricated, or all
-    // stamped at once at the end, the first gap and the later gaps would not differ.
+    // Published streaming numbers are timings (TTFT, inter-token gaps), not frame counts, so each
+    // frame needs its own arrival timestamp. Distinct pauses before/after the first frame make a
+    // fabricated or end-stamped offset list distinguishable from a real one.
     #[test]
     fn sse_records_when_each_frame_arrived_not_just_that_it_did() {
         let addr = spawn_server(|mut conn| {
@@ -1899,10 +1690,8 @@ mod tests {
             );
         }
 
-        // THE DISCRIMINATING CHECK. The gap after the first token is much smaller than the wait for
-        // it. A single timestamp reused for every frame, or offsets stamped once at the end, would
-        // make these equal - so this is what distinguishes a real per-frame clock from a plausible
-        // looking one.
+        // The gap after the first token must be much smaller than the wait for it - a single
+        // reused timestamp or end-of-stream stamping would make these equal.
         let first_gap = outcome.frame_offsets_us[1] - outcome.frame_offsets_us[0];
         assert!(
             first_gap < ttft_us,
@@ -1928,11 +1717,8 @@ mod tests {
 
     // ── FRAMING ─────────────────────────────────────────────────────────────────────────────────
     //
-    // Everything below pins how a response is FRAMED, which is the class of defect that costs a
-    // whole cell without ever looking like a failure: a body that is silently truncated, or a
-    // truncation silently accepted as a body, both hand the caller a well-formed `Response` whose
-    // contents are wrong. The gateway under test is arbitrary third-party software, so every one of
-    // these shapes is something a real target can and does emit.
+    // Pins how a response is framed: a silently truncated (or silently accepted) body hands the
+    // caller a well-formed `Response` with wrong contents, and never looks like a failure.
 
     /// A minimal head builder, so a framing test states only the thing it is about.
     fn head(status_line: &str, headers: &[&str]) -> String {
@@ -1946,10 +1732,8 @@ mod tests {
         s
     }
 
-    // HTTP/1.0 is not a malformed HTTP/1.1. Several proxies and a few gateway front ends still
-    // answer 1.0 on an error path, and rejecting the version would turn a perfectly readable 503
-    // into `Malformed`, which probe.rs reads as "we may never have reached the gateway" rather than
-    // as the gateway's own verdict. That is the exact collapse this file exists to prevent.
+    // HTTP/1.0 is not malformed HTTP/1.1: rejecting the version would turn a readable 503 into
+    // `Malformed`, which probe.rs reads as "never reached" instead of the gateway's own verdict.
     #[test]
     fn an_http_1_0_response_is_a_real_response_not_a_malformed_one() {
         let addr = spawn_server(|mut conn| {
@@ -1973,9 +1757,8 @@ mod tests {
         }
     }
 
-    // Neither Content-Length nor Transfer-Encoding: the body runs to the close. This is the framing
-    // this client actually asks for (it sends `Connection: close`), so a bug here silently empties
-    // the body of every target that does not announce a length.
+    // Neither Content-Length nor Transfer-Encoding: body runs to the close, which is what this
+    // client's own `Connection: close` asks for.
     #[test]
     fn a_close_delimited_body_with_no_framing_headers_is_read_in_full() {
         let addr = spawn_server(|mut conn| {
@@ -1996,11 +1779,8 @@ mod tests {
         }
     }
 
-    // A SHORT BODY IS NOT A BODY. The peer declared a length and then closed early, so what arrived
-    // is a fragment of a JSON document. Handing that back as `Response` lets a caller parse a
-    // truncated payload, or worse, read the truncation as a semantic answer from the gateway. The
-    // byte counts belong in the message because "how much of it arrived" is what tells an operator
-    // whether this was a crash mid-write or a peer that lied about the length.
+    // A short body must not surface as `Response`: a caller would parse the truncated fragment as
+    // a real answer. Byte counts in the message tell an operator crash-mid-write from a lied length.
     #[test]
     fn a_body_shorter_than_its_declared_content_length_is_malformed_never_a_short_success() {
         let addr = spawn_server(|mut conn| {
@@ -2022,10 +1802,8 @@ mod tests {
         }
     }
 
-    // A declared length of zero is a COMPLETE body, and the length header settles the framing: the
-    // client must not fall through to reading until the close, because a peer that keeps the
-    // connection open (a keep-alive front end that ignored our `Connection: close`) would then hold
-    // the probe until its deadline and turn an instant 204-shaped answer into a timeout.
+    // Content-Length: 0 settles the framing; must not fall through to reading until close, or a
+    // peer ignoring our `Connection: close` would turn an instant answer into a timeout.
     #[test]
     fn a_content_length_of_zero_is_an_empty_body_and_does_not_wait_for_the_close() {
         let addr = spawn_server(|mut conn| {
@@ -2056,9 +1834,8 @@ mod tests {
         );
     }
 
-    // TCP delivers a stream, not messages. A peer that flushes its status line in two writes (a
-    // proxy that prepends the version, a slow-loris front end) is entirely legal, and reading only
-    // what happened to be in the first packet would report `Malformed` for a perfectly good 200.
+    // TCP delivers a stream, not messages; a status line split across two writes is legal and must
+    // not read as `Malformed`.
     #[test]
     fn a_status_line_split_across_reads_is_reassembled() {
         let addr = spawn_server(|mut conn| {
@@ -2081,9 +1858,8 @@ mod tests {
         }
     }
 
-    // The same stream property, one layer down: a header split mid-NAME. This matters more than the
-    // status line because the header that gets split may be the one that frames the body, so a
-    // partial read here does not merely mis-title the response, it mis-frames it.
+    // Same stream property, one layer down: a split header may be the one that frames the body, so
+    // a partial read here mis-frames the response, not just mis-titles it.
     #[test]
     fn headers_split_across_reads_are_reassembled_and_still_frame_the_body() {
         let addr = spawn_server(|mut conn| {
@@ -2109,11 +1885,8 @@ mod tests {
         }
     }
 
-    // THE LENGTH IS THE PEER'S CLAIM, NOT OURS. usize::MAX as a Content-Length makes a reserving
-    // reader panic on capacity overflow, and a merely enormous one reaches the allocator, whose
-    // failure handler calls abort(): not a panic, nothing catches it, and an eight hour run dies
-    // with no operator watching. The cap must be applied to the DECLARATION, before a byte is read,
-    // and the verdict must say so rather than blaming a timeout.
+    // usize::MAX as Content-Length would panic a reserving reader or abort() the allocator; the
+    // cap must reject the declaration itself, before a byte is read.
     #[test]
     fn an_absurd_content_length_is_rejected_on_the_declaration_never_allocated() {
         let addr = spawn_server(|mut conn| {
@@ -2139,13 +1912,9 @@ mod tests {
         );
     }
 
-    // A CLOSE-DELIMITED BODY HAS NO DECLARATION TO CAP - the peer just streams until it closes the
-    // connection, so the only place left to enforce MAX_BODY_BYTES is against what has actually
-    // accumulated. This cap was only ever checked against a declared Content-Length, so a peer that
-    // omits any framing header (legal: RFC 7230 permits close-delimited responses) and streams past
-    // MAX_BODY_BYTES before the deadline grew the buffer without limit until the wall-clock timeout,
-    // tens of seconds away - long enough on loopback to reach gigabytes and risk the allocator's
-    // unconditional abort() this whole cap exists to avoid.
+    // A close-delimited body has no declared length to cap up front, so MAX_BODY_BYTES must be
+    // enforced against the accumulator instead - otherwise this streams unbounded until the
+    // deadline, risking the allocator's abort().
     #[test]
     fn a_close_delimited_body_past_the_cap_is_rejected_without_waiting_for_the_deadline() {
         let addr = spawn_server(|mut conn| {
@@ -2180,9 +1949,8 @@ mod tests {
         );
     }
 
-    // The chunked sibling of the same defect: no single chunk here exceeds MAX_BODY_BYTES (each is
-    // legally sized), so the per-chunk check in read_exact_deadline never fires. Only a check on the
-    // running total across chunks catches an unbounded NUMBER of legally-sized chunks.
+    // Chunked sibling of the same defect: no single chunk exceeds MAX_BODY_BYTES, so only a check
+    // on the running total across chunks catches an unbounded number of them.
     #[test]
     fn a_chunked_body_past_the_cap_is_rejected_without_waiting_for_the_deadline() {
         let addr = spawn_server(|mut conn| {
@@ -2221,10 +1989,9 @@ mod tests {
         );
     }
 
-    // RFC 7230 section 3.3.3: when both are present, Transfer-Encoding wins and Content-Length is
-    // ignored. Getting this backwards truncates the body to the (bogus) declared length AND leaves
-    // the chunk framing undecoded, so the caller gets chunk-size lines inside what it believes is
-    // JSON. Real gateways emit both when a buffering proxy sits in front of a streaming origin.
+    // RFC 7230 §3.3.3: when both are present, Transfer-Encoding wins and Content-Length is
+    // ignored. Getting this backwards leaves chunk framing undecoded inside what the caller
+    // believes is JSON.
     #[test]
     fn transfer_encoding_chunked_wins_over_a_content_length() {
         let addr = spawn_server(|mut conn| {
@@ -2250,10 +2017,8 @@ mod tests {
         }
     }
 
-    // The chunk decoder builds its own `HttpResponse` with a placeholder status of 0 and no headers,
-    // and relies on the caller to fill in what the head already parsed. If that hand-off is dropped,
-    // every chunked response arrives as status 0, which is not a status any peer can send: a chunked
-    // 503 would stop being a gateway verdict and become an unclassifiable number.
+    // The chunk decoder returns a placeholder status of 0; the caller must fill in the head's real
+    // status/headers, or a chunked 503 would arrive unclassifiable.
     #[test]
     fn a_chunked_response_carries_the_head_status_and_headers_not_the_placeholder() {
         let addr = spawn_server(|mut conn| {
@@ -2289,9 +2054,8 @@ mod tests {
         }
     }
 
-    // Chunk extensions ("1a;charset=utf-8") are legal and some proxies emit them. Parsing the whole
-    // line as hex fails, and the failure surfaces as `Malformed`, so a target that merely annotated
-    // its chunks would be reported as having sent a broken response.
+    // Chunk extensions ("1a;charset=utf-8") are legal; parsing the whole line as hex would fail and
+    // wrongly report a target that merely annotated its chunks as `Malformed`.
     #[test]
     fn a_chunk_size_extension_is_stripped_before_the_hex_is_parsed() {
         let addr = spawn_server(|mut conn| {
@@ -2308,9 +2072,8 @@ mod tests {
         }
     }
 
-    // Trailing headers after the terminating zero chunk are rare but legal, and they must be
-    // consumed up to the final blank line and never appear in the body: a caller that JSON-parses
-    // the body would otherwise choke on a trailer glued to the end of a valid document.
+    // Trailing headers after the zero chunk are rare but legal; must be consumed and never land in
+    // the body, or a JSON-parsing caller chokes on the trailer glued to the end.
     #[test]
     fn chunked_trailers_are_consumed_and_never_land_in_the_body() {
         let addr = spawn_server(|mut conn| {
@@ -2341,9 +2104,8 @@ mod tests {
         );
     }
 
-    // The mirror of the truncated Content-Length case, for the other framing. Bytes arrived and the
-    // peer vanished before the terminating zero chunk, so what we hold is a prefix. Returning it as
-    // a `Response` would publish a partial body as the gateway's complete answer.
+    // Mirror of the truncated Content-Length case: the peer vanished before the terminating zero
+    // chunk, so what we hold is a prefix and must not surface as a complete `Response`.
     #[test]
     fn a_chunked_body_that_ends_before_its_terminating_chunk_is_malformed() {
         let addr = spawn_server(|mut conn| {
@@ -2363,10 +2125,8 @@ mod tests {
         }
     }
 
-    // A chunked stream can also die inside the TRAILER, after the zero chunk was sent. Everything
-    // that will ever be in the body has arrived by then, which is exactly what makes this tempting
-    // to accept, and exactly why it must not be: the response was never terminated, so we cannot
-    // tell a finished stream from a peer that crashed while writing.
+    // Dying inside the trailer (after the zero chunk) is tempting to accept since the body is
+    // already complete, but the response was never terminated - indistinguishable from a crash.
     #[test]
     fn a_chunked_stream_that_dies_inside_its_trailer_is_malformed() {
         let addr = spawn_server(|mut conn| {
@@ -2383,10 +2143,8 @@ mod tests {
         );
     }
 
-    // The evidence, not just the verdict. "Bad chunk size" tells an operator nothing; the bytes the
-    // peer actually sent are what distinguishes a gateway emitting decimal sizes from a proxy that
-    // double-encoded the body, and throwing them away is how a rig defect masquerades as a clean
-    // gateway failure.
+    // "Bad chunk size" alone tells an operator nothing; the bytes actually seen must be in the
+    // message.
     #[test]
     fn an_unparseable_chunk_size_names_what_it_saw() {
         let addr = spawn_server(|mut conn| {
@@ -2406,10 +2164,8 @@ mod tests {
         }
     }
 
-    // A stray non-header line in the head (a proxy's informational banner, an obs-fold continuation)
-    // must be skipped rather than sink a response that otherwise has a perfectly good status, body,
-    // and framing. Failing the whole response over one cosmetic line converts a gateway's real
-    // answer into "we may never have reached it".
+    // A stray non-header line must be skipped, not sink an otherwise-good response - failing the
+    // whole thing over one cosmetic line turns a real answer into "never reached".
     #[test]
     fn a_header_line_with_no_colon_is_skipped_rather_than_sinking_the_response() {
         let addr = spawn_server(|mut conn| {
@@ -2438,9 +2194,7 @@ mod tests {
         }
     }
 
-    // Header values legitimately contain colons (Date, and any URL in a Location or Link). Splitting
-    // on the LAST colon rather than the first silently truncates such a value, and a content-type
-    // read that way would misclassify a stream as JSON.
+    // Header values can contain colons (Date, a Location URL); must split on the FIRST colon only.
     #[test]
     fn a_header_value_containing_colons_survives_whole() {
         let addr = spawn_server(|mut conn| {
@@ -2466,9 +2220,7 @@ mod tests {
         }
     }
 
-    // Headers are kept as a pair list and never a map, precisely so repeated names survive: some
-    // dialects distinguish repeated headers from a single comma-joined one, and collapsing them
-    // would hide that a peer sent two conflicting values before the caller ever saw the difference.
+    // Headers are a pair list, never a map, so repeated names survive rather than collapsing.
     #[test]
     fn duplicate_response_headers_both_survive_because_headers_are_a_pair_list() {
         let addr = spawn_server(|mut conn| {
@@ -2503,11 +2255,8 @@ mod tests {
         }
     }
 
-    // obs-fold (RFC 7230 3.2.4): a continuation line starting with a space or tab extends the value
-    // of the header immediately before it, rather than being a header of its own. A reader that
-    // just fails to parse it as "name: value" and drops it silently truncates whatever value was
-    // folded, which for something like a folded Warning or Location is exactly the part an operator
-    // needed to see.
+    // obs-fold (RFC 7230 3.2.4): a leading-space/tab continuation extends the previous header's
+    // value rather than being its own header; dropping it as unparseable truncates the value.
     #[test]
     fn an_obs_folded_header_line_is_unfolded_onto_the_previous_header() {
         let addr = spawn_server(|mut conn| {
@@ -2584,10 +2333,8 @@ mod tests {
 
     // ── SSE framing ─────────────────────────────────────────────────────────────────────────────
 
-    // A content-type that is present and is not an event stream is a DEFINITIVE answer: this peer is
-    // not streaming, and waiting out the deadline learns nothing more. Most cells reply with plain
-    // JSON, so without this a twenty second timeout is burned twice per cell to discover something
-    // the head stated in its first few bytes.
+    // A present, non-event-stream content-type is definitive: waiting out the deadline would learn
+    // nothing more, and most cells reply with plain JSON.
     #[test]
     fn an_sse_probe_against_a_plain_json_answer_returns_at_once_and_names_the_type() {
         let addr = spawn_server(|mut conn| {
@@ -2617,9 +2364,7 @@ mod tests {
         );
     }
 
-    // A MISSING content-type is not a refusal. The frames are what settle whether this is a stream,
-    // so a peer that streams without announcing it must still be read: treating absence as a
-    // negative would publish "does not stream" about a gateway that demonstrably does.
+    // A missing content-type is not a refusal; the frames settle whether this is a stream.
     #[test]
     fn a_stream_that_never_declares_a_content_type_is_still_read() {
         let addr = spawn_server(|mut conn| {
@@ -2636,9 +2381,8 @@ mod tests {
         );
     }
 
-    // The budget is a CEILING, not a target: an off-by-one here reads one extra frame off every
-    // stream, which on a paced stream costs an inter-frame interval per probe and silently inflates
-    // every streaming duration the suite publishes.
+    // The budget is a ceiling, not a target: an off-by-one reads one extra frame and silently
+    // inflates every published streaming duration.
     #[test]
     fn sse_stops_at_the_frame_budget_and_says_so() {
         let addr = spawn_server(|mut conn| {
@@ -2669,11 +2413,9 @@ mod tests {
         );
     }
 
-    // hyper (the mock's own server) chunk-encodes any SSE response, since a live event stream has
-    // no Content-Length. A chunk-unaware reader only "worked" by coincidence of a chunk boundary
-    // landing on a frame boundary; this deliberately splits a chunk MID-FRAME (inside the `data:`
-    // line itself, and again inside its payload) so a reader that treats chunk-size lines as frame
-    // noise instead of decoding them would read a truncated/corrupted frame or miscount entirely.
+    // hyper chunk-encodes any SSE response (no Content-Length on a live stream). Deliberately
+    // splits a chunk mid-frame so a reader that doesn't actually decode chunk framing would
+    // truncate or miscount.
     #[test]
     fn a_chunk_boundary_landing_mid_frame_does_not_truncate_or_corrupt_it() {
         let addr = spawn_server(|mut conn| {
@@ -2710,10 +2452,9 @@ mod tests {
         assert_eq!(outcome.end, SseEnd::StreamClosed);
     }
 
-    // An SSE stream carries more line kinds than `data:`. Counting `event:`, `id:`, comments or the
-    // blank separators as frames would inflate the frame count, and since every published streaming
-    // number is a per-frame timing, an inflated count fabricates inter-token gaps that never
-    // happened. The `data:` prefix may also be followed by any amount of leading space, or none.
+    // Only `data:` lines are frames - counting `event:`, `id:`, comments, or blank separators would
+    // fabricate inter-token gaps. The `data:` prefix may be followed by any amount of leading
+    // space, or none.
     #[test]
     fn sse_counts_only_data_frames_and_trims_their_leading_space() {
         let addr = spawn_server(|mut conn| {
@@ -2734,8 +2475,7 @@ mod tests {
         );
     }
 
-    // There is no stream to read frames from if the head never parsed, and there is no status
-    // either: reporting one would assert the peer answered when what it sent was not an answer.
+    // No status either if the head never parsed: reporting one would assert the peer answered.
     #[test]
     fn an_sse_probe_against_a_broken_head_is_malformed_and_carries_no_status() {
         let addr = spawn_server(|mut conn| {
@@ -2756,10 +2496,8 @@ mod tests {
         assert!(outcome.frames.is_empty());
     }
 
-    // WHATWG SSE: consecutive `data:` lines with no blank line between them are ONE logical event,
-    // joined with "\n". Treating each line as its own frame would split a multi-line payload (a
-    // formatted message, a multi-line JSON delta) into several frames that were never separate
-    // events, and would fabricate inter-token gaps between lines that arrived in the same event.
+    // WHATWG SSE: consecutive `data:` lines with no blank line between them are ONE event, joined
+    // with "\n" - treating each line as its own frame would fabricate inter-token gaps.
     #[test]
     fn consecutive_data_lines_before_a_blank_line_join_into_one_frame() {
         let addr = spawn_server(|mut conn| {
@@ -2808,8 +2546,8 @@ mod tests {
 
     // ── the transport-agnostic SSE reader ───────────────────────────────────────────────────────
     //
-    // These are the boundaries a live socket produces rarely and unpredictably, which is exactly why
-    // the decoder takes bytes instead of a socket: they can be produced on demand here.
+    // These boundaries occur rarely and unpredictably on a live socket; the decoder takes bytes
+    // instead of a socket so they can be produced on demand here.
 
     fn chunked(parts: &[&str]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -2850,17 +2588,14 @@ mod tests {
     }
 
     // drain_body (like pump_chunked and try_head) must not rescan the accumulated buffer from
-    // index 0 on every feed(): a slow peer that writes a few bytes per TCP read would otherwise
-    // cost O(fragments * bytes) instead of O(bytes) total, and that cost sits inside the timed
-    // streaming window whose TTFT/gap numbers are published. gen.rs::read_response carries a
-    // `scanned` cursor for exactly this reason; the SSE reader has no equivalent.
+    // index 0 on every feed(), or a slow peer costs O(fragments * bytes) inside the timed
+    // TTFT/gap window. Mirrors gen.rs::read_response's `scanned` cursor.
     #[test]
     fn feeding_the_same_bytes_in_many_small_fragments_is_not_quadratically_slower() {
         const IDENTITY_SSE_HEAD: &str =
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
 
-        // One un-terminated `data:` line delivered a handful of bytes at a time, mimicking a slow
-        // peer. No '\n' ever appears, so every feed() call must decide there is nothing to drain.
+        // One un-terminated `data:` line delivered a few bytes at a time; no '\n' ever appears.
         let payload = vec![b'x'; 50_000];
 
         let mut fragmented = SseReader::new(usize::MAX, None);
@@ -2874,18 +2609,15 @@ mod tests {
         }
         let fragmented_elapsed = start.elapsed();
 
-        // The same bytes delivered whole exercise drain_body's scan exactly once instead of 5,000
-        // times.
+        // Same bytes delivered whole: one scan instead of 5,000.
         let mut whole = SseReader::new(usize::MAX, None);
         assert_eq!(whole.feed(IDENTITY_SSE_HEAD.as_bytes(), 0), Step::NeedMore);
         let start = Instant::now();
         assert_eq!(whole.feed(&payload, 0), Step::NeedMore);
         let whole_elapsed = start.elapsed();
 
-        // A cursor that resumes where the last scan left off costs roughly the same total work no
-        // matter how the bytes were sliced up. Rescanning from index 0 on every feed() instead
-        // costs O(fragments * bytes), which for 5,000 fragments over the same buffer should be
-        // orders of magnitude slower than the un-fragmented baseline.
+        // A resuming cursor costs the same total work regardless of fragmentation; rescanning from
+        // 0 on every feed() would be orders of magnitude slower here.
         assert!(
             fragmented_elapsed < whole_elapsed * 100 + Duration::from_millis(50),
             "fragmented feed took {fragmented_elapsed:?} vs {whole_elapsed:?} for the same bytes \
@@ -2893,10 +2625,8 @@ mod tests {
         );
     }
 
-    // THE PROPERTY THAT MATTERS MOST: how the bytes were split across reads must not change what was
-    // read. A chunk header landing across two TCP segments, or a `data:` line split down the middle,
-    // is ordinary on a real socket and used to be the difference between a correct frame and a
-    // silently corrupted one.
+    // How the bytes were split across reads must not change what was decoded - a chunk header or
+    // `data:` line split mid-way is ordinary on a real socket.
     #[test]
     fn how_the_bytes_arrive_cannot_change_what_was_decoded() {
         let body = chunked(&["data: hel", "lo\n\ndata: wor", "ld\n\n", "data: third\n\n"]);
@@ -2989,8 +2719,7 @@ mod tests {
         assert_eq!(out.status, None);
     }
 
-    // A stream that goes quiet mid-event keeps what arrived: the frames are real, and discarding
-    // them would publish nothing for a gateway that streamed fine until the deadline.
+    // A stream that goes quiet mid-event keeps what already arrived.
     #[test]
     fn a_deadline_keeps_the_frames_that_already_arrived() {
         let body = chunked(&["data: a\n\ndata: b\n\n"]);
@@ -3003,8 +2732,8 @@ mod tests {
         assert_eq!(out.end, SseEnd::Timeout);
     }
 
-    // Each frame is credited the moment its own bytes landed, because every published streaming
-    // number is a timing and a shared timestamp would flatten the gaps to zero.
+    // Each frame is credited the moment its own bytes landed; a shared timestamp would flatten
+    // the gaps to zero.
     #[test]
     fn each_frame_is_credited_the_arrival_of_its_own_bytes() {
         let mut r = SseReader::new(64, None);
@@ -3020,12 +2749,8 @@ mod tests {
         );
     }
 
-    // AN EVENT THE PEER NEVER TERMINATED IS NOT A FRAME IT DELIVERED.
-    //
-    // `finish` used to flush the held `data:` lines as one more frame stamped at the close or the
-    // deadline, so a gateway that died mid-event was credited with delivering the fragment that
-    // killed it, and the manufactured arrival time - here nine seconds after the last real byte -
-    // entered the gap samples as a stall no frame arrival produced.
+    // An event the peer never terminated is not a delivered frame: `finish` must not flush the
+    // held `data:` fragment stamped with a fabricated close/deadline arrival time.
     #[test]
     fn an_event_the_peer_never_terminated_is_not_counted_as_a_delivered_frame() {
         let mut r = SseReader::new(64, None);
@@ -3052,8 +2777,7 @@ mod tests {
         assert_eq!(out.end, SseEnd::Timeout);
     }
 
-    // The same fragment, on a stream the peer ended deliberately: how the stream ended must not
-    // decide whether an un-dispatched fragment counts.
+    // How the stream ended must not decide whether an un-dispatched fragment counts.
     #[test]
     fn a_fragment_left_by_a_terminal_chunk_is_dropped_the_same_way() {
         let mut r = SseReader::new(64, None);
@@ -3077,12 +2801,8 @@ mod tests {
         out
     }
 
-    // THE TWO LANES MUST AGREE, AGAINST THE SAME PEER.
-    //
-    // The blocking lane and the tokio lane share the decoder and the request builder, so this is
-    // asserting that the only thing that differs - who owns the waiting - does not change what was
-    // read. Without it, "we ported the generator" is a claim resting on the two implementations
-    // looking similar.
+    // The two lanes must agree against the same peer: they share the decoder and request builder,
+    // so this asserts that "who owns the waiting" is the only real difference between them.
     #[test]
     fn the_async_lane_reads_exactly_what_the_blocking_lane_reads() {
         let addr = sse_server_for_diff();
@@ -3201,19 +2921,12 @@ mod tests {
         ]
     }
 
-    // THE PROBE AND RE-VERIFY LANES WERE STILL INJECTABLE, and that is ledger RIG-12's other half.
-    //
-    // `gen.rs::build_request` was hardened against CRLF in a manifest header; `send` - which every
-    // probe, every capability verdict and every mock control-plane call goes through - kept doing
-    // `format!("{name}: {value}\r\n")` over the SAME manifest headers. A rule enforced on one of
-    // three lanes is not enforced.
-    //
-    // Refused as `RigRefused`, never as `ConnectionFailed` or `Malformed`: those describe the PEER,
-    // and this is a fault of ours. A gateway that was never asked must not be charged with anything.
+    // RIG-12's other half: `send` (probe/re-verify) used to interpolate manifest headers raw even
+    // after `gen.rs::build_request` was hardened. Must refuse as `RigRefused`, never
+    // `ConnectionFailed`/`Malformed` - those describe the peer, and this is a fault of ours.
     #[test]
     fn the_probe_lane_refuses_a_request_it_would_have_to_smuggle() {
-        // A live, well-behaved peer, so nothing about the refusal can be an accident of an address
-        // with nothing on it.
+        // A live, well-behaved peer, so the refusal can't be an accident of nothing listening.
         let addr = spawn_server(|mut conn| {
             let _ = read_request_head(&conn);
             let _ = conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}");
@@ -3230,8 +2943,7 @@ mod tests {
                 }
             }
         }
-        // A GET goes through the same builder and gets the same answer, or the control plane is the
-        // lane that stayed open.
+        // A GET goes through the same builder and gets the same answer.
         assert!(matches!(
             get(
                 addr,
@@ -3243,8 +2955,7 @@ mod tests {
         ));
     }
 
-    // The rule must not refuse ordinary requests: a validator that fails closed on everything is a
-    // benchmark that measures nothing, which is a worse answer than the one it replaced.
+    // The rule must not refuse ordinary requests: failing closed on everything measures nothing.
     #[test]
     fn an_ordinary_request_still_goes_out() {
         assert_eq!(
@@ -3263,9 +2974,8 @@ mod tests {
         );
     }
 
-    // THE STREAMING LANE WAS THE THIRD. `build_sse_request` is shared by the blocking and async
-    // stream transports, so one unenforced rule there covered both - every TTFT sample, every gap
-    // percentile and every lane of every concurrent-stream window.
+    // The streaming lane was the third: `build_sse_request` is shared by both stream transports,
+    // so one unenforced rule there covered both.
     #[test]
     fn the_streaming_lanes_refuse_a_request_they_would_have_to_smuggle() {
         let addr = spawn_server(|mut conn| {
@@ -3312,9 +3022,8 @@ mod tests {
 
     // ── content frames vs every event (ledger RIG-11) ────────────────────────────────────────────
 
-    // The decoder counts CONTENT frames only when it is told which wire it is reading, and it asks
-    // the dialect rather than sniffing for `[DONE]` itself. Both halves matter: the count has to be
-    // right, and the taxonomy has to live where the protocol does.
+    // The decoder counts content frames by asking the dialect, never by sniffing `[DONE]` itself -
+    // the taxonomy belongs with the protocol.
     #[test]
     fn the_reader_counts_content_frames_by_asking_the_dialect() {
         // Exactly the shapes mock/src/main.rs emits for openai: role head, content deltas, the
@@ -3351,9 +3060,8 @@ mod tests {
 
     // ── a budget counted in CONTENT frames ───────────────────────────────────────────────────────
 
-    /// A stream with `ping`-shaped framing between its tokens, in openai's spelling: the shape a
-    /// gateway with a keepalive - or one re-emitting a translated stream in its own framing - puts on
-    /// the wire.
+    /// A stream with `ping`-shaped framing between its tokens (openai spelling) - the shape a
+    /// gateway with a keepalive, or one re-emitting a translated stream, puts on the wire.
     fn framed_stream(tokens: usize) -> String {
         let mut s = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".to_string();
         s.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n");
@@ -3366,14 +3074,9 @@ mod tests {
         s
     }
 
-    // A CONTENT BUDGET COUNTS TOKENS, SO FRAMING CANNOT DISPLACE THEM.
-    //
-    // Under `Events(8)` this same stream stops having seen only THREE tokens: the eight slots go to
-    // the role head, four pings and three content frames. `run::stream_window` then divides that by
-    // a denominator computed from the MOCK's layout, which spends one slot on its head and none on
-    // pings - so a gateway that lost nothing reads as having delivered three of the frames it owed.
-    // That is the defect: the numerator is measured on the gateway's wire and the denominator is
-    // assumed from the mock's.
+    // A content budget counts tokens, so framing cannot displace them. Under `Events(8)` this same
+    // stream would stop having seen only three tokens (the rest spent on the role head and pings),
+    // reading as a gateway that lost frames it never lost.
     #[test]
     fn a_content_budget_reads_past_framing_until_the_tokens_arrive() {
         let bytes = framed_stream(16);
@@ -3407,9 +3110,8 @@ mod tests {
         );
     }
 
-    // THE CEILING IS THE ONLY THING BOUNDING A CONTENT BUDGET, so it has to bind, and hitting it is
-    // a shortfall rather than a satisfied budget: `EventCeilingReached` is a different answer from
-    // `FrameBudgetReached` precisely so a caller cannot read one as the other.
+    // The ceiling is the only thing bounding a content budget; hitting it is a shortfall, so
+    // `EventCeilingReached` must stay distinct from `FrameBudgetReached`.
     #[test]
     fn a_content_budget_stops_at_the_event_ceiling_and_says_which_bound_stopped_it() {
         // Framing only: the tokens this budget is waiting for never come.
@@ -3458,8 +3160,8 @@ mod tests {
 mod head_cap_tests {
     use super::*;
 
-    // A CAP THAT CANNOT FIRE IS NOT A CAP, so this drives the actual reader against a peer that does
-    // the thing the cap exists for: answers with endless short, legal header lines.
+    // Drives the actual reader against a peer that does the thing the cap exists for: endless
+    // short, legal header lines.
     #[test]
     fn an_endless_header_stream_is_refused_rather_than_accumulated() {
         use std::io::{BufRead, BufReader, Write};
@@ -3510,10 +3212,8 @@ mod head_cap_tests {
 mod head_terminator_tests {
     use super::*;
 
-    /* A CRLF PAIR IN THE BODY MUST NOT BE MISTAKEN FOR THE END OF THE HEAD. The bare-LF fallback
-    used to fire only when no CRLF existed anywhere in the buffer, and the buffer already holds
-    body bytes - so an LF-terminated head followed by CRLF-terminated frames lost its first
-    frame and credited TTFT to the second. */
+    // A CRLF pair in the body must not be mistaken for the end of the head: an LF-terminated head
+    // followed by CRLF-terminated frames used to lose its first frame and credit TTFT to the second.
     #[test]
     fn the_earlier_blank_line_ends_the_head_whichever_form_it_takes() {
         let mixed = b"HTTP/1.1 200 OK\nContent-Type: text/event-stream\n\ndata: alpha\r\n\r\ndata: beta\n\n";

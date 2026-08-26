@@ -4,32 +4,20 @@
 // The load generator, in Rust. `otb loadgen` (this module) is run as a subprocess by `run.rs`'s
 // `load_window`.
 //
-// It prints a stats line (`rps=<f64> fail=%d ... p50us=%d ...`) that `engine/src/loadgen.rs::
-// parse_ugen_line` parses on the other end; the two must stay in the same shape. `rps` is a FLOAT,
-// not a count: below 1/s the rate is fractional and printing it as an integer would send `rps=0`
-// for a window that carried requests. See `UgenStats::rps` for the full reasoning.
+// Prints a stats line (`rps=<f64> fail=%d ... p50us=%d ...`) that `engine/src/loadgen.rs::
+// parse_ugen_line` parses on the other end; the two must stay in the same shape. `rps` is a FLOAT:
+// below 1/s the rate is fractional, and printing it as an integer would send `rps=0` for a window
+// that carried requests (see `UgenStats::rps`).
 //
-// ONE ASYNC TASK PER UNIT OF CONCURRENCY, NOT ONE OS THREAD.
+// Uses one async task per unit of concurrency, not one OS thread. Thread-per-connection could not
+// hold the connection counts a sweep asks for (a run toward 32k concurrency pinned this process's
+// six cores at a 1-min load average over 24,000 and never converged, measuring the rig's own
+// scheduler thrashing rather than the gateway). A task costs a few KB against a thread's full
+// stack. The mock reference instrument already runs on tokio, so this adds no new dependency to
+// the measurement path.
 //
-// This module used to say "std only, and threads rather than async on purpose ... an async runtime
-// would add a scheduler between the measurement and the clock for no benefit AT THIS CONCURRENCY".
-// That last clause was the load-bearing one, and the concurrency search outgrew it. A thread per
-// connection means the instrument cannot honour the number it is asked for: a field run sweeping
-// toward 32k held tens of thousands of native threads on the six cores `taskset` pins this process
-// to, sat at a 1-minute load average over 24,000 for 45 minutes, and never converged. Every probe
-// past that point measured the rig's own scheduler thrashing rather than the gateway, and the
-// search had no way to tell the two apart - it just kept climbing. A task costs a few KB against a
-// thread's full stack, so the ramp reaches a real ceiling instead of collapsing into one.
-//
-// The dependency bar the old comment set ("every dependency here has to be audited before anyone
-// trusts the numbers") is MET, not waived: the mock - the reference instrument every published
-// number is judged against, and the thing whose throughput decides whether a result is suppressed
-// as mock-bound - has always run on tokio. This adds no crate the measurement path did not already
-// rest on.
-//
-// What did NOT change: the wire handling. Connection reuse, the fresh-vs-reused failure
-// attribution, HTTP framing, the response budget and the non-2xx rule are the same logic, because
-// those are what the published numbers mean.
+// Wire handling (connection reuse, fresh-vs-reused failure attribution, HTTP framing, response
+// budget, non-2xx rule) is unchanged, since that is what the published numbers mean.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,75 +49,45 @@ pub struct GenStats {
     pub ok: u64,
     pub fail: u64,
     pub elapsed_s: f64,
-    /// Set when the window never ran at the requested concurrency, so it is not a measurement of the
-    /// gateway at any concurrency we could name. Under threads that meant the OS refusing a thread;
-    /// under tasks it means the runtime itself could not be built, which is the same class of fact:
-    /// the rig failed to pose the question, and that is never a gateway result.
+    /// Set when the window never ran at the requested concurrency (thread refused, or async
+    /// runtime failed to build): the rig failed to pose the question, which is never a gateway
+    /// result.
     pub spawn_failed: bool,
-    /// Connections the RIG could not make, as distinct from requests the gateway refused.
-    ///
-    /// A TCP connection needs a unique (src ip, src port, dst ip, dst port). Every window here talks
-    /// to ONE destination, so simultaneous connections are bounded by this host's ephemeral source
-    /// ports - `net.ipv4.ip_local_port_range`, which defaults to about 28,000 - and running out
-    /// raises EADDRNOTAVAIL on connect. That is our limit, not the gateway's, and it used to land in
-    /// `fail` beside a genuine refusal where nothing downstream could tell them apart: the search
-    /// would read its own port exhaustion as the gateway's ceiling and publish it.
-    ///
-    /// Counted separately so a window that ran out of rig can be recognised as one. EMFILE/ENFILE
-    /// (out of file descriptors) are the same class and counted here too.
+    /// Connections the RIG could not make (EADDRNOTAVAIL from exhausting this host's ephemeral
+    /// source ports, or EMFILE/ENFILE), as distinct from requests the gateway refused. Counted
+    /// separately so a window that ran out of rig, rather than measuring the gateway, can be
+    /// recognised as one.
     pub rig_refused: u64,
     /// Requests a bound of OURS cut short: `RESPONSE_BUDGET` on an exchange, or `CONNECT_BUDGET` on
-    /// a connect that never completed. Also counted in `fail`, because a caller waiting thirty
-    /// seconds got nothing - but separable, so a window failing for our reason cannot look identical
-    /// to one failing for the gateway's.
-    ///
-    /// A CONNECT TIMEOUT IS NOT `rig_refused`. `rig_refused` is the claim "this host had no
-    /// ephemeral port or descriptor left", and `run.rs` treats a window containing any of those as
-    /// UNMEASURED, so filing a hung gateway there would erase the very failure it caused. A connect
-    /// timeout carries no evidence about which side ran out; what is certainly true is that our
-    /// five-second bound fired, which is exactly what this counter says.
+    /// a connect that never completed. Also counted in `fail`, but kept separable from a genuine
+    /// gateway failure. Not `rig_refused`: a connect timeout carries no evidence the host ran out of
+    /// anything, only that our five-second bound fired, and `run.rs` treats any `rig_refused` window
+    /// as UNMEASURED, which a hung gateway must not become.
     pub budget_exceeded: u64,
-    /// Every successful request's latency, microseconds. Percentiles are computed from this rather
-    /// than from a running estimate: an approximate p99 is the one number nobody can check later.
+    /// Every successful request's latency, microseconds. Kept raw (not a running percentile
+    /// estimate) so percentiles are exact rather than approximate.
     pub latencies_us: Vec<u64>,
-    /// The p50/p99, already computed. `run()` leaves these `None`: its caller has `latencies_us` and
-    /// can call `pct_us` itself. `run.rs::load_window_at` sets them instead, because raw per-request
-    /// latencies never cross the subprocess boundary - `otb loadgen`'s stdout is the one `k=v` stats
-    /// line (`loadgen.rs::parse_ugen_line`), which already carries the percentiles the child computed
-    /// over samples that do not exist in this process. `pct_us(0.99)` on an empty `latencies_us` would
-    /// silently read as p99=0 instead of "not measured here", so the subprocess path fills these
-    /// explicitly rather than leaving a caller to rediscover that distinction.
+    /// Precomputed p50/p99. `run()` leaves these `None` (callers with `latencies_us` can call
+    /// `pct_us` directly); `run.rs::load_window_at` fills them because raw latencies never cross the
+    /// subprocess boundary — only the `k=v` stats line does — and an empty `latencies_us` on this
+    /// side would otherwise read as p99=0 instead of "not measured here".
     pub p50_us: Option<u64>,
     pub p99_us: Option<u64>,
 }
 
 impl GenStats {
-    /// Completed requests per second. A WHOLE NUMBER AT OR ABOVE 1/s, AND FRACTIONAL BELOW IT.
-    ///
-    /// This returned `u64` via `(ok as f64 / elapsed_s) as u64`, which truncates toward zero - so a
-    /// rung that completed one request in four seconds published `0`. That is not a rounding
-    /// difference, it is a false statement: `0` says the gateway carried nothing when it carried
-    /// 0.25/s. plano hit it twice (c=256 on two cells, `rps: 0` sitting beside a `p99_us` of 3.4 s),
-    /// and both external auditors had to carry a documented special case - "a percentile cannot exist
-    /// without a completed request, so the rate merely rounded down" - to avoid calling a correct
-    /// engine wrong.
-    ///
-    /// THE SPLIT IS DELIBERATE, rather than simply returning the exact float everywhere. Below 1/s,
-    /// truncation destroys the entire magnitude of the answer, so precision there is the whole point.
-    /// At or above 1/s, `trunc()` reproduces every number this engine has ever published EXACTLY -
-    /// so the change cannot quietly move a single existing figure while fixing the one case that was
-    /// wrong, and 44,363.7 req/s is not made truer by carrying a tenth.
-    ///
-    /// Sub-1/s rates are not a curiosity. They are what a gateway collapsing under concurrency looks
-    /// like, which is precisely where the board must not round the evidence away to zero.
+    /// Completed requests per second: fractional below 1/s, truncated to a whole number at or above
+    /// it. A plain `as u64` truncates toward zero, so a rate like 0.25/s used to publish as `0` — a
+    /// false statement, not a rounding difference. Truncating (not rounding) at/above 1/s keeps
+    /// every previously published whole-number rate unchanged; the fix only affects the sub-1/s case
+    /// where truncation would otherwise erase the entire answer.
     pub fn rps(&self) -> f64 {
         if self.elapsed_s <= 0.0 {
             return 0.0;
         }
         let exact = self.ok as f64 / self.elapsed_s;
-        // A non-finite rate is the rig malfunctioning, and `as i64` on an infinity SATURATES rather
-        // than wrapping - publishing 9,223,372,036,854,775,807 req/s as though it were a measurement.
-        // Guarded the same way `stats` now guards its order statistics.
+        // Guard against a non-finite rate: casting an infinity to an integer saturates rather than
+        // wrapping, which would publish it as a huge but plausible-looking number.
         if !exact.is_finite() {
             return 0.0;
         }
@@ -140,17 +98,14 @@ impl GenStats {
         }
     }
 
-    /// Nearest-rank percentile, through `stats::nearest_rank_index` so this cannot drift from the
-    /// streaming percentiles it is published beside: a convention that differs by one index from
-    /// what a reader of the published numbers assumes is a silent disagreement, not a rounding
-    /// difference, and this engine shipped exactly that disagreement (ledger SRCH-04) until the
-    /// rank moved into one function.
+    /// Nearest-rank percentile via `stats::nearest_rank_index`, shared with the streaming
+    /// percentiles so the two conventions cannot drift apart again (ledger SRCH-04).
     pub fn pct_us(&self, q: f64) -> u64 {
         Self::pct_of(&self.sorted_latencies(), q)
     }
 
-    /// Sort once. `stats_line` needs two percentiles, and cloning the whole vector per call held
-    /// several copies of millions of samples for a run long enough to matter.
+    /// Sort once and reuse: `stats_line` needs two percentiles, and cloning the sample vector per
+    /// call is wasteful for a long run's millions of samples.
     fn sorted_latencies(&self) -> Vec<u64> {
         let mut v = self.latencies_us.clone();
         v.sort_unstable();
@@ -178,44 +133,37 @@ impl GenStats {
             p50,
             p99,
             self.ok,
-            // ACROSS THE SUBPROCESS BOUNDARY TOO. The load generator is a child process and this
-            // line is everything the parent learns from it, so a count that stops here would leave
-            // the parent unable to tell its own port exhaustion from the gateway refusing - which is
-            // the whole reason the count exists.
+            // This line is everything the parent process learns from the child, so rig_refused and
+            // budget_exceeded must cross it too, or the parent cannot tell its own limits from the
+            // gateway's failures.
             self.rig_refused,
             self.budget_exceeded,
-            // AND `spawn_failed`, for the same reason as the two above. The OS refusing a thread means
-            // the window never ran at the concurrency it claims - a RIG limit the parent's search must
-            // stop on rather than read as a turnover. The parent had a check for it
-            // (`if stats.spawn_failed` in run.rs) that could NEVER fire on this path: the flag stopped
-            // at this boundary and the parent hardcoded it to false, so a child that could not spawn
-            // its threads reported a perfectly ordinary window.
+            // Likewise spawn_failed: `run.rs` checks `if stats.spawn_failed`, which needs this field
+            // on the wire to ever fire.
             u8::from(self.spawn_failed)
         )
     }
 }
 
-/// What one connection-holder measured. Owned per task and merged once at the end, so the hot path
-/// never touches a shared lock: under a thread per connection a single `Mutex<GenStats>` was only
-/// contended at join time, but with tasks the same pattern would serialise thousands of wakeups.
+/// What one connection-holder measured. Owned per task and merged once at the end so the hot path
+/// never touches a shared lock (a `Mutex<GenStats>` per exchange would serialise thousands of
+/// wakeups under high task concurrency).
 #[derive(Default)]
 struct WorkerStats {
     ok: u64,
     fail: u64,
-    /// Connections this HOST could not make (ephemeral ports or descriptors exhausted), as opposed
-    /// to requests the gateway refused. See `GenStats::rig_refused`.
+    /// Connections this HOST could not make (ports/descriptors exhausted), distinct from requests
+    /// the gateway refused. See `GenStats::rig_refused`.
     rig_refused: u64,
-    /// Requests a bound of ours cut short (`RESPONSE_BUDGET` or `CONNECT_BUDGET`). Counted as
-    /// failures AND counted here, so a window whose failures are really our own timeout can be
-    /// recognised as one.
+    /// Requests a bound of ours cut short (`RESPONSE_BUDGET` or `CONNECT_BUDGET`). Also counted in
+    /// `fail`, kept separate so a window failing on our own timeout can be recognised as one.
     budget_exceeded: u64,
     lat: Vec<u64>,
 }
 
 impl WorkerStats {
-    /// Charge a connect that produced no connection. Always a failure - nothing was answered - and
-    /// always attributed, because "our port range ran out", "our connect bound fired" and "the peer
-    /// refused" are three different claims that used to arrive as one number.
+    /// Charge a connect that produced no connection: always a failure, always attributed to which
+    /// side caused it (rig, our bound, or the peer).
     fn charge_connect_fault(&mut self, fault: ConnectFault) {
         self.fail += 1;
         match fault {
@@ -229,16 +177,14 @@ impl WorkerStats {
 /// Which side a connect attempt that produced no connection belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectFault {
-    /// EADDRNOTAVAIL/EADDRINUSE (no ephemeral source port) or EMFILE/ENFILE (no descriptor): THIS
-    /// HOST ran out, and the gateway was never asked anything.
+    /// EADDRNOTAVAIL/EADDRINUSE (no ephemeral source port) or EMFILE/ENFILE (no descriptor): this
+    /// host ran out, and the gateway was never asked anything.
     RigExhausted,
-    /// `CONNECT_BUDGET` elapsed with no answer. Ours in the same sense `RESPONSE_BUDGET` is: the
-    /// peer may be wedged, may be blackholing SYNs, may be behind a full accept backlog, and this
-    /// side cannot tell - but it CAN say that the thirty seconds a caller would have waited was cut
-    /// at five by us. Filed as a failure with that attribution rather than as a bare `fail`, which
-    /// used to read exactly like a refusal.
+    /// `CONNECT_BUDGET` elapsed with no answer. We can't tell if the peer is wedged, blackholing, or
+    /// behind a full backlog, only that our five-second bound cut off what would have been a
+    /// thirty-second wait. Filed as an attributed failure rather than a bare `fail`.
     OurConnectBound,
-    /// Refused, unreachable, reset: the peer's answer, and the only one of the three that is the
+    /// Refused, unreachable, reset: the peer's own answer, the only one of the three that is the
     /// gateway's own failure.
     PeerRefused,
 }
@@ -260,17 +206,11 @@ fn connect_fault(err: Option<&std::io::Error>) -> ConnectFault {
     }
 }
 
-/// THE MEASURED WINDOW, so the rate's numerator and its denominator describe the same interval.
-///
-/// `elapsed_s` is the sleep between these two instants. Everything a task did outside them used to
-/// land in `ok` anyway: the spawn ramp before `start`, and - the one that matters - the drain after
-/// `end`, where every lane's in-flight response completed and was counted against a denominator that
-/// had already stopped. At high concurrency with slow responses that is one extra success per lane
-/// for free, which biases the peak search toward exactly the high rungs it is climbing toward.
-///
-/// Published as the two instants happen, never guessed: `start` once every task exists, `end` when
-/// the sleep returns and BEFORE the stop flag is set, so no task can be past the end without being
-/// able to see it.
+/// The measured window, so the rate's numerator and denominator describe the same interval.
+/// `elapsed_s` is the sleep between `start` and `end`; anything a task completes outside that
+/// interval (spawn ramp before `start`, drain after `end`) must not count toward `ok`, or it biases
+/// the rate — worst at high concurrency with slow responses. `end` is published before the stop
+/// flag, so no task can be past the end without seeing it.
 #[derive(Default)]
 struct Window {
     start: OnceLock<Instant>,
@@ -278,17 +218,11 @@ struct Window {
 }
 
 impl Window {
-    /// Whether an exchange that COMPLETED at `at` belongs to the measured window. Completion, not
-    /// start: a request is a success when its response arrived, and that is the instant the rate
-    /// counts.
+    /// Whether an exchange that completed at `at` belongs to the measured window. Completion, not
+    /// start, is what counts: a request is a success when its response arrived.
     fn contains(&self, at: Instant) -> bool {
         match (self.start.get(), self.end.get()) {
-            // The clock has not started, so this is the spawn ramp: real work, but outside the
-            // interval `elapsed_s` measures, and counting it inflates the same rate from the other
-            // end.
             (None, _) => false,
-            // The window is open. `end` is published before the stop flag, so a task that has not
-            // seen an end has not passed one.
             (Some(s), None) => at >= *s,
             (Some(s), Some(e)) => at >= *s && at <= *e,
         }
@@ -311,24 +245,20 @@ async fn worker(
         lat: Vec::with_capacity(1024),
     };
     let mut conn: Option<TcpStream> = None;
-    // ALLOCATED ONCE, reused across every request this task sends: a fresh Vec per response would
-    // put an allocator call in the timed hot path of every exchange, for a task that runs for the
-    // whole window at whatever RPS the sweep is driving. `read_response` clears it, never replaces it.
+    // Allocated once and reused (cleared, never replaced, by `read_response`) to keep an allocator
+    // call out of the timed hot path.
     let mut acc: Vec<u8> = Vec::with_capacity(8192);
 
     // Whether the connection about to be used was opened THIS iteration. A peer vanishing on a
-    // brand-new connection is a real failure; the same thing on a connection we chose to reuse is
-    // our reuse being stale, and counting it against the target would publish our bookkeeping as
-    // its failure rate.
+    // brand-new connection is a real failure; the same thing on a reused connection is our reuse
+    // being stale, not the target's fault.
     let mut fresh;
     while !stop.load(Ordering::Relaxed) {
         fresh = false;
         if conn.is_none() {
             fresh = true;
-            // Both a connect error and a connect timeout mean no connection, and neither is a
-            // request the target answered. WHICH SIDE ran out matters, though, and all three
-            // answers - the rig out of ports/descriptors, our own connect bound firing, the peer
-            // refusing - used to arrive as one undifferentiated `fail`.
+            // Attribute which side failed: rig out of ports/descriptors, our connect bound, or the
+            // peer refusing.
             let fault = match tokio::time::timeout(CONNECT_BUDGET, TcpStream::connect(addr)).await {
                 Ok(Ok(s)) => {
                     let _ = s.set_nodelay(true);
@@ -342,9 +272,8 @@ async fn worker(
                 if window.contains(Instant::now()) {
                     w.charge_connect_fault(fault);
                 }
-                // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
-                // loopback) once a gateway stops accepting, burning a core and inflating `fail`
-                // into a measure of how fast connect can fail rather than a request count.
+                // Back off, or the loop spins at connect-refusal speed once a gateway stops
+                // accepting, burning a core and inflating `fail` into a measure of retry speed.
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 continue;
             }
@@ -354,8 +283,8 @@ async fn worker(
         let response_deadline = t0 + RESPONSE_BUDGET;
 
         let outcome = if s.write_all(req.as_bytes()).await.is_err() {
-            // A write that fails on a REUSED connection is the same stale-connection case as a read
-            // that sees nothing: the peer closed it while it sat idle.
+            // A write failing on a reused connection is the same stale-connection case as a read
+            // seeing nothing: the peer closed it while idle.
             if fresh {
                 Exchange::Failed
             } else {
@@ -365,9 +294,8 @@ async fn worker(
             read_response(s, response_deadline, &mut acc).await
         };
 
-        // WHEN the exchange finished decides whether it is part of the measurement, and the
-        // connection bookkeeping happens either way: a broken connection is still broken after the
-        // window closes.
+        // Whether the exchange counts depends on when it finished; connection bookkeeping happens
+        // either way.
         let done = Instant::now();
         let counted = window.contains(done);
         match outcome {
@@ -377,8 +305,8 @@ async fn worker(
                     w.ok += 1;
                 }
             }
-            // ANSWERED, and the peer said that was the last one on this connection. A success: the
-            // target did exactly what it advertised. Only the connection is discarded.
+            // Answered, and the peer said this was the last exchange on the connection: a success,
+            // only the connection is discarded.
             Exchange::LastOnConnection => {
                 if counted {
                     w.lat.push(done.duration_since(t0).as_micros() as u64);
@@ -386,14 +314,13 @@ async fn worker(
                 }
                 conn = None;
             }
-            // A stale connection we chose to reuse. The request never reached a listening peer, so
-            // it is neither a success nor the target's failure: reconnect and send it again. Not
-            // counted, and no latency recorded, because nothing was measured.
+            // A stale reused connection: the request never reached a listening peer, so reconnect
+            // and resend rather than counting it as any kind of result.
             Exchange::ClosedBeforeAnyBytes if !fresh => {
                 conn = None;
             }
-            // Out of budget is a failure the caller would have felt, and also a bound of ours, so it
-            // is counted in both places rather than hidden in one.
+            // Out of budget is both a failure the caller would have felt and a bound of ours, so
+            // it's counted in both places.
             Exchange::BudgetExceeded => {
                 if counted {
                     w.fail += 1;
@@ -401,12 +328,12 @@ async fn worker(
                 }
                 conn = None;
             }
-            // The same thing on a connection opened moments ago is the target refusing to answer.
+            // The same close on a freshly opened connection is the target refusing to answer.
             Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
                 if counted {
                     w.fail += 1;
                 }
-                conn = None; // a broken connection is not reused: the next request would inherit its state
+                conn = None; // a broken connection is not reused
             }
         }
     }
@@ -416,24 +343,17 @@ async fn worker(
 
 /// Build the one request every task in this window sends, or refuse to build it.
 ///
-/// A HEADER IS INTERPOLATED INTO THE WIRE FORMAT, so a value carrying CRLF is not a header value at
-/// all: `x-route: a\r\nx-other: b` puts a second header on the wire, and `\r\n\r\n` ends the head
-/// and makes the rest of the value a second request on the connection. The header list comes across
-/// a process boundary from the manifest (`loadgen::decode_headers`), which is exactly the kind of
-/// input that must not be able to choose what bytes this generator sends.
+/// Headers are interpolated directly into the wire format, so a value carrying CRLF is not a
+/// header value at all — it can inject a second header or a second request. Headers arrive from
+/// the manifest across a process boundary and must not be able to choose what bytes go on the
+/// wire.
 ///
-/// REFUSED, NOT SANITISED. Stripping the CRLF would send a header the manifest did not write -
-/// silently a different credential or a different routing key - and publish the resulting numbers
-/// under the pairing the manifest asked for. A window that cannot pose the question honestly does
-/// not run: `run` turns this into `spawn_failed`, the same "the rig never asked" answer a runtime
-/// that would not build gets.
+/// Refused, not sanitised: stripping the CRLF would silently send a different credential/routing
+/// key than the manifest specified. `run` turns a refusal into `spawn_failed` — the window never
+/// ran, rather than running dishonestly.
 fn build_request(cfg: &GenConfig) -> Result<String, String> {
-    // ONE RULE, SHARED WITH THE PROBE AND STREAMING LANES. This check used to live here, spelled
-    // out, and only here: `http::send` and `http::build_sse_request` interpolated the same
-    // manifest-supplied path and headers raw, so the probe, streaming and re-verify lanes stayed
-    // injectable while this one was not (ledger RIG-12). A rule enforced on one of three lanes is a
-    // lane a reader thinks is covered, so it moved to `http::unsendable_request` and all three call
-    // it.
+    // Shared with the probe and streaming lanes via `http::unsendable_request` so the injection
+    // check can't be applied to one lane and forgotten on another (ledger RIG-12).
     if let Some(why) = crate::http::unsendable_request(&cfg.path, &cfg.headers) {
         return Err(why);
     }
@@ -451,50 +371,40 @@ fn build_request(cfg: &GenConfig) -> Result<String, String> {
     ))
 }
 
-/// The most response body the generator will accumulate for one exchange.
-///
-/// A rig bound, and named so it can be reasoned about: it was a bare `1 << 20` buried in the read
-/// loop. Generous by three orders of magnitude against what this rig actually asks for - every body
-/// it sends caps the response at a handful of tokens, so the mock's replies are around a kilobyte -
-/// which is what makes exceeding it a signal worth printing rather than a routine truncation.
+/// The most response body the generator will accumulate for one exchange. Named rather than a bare
+/// `1 << 20`. Generous versus what this rig actually sends (replies are around a kilobyte), so
+/// exceeding it is a signal worth printing, not a routine truncation.
 const RESPONSE_ACC_CAP: usize = 1 << 20;
 
 /// What one request/response exchange did to the connection.
 ///
-/// The generator reuses connections, so a failure on a REUSED one must be told apart from a failure
-/// on a fresh one: attributing a stale-connection close to the target would count a peer that
-/// answered correctly and simply closed as advertised as a failed request, halving throughput and
-/// failing the clean-window gate for a peer that did nothing wrong.
+/// The generator reuses connections, so a failure on a reused one must be told apart from a
+/// failure on a fresh one: attributing a stale-connection close to the target would count a peer
+/// that answered correctly and closed as advertised as a failed request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Exchange {
-    /// A complete response, and the connection may carry another request.
+    /// A complete response; the connection may carry another request.
     Reusable,
-    /// A complete response, and the peer said this is the last one on this connection. A SUCCESS:
-    /// the request was answered. The connection is simply not reused.
+    /// A complete response, and the peer said this is the last one on this connection. A success:
+    /// only the connection is discarded.
     LastOnConnection,
-    /// The peer went away before a single byte of response arrived. On a REUSED connection that is a
-    /// stale connection - the peer closed an idle one - not a failed request, because the request
-    /// never reached a server that was listening. On a FRESH connection it is a real failure.
+    /// The peer went away before a single byte of response arrived. On a reused connection this is
+    /// a stale idle connection, not a failed request (it never reached a listening server). On a
+    /// fresh connection it is a real failure.
     ClosedBeforeAnyBytes,
     /// A genuine failure: a non-2xx, a malformed head, a truncated body.
     Failed,
-    /// The request did not complete inside `RESPONSE_BUDGET`.
-    ///
-    /// STILL A FAILURE - a gateway that cannot answer one request in thirty seconds has failed any
-    /// caller that was waiting - but a failure whose bound is OURS, and the artifact has to be able
-    /// to say so. Every other rig limit that ever bound was invisible for exactly this reason: it
-    /// landed in the same counter as a genuine refusal and nothing downstream could separate them.
-    /// The budget is roughly a thousand times the slowest gateway this field has measured, so this
-    /// should never fire; "should never fire" is what was true of the ephemeral port range until it
-    /// did.
+    /// The request did not complete inside `RESPONSE_BUDGET`. Still a failure — a gateway that
+    /// cannot answer in thirty seconds has failed the caller — but attributed to our own bound
+    /// rather than folded into a generic refusal. Should essentially never fire.
     BudgetExceeded,
 }
 
 /// Whether the peer announced it will close after this response.
 ///
 /// HTTP/1.0 defaults to close and must opt IN to keep-alive; HTTP/1.1 defaults to keep-alive and
-/// opts out with `connection: close`. Getting that default backwards is what makes a well-behaved
-/// HTTP/1.0 peer look like it is failing half its requests.
+/// opts out via `connection: close`. Getting this backwards makes a well-behaved HTTP/1.0 peer look
+/// like it's failing half its requests.
 fn peer_will_close(head_lower: &str) -> bool {
     let says = |name: &str| {
         head_lower
@@ -507,24 +417,21 @@ fn peer_will_close(head_lower: &str) -> bool {
     head_lower.starts_with("http/1.0") && !says("keep-alive")
 }
 
-/// Read one response and discard it. Only success or failure matters here; the body is the mock's
-/// canned reply and parsing it would charge the gateway for our own JSON cost.
+/// Read one response and discard it. Only success/failure matters; the body is the mock's canned
+/// reply, and parsing it would charge the gateway for our own JSON cost.
 ///
-/// `acc` is the caller's scratch buffer, reused across every request on this task rather than
-/// allocated fresh per call: cleared here, not replaced, so its capacity survives from one exchange
-/// to the next instead of paying an allocator call inside the timed hot path of every request.
+/// `acc` is the caller's scratch buffer, reused across requests on this task: cleared here, not
+/// replaced, so its capacity survives instead of paying an allocator call per request.
 async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) -> Exchange {
-    // A PER-READ TIMEOUT IS NOT A BOUND. A peer that trickles one byte at a time keeps a task
-    // inside this function effectively forever, and `run()` waits on every task before it can
-    // report, so one wedged task delays the whole window. This deadline is the bound.
+    // A per-read timeout is not a bound: a peer trickling one byte at a time would keep this task
+    // alive forever and delay the whole window (`run()` waits on every task). `deadline` is the
+    // actual bound.
     let mut buf = [0u8; 8192];
     acc.clear();
     let mut hdr_end: Option<usize> = None;
-    // Parsed ONCE when the headers complete, then reused. Re-decoding and re-lowercasing the head
-    // on every read put an allocation per read inside the timed window, which is charged to the
-    // gateway. `scanned` is how far the terminator search has already looked: rescanning the whole
-    // body on each read is O(N^2) in the number of reads, and chunked is the normal framing for a
-    // gateway that streams, so this was the worst case rather than the rare one.
+    // The head is decoded once, when headers complete, and reused; `scanned` tracks how far the
+    // chunk terminator search has already looked, so it doesn't rescan the whole body on each read
+    // (which would be O(N^2) and charged to the gateway's timed window).
     let mut framing_kind: Option<Framing> = None;
     let mut scanned: usize = 0;
     let mut closing = false;
@@ -556,7 +463,7 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
                     None => return Exchange::Failed,
                 },
                 Framing::Chunked => {
-                    // Only the newly-arrived bytes, overlapping by the terminator length so a
+                    // Scan only newly-arrived bytes, overlapping by the terminator length so a
                     // terminator split across two reads is still found.
                     let from = scanned.saturating_sub(4).max(he);
                     if acc[from..].windows(5).any(|w| w == b"0\r\n\r\n") {
@@ -564,31 +471,24 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
                     }
                     scanned = acc.len();
                 }
-                // An until-close body is only complete once the peer actually closes, which the
-                // n == 0 arm below handles. Returning here would call a body complete the moment the
-                // headers landed and charge the gateway nothing for sending it.
+                // Handled by the n == 0 arm below: an until-close body isn't complete until the peer
+                // actually closes.
                 Framing::UntilClose => {}
             }
         }
-        // Bound the read by what is LEFT of the budget. A fixed per-read timeout on top of a
-        // deadline check makes the real ceiling twice the advertised one: the check passes at
-        // deadline-minus-a-moment, then the read blocks for its own full timeout.
+        // Bound the read by what's LEFT of the budget, not a fixed per-read timeout — otherwise the
+        // real ceiling becomes twice the advertised one.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Exchange::BudgetExceeded;
         }
         let n = match tokio::time::timeout(remaining, s.read(&mut buf)).await {
-            // THE DEADLINE ELAPSED, and that is our bound firing, never a stale connection. This
-            // read is bounded by what is left of `RESPONSE_BUDGET`, so `Err` here means the peer
-            // held a live connection for the whole budget and said nothing - a gateway that hangs.
-            // Folding it into `ClosedBeforeAnyBytes` made it invisible on a reused connection (the
-            // caller retries that case silently: no ok, no fail, nothing but depressed rps) and a
-            // bare `fail` on a fresh one, where "our thirty seconds fired" read exactly like a
-            // refusal. A timeout is always accounted and always attributed to the bound that fired.
+            // The deadline elapsing is our bound firing, never a stale connection: the peer held a
+            // live connection for the whole budget and said nothing. Always attributed here rather
+            // than folded into `ClosedBeforeAnyBytes` (invisible on reuse) or a bare failure.
             Err(_) => return Exchange::BudgetExceeded,
-            // A read ERROR with nothing received is the peer going away, which the caller reads by
-            // freshness: on a reused connection it is a stale connection of ours, on a fresh one it
-            // is a failure.
+            // A read error with nothing received is the peer going away; the caller distinguishes a
+            // stale reused connection from a real failure by freshness.
             Ok(Err(_)) if acc.is_empty() => return Exchange::ClosedBeforeAnyBytes,
             Ok(Err(_)) => return Exchange::Failed,
             Ok(Ok(n)) => n,
@@ -602,26 +502,14 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
                 let head = String::from_utf8_lossy(&acc[..he]).to_lowercase();
                 matches!(framing(&head), Framing::UntilClose).then_some(())
             }) {
-                // The peer closed, so there is no connection left to reuse either way.
                 Some(()) => Exchange::LastOnConnection,
                 None => Exchange::Failed,
             };
         }
         acc.extend_from_slice(&buf[..n]);
-        // OUR BUFFER BOUND IS OURS, NOT THE GATEWAY'S FAILURE.
-        //
-        // This was a bare `1 << 20` returning `Exchange::Failed`: an unnamed constant, no message,
-        // and counted in `fail` alongside a genuine non-2xx or a malformed head. Every other bound in
-        // this module is deliberately kept apart from a gateway failure - `rig_refused` and
-        // `budget_exceeded` exist for exactly that, because folding "our own limit fired" into "the
-        // gateway failed" is how a rig's ephemeral port range once got published as a gateway's
-        // ceiling. A response over the cap would have been indistinguishable from a broken gateway,
-        // and because `SweepProbe` requires `fail == 0` for a clean window it could discard an
-        // otherwise-good rung and understate that gateway's throughput with no diagnostic anywhere.
-        //
-        // `BudgetExceeded` is the existing seam for "a bound WE set stopped this exchange", and it is
-        // already counted separately from `fail`, so this needs no new variant. Loud, because a
-        // silent bound is the defect and not the size.
+        // Exceeding our own accumulator cap is our bound, not the gateway's failure — reuse
+        // `BudgetExceeded` rather than folding it into a generic `Failed`, which would let an
+        // oversized-but-otherwise-fine response silently trip `SweepProbe`'s `fail == 0` gate.
         if acc.len() > RESPONSE_ACC_CAP {
             eprintln!(
                 "loadgen: a response exceeded the rig's own {RESPONSE_ACC_CAP}-byte accumulator, so \
@@ -665,22 +553,21 @@ fn content_length(head_lower: &str) -> Option<usize> {
 
 /// Run the load and return the aggregate.
 ///
-/// Stays a BLOCKING function: `otb loadgen`'s contract with `run.rs::load_window_at` is a
-/// subprocess that prints one stats line, and nothing above this call is async. The runtime is
-/// built here, used, and dropped, so async is an implementation detail of the generator rather than
-/// something the engine has to adopt.
+/// Stays a blocking function: `otb loadgen`'s contract with `run.rs::load_window_at` is a
+/// subprocess printing one stats line, so async is an implementation detail — the runtime is
+/// built, used, and dropped here.
 pub fn run(cfg: &GenConfig) -> GenStats {
     // Worker threads default to `available_parallelism`, which honours the CPU affinity mask
-    // `taskset -c $LOADCORES` sets, so the generator still runs on exactly the cores it is pinned
-    // to. That pinning is the comparability basis of every published number.
+    // `taskset -c $LOADCORES` sets, keeping the generator on the cores its published numbers are
+    // pinned to.
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => rt,
         Err(e) => {
-            // The rig could not pose the question at all. Reported the same way a refused thread
-            // was: a window that never ran is not a measurement of the gateway at any concurrency.
+            // A window that never ran is not a measurement at any concurrency, same as a refused
+            // thread.
             eprintln!("loadgen: could not build the async runtime: {e}");
             return GenStats {
                 spawn_failed: true,
@@ -691,9 +578,8 @@ pub fn run(cfg: &GenConfig) -> GenStats {
 
     let req = match build_request(cfg) {
         Ok(r) => Arc::new(r),
-        // The rig could not pose the question honestly, which is the same class of fact as a runtime
-        // it could not build: reported as a window that never ran, never as a window of failures the
-        // gateway would be charged with.
+        // Same class of fact as a runtime that wouldn't build: report as a window that never ran,
+        // not as a window of failures charged to the gateway.
         Err(why) => {
             eprintln!("loadgen: refusing to send this window's request: {why}");
             return GenStats {
@@ -719,20 +605,9 @@ pub fn run(cfg: &GenConfig) -> GenStats {
             )));
         }
 
-        // THE WINDOW IS THE SLEEP, and it starts once every task exists.
-        //
-        // The thread version started this clock BEFORE spawning and stopped it AFTER joining, so
-        // the spawn ramp and the post-stop drain both landed in the denominator - which deflated
-        // rps hardest at exactly the high rungs where spawning was slowest, biasing the search
-        // against the concurrencies it was climbing toward. Spawning tasks is cheap enough that the
-        // ramp is no longer a meaningful share of the window, and timing the sleep alone is what
-        // the original comment always said this measured.
-        // AND THE SAME WINDOW IS WHAT COUNTS. `start` opens the interval the tasks credit their
-        // completions to; `end` closes it, published BEFORE the stop flag so no task can be past the
-        // end without being able to see it. Everything that completes in the drain after `end` is
-        // real work that finished outside the interval `elapsed_s` measures, and counting it into
-        // `ok` raised rps by one free success per lane - worst at high concurrency with slow
-        // responses, which is precisely where the peak search is looking.
+        // The window is the sleep itself, timed after every task exists: including the spawn ramp
+        // or the post-stop drain in `elapsed_s` would bias rps, worst at high concurrency with slow
+        // responses. `end` is published before the stop flag so no task can be past it unseen.
         let started = Instant::now();
         let _ = window.start.set(started);
         tokio::time::sleep(duration).await;
@@ -754,10 +629,8 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                     g.budget_exceeded += w.budget_exceeded;
                     g.latencies_us.extend_from_slice(&w.lat);
                 }
-                // A task that panicked is a HARNESS fault, and its requests are gone. Say so on
-                // stderr rather than folding a silent hole into a published rate: the release
-                // profile aborts on panic, so this is reachable only in a debug build, and a
-                // quietly smaller `ok` would read as the gateway being slower.
+                // A panicked task is a harness fault (release profile aborts on panic, so this is
+                // debug-build-only); log it rather than silently shrinking `ok`.
                 Err(e) => eprintln!("loadgen: a connection task did not finish cleanly: {e}"),
             }
         }
@@ -768,9 +641,8 @@ pub fn run(cfg: &GenConfig) -> GenStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The test peers below are plain blocking servers on their own threads: they stand in for a
-    // gateway, and holding them to the generator's own async shape would test the harness twice
-    // instead of testing it against something independent.
+    // Test peers are plain blocking servers on their own threads, standing in for a gateway
+    // independent of the generator's own async shape.
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -788,15 +660,9 @@ mod tests {
         }
     }
 
-    // THE PERCENTILE CONVENTION IS THE ENGINE'S, NOT THIS FILE'S. A one-index difference is a silent
-    // disagreement between two instruments that both look correct, and this engine shipped one
-    // (ledger SRCH-04): the load generator resolved a rank with floor while the streaming
-    // percentiles used ceil, with comments in both files claiming they agreed.
-    //
-    // The floor convention this test used to pin is exactly what makes the case below wrong: it put
-    // p50 at index 5 of ten (the SIXTH value, above the middle) and p99 at index 9 (the MAXIMUM),
-    // and the assertion literally read "the last value". A percentile that is the maximum is not a
-    // percentile, which `metric.rs`'s own test asserted in the same crate.
+    // Pins the engine-wide nearest-rank percentile convention (not this file's own): this engine
+    // once shipped a one-index disagreement between the load generator (floor) and streaming
+    // percentiles (ceil) while both claimed to agree (ledger SRCH-04).
     #[test]
     fn percentiles_are_nearest_rank_on_the_engines_one_convention() {
         let s = stats(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100], 10, 0, 1.0);
@@ -837,8 +703,6 @@ mod tests {
 
     #[test]
     fn rps_is_successes_over_measured_elapsed_not_nominal_duration() {
-        // Measured elapsed, because a run that took longer than asked must not report the rate it
-        // would have had. The Go generator makes the same choice.
         assert_eq!(stats(&[1], 1000, 0, 10.0).rps(), 100.0);
         assert_eq!(
             stats(&[1], 1000, 0, 0.0).rps(),
@@ -894,7 +758,6 @@ mod tests {
         );
     }
 
-    // End to end against a real socket: the generator must actually move requests and record them.
     #[test]
     fn drives_a_real_socket_and_records_what_it_measured() {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -941,10 +804,8 @@ mod tests {
         assert!(g.rps() > 0.0, "a run that completed requests has a rate");
     }
 
-    // A chunked response is what a real gateway sends whenever it does not buffer to compute a
-    // length. A reader that stops at the header terminator instead of draining the body would leave
-    // the body on the socket, so the NEXT request on the reused connection would read those bytes as
-    // its status line and count a success as a failure.
+    // A reader that stops at the header terminator instead of draining a chunked body would leave
+    // bytes on the socket, corrupting the next request on the reused connection.
     #[test]
     fn a_chunked_response_is_drained_so_the_next_request_is_not_corrupted() {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -954,8 +815,7 @@ mod tests {
                 let Ok(mut c) = c else { continue };
                 std::thread::spawn(move || {
                     let mut b = [0u8; 4096];
-                    // Answer every request on this connection with a CHUNKED body, so a reader that
-                    // does not drain will desync on the second one.
+                    // Chunked on every request, so a non-draining reader desyncs on the second one.
                     while c.read(&mut b).unwrap_or(0) > 0 {
                         let r = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n\
                                  4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n";
@@ -982,8 +842,6 @@ mod tests {
             g.ok,
             g.fail
         );
-        // The real tell: with an undrained body the connection desyncs and every request after the
-        // first is misread as a non-2xx, so failures would dominate.
         assert_eq!(
             g.fail, 0,
             "a drained connection must not manufacture failures, got {}",
@@ -991,13 +849,9 @@ mod tests {
         );
     }
 
-    // A PEER THAT CLOSES IS NOT A PEER THAT FAILED.
-    //
-    // HTTP/1.0 defaults to closing after each response and must opt IN to keep-alive. The generator
-    // reuses connections, so a failure on a reused connection must be attributed to OUR reuse of a
-    // connection the peer told us it was closing, never to the target: counting it as a request
-    // failure would read throughput as roughly half and fail the clean-window gate
-    // (`Sample.passed` requires fail == 0) for a peer that answered every request correctly.
+    // HTTP/1.0 defaults to closing after each response (must opt IN to keep-alive). Reusing a
+    // connection the peer said it was closing must not be counted as the target's failure, or
+    // throughput reads as roughly half and a correct peer fails the clean-window gate.
     #[test]
     fn a_peer_that_answers_and_closes_is_all_successes_and_no_failures() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1006,8 +860,8 @@ mod tests {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { continue };
                 std::thread::spawn(move || {
-                    // Read one request, answer it in HTTP/1.0 with no keep-alive, then close. Legal,
-                    // and exactly what a plain HTTP/1.0 server does.
+                    // Answer in HTTP/1.0 with no keep-alive, then close: what a plain HTTP/1.0
+                    // server does.
                     let mut b = [0u8; 4096];
                     if conn.read(&mut b).unwrap_or(0) == 0 {
                         return;
@@ -1040,10 +894,8 @@ mod tests {
         );
     }
 
-    // The other half of the same rule: a peer that closes WITHOUT answering is a real failure, and
-    // must still be counted. Otherwise the fix above would silently swallow a gateway that accepts
-    // connections and refuses to serve, which is a live failure mode (a container that binds its
-    // port and then dies at config load looks exactly like this).
+    // The other half of the same rule: a peer that closes WITHOUT answering must still count as a
+    // failure — e.g. a container that binds its port and then dies at config load.
     #[test]
     fn a_peer_that_accepts_and_closes_without_answering_is_a_failure() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1072,10 +924,8 @@ mod tests {
         );
     }
 
-    // A chunked body delivered across MANY small reads. The terminator search must look only at
-    // newly-arrived bytes, so a terminator split across a read boundary is still found: rescanning
-    // the whole body from the start on every read is O(N^2), and every microsecond of it lands
-    // inside the timed window and is charged to the gateway.
+    // A chunked terminator split across many small reads must still be found without rescanning the
+    // whole body each time (O(N^2), charged to the timed window).
     #[test]
     fn a_chunked_body_split_across_many_reads_still_terminates() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1092,8 +942,7 @@ mod tests {
                         {
                             return;
                         }
-                        // Many small chunks, then the terminator written one byte at a time so it
-                        // straddles read boundaries.
+                        // Terminator written one byte at a time so it straddles read boundaries.
                         for _ in 0..64 {
                             if conn.write_all(b"4\r\nabcd\r\n").is_err() {
                                 return;
@@ -1131,8 +980,7 @@ mod tests {
         );
     }
 
-    // A body with no length header and no chunking runs to connection close. That is a legitimate
-    // framing, NOT a zero-length body, and it must not be confused with one.
+    // No length header and no chunking means run-to-close framing, not a zero-length body.
     #[test]
     fn a_response_with_no_framing_header_is_not_treated_as_an_empty_body() {
         assert!(matches!(
@@ -1149,8 +997,7 @@ mod tests {
         ));
     }
 
-    // A non-2xx is a FAILURE, not a fast success. Counting an error page as throughput is how a
-    // broken gateway posts its best number.
+    // A non-2xx is a failure, not throughput.
     #[test]
     fn a_non_2xx_response_is_a_failure_not_throughput() {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1178,12 +1025,9 @@ mod tests {
         assert!(g.fail > 0, "and it must be counted as a failure");
     }
 
-    // THE POINT OF THE REWRITE, pinned as a test: a concurrency that a thread-per-connection
-    // generator could not honour on a small box must now cost tasks, not OS threads. 2048 native
-    // threads on a CI runner is where the old design started losing to its own scheduler; 2048
-    // tasks is unremarkable. The assertion is deliberately about COMPLETION, not about a rate: this
-    // proves the instrument can hold the connections it claims, which is exactly what the failed
-    // field run disproved for threads.
+    // Pins the point of the async rewrite: 2048 concurrent holders must be cheap tasks, not OS
+    // threads (which would start losing to the scheduler at this count on a CI runner). Asserts
+    // completion, not rate — proving the instrument can hold the connections it claims.
     #[test]
     fn a_high_concurrency_window_is_held_by_tasks_rather_than_os_threads() {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1222,21 +1066,16 @@ mod tests {
             g.ok,
             g.fail
         );
-        // The old failure mode was wall clock exploding far past the requested window because
-        // spawning and joining the holders dwarfed the window itself. A generous bound: this is a
-        // regression guard against collapse, not a performance assertion.
+        // Generous bound: a regression guard against wall-clock collapse, not a performance
+        // assertion.
         assert!(
             wall < Duration::from_secs(20),
             "a 500ms window at c=2048 took {wall:?}; the holders are not cheap"
         );
     }
 
-    // A RIG LIMIT MUST NEVER BE INDISTINGUISHABLE FROM A GATEWAY FAILURE.
-    //
-    // Both of these used to land in `fail` beside a genuine refusal, where nothing downstream could
-    // separate them - which is how the search came to publish this host's ephemeral port range as a
-    // gateway's ceiling. They are counted apart now, and the stats line carries them across the
-    // subprocess boundary because that line is everything the parent learns from the child.
+    // rig_refused and budget_exceeded must cross the subprocess boundary in the stats line, or the
+    // parent can't tell a rig limit from a genuine gateway failure.
     #[test]
     fn the_stats_line_carries_our_own_limits_apart_from_the_gateways_failures() {
         let g = GenStats {
@@ -1264,7 +1103,6 @@ mod tests {
             "and the gateway's own failure count is unchanged: {line}"
         );
 
-        // The parent reads them back.
         let parsed = crate::loadgen::parse_ugen_line(&line)
             .into_value()
             .expect("a line this generator wrote must parse");
@@ -1272,9 +1110,8 @@ mod tests {
         assert_eq!(parsed.budget_exceeded, 2);
         assert_eq!(parsed.fail, 7);
 
-        // A line from an older generator has neither field and must still parse: absent means "not
-        // reported", which is not the same as "did not happen", and refusing an otherwise complete
-        // line would turn a cosmetic version skew into a lost measurement.
+        // An older generator's line lacks these fields; absent must mean "not reported", not "did
+        // not happen", and must still parse.
         let old = "rps=1000 fail=1 p50=1.00 p99=2.00 p50us=1000 p99us=2000 ok=999";
         let legacy = crate::loadgen::parse_ugen_line(old)
             .into_value()
@@ -1284,13 +1121,8 @@ mod tests {
         assert_eq!(legacy.ok, 999);
     }
 
-    // A GATEWAY THAT ACCEPTS AND THEN HANGS MUST BE VISIBLE.
-    //
-    // A read timeout used to be reported as `ClosedBeforeAnyBytes`, which the worker retries in
-    // silence on a reused connection - no ok, no fail, no budget count, so a hung gateway showed up
-    // only as mysteriously low rps - and counted as a bare `fail` on a fresh one, where our own
-    // thirty-second bound firing read exactly like the gateway refusing. The deadline passing is our
-    // bound, on every connection, and it says so.
+    // A read timeout must report as `BudgetExceeded` on every connection, not silently retried as
+    // `ClosedBeforeAnyBytes` (which used to make a hung gateway show up only as depressed rps).
     #[test]
     fn a_read_timeout_on_a_live_connection_is_our_budget_firing_not_a_stale_connection() {
         let hangs = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1298,7 +1130,7 @@ mod tests {
         std::thread::spawn(move || {
             for c in hangs.incoming() {
                 let Ok(c) = c else { continue };
-                // Accept, then say nothing and hold the connection open.
+                // Accept, say nothing, hold the connection open.
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(5));
                     drop(c);
@@ -1310,7 +1142,7 @@ mod tests {
         let close_addr = closes.local_addr().expect("addr");
         std::thread::spawn(move || {
             for c in closes.incoming() {
-                drop(c); // accept and close at once: a peer going away, not a peer hanging
+                drop(c); // a peer going away, not a peer hanging
             }
         });
 
@@ -1333,9 +1165,8 @@ mod tests {
                 "a peer holding a live connection past the deadline is our bound firing, got {out:?}"
             );
 
-            // The other half of the rule, unchanged: a peer that GOES AWAY with nothing sent is
-            // still the stale-connection case the worker retries on a reused connection, so this fix
-            // must not turn every idle keep-alive close into a failure.
+            // A peer that goes away with nothing sent is still the stale-connection retry case, not
+            // a failure.
             let mut gone = TcpStream::connect(close_addr).await.expect("connect");
             let out = read_response(
                 &mut gone,
@@ -1351,13 +1182,9 @@ mod tests {
         });
     }
 
-    // OUR CONNECT BOUND IS NOT THE GATEWAY REFUSING, AND IT IS NOT THE RIG RUNNING OUT EITHER.
-    //
-    // The five-second connect timeout used to land in `fail` with no attribution at all, beside
-    // EADDRNOTAVAIL/EMFILE which do get `rig_refused`. It is filed as our bound firing:
-    // `rig_refused` is the claim "this host had no port or descriptor left", and run.rs turns a
-    // window containing any of those into an UNMEASURED one - so filing a hung gateway there would
-    // erase the failure it caused.
+    // The five-second connect timeout is filed as our own bound firing, not `rig_refused`
+    // (EADDRNOTAVAIL/EMFILE) or a bare `fail`: `run.rs` treats any `rig_refused` window as
+    // UNMEASURED, so misfiling a hung gateway there would erase the failure it caused.
     #[test]
     fn a_connect_timeout_is_charged_to_our_own_bound_never_to_rig_exhaustion() {
         assert_eq!(connect_fault(None), ConnectFault::OurConnectBound);
@@ -1398,13 +1225,8 @@ mod tests {
         );
     }
 
-    // THE RATE'S NUMERATOR AND DENOMINATOR MUST DESCRIBE THE SAME WINDOW.
-    //
-    // Every lane's in-flight response used to complete during the post-stop drain and count into
-    // `ok` while `elapsed_s` stayed frozen at the sleep - one free success per lane, largest exactly
-    // where the peak search is climbing (high concurrency, slow responses). Here nothing can
-    // possibly answer inside the window, so an honest window reports nothing rather than a rate
-    // built entirely out of the drain.
+    // The rate's numerator and denominator must describe the same window: a response landing during
+    // the post-stop drain must not count into `ok` while `elapsed_s` stays frozen at the sleep.
     #[test]
     fn responses_that_land_after_the_window_closes_are_not_counted_into_its_rate() {
         let served = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1421,8 +1243,7 @@ mod tests {
                         return;
                     }
                     counter.fetch_add(1, Ordering::Relaxed);
-                    // Answer well after the load window has closed: a real response, delivered
-                    // during the drain.
+                    // Answer well after the load window has closed.
                     std::thread::sleep(Duration::from_millis(700));
                     let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
                 });
@@ -1454,11 +1275,8 @@ mod tests {
         assert_eq!(g.rps(), 0.0);
     }
 
-    // A HEADER VALUE IS NOT ALLOWED TO CHOOSE WHAT BYTES GO ON THE WIRE.
-    //
-    // Header values arrive from the manifest across a process boundary, and they are interpolated
-    // straight into the request head: a CRLF in one appends a header the manifest never wrote, and a
-    // double CRLF ends the head and makes the rest a second request on the connection.
+    // A header value must not be able to choose what bytes go on the wire: a CRLF appends a header
+    // the manifest never wrote, and a double CRLF starts a second request on the connection.
     #[test]
     fn a_header_carrying_crlf_is_refused_rather_than_smuggled_onto_the_wire() {
         let with = |headers: Vec<(String, String)>, path: &str| GenConfig {
@@ -1500,10 +1318,8 @@ mod tests {
         assert!(ok.contains("authorization: Bearer sk-abc.DEF_123-+/=\r\n"));
     }
 
-    // And the window built from such a manifest NEVER RUNS: a sanitised header would send a
-    // credential or a routing key the manifest did not write and publish the result under the
-    // pairing it asked for, while a window of failures would charge the gateway for our refusal.
-    // `spawn_failed` is the existing "the rig never posed the question" answer.
+    // A window built from an injecting manifest never runs (`spawn_failed`), rather than sanitising
+    // the header or charging the gateway for our refusal.
     #[test]
     fn a_window_whose_request_would_inject_never_runs_and_charges_the_gateway_nothing() {
         let g = run(&GenConfig {
@@ -1532,10 +1348,8 @@ mod rate_precision_tests {
         }
     }
 
-    // THE CASE THAT WAS PUBLISHED AS ZERO. plano hit it twice: one request completed in four seconds
-    // is 0.25 req/s, and `as u64` truncation published `0` - which does not say "slow", it says the
-    // gateway carried NOTHING. Both external auditors had to carry a written special case to avoid
-    // calling a correct engine wrong.
+    // The case that used to publish as zero: `as u64` truncation turned 0.25 req/s into `0`, which
+    // says "carried nothing" rather than "slow".
     #[test]
     fn a_sub_one_per_second_rate_is_not_published_as_zero() {
         let r = s(1, 4.0).rps();
@@ -1551,9 +1365,8 @@ mod rate_precision_tests {
         assert!((s(3, 4.0).rps() - 0.75).abs() < 1e-9);
     }
 
-    // AND THE OTHER HALF: nothing at or above 1/s moves. The split exists precisely so this change
-    // cannot quietly restate a single number the board has already published - if it rounded instead
-    // of truncating, every rate on the board could shift by one.
+    // At or above 1/s, nothing moves: truncating (not rounding) keeps every previously published
+    // rate unchanged.
     #[test]
     fn rates_at_or_above_one_per_second_are_unchanged_whole_numbers() {
         assert_eq!(s(100, 1.0).rps(), 100.0);
@@ -1571,8 +1384,8 @@ mod rate_precision_tests {
         );
     }
 
-    // A rate is undefined without elapsed time, and an infinity cast to an integer SATURATES rather
-    // than wrapping - which would publish 9,223,372,036,854,775,807 req/s as a measurement.
+    // A rate is undefined without elapsed time; an infinity cast to an integer would saturate
+    // rather than wrap, publishing a huge bogus number.
     #[test]
     fn a_rate_with_no_elapsed_time_is_zero_not_an_infinity() {
         assert_eq!(s(10, 0.0).rps(), 0.0);

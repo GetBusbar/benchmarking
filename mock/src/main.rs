@@ -27,32 +27,20 @@
 // This lets the matrix runner prove a request actually round-tripped through the gateway to the
 // intended egress dialect.
 //
-// RECORDING IS RUNTIME-TOGGLABLE, AND THAT IS A MEASUREMENT-INTEGRITY DECISION, not a convenience.
+// RECORDING IS RUNTIME-TOGGLABLE, a measurement-integrity decision, not a convenience.
 // MOCK_RECORD=1 sets the STARTING state; POST /__mock/record with `{"on":true|false}` changes it
 // while the mock runs, and GET /__mock/state reports it.
 //
-// The reason is what recording costs and what that cost would do to the published board. This mock's
-// own throughput is the reference every gateway's number is judged against, so anything that slows the
-// mock down understates EVERY gateway measured against it - and it does so consistently, which is what
-// makes it dangerous: all the numbers stay internally plausible while all of them move together.
+// A recorded request takes a process-wide lock, and this mock's own throughput is the reference
+// every gateway's number is judged against, so a slower mock would understate every gateway
+// measured against it - consistently, which is what makes it dangerous. The harness needs the
+// record for exactly one request per cell but drives millions through the same process for the
+// throughput/memory windows, so it turns recording on only around its one re-verification request
+// and off for every load window - keeping every published number, including the mock's own
+// reference ceiling, taken against the same mock behaviour.
 //
-// This paragraph used to say a result within 10% of the mock's ceiling was "suppressed as mock-bound"
-// via `is_rig_bound`. That suppression mechanism and that function were both deleted (see
-// `rigbound.rs`'s own header); nothing is suppressed today. It was the third copy of the same stale
-// claim - `run.rs` and `reverify.rs` carried the other two - which is what a fact repeated in three
-// comments instead of stated in one place does when the code beneath it changes. A recorded request takes a process-wide lock, and the harness
-// needs the record for exactly ONE request per cell while it drives millions through the same
-// process for the throughput and memory windows.
-//
-// With the toggle the harness turns recording on around its one re-verification request and off for
-// every load window, so every published number is taken against the same mock behaviour the perf
-// suites have always run against - INCLUDING the mock's own reference ceiling, which is measured
-// with this same process and would otherwise be a different instrument from the one the gateway was
-// measured against.
-//
-// The unrecorded path is still one branch on an atomic load, and the recorded path now does its
-// shape check and its allocations OUTSIDE the critical section, so the lock is held for a handful of
-// moves rather than for a substring scan over the body plus two heap allocations.
+// The unrecorded path is one branch on an atomic load; the recorded path does its shape check and
+// allocations OUTSIDE the lock, so the critical section is a handful of moves.
 //
 // STREAMING: when (and only when) the request body says "stream":true, the OpenAI and Anthropic
 // paths answer a valid SSE stream instead - role/message_start, then N content deltas paced at a
@@ -168,21 +156,14 @@ fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
         }
         // Cohere: v2 chat carries `messages`; v1 chat carries `message`/`chat_history`.
         //
-        // KNOWN WEAK, AND SAID SO RATHER THAN IMPLIED. A cohere v2 body and an OpenAI chat body are
-        // near-identical at this depth - both are `{"model":…,"messages":[{"role","content"}]}` - so a
-        // gateway that forwarded the client's OpenAI body VERBATIM to the cohere endpoint would satisfy
-        // this arm. `reverify` still catches the common case, because it checks WHICH ENDPOINT the
-        // request landed on and a verbatim forward hits the ingress dialect's own path (that is what
-        // caught aisix's openai-responses>openai cell). What this arm cannot catch is a gateway that
-        // routes correctly and translates nothing, and pretending otherwise would be worse than saying
-        // it. Compare the `bedrock` arm above, which CAN discriminate because Converse genuinely
-        // reshapes the body into content blocks.
+        // Known weak: a cohere v2 body is near-identical to an OpenAI chat body at this depth, so a
+        // verbatim OpenAI forward would satisfy this arm too. `reverify`'s endpoint check catches the
+        // common case; a gateway that routes correctly but translates nothing would not be caught
+        // here (unlike `bedrock` below, which discriminates because Converse reshapes the body).
         "cohere" => has("\"messages\"") || has("\"message\"") || has("\"chat_history\""),
         "openai-responses" => has("\"input\"") || has("\"instructions\""),
-        // Anthropic: `max_tokens` is REQUIRED here where OpenAI treats it as optional, so requiring
-        // both is the strongest marker available at this depth. Same caveat as `cohere`: the OpenAI
-        // probe body carries a `max_tokens` too, so a verbatim forward would satisfy this arm and is
-        // caught by the ENDPOINT check rather than by this one.
+        // Anthropic requires `max_tokens` where OpenAI treats it as optional, so requiring both is
+        // the strongest marker available; same verbatim-forward caveat as `cohere` above.
         "anthropic" => has("\"messages\"") && has("\"max_tokens\""),
         "gemini" => has("\"contents\""),
         _ => false,
@@ -216,11 +197,9 @@ type Recorder = std::sync::Mutex<std::collections::HashMap<&'static str, Dialect
 /// the unrecorded hot path must still pay nothing more than a relaxed load to find that out.
 type RecordFlag = std::sync::atomic::AtomicBool;
 
-/// Does the control body ask for recording on or off? `None` for a body that says neither, which is
-/// a request the caller got wrong and must be refused rather than defaulted: silently reading an
-/// unparseable body as "off" would leave a harness believing it had enabled the recorder it is about
-/// to draw a conclusion from, and the conclusion it draws from an empty recorder is about somebody's
-/// product.
+/// Does the control body ask for recording on or off? `None` for a body that says neither, which
+/// must be refused rather than defaulted: silently reading an unparseable body as "off" would leave
+/// a caller believing it enabled the recorder when it didn't.
 fn wants_recording(body: &[u8]) -> Option<bool> {
     let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
     match (
@@ -276,11 +255,9 @@ fn state_json(rec: &Recorder, recording: bool) -> String {
 /// `head` goes out immediately, then each `delta` after an interval sleep (first delta is
 /// unpaced so direct-to-mock TTFT stays near zero), then `tail`.
 ///
-/// The deltas are prebuilt as a VECTOR of `chunks` distinct frames, one per index, with the frame
-/// index embedded in the padding text so no two consecutive content frames are byte-identical. This
-/// costs nothing on the hot path (still a refcount bump per send) but keeps every gateway fair: a
-/// gateway with a repetition/loop guard (e.g. one gateway aborts a stream on identical consecutive
-/// chunks) is not tripped by synthetic identical tokens the way a single reused delta would trip it.
+/// Deltas are prebuilt as a vector of `chunks` distinct frames, index embedded in the padding, so
+/// no two consecutive content frames are byte-identical - keeps a gateway with a repetition/loop
+/// guard from aborting on synthetic identical tokens.
 struct StreamFrames {
     openai_head: Vec<Bytes>,
     openai_deltas: Vec<Bytes>,
@@ -444,13 +421,8 @@ async fn handle(
             .body(Full::new(Bytes::from_static(b"{\"ok\":true}")).boxed())
             .unwrap());
     }
-    // TURN RECORDING ON AND OFF WHILE THE MOCK RUNS. The harness needs the recorder for one request
-    // per cell and drives millions more through this process for its load windows; leaving recording
-    // on for those would slow the mock, and the mock's own throughput is the reference every
-    // gateway's number is judged against, so it would suppress real gateway measurements as
-    // mock-bound. A body that says neither on nor off is REFUSED rather than defaulted: a caller who
-    // believes it enabled the recorder and did not would read an empty record as a gateway failing to
-    // translate.
+    // Turns recording on/off while the mock runs, so load windows (millions of requests) never pay
+    // the recording cost. A body that says neither on nor off is refused rather than defaulted.
     if path == "/__mock/record" {
         let body = match Limited::new(req.into_body(), MAX_BODY_BYTES)
             .collect()
@@ -497,11 +469,8 @@ async fn handle(
         }
     };
     if recording.load(std::sync::atomic::Ordering::Relaxed) {
-        // THE SHAPE CHECK AND THE ALLOCATIONS HAPPEN OUTSIDE THE LOCK. They used to happen inside it,
-        // which held a process-wide mutex across a substring scan of the body plus two heap
-        // allocations on every request - a serialization point in the one process whose throughput is
-        // the reference every gateway's number is judged against. The critical section is now three
-        // moves.
+        // The shape check and allocations happen outside the lock (used to happen inside it, holding
+        // a process-wide mutex across a substring scan plus two heap allocations per request).
         let d = dialect_for(&path);
         let body_ok = request_shape_ok(d, &reqbody);
         let last_path = path.clone();
@@ -534,22 +503,15 @@ async fn main() {
             port = v.parse().unwrap_or(8000);
         }
     }
-    // TRIMMED, for the reason the block below spells out at length: this knob sat three lines above a
-    // comment explaining that exact bug for its neighbours and did not have the fix itself. A value
-    // carrying whitespace - a shell export, a CI variable, a generated env file's trailing newline -
-    // made `parse()` fail, `.ok()` swallow it, and the mock silently keep 0 while the operator believed
-    // the TTFT they set was in effect.
+    // Trimmed: a value with stray whitespace (shell export, CI var) would fail `parse()`, get
+    // swallowed by `.ok()`, and silently keep the mock at 0 while the operator believed TTFT was set.
     let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0);
-    // TRIMMED, BECAUSE THE ENGINE TRIMS. These knobs are read on BOTH sides of the measurement: the
-    // mock paces frames by them, and the engine reads MOCK_STREAM_INTERVAL_MS to know what pace to
-    // judge a stall against. The engine's reader is `v.trim().parse()`; this one was `v.parse()`, so a
-    // value carrying any whitespace - trivially easy through a shell export or a CI variable - made the
-    // mock silently keep its DEFAULT while the engine believed the new number. Nothing reports that:
-    // the two sides simply measure against different cadences, and every streaming rung is then judged
-    // by a pace nothing is producing. One truth read two ways is the drift this repo keeps finding.
+    // Trimmed because the engine trims: these knobs are read on both sides of the measurement (mock
+    // paces frames, engine judges stalls against the same pace), so an untrimmed reader here would
+    // silently desync the two sides' cadence with nothing reporting the mismatch.
     let envn = |k: &str, d: u64| {
         std::env::var(k)
             .ok()
@@ -593,24 +555,11 @@ async fn main() {
         }
     };
     eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) - OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
-    // Backstop against unbounded in-flight connections over an 8-hour run (a leak or a runaway
-    // client), not a tight operational limit.
-    //
-    // THE OLD JUSTIFICATION IS VOID AND THE CAP CAN NOW BIND. It read "OTB_MAX_CONC's own ceiling
-    // elsewhere in this repo defaults to 512, so this is set far above anything the benchmark's own
-    // concurrency produces". That default is gone: `otb.rs` now defaults max_conc to
-    // `host_connection_ceiling()`, which on the bench box (ip_local_port_range 16384-65535) is 32,768 -
-    // above this cap, not far below it.
-    //
-    // Why that matters here rather than being a tidy-up: a gateway that does NOT pool upstream
-    // connections opens roughly one mock connection per in-flight request. At the top of the ladder
-    // that exceeds 20,000, the accept loop parks on `acquire_owned().await`, and every further connect
-    // either stalls until CONNECT_BUDGET or completes seconds late - and the load generator charges all
-    // of that to the GATEWAY. A cap on the reference instrument that binds during a measurement stops
-    // being a backstop and becomes part of the number.
-    //
-    // Raised to sit above the host's own connection ceiling so it is once again the thing it claims to
-    // be: reachable only by a leak, never by the benchmark running as designed.
+    // Backstop against unbounded in-flight connections over an 8-hour run (a leak or runaway
+    // client), not a tight operational limit. Set above `host_connection_ceiling()` (32,768 on the
+    // bench box's port range): a gateway that doesn't pool upstream connections opens roughly one
+    // per in-flight request, and a cap that binds during a real measurement stops being a backstop
+    // and becomes part of the number.
     let conn_permits = Arc::new(tokio::sync::Semaphore::new(40_000));
     loop {
         let (stream, _) = match listener.accept().await {
@@ -851,11 +800,8 @@ mod tests {
         assert!(!wants_stream(b"{}"));
     }
 
-    // Only the openai and anthropic paths synthesise a stream; the others answer their normal JSON
-    // even when asked to stream, and the harness records that as untestable rather than measuring
-    // it. The handler decides by asking whether the body it picked is the openai or the anthropic
-    // one, so which paths select those two bodies is the whole of the streaming routing, and it is
-    // pinned here where it can be checked without standing up a server.
+    // Only openai and anthropic synthesise a stream; the handler decides by whether the picked body
+    // is one of those two, so which paths select them is the whole of the streaming routing.
     #[test]
     fn exactly_the_openai_and_anthropic_paths_select_a_streamable_body() {
         assert_eq!(body_for("/v1/chat/completions"), OPENAI);
@@ -881,10 +827,8 @@ mod tests {
 
     // ── stream frames ───────────────────────────────────────────────────────────────────────────
 
-    // NO TWO CONSECUTIVE CONTENT FRAMES MAY BE BYTE-IDENTICAL. A gateway with a repetition or loop
-    // guard aborts a stream whose chunks repeat, so a single reused delta would fail that gateway on
-    // a property of our synthetic tokens rather than of its behaviour, and every frame must still be
-    // the same SIZE or the per-frame timings stop being comparable between gateways.
+    // No two consecutive content frames may be byte-identical (a repetition/loop guard would abort
+    // the stream), and every frame must stay the same size or per-frame timings aren't comparable.
     #[test]
     fn consecutive_stream_deltas_differ_in_content_but_not_in_size() {
         let f = StreamFrames::build(8, 0, 16);
@@ -944,10 +888,9 @@ mod tests {
 
     // ── the recorded state document ─────────────────────────────────────────────────────────────
 
-    // The state document is hand-assembled with format!, so a body snippet carrying a quote, a
-    // backslash or a newline (every request body has quotes) would produce INVALID JSON and the
-    // matrix runner would read a parse error as "the request never arrived" rather than as a bug in
-    // this escaper. That inverts a proof of a working round trip into evidence of a broken one.
+    // The state document is hand-assembled with format!, so an unescaped quote/backslash/newline in
+    // a body snippet would produce invalid JSON, and the matrix runner would misread that as "the
+    // request never arrived" instead of a bug in this escaper.
     #[test]
     fn a_body_snippet_full_of_json_metacharacters_still_escapes_to_valid_json() {
         let nasty = "{\"a\":\"b\\c\"}\n\r\t\u{1}";
@@ -1033,9 +976,7 @@ mod tests {
 
     // ── the recording toggle ────────────────────────────────────────────────────────────────────
 
-    // The toggle exists so the harness's LOAD WINDOWS never pay for recording. This mock's own
-    // throughput is the reference every gateway's number is judged against, so a slower mock
-    // suppresses real gateway measurements as mock-bound - honestly, and therefore invisibly.
+    // The toggle exists so the harness's load windows never pay for recording.
     #[test]
     fn the_record_control_reads_on_and_off_in_both_json_spacings() {
         assert_eq!(wants_recording(br#"{"on":true}"#), Some(true));
@@ -1044,9 +985,8 @@ mod tests {
         assert_eq!(wants_recording(br#"{"on": false}"#), Some(false));
     }
 
-    // A BODY THAT SAYS NEITHER IS REFUSED, never defaulted. A caller that believes it enabled the
-    // recorder and did not would read the resulting empty record as a gateway failing to translate,
-    // which is a false accusation produced entirely by a defaulted control message.
+    // A body that says neither is refused, never defaulted: a defaulted "off" would let a caller
+    // read an empty record as a gateway failing to translate rather than a bad control message.
     #[test]
     fn a_record_control_body_that_says_neither_is_refused_rather_than_defaulted() {
         for body in [
@@ -1071,11 +1011,8 @@ mod tests {
         );
     }
 
-    // The whole point of the toggle, over a real connection: recording starts off, `/__mock/record`
-    // turns it on, `/__mock/state` reports it, and a request that arrives while recording is OFF is
-    // not recorded at all. That last clause is what guarantees a load window costs nothing - it is
-    // the difference between "the guard is implemented" and "the guard did not cost us the
-    // measurements it was meant to protect".
+    // End-to-end over a real connection: recording starts off, `/__mock/record` turns it on,
+    // `/__mock/state` reports it, and a request arriving while off is never recorded.
     #[tokio::test]
     async fn a_request_that_arrives_while_recording_is_off_is_never_recorded() {
         let listener = match TcpListener::bind("127.0.0.1:0").await {

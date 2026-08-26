@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 //
-// The engine binary. Subcommands mirror the shell functions one for one, taking the same input on
-// stdin and printing the same thing on stdout, so a differential harness can run both
-// implementations over generated inputs and diff them: parity that is executed catches more than
-// parity that is only reviewed by eye.
+// The engine binary. Subcommands mirror the shell functions one for one, same stdin input and
+// stdout output, so a differential harness can run both implementations and diff them.
 //
-// This is a separate crate target from the library (its own root, not lib.rs), so it needs its own
-// copy of the same test-only unwrap/expect/panic exemption lib.rs documents.
+// Separate crate target from the library (its own root, not lib.rs), so it needs its own copy of
+// the test-only unwrap/expect/panic exemption lib.rs documents.
 #![cfg_attr(test, allow(clippy::panic, clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::Read;
@@ -19,8 +17,7 @@ use std::time::Duration;
 
 /// If `commands` left a minted credential at `<gw_dir>/.minted-auth`, its trimmed contents are what
 /// every probe should authenticate with instead of the manifest's declared (placeholder) `auth`.
-/// `None` for the absent, unreadable, or whitespace-only cases - every one of those means "nothing
-/// was minted", so the declared `auth` stands.
+/// `None` for absent/unreadable/whitespace-only, all meaning "nothing was minted".
 fn resolve_minted_auth(gw_dir: &std::path::Path) -> Option<String> {
     let raw = std::fs::read_to_string(gw_dir.join(".minted-auth")).ok()?;
     let trimmed = raw.trim();
@@ -30,19 +27,13 @@ fn resolve_minted_auth(gw_dir: &std::path::Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// WHY A GATEWAY THAT MINTS ITS OWN CREDENTIAL CANNOT BE MEASURED THROUGH A RESTART.
-///
-/// `resolve_minted_auth` runs ONCE, right after the initial launch, and the credential it finds is
-/// copied into the config every later request authenticates with. The memory phase then stops and
-/// relaunches the gateway (`run::restart_to_rest`), replaying the same `commands`: a gateway that
-/// mints a fresh credential per boot mints a new one there, and every request after that point
-/// carries a token the gateway no longer accepts. The symptom is not an error, it is a grid of
-/// failures attributed to the gateway.
-///
-/// The engine cannot re-resolve it from here (the restart happens deep inside the grid, against a
-/// credential the run config captured by value), so the honest move is to refuse the combination
-/// rather than publish a run whose second half authenticated with a dead token. Returns the refusal
-/// to print, or `None` when there is nothing to refuse.
+/// A gateway that mints its own credential can't be measured through a restart: `resolve_minted_auth`
+/// runs once after the initial launch, but the memory phase later stops and relaunches the gateway
+/// (`run::restart_to_rest`), replaying `commands` and minting a fresh credential every later request
+/// won't have. The engine can't re-resolve it from here (the restart happens deep inside the grid,
+/// against a credential the run config captured by value), so it refuses the combination instead of
+/// publishing a run whose second half authenticated with a dead token. Returns the refusal to print,
+/// or `None` when there is nothing to refuse.
 fn stale_minted_auth_refusal(minted: Option<&str>, harness_restarts_it: bool) -> Option<String> {
     if minted.is_none() || !harness_restarts_it {
         return None;
@@ -60,10 +51,8 @@ fn stale_minted_auth_refusal(minted: Option<&str>, harness_restarts_it: bool) ->
 
 /// The loud end-of-run stop failure, or `None` if the gateway really is gone.
 ///
-/// The final `stop_and_wait` used to be discarded with `let _`. A gateway that outlives the stop
-/// budget keeps the port and the cores the NEXT gateway needs, so the failure surfaces one gateway
-/// later as that gateway "never becoming ready" - the run that caused it having already reported
-/// success.
+/// A gateway that outlives the stop budget keeps the port and cores the NEXT gateway needs, so a
+/// discarded failure here surfaces one gateway later as that one "never becoming ready".
 fn end_of_run_stop_failure(
     identity: &str,
     stop: &Result<(), otb_engine::supervise::SuperviseError>,
@@ -103,11 +92,9 @@ fn read_samples() -> Vec<Sample> {
         .collect()
 }
 
-/// Real ISO-8601, colons and all - `measured_at`'s own contract (snapshot.rs's `write_snapshot`
-/// derives the filesystem-safe historical filename by replacing ':' with '-' on exactly this
-/// shape; its test fixtures were always written this way). A colon-less stamp here is not a
-/// cosmetic difference: `Date.parse` in the site generator returns NaN on it, so every
-/// `measured_at` this produced silently failed to parse and rendered as null on the board.
+/// Real ISO-8601, colons and all: `snapshot.rs`'s `write_snapshot` derives the filesystem-safe
+/// historical filename by replacing ':' with '-' on exactly this shape, and the site generator's
+/// `Date.parse` returns NaN without the colons, rendering `measured_at` as null.
 fn utc_stamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -130,8 +117,8 @@ fn utc_stamp() -> String {
 }
 
 /// The id every container this invocation creates is scoped to. `OTB_RUN_ID` when the orchestrator
-/// set one (run-on-ec2.sh already has a `RUN_ID` it tags its boxes with), otherwise this process's
-/// pid, which is all two runs sharing a box need in order to stop naming each other's containers.
+/// set one (run-on-ec2.sh's own `RUN_ID`), otherwise this process's pid, enough for two runs
+/// sharing a box to avoid naming each other's containers.
 fn run_scope() -> String {
     std::env::var("OTB_RUN_ID")
         .ok()
@@ -148,9 +135,8 @@ fn arg_f64(args: &[String], i: usize, default: f64) -> f64 {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        // The load generator, as a subcommand of the same binary. One artifact to cross-compile and
-        // ship, one version stamp, and the stats line is a shared struct rather than a text format
-        // parsed by hand on both sides of a process boundary.
+        // The load generator, as a subcommand of the same binary: one artifact to ship, one version
+        // stamp, and the stats line is a shared struct rather than a hand-parsed text format.
         Some("loadgen") => {
             let addr = match args.get(1).and_then(|a| a.parse().ok()) {
                 Some(a) => a,
@@ -165,19 +151,14 @@ fn main() -> ExitCode {
             let conc: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
             let dur: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
             let body = args.get(5).cloned().unwrap_or_else(|| "{}".into());
-            // THE HEADERS COME FROM THE ENGINE THAT SPAWNED THIS, via the environment.
+            // Headers come from the spawning engine via the environment, not a hardcoded placeholder:
+            // a fixed `authorization: Bearer dummy` here would silently mismatch most dialects' real
+            // credentials, failing every load window and reading as the search finding no passing
+            // concurrency rather than as our own credential fault.
             //
-            // They used to be hardcoded here as `authorization: Bearer dummy`, and that is a
-            // data-invalidating defect rather than a placeholder: the in-process probe authenticated
-            // with the manifest's real credential in the right per-dialect shape, every LOAD WINDOW
-            // authenticated as the literal string "dummy" with a header name two of the six dialects
-            // do not use, and any gateway whose declared auth was anything else passed its probe and
-            // then failed 100% of every window. The absence that reached the artifact blamed the
-            // SEARCH ("no probed concurrency passed the gate") for a credential fault of ours.
-            //
-            // Unset means NO headers, never a placeholder: see `loadgen::decode_headers` for why a
-            // wrong credential is worse than none. The warning is because a hand-run `otb loadgen`
-            // against an authenticating gateway would otherwise read as the gateway falling over.
+            // Unset means NO headers, never a placeholder (see `loadgen::decode_headers`): a wrong
+            // credential is worse than none. The warning below is so a hand-run `otb loadgen` against
+            // an authenticating gateway doesn't read as the gateway falling over.
             let headers = otb_engine::loadgen::decode_headers(
                 std::env::var(otb_engine::loadgen::HEADERS_ENV)
                     .ok()
@@ -215,7 +196,7 @@ fn main() -> ExitCode {
             let cfg = RunConfig {
                 gateway_addr,
                 mock_addr,
-                // `smoke` takes no manifest, so there is nothing to vary the egress column by.
+                // No manifest, so there's nothing to vary the egress column by.
                 egress_models: Default::default(),
                 model: args.get(3).cloned().unwrap_or_else(|| "gpt-4o-mini".into()),
                 auth: "dummy".into(),
@@ -223,28 +204,23 @@ fn main() -> ExitCode {
                 sweep_duration_s: 2,
                 probe_timeout: Duration::from_secs(10),
                 load_cores: std::env::var("LOADCORES").ok(),
-                // `smoke` drives an ALREADY-RUNNING gateway that this process did not pin, so there
-                // is no core list it can honestly claim. Empty means the cost window reports
-                // utilisation as absent rather than measuring some other process's cores and
-                // labelling the result this gateway's.
+                // `smoke` drives an already-running gateway it didn't pin, so no core list it can
+                // honestly claim; empty means utilisation reports absent rather than measuring some
+                // other process's cores as this gateway's.
                 gw_cores: String::new(),
-                // `smoke` drives an already-running gateway and takes no manifest, so it has no
-                // declared identity to measure memory against. An empty match resolves to nothing -
-                // enforced in `supervise::select_matches`, because the `pgrep -f ""` this used to be
-                // matched EVERY process on the box and could publish init's tree as the gateway's
-                // RSS - and the memory group reports an absence naming it, which is the honest answer.
+                // No manifest, so no declared identity to measure memory against. An empty match
+                // resolves to nothing (enforced in `supervise::select_matches`) rather than
+                // `pgrep -f ""` matching every process on the box.
                 static_headers: Vec::new(),
                 egress_headers: Default::default(),
                 runtime: otb_engine::manifest::Runtime::Native {
                     proc_match: String::new(),
                 },
-                // `smoke` runs against a target someone else started, so the harness does not own
-                // its lifetime and must never restart it.
-                // `smoke` drives a target at whatever path the dialect defines; it takes no manifest.
+                // Someone else started this target, so the harness must never restart it, and it
+                // takes no manifest, so no declared path either.
                 declared_path: String::new(),
                 cell_paths: Default::default(),
-                // `smoke` takes no manifest, so there is no declared capability grid to consult:
-                // every cell is probed, exactly as before this field existed.
+                // No manifest, so no declared capability grid: every cell is probed.
                 matrix: Vec::new(),
                 matrix_note: String::new(),
                 untestable_cells: Vec::new(),
@@ -255,9 +231,8 @@ fn main() -> ExitCode {
             };
             println!("mock healthy: {}", otb_engine::run::mock_healthy(&cfg));
             for r in run_grid(&cfg, 4, 64) {
-                // Print every metric the engine took, not a hand-picked one: the smoke's job is to
-                // show what the engine actually produced, and a curated line would hide a group that
-                // silently returned nothing.
+                // Print every metric the engine took, not a curated one, so a group that silently
+                // returned nothing isn't hidden.
                 let perf = match &r.metrics {
                     Some(m) => m
                         .iter()
@@ -281,8 +256,8 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        // The whole suite for one gateway: probe the grid, sweep what is served, judge each peak
-        // against the rig at the same operating point, and write the snapshot.
+        // The whole suite for one gateway: probe the grid, sweep what's served, judge each peak
+        // against the rig at the same operating point, write the snapshot.
         Some("run") => {
             use otb_engine::manifest::Manifest;
             use otb_engine::suite::{run_suite, SuiteConfig};
@@ -292,9 +267,8 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             };
-            // A gateway is a DIRECTORY, not a file: definition.json plus whatever sidecars it has.
-            // Passing the definition itself still works, so an operator can point at the file they
-            // were reading a moment ago and get the same thing.
+            // A gateway is a directory (definition.json plus sidecars), not a file, but passing the
+            // definition file itself still resolves to the same directory.
             let dir = {
                 let p = std::path::Path::new(manifest_path);
                 if p.is_dir() {
@@ -310,25 +284,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            // BIND EVERY CONTAINER THIS INVOCATION CREATES TO THIS INVOCATION. Without it the
-            // container name is the manifest's alone, identical on every run of this gateway on this
-            // box, so a second run's boot-retry `docker rm -f` deletes the FIRST run's container in
-            // the middle of its measurement. `OTB_RUN_ID` lets the orchestrator use the same run id
-            // it tags its boxes with; a bare pid is enough to separate two runs on one box.
+            // Bind every container this invocation creates to this run: without it, the container
+            // name is the manifest's alone, so a second run's boot-retry `docker rm -f` would delete
+            // the first run's container mid-measurement.
             manifest.runtime = manifest.runtime.scoped_to_run(&run_scope());
             if let Err(e) = manifest.validate() {
                 eprintln!("manifest {manifest_path} is incomplete: {e}");
                 return ExitCode::FAILURE;
             }
-            // THE CONFIG-NECESSITY GATE, at the only point where refusing still costs nothing.
-            //
-            // The board's fairness rule is that every gateway config is the bare minimum required to
-            // run. A manifest that fails that has not earned a number, and finding out after the run
-            // means the box-hours are already spent and the tempting fix is to publish anyway.
-            //
-            // Defaults are empty for now: there is no per-gateway source of "what this ships with out
-            // of the box" in the tree yet, so the restated-default rule cannot fire. The structural
-            // rules - an unusable key, a duplicate claim - do fire, and this is where they belong.
+            // Config-necessity gate, checked here where refusing still costs nothing: every gateway
+            // config must be the bare minimum required to run, or it hasn't earned a published number.
+            // Defaults are empty for now (no per-gateway "ships with" source yet), so only the
+            // structural lint rules (unusable key, duplicate claim) can fire here.
             let findings =
                 otb_engine::config_lint::lint(&manifest, &otb_engine::config_lint::Defaults::new());
             for f in &findings {
@@ -338,10 +305,10 @@ fn main() -> ExitCode {
                 eprintln!("manifest {manifest_path} does not meet the config-necessity standard; refusing to measure it");
                 return ExitCode::FAILURE;
             }
-            // The gateway's port is DECLARED in its definition, so the caller does not repeat it.
-            // A caller-supplied port is a second spelling of one fact, and the run would drive
-            // whatever answered on it - which is how a measurement ends up attributed to the wrong
-            // gateway. An explicit address is still accepted for driving something already running.
+            // The gateway's port is declared in its definition, not repeated by the caller: a
+            // caller-supplied port is a second spelling of one fact and risks measuring whatever
+            // answered on it. An explicit address is still accepted for driving something already
+            // running (via OTB_GATEWAY_ADDR below).
             let Some(mk) = args
                 .get(2)
                 .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
@@ -377,10 +344,9 @@ fn main() -> ExitCode {
                 eprintln!("cannot create {results_dir}: {e}");
                 return ExitCode::FAILURE;
             }
-            // The grid and the search range are overridable, not only for convenience: the full
-            // default run is 36 cells x a peak search x a pinned child per rung, and an end-to-end
-            // run that cannot be shrunk cannot be tested. Passing nothing here gets the same
-            // defaults a field run uses.
+            // Grid and search range are overridable: the full default run is 36 cells x a peak
+            // search x a pinned child per rung, and an end-to-end run that can't be shrunk can't be
+            // tested. Passing nothing gets the same defaults a field run uses.
             let raw_dialects = std::env::var("OTB_DIALECTS").ok();
             let dialects = match otb_engine::ingress::dialects_from(raw_dialects.as_deref()) {
                 Ok(d) => d,
@@ -398,9 +364,9 @@ fn main() -> ExitCode {
             let gw_dir = dir.clone();
             let gw_cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
 
-            // RENDER THE CONFIG BEFORE LAUNCHING. Seven of the containers mount a file the harness
-            // writes and every source build points at one; launching before it exists produces a
-            // gateway that starts and dies, which reads as the gateway being broken.
+            // Render the config before launching: most containers mount a file the harness writes,
+            // and launching before it exists produces a gateway that starts and dies, reading as
+            // the gateway being broken.
             match manifest.render_configs(&gw_cores, mk.port(), &gw_dir) {
                 Ok(written) => {
                     for (path, _) in &written {
@@ -422,44 +388,22 @@ fn main() -> ExitCode {
                 dialects,
                 sweep_duration_s: arg_f64(&args, 4, 6.0) as u64,
                 load_cores: std::env::var("LOADCORES").ok(),
-                // THE ENGINE'S OWN DEFAULT, not an orchestrator setting: a real field run must
-                // search wide enough to find ANY gateway's true peak, and a caller forgetting to
-                // export an override should get the wide range, not a narrow one silently clipping
-                // a fast gateway's ceiling. [512] was too narrow to find one entrant's true peak on
-                // the box that measured the field with it unset - the search reported "still rising
-                // at the top of the range" rather than a number, for a gateway fast enough to have a
-                // real answer.
+                // Engine's own default, not an orchestrator setting: an unset override should get
+                // the wide range, not a narrow one silently clipping a fast gateway's ceiling. 512
+                // was too narrow to find some entrants' true peak; 65536 is wrong the other way,
+                // since `gen.rs::run` spawns one real OS thread per unit of concurrency
+                // (`std::thread::Builder::spawn_scoped`) pinned to LOADCORES' handful of cores, and
+                // ramping toward 65536 threads there measures the rig's own scheduler thrashing, not
+                // the gateway. OTB_MIN_CONC/OTB_MAX_CONC remain the escape hatch for narrowing a
+                // debug run or widening this once the generator isn't thread-per-connection.
                 //
-                // 65536 went the other way and is WRONG: `gen.rs::run` spawns one real OS thread per
-                // unit of concurrency (`std::thread::Builder::spawn_scoped`, one per worker), pinned
-                // by `taskset` to LOADCORES' handful of cores. A search ramping toward 65536 asks
-                // that process to hold tens of thousands of native threads on ~6 cores, which is not
-                // a measurement of the gateway - a live field run hit exactly this and sat at a
-                // 1-minute load average over 24,000 for 45+ minutes, never converging, because the
-                // rig's own scheduler thrashing was drowning out any real signal from the target. The
-                // search's doubling ramp has no way to tell "the gateway is still faster" apart from
-                // "the harness's own instrument just collapsed", so it kept climbing.
-                // 4096 stays 8x wider than the too-narrow 512 (real headroom above any ceiling this
-                // field has shown so far) while staying an order of magnitude below where thread
-                // count alone becomes the bottleneck. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape
-                // hatch for narrowing a debug run (matches OTB_DIALECTS's own "unset means real run"
-                // convention below), and for widening it again once the generator is no longer
-                // thread-per-connection.
-                // THE CEILING IS READ FROM THE HOST, not chosen as a constant.
-                //
-                // 4096 was picked when the load generator was thread-per-connection, and raising it
-                // to a bigger constant only moved the arbitrary number. The real bound is physical: a
-                // TCP connection needs a unique (src ip, src port, dst ip, dst port), and every
-                // window here drives ONE destination, so simultaneous connections cannot exceed this
-                // host's ephemeral source ports. On a default Linux that is about 28,000 - already
-                // below the 65536 a wider constant would ask for - and asking past it raises
-                // EADDRNOTAVAIL, which is the rig running out and used to be counted as the gateway
-                // refusing.
-                //
-                // So the engine reads `/proc/sys/net/ipv4/ip_local_port_range` and caps itself at
-                // what the host can actually do. The orchestrator widens that range before a run
-                // (run-on-ec2.sh), and because the ceiling is derived rather than declared, widening
-                // it is the only thing anyone has to change - there is no second number to move.
+                // The max is read from the host, not a chosen constant: a TCP connection needs a
+                // unique (src ip, src port, dst ip, dst port), every window here drives one
+                // destination, so simultaneous connections can't exceed this host's ephemeral source
+                // port range (`/proc/sys/net/ipv4/ip_local_port_range`, ~28,000 by default) — past
+                // that the rig hits EADDRNOTAVAIL, which used to be misread as the gateway refusing.
+                // The orchestrator widens the port range before a run (run-on-ec2.sh); since the
+                // ceiling is derived, that's the only number anyone has to move.
                 min_conc: env_u32("OTB_MIN_CONC", 1),
                 max_conc: env_u32("OTB_MAX_CONC", otb_engine::run::host_connection_ceiling()),
                 measured_at: utc_stamp(),
@@ -468,16 +412,12 @@ fn main() -> ExitCode {
                 hardware: std::env::var("BENCH_HARDWARE")
                     .ok()
                     .filter(|v| !v.trim().is_empty()),
-                // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
-                // and exports it, because the box cannot work it out for itself: its clone is a
-                // detached checkout and this binary arrived as a release download, so neither the
-                // tree nor the executable knows the revision it came from.
-                //
-                // An unset or empty variable is None, not the empty string: a snapshot must be able
-                // to say "this run cannot be traced" rather than claim a commit named "".
-                // WHICH MOCK TOOK THE READINGS. rig.sh on the box fetched and hashed it; these are
-                // passed through rather than re-derived, because the engine never sees the fetch.
-                // Absent env means an absent block, never a fabricated one.
+                // Which commit produced this run: run-on-ec2.sh resolves it before the box exists,
+                // since the box's own clone is a detached checkout and the binary is a release
+                // download. Unset/empty is None, never the empty string, so a snapshot can say "not
+                // traceable" rather than claim a commit named "".
+                // Which mock took the readings: rig.sh fetched and hashed it on the box; passed
+                // through rather than re-derived. Absent env means an absent block, not a fabricated one.
                 rig_mock: std::env::var("OTB_RIG_MOCK_SHA256")
                     .ok()
                     .filter(|v| !v.is_empty())
@@ -496,19 +436,14 @@ fn main() -> ExitCode {
                     .filter(|c| !c.is_empty())
                     .map(|commit| otb_engine::record::EngineStamp {
                         commit,
-                        // Anything that is not exactly "0" is treated as dirty. A run from a
-                        // modified tree is not identified by its commit, and the safe default for
-                        // an unreadable flag is to mark it unreproducible rather than to claim it.
+                        // Anything other than exactly "0" is treated as dirty: an unreadable flag
+                        // should mark the run unreproducible rather than claim a clean one.
                         dirty: std::env::var("BENCH_ENGINE_DIRTY").as_deref() != Ok("0"),
                     }),
             };
-            // LAUNCH IT, if the manifest says how.
-            //
-            // A manifest that declares no launch describes a gateway someone else is running, which
-            // is what every run did until now and is what the smoke against an already-up target
-            // still does. Declaring a launch means the harness owns the gateway's lifetime: it starts
-            // it, measures it, and stops it, so a run cannot silently measure a container left over
-            // from a previous one.
+            // Launch it, if the manifest says how. No declared launch means a gateway someone else is
+            // running (what `smoke` still does). A declared launch means the harness owns the
+            // gateway's lifetime end to end, so a run can't silently measure a leftover container.
             let launched = match cfg.manifest.launch_spec(
                 &gw_cores,
                 cfg.mock_addr.port(),
@@ -530,21 +465,16 @@ fn main() -> ExitCode {
                                 spec.runtime.identity(),
                                 l.attempts
                             );
-                            // COMMANDS, in order, now that it is up and before anything is measured.
+                            // Commands, in order, now that it's up and before anything is measured. A
+                            // gateway with no config file is configured via its own admin API after
+                            // boot, so this is the only point that can happen, and it must finish
+                            // before a probe decides what the gateway serves. A failure here stops
+                            // the run: a half-configured gateway answering probes for a never-wired
+                            // upstream is worse than one that never started.
                             //
-                            // A gateway with no config file is configured through its own admin API
-                            // after it boots, so this is the only point at which that can happen: it
-                            // needs the process answering, and it must be finished before a probe
-                            // decides what the gateway does or does not serve.
-                            //
-                            // A failure here stops the run. A half-configured gateway is worse than
-                            // one that never started: it answers probes, and publishes a verdict for
-                            // an upstream that was never wired up.
-                            // IN THE GATEWAY'S OWN DIRECTORY, not wherever otb was invoked from: a
-                            // line transcribed from a gateway's docs writes and reads relative paths
-                            // (`> .minted-auth` is the one that already matters), and only this
-                            // directory is where anything looks for them. Declared once here so the
-                            // memory phase's replay of the same commands lands in the same place.
+                            // Run in the gateway's own directory, not wherever otb was invoked from:
+                            // commands write/read relative paths (`> .minted-auth` matters here), and
+                            // this directory is where the memory phase's replay will look too.
                             otb_engine::launch::set_commands_dir(gw_dir.clone());
                             for line in &cfg.manifest.commands {
                                 match otb_engine::launch::run_line(line, Duration::from_secs(120)) {
@@ -560,19 +490,15 @@ fn main() -> ExitCode {
                                     }
                                 }
                             }
-                            // A GATEWAY WITH NO CONFIG FILE MAY MINT ITS OWN CREDENTIAL RATHER THAN
-                            // LET ONE BE DECLARED. One entrant's admin API generates a random token
-                            // server-side and discards any client-supplied one, so no `commands`
-                            // line can make the manifest's static `auth` valid by asking for it by
-                            // name. `run_line` spawns a fresh `/bin/sh -c` per line (launch.rs), so
-                            // an `export` in one command is invisible to the next and to this
-                            // process - the only thing that survives across those separate
-                            // invocations is a file. See `resolve_minted_auth`.
+                            // A gateway with no config file may mint its own credential rather than
+                            // accept a declared one (e.g. an admin API that generates a random token
+                            // server-side). `run_line` spawns a fresh `/bin/sh -c` per line
+                            // (launch.rs), so an `export` doesn't survive between commands — only a
+                            // file does. See `resolve_minted_auth`.
                             let minted = resolve_minted_auth(&gw_dir);
-                            // The harness owning the lifetime is exactly the condition under which
-                            // the memory phase restarts the gateway, so a per-boot credential would
-                            // go stale mid-run. Refused here, before a single measurement, rather
-                            // than published as the gateway failing every cell after the restart.
+                            // The harness owning the lifetime is exactly when the memory phase
+                            // restarts the gateway, so a per-boot credential would go stale mid-run.
+                            // Refused here, before any measurement.
                             if let Some(why) = stale_minted_auth_refusal(minted.as_deref(), true) {
                                 eprintln!("{}: {why}", cfg.manifest.name);
                                 let _ = otb_engine::supervise::stop_and_wait(
@@ -592,9 +518,8 @@ fn main() -> ExitCode {
                             Some(spec)
                         }
                         Err(e) => {
-                            // The gateway never came up. Publishing a grid of absences against a
-                            // gateway that was never running would read as the gateway failing, so
-                            // this stops rather than measuring nothing and calling it a result.
+                            // The gateway never came up; stop rather than publish a grid of absences
+                            // that would read as the gateway failing.
                             eprintln!("{} never became ready: {e}", spec.runtime.identity());
                             return ExitCode::FAILURE;
                         }
@@ -604,12 +529,9 @@ fn main() -> ExitCode {
 
             let outcome = run_suite(&cfg, gw);
 
-            // Stop what we started, whatever happened. A gateway left running holds the port and the
-            // cores the NEXT gateway needs, and the failure that causes looks like the next gateway
-            // refusing to boot.
-            // AND SAY SO IF IT DID NOT STOP. Discarding this result let a gateway that outlived the
-            // budget keep the port and the cores, and the only report of it was the NEXT gateway
-            // failing to boot.
+            // Stop what we started, whatever happened, and say so if it didn't stop: a gateway left
+            // running holds the port/cores the next one needs, surfacing as that gateway's boot
+            // failure instead of this one's.
             let mut stop_failed = false;
             if let Some(spec) = &launched {
                 let stop = otb_engine::supervise::stop_and_wait(
@@ -627,8 +549,8 @@ fn main() -> ExitCode {
                 Ok(paths) => {
                     println!("wrote {}", paths.current.display());
                     println!("wrote {}", paths.historical.display());
-                    // The snapshot is written and honest; the BOX is not clean. A zero exit here
-                    // would tell the orchestrator it may launch the next gateway on this box.
+                    // The snapshot is honest, but the box isn't clean: a zero exit would wrongly
+                    // tell the orchestrator it may launch the next gateway here.
                     if stop_failed {
                         return ExitCode::FAILURE;
                     }
@@ -704,22 +626,18 @@ fn main() -> ExitCode {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        /* THE COMMIT THIS BINARY WAS BUILT FROM, read back out of the binary itself.
-        
-           The boxes do not build the engine, they download it, and the commit recorded in every
-           artifact came from an environment variable the orchestrator set from its own checkout.
-           That stamp said what the operator INTENDED to run. On 2026-08-03 a snapshot was stamped
-           0ce7a907 and measured by a binary containing no line of it - the fixes were on a branch,
-           the release only rebuilds on a push to main, and the boxes fetched the previous artifact.
-        
-           So the run asks the binary, and refuses to measure when the answer disagrees with the
-           commit it is about to stamp. Empty output means the build could not establish its own
-           commit, which the caller must treat as unverifiable rather than as a match. */
+        /* The commit this binary was built from, read back out of the binary itself.
+
+           Boxes download the engine rather than build it, and the commit stamped in an artifact
+           otherwise comes from an orchestrator env var recording only what was INTENDED to run —
+           which can disagree with what was actually fetched. So the run asks the binary directly
+           and refuses to measure on a mismatch. Empty output means the build couldn't establish
+           its own commit; treat that as unverifiable, not as a match. */
         Some("engine-commit") => {
             println!("{}", env!("OTB_ENGINE_COMMIT"));
             ExitCode::SUCCESS
         }
-        // The shell is handed an ALREADY-WINDOWED file, so window over everything here to match.
+        // The shell is handed an already-windowed file, so window over everything here to match.
         Some("plateau-check") => {
             let samples = read_samples();
             let steady = stats::plateau_check(
@@ -754,9 +672,8 @@ fn main() -> ExitCode {
 mod utc_stamp_tests {
     use super::utc_stamp;
 
-    // THE CASE THAT WAS BROKEN: a stamp with dashes where the time portion's colons belong parses
-    // as NaN in the site generator's Date.parse, so every gateway silently rendered measured_at as
-    // null. A real ISO-8601 shape is the whole contract this function exists to uphold.
+    // A stamp with dashes where the time portion's colons belong parses as NaN in the site
+    // generator's Date.parse, silently rendering measured_at as null.
     #[test]
     fn the_stamp_is_real_iso_8601_with_colons_in_the_time_portion() {
         let s = utc_stamp();
@@ -790,9 +707,8 @@ mod end_of_run_tests {
     use otb_engine::supervise::SuperviseError;
     use std::time::Duration;
 
-    // THE DEFECT: the final stop's result was dropped with `let _`, so a gateway that outlived the
-    // 15s budget kept the port and the cores, and the only report of it was the NEXT gateway on the
-    // box failing to boot - attributed to that gateway rather than to this one.
+    // Regression test: the final stop's result used to be dropped with `let _`, so a gateway that
+    // outlived the 15s budget kept the port/cores, surfacing only as the next gateway failing to boot.
     #[test]
     fn a_gateway_that_survives_the_stop_budget_is_reported_loudly() {
         let stop = Err(SuperviseError::StillHeld {
@@ -820,10 +736,9 @@ mod end_of_run_tests {
         assert_eq!(end_of_run_stop_failure("gw-bench-4242", &Ok(())), None);
     }
 
-    // THE DEFECT: minted auth is resolved once, after the initial launch, and the memory phase then
-    // restarts the gateway and replays `commands`. A gateway that mints per boot would hand out a new
-    // credential there while every later request kept using the first one, and the whole second half
-    // of the grid would read as the gateway refusing its own traffic.
+    // Minted auth is resolved once after the initial launch; a gateway that mints per boot would
+    // hand out a new credential when the memory phase restarts it, and the second half of the grid
+    // would read as the gateway refusing its own traffic.
     #[test]
     fn a_minting_gateway_the_harness_restarts_is_refused_before_it_is_measured() {
         let why = stale_minted_auth_refusal(Some("sk-minted-1"), true)
@@ -839,8 +754,8 @@ mod end_of_run_tests {
         assert_eq!(stale_minted_auth_refusal(None, true), None);
     }
 
-    // Someone else's gateway, someone else's lifetime: nothing here restarts it, so the credential it
-    // minted at ITS boot stays valid for the whole run.
+    // Someone else's gateway, someone else's lifetime: nothing here restarts it, so its own
+    // boot-minted credential stays valid for the whole run.
     #[test]
     fn a_minting_gateway_the_harness_never_restarts_is_fine() {
         assert_eq!(stale_minted_auth_refusal(Some("sk-minted-1"), false), None);
@@ -851,8 +766,8 @@ mod end_of_run_tests {
 mod minted_auth_tests {
     use super::resolve_minted_auth;
 
-    // A tiny throwaway directory per test, so tests can run concurrently without treading on each
-    // other's `.minted-auth`. Not `tempfile`: this crate takes no dev-dependency for one file.
+    // A throwaway directory per test so tests can run concurrently without colliding on
+    // `.minted-auth`. No `tempfile` dep for one file.
     fn scratch_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "otb-minted-auth-test-{name}-{}",
@@ -862,8 +777,8 @@ mod minted_auth_tests {
         dir
     }
 
-    // THE CASE THIS EXISTS FOR: a gateway whose real credential can only be known after it boots
-    // gets that credential into the probe, not the manifest's placeholder.
+    // A gateway whose real credential is only known after boot gets that credential into the
+    // probe, not the manifest's placeholder.
     #[test]
     fn a_minted_file_overrides_the_declared_auth() {
         let dir = scratch_dir("present");
@@ -874,16 +789,15 @@ mod minted_auth_tests {
         );
     }
 
-    // TWELVE OF THIRTEEN ENTRANTS: no file, so the declared `auth` stands untouched.
+    // No file, so the declared `auth` stands untouched.
     #[test]
     fn no_file_means_no_override() {
         let dir = scratch_dir("absent");
         assert_eq!(resolve_minted_auth(&dir), None);
     }
 
-    // A command that ran but wrote nothing useful (a failed mint that still touched the file, an
-    // empty redirect) must not silently authenticate with an empty bearer token - that is a
-    // different, worse failure mode than "kept the placeholder".
+    // A command that touched the file but wrote nothing useful must not silently authenticate with
+    // an empty bearer token — worse than falling back to the placeholder.
     #[test]
     fn a_whitespace_only_file_means_no_override() {
         let dir = scratch_dir("blank");
