@@ -19,19 +19,24 @@
   "first_commit": "2025-03-19",
   "as_of": "2026-08-26"
  },
- "busbar-151": {
+ "busbar": {
   "stars": 116,
   "first_commit": "2026-05-29",
   "as_of": "2026-08-26"
  },
  "gomodel": {
-  "stars": 1082,
+  "stars": 1083,
   "first_commit": "2025-12-13",
   "as_of": "2026-08-26"
  },
  "helicone": {
   "stars": 624,
   "first_commit": "2025-04-01",
+  "as_of": "2026-08-26"
+ },
+ "higress": {
+  "stars": 9195,
+  "first_commit": "2022-10-27",
   "as_of": "2026-08-26"
  },
  "kong": {

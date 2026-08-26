@@ -19,19 +19,6 @@ env GATEWAY_CONCURRENCY={NCORE}
   like GOMAXPROCS centrally), so it is declared per-gateway, from {NCORE}, exactly as the manifest
   spec's one exception allows.
 
-env USE_PLUGIN_SERVER=off
-  measure. The all-in-one image defaults this to on, which keeps the built-in plugin server - a
-  resident nginx listening on 8002 inside the container - serving Wasm plugin images to Envoy over
-  local HTTP; base.sh normalizes off/false/no to off, and with it off start-plugin-server.sh exits
-  at boot. This manifest configures no Wasm plugin anywhere - no WasmPlugin resource, no plugin
-  annotation on the Ingress, and the McpBridge is used purely as a static registry - so that nginx
-  can never answer a request, and the project's own deploy-by-docker table says the alternative
-  source it enables (the public image server) is only consulted when a Wasm plugin must be
-  fetched, which nothing here ever does. This is the manifest's one turn-off of a default-on
-  component, made on the same minimality principle the rest of the config lives by: the process
-  exists to serve a capability this deployment does not configure, and leaving it on would count
-  an idle nginx's RSS in figures that already honestly carry the console JVM's.
-
 mount data/mcpbridges/default.gen.yaml -> /data/mcpbridges/default.yaml (read-only)
   upstream. The all-in-one bootstrap (start-apiserver.sh) copies its defaults into /data with
   cp -n, so an existing file at this path survives and ours - pointing the sole static registry at
