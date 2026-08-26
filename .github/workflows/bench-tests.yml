@@ -238,3 +238,33 @@ jobs:
       # and the C1-C5 structural invariants with their RED-before proofs.
       - name: Consistency guard (table == drawer == compare == charts)
         run: node site/test.mjs
+
+  coverage:
+    # INFORMATIONAL COVERAGE, NEVER A GATE. This job collects line coverage for the Rust workspace
+    # (engine + mock) with cargo-llvm-cov and uploads lcov to Codecov. It is deliberately ADDITIVE
+    # and NON-REQUIRED: it is not in any needs: list, it does not block a PR, and the upload uses
+    # fail_ci_if_error: false so a flaky Codecov endpoint can never turn this workflow red. The
+    # correctness gate remains the `engine`/`audit`/`site` jobs above; coverage is an observation
+    # surfaced on the README badge and as per-PR context (see codecov.yml — statuses are
+    # informational and comments are off). The workspace tests run with no service containers and no
+    # special env (mirroring the `engine` job's `cargo test --workspace`), so nothing is wired here.
+    name: coverage (llvm-cov · codecov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage (workspace)
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - name: Upload to Codecov (tokenless; never fails the build)
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          slug: GetBusbar/benchmarking
+          fail_ci_if_error: false
