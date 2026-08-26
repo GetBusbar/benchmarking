@@ -4,4 +4,3 @@
 # gateway's OWN knob (not one of the runtime-standard names the harness sets centrally for every
 # entrant), so it is declared here, from {NCORE}, exactly once.
 GATEWAY_CONCURRENCY={NCORE}
-USE_PLUGIN_SERVER=off
