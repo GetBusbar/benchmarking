@@ -969,6 +969,9 @@ if (SINGLE_ENGINE && boardEngine != null) {
   const IDENTITY = new Set([
     "key", "display", "lang", "cls", "repo", "version",
     "stars", "stars_as_of", "first_commit", "engine",
+    // Editorial identity, not a measurement: a row awaiting re-measurement still credits its
+    // contributor. Omitting this nulled the contributor on every unmeasured/suppressed row (higress).
+    "contributed_by",
   ]);
   for (const g of gateways) {
     if (g.engine.current) continue;
