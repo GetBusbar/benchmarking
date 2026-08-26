@@ -3,30 +3,26 @@
 // check-consistency.mjs: STRUCTURAL INVARIANTS on the sealed-envelope bundle + accessors.
 //
 // Under the sealed envelope (Design E) every metric is EITHER a certified number OR an explicit
-// {value:null, suppressed:true}: the raw scalar + its _mock_bound flag are consumed at seal time and
-// never re-emitted, so there is nothing for render surfaces to individually agree about. This file
-// instead checks invariants on the contract itself, the onthebench 11th-phase ("where are tests
-// missing?") test:
+// {value:null, suppressed:true}; the raw scalar and its _mock_bound flag are consumed at seal time
+// and never re-emitted. This file checks invariants on the contract itself:
 //
-//   C1  No raw ungated metric field exists in the bundle (only certified-or-suppressed envelopes); NO
-//       `*_mock_bound` key survives anywhere.
+//   C1  No raw ungated metric field exists in the bundle; no `*_mock_bound` key survives anywhere.
 //   C2  A suppressed metric exposes no recoverable value (value === null, no shadow numeric field).
-//   C3  Every displayed caption derives from a source.sweep stamp present in the data; app.js/charts.py
-//       carry no hard-coded source-token literal in a per-datum caption renderer (the lint).
-//   C4  Single projection path: every projected cell's source.kind is a known origin and its source.sweep
-//       is a valid caption key; NO legacy suite object (g.perf/stream/streamcpu/xlate) leaks into the bundle.
-//   C5  Every sealed-metric read (app.js AND charts.py) routes through metric()/mval() - never a raw
-//       `.value` / `.get("value")` deref outside the accessors (the taint-based accessor-routing lint).
+//   C3  Every displayed caption derives from a source.sweep stamp present in the data; no hard-coded
+//       source-token literal in a per-datum caption renderer (the lint).
+//   C4  Single projection path: every projected cell's source.kind is a known origin and its
+//       source.sweep is a valid caption key; no legacy suite object (g.perf/stream/streamcpu/xlate)
+//       leaks into the bundle.
+//   C5  Every sealed-metric read (app.js) routes through metric()/mval() - never a raw `.value` /
+//       `.get("value")` deref outside the accessors (the taint-based accessor-routing lint).
 //
-// Each lint is a PURE EXPORTED FUNCTION so it can be driven against synthetic source that CONTAINS the
-// violation: a lint with no RED-before proof is indistinguishable from a lint that cannot fire, which is
-// exactly what C5's predecessor was.
+// Each lint is a PURE EXPORTED FUNCTION so it can be driven against synthetic source that CONTAINS
+// the violation - a lint with no RED-before proof is indistinguishable from one that cannot fire.
 //
-// Rigor rules (Design F Part 1): the expected side of any cross-representation assertion is re-derived
-// INDEPENDENTLY from the RAW matrix cell on disk (results/matrix/<gw>.json), never via the accessor under
-// test (R1). A COVERAGE assertion (R2) fails if any invariant branch is never exercised by the bundle -
-// an inert check is itself a failure. Each invariant has a RED-before test in test.mjs (revert the seal on
-// one surface -> the class test fails).
+// Rigor rules (Design F Part 1): the expected side of any cross-representation assertion is
+// re-derived INDEPENDENTLY from the RAW matrix cell on disk (results/matrix/<gw>.json), never via
+// the accessor under test (R1). A COVERAGE assertion (R2) fails if any invariant branch is never
+// exercised - an inert check is itself a failure. Each invariant has a RED-before test in test.mjs.
 //
 // Run standalone against an emitted bundle:
 //   node site/check-consistency.mjs [site/data.json]
@@ -39,9 +35,8 @@ import { createRequire } from "node:module";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 
-// The metric-field vocabulary is IMPORTED from seal.mjs, the SAME list gen-data seals from, so a local
-// whitelist here can never lag the producer: one shared list plus a shape rule (any *_rss_mib) means a
-// new producer field is checked the day it appears.
+// Metric-field vocabulary imported from seal.mjs (the same list gen-data seals from) so this can't lag
+// the producer; a shape rule for *_rss_mib covers new producer fields automatically.
 import { displayedValue, isMetricField, zeroNoteFor } from "./seal.mjs";
 // The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
 // the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
@@ -50,13 +45,10 @@ const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stre
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
 
 // ---- reading a RAW artifact of either shape -------------------------------------------------------
-// upstreamsOf(m): the egress -> {cells} grid of a raw artifact, in ONE shape. A v2 artifact carries it
-// under `upstreams`; a v1 artifact carries its single measured egress row as a top-level `cells`, named
-// by `upstream_shape` (the same normalization gen-data applies before projecting). Reading only
-// `m.upstreams` here meant a v1 artifact produced ZERO oracle comparisons and ZERO re-derived
-// selections, and the per-gateway coverage gate then converted that silence into a hard publish
-// failure - so an honest legacy republish was blocked by the oracle's inability to READ the artifact
-// rather than by anything wrong with the data it contained.
+// upstreamsOf(m): egress -> {cells} grid, from either raw artifact shape. v2 carries it under
+// `upstreams`; v1 carries its single measured egress row as a top-level `cells`, named by
+// `upstream_shape`. Reading only `m.upstreams` here silently zeroed the oracle for v1 artifacts,
+// turning an honest legacy republish into a hard publish failure via the coverage gate.
 export function upstreamsOf(m) {
   if (!m || typeof m !== "object") return {};
   if (m.upstreams && typeof m.upstreams === "object") return m.upstreams;
@@ -70,16 +62,13 @@ export function rawCellAt(m, ingress, egress) {
 }
 
 // ---- C7: peak_rss_mib <= peak_rss_hwm_mib (a second physical-plausibility invariant) ------------
-// VmHWM is the KERNEL's own high-water mark, updated on every charge, so it cannot be lower than any
-// RSS the sampler ever observed for the same process tree. The shipped data violates it on two
-// gateways (one gateway at 165.1 > 164.7, another at 45.0 > 44.7), which is physically impossible for a
-// FIXED process tree - and that is the tell. Both readers sum over the tree ENUMERATED AT READ TIME
-// (lib/harness.sh _proc_tree_field_mib): the sampled peak sums VmRSS over the tree alive DURING the
-// load, while VmHWM is summed AFTER it. A worker that exits in between is counted in the peak and
-// absent from the HWM sum, so sum(VmHWM) can legitimately come out BELOW the sampled peak on a
-// multi-process gateway. It is a real artefact of transient children, not a fabricated number - so it
-// WARNS (so the next run can attribute it) rather than hard-failing an otherwise honest publish. The
-// numbers are left exactly as measured; nothing here rewrites data.
+// VmHWM is the KERNEL's own high-water mark, so it cannot be lower than any RSS observed for the same
+// process tree. Both readers sum over the tree ENUMERATED AT READ TIME (lib/harness.sh
+// _proc_tree_field_mib): the sampled peak sums VmRSS over the tree alive DURING the load, while VmHWM
+// is summed AFTER it, so a worker that exits in between is counted in the peak but absent from the HWM
+// sum - sum(VmHWM) can legitimately fall below the sampled peak on a multi-process gateway. That's a
+// transient-worker artefact, not fabricated data, so this WARNS rather than hard-failing; numbers are
+// left exactly as measured.
 export function c7HwmBelowPeak(gwKey, rawMatrix) {
   const warnings = [];
   let checked = 0;
@@ -95,11 +84,9 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
         `process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; ` +
         `a transient-worker artefact of summing the tree at two different instants, not a fabricated value)`);
   };
-  // PER CELL, because that is where memory lives now. Reading only the top-level block made this check a
-  // NO-OP on every artifact the current producer writes - and worse than a no-op: "C7.hwm" is a REQUIRED
-  // coverage token whenever a bundle publishes matrix numbers, and a per-cell memory row is itself what
-  // makes a gateway a matrix publisher, so an all-new-shape field run would satisfy the requirement and
-  // starve the token at the same time, hard-failing the publish gate on 13 freshly measured gateways.
+  // Walked PER CELL: memory lives per-cell now, and per-cell memory is itself what makes a gateway a
+  // matrix publisher, so reading only the top-level block would starve the required C7.hwm coverage
+  // token on an all-new-shape field run.
   const ups = rawMatrix.upstreams && typeof rawMatrix.upstreams === "object" ? rawMatrix.upstreams : null;
   if (ups) {
     for (const [egress, up] of Object.entries(ups))
@@ -115,18 +102,14 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
   return { warnings, checked };
 }
 
-// The gross-inversion ceiling that used to live here is RETIRED. It capped how much window noise could
-// excuse a sustained figure sitting above the maximum it was meant to sit under; both of those fields
-// are deleted and the frontier makes that inversion unrepresentable (six maxima over sets that only
-// grow). bench-audit.py used to parse this file's `export const C6_GROSS_PCT = 5;` to catch drift
-// between the two copies - a sound mechanism for a live constant, and pure decoration once the constant
-// governed nothing, so it went too. C6 above now checks the frontier's ordering and its disclosure.
+// The gross-inversion ceiling and C6_GROSS_PCT constant that used to live here are retired: the two
+// fields they capped are deleted, and the frontier's ordering makes that inversion unrepresentable.
+// bench-audit.py used to parse C6_GROSS_PCT to catch drift between copies; once the constant governed
+// nothing, that check was pure decoration and went too. C6 below checks frontier ordering/disclosure.
 
 // sweepSpreadPct(sweep, winner): the rung-to-rung scatter of a sweep, as a percentage of the winning
-// rps. This is the cell's OWN measured noise: same box, same phase, same gateway, several samples of
-// the same ceiling. Null when there is nothing to measure it from (fewer than two rungs), which is the
-// honest answer - a sweep that probed once has not measured its own variability, and the caller must
-// NOT then treat an inversion as excusable.
+// rps - the cell's OWN measured noise. Null when there are fewer than two rungs: a sweep that probed
+// once has not measured its own variability, and the caller must not treat an inversion as excusable.
 function sweepSpreadPct(sweep, winner) {
   if (!Array.isArray(sweep) || sweep.length < 2 || !(winner > 0)) return null;
   const vals = sweep.map((r) => (r && typeof r.rps === "number" ? r.rps : null)).filter((v) => v != null);
@@ -134,9 +117,7 @@ function sweepSpreadPct(sweep, winner) {
   return ((Math.max(...vals) - Math.min(...vals)) / winner) * 100;
 }
 // peakRanOutOfLadder(sweep, winnerConc): did the peak sweep WIN at the highest concurrency it probed?
-// Then it never observed a fall-off, so it never established a ceiling - the true peak may be past the
-// end of the ladder. This is the defect the old warning masked, and it is a hard error at any
-// magnitude, inversion or not.
+// Then it never observed a fall-off, so it never established a ceiling - a hard error at any magnitude.
 function peakRanOutOfLadder(sweep, winnerConc) {
   if (!Array.isArray(sweep) || sweep.length < 2 || winnerConc == null) return false;
   const concs = sweep.map((r) => (r && typeof r.conc === "number" ? r.conc : null)).filter((v) => v != null);
@@ -145,17 +126,14 @@ function peakRanOutOfLadder(sweep, winnerConc) {
 }
 // C6: THE FRONTIER MUST NOT INVERT, AND A READING MUST NOT CLAIM MORE THAN IT PROVED.
 //
-// C6 used to compare `rps_sustained_20ms` against `rps_max_proxy` and fail the build when the
-// "sustained" figure exceeded the "maximum" - which happened, on aisix openai-responses>anthropic
-// (16,610 vs 16,232) and bifrost openai-responses>openai-responses (5,174 vs 5,113), because the two
-// numbers came from two different algorithms over ONE set of windows and the bisection reached rungs
-// the plateau search had already quit before.
+// C6 used to compare `rps_sustained_20ms` against `rps_max_proxy` and fail when "sustained" exceeded
+// "maximum" - which happened because the two numbers came from different algorithms over one set of
+// windows, and the bisection reached rungs the plateau search had already quit before.
 //
-// Both scalars are gone. The frontier makes that inversion UNREPRESENTABLE: a reading is a maximum over
-// the rungs qualifying at its bound, and relaxing a bound only adds rungs, so a looser reading cannot be
-// smaller. This checks it anyway - an invariant nothing verifies is an invariant nobody notices
-// breaking, and the whole point of an independent oracle is that it does not take the producer's word
-// for its own guarantees.
+// Both scalars are gone; the frontier makes that inversion UNREPRESENTABLE (a reading is a maximum
+// over the rungs qualifying at its bound, and relaxing a bound only adds rungs, so a looser reading
+// cannot be smaller). This checks it anyway - an invariant nothing verifies is an invariant nobody
+// notices breaking.
 export function c6Inversions(gwKey, rawMatrix) {
   const violations = [];
   const warnings = [];
@@ -167,8 +145,7 @@ export function c6Inversions(gwKey, rawMatrix) {
       cellsChecked += 1;
       const at = `${gwKey}.${ingress}->${egress}`;
 
-      // (1) THE BOUNDS ASCEND, with the unbounded reading last. The published sequence has to read as
-      // the tradeoff curve it is, or a reader checking monotonicity by eye is checking the wrong order.
+      // (1) Bounds ascend, unbounded reading last - the sequence must read as the tradeoff curve it is.
       const bounds = perf.frontier.map((r) => (r.p99_bound_us == null ? Infinity : r.p99_bound_us));
       for (let i = 1; i < bounds.length; i += 1) {
         if (!(bounds[i] > bounds[i - 1])) {
@@ -178,7 +155,8 @@ export function c6Inversions(gwKey, rawMatrix) {
         }
       }
 
-      // (2) MONOTONICITY. Relaxing the bound can only widen the set a maximum is taken over.
+      // (2) Monotonicity: relaxing the bound can only widen the rung set a maximum is taken over, so a
+      // looser reading cannot be smaller.
       let prev = null;
       let prevAt = null;
       for (const r of perf.frontier) {
@@ -195,11 +173,10 @@ export function c6Inversions(gwKey, rawMatrix) {
         prevAt = label;
       }
 
-      // (3) A READING MUST NOT CLAIM A CEILING IT DID NOT ESTABLISH. `lower_bound` is true exactly when
-      // the winning rung is the highest one probed - we stopped because the range ended, not because the
-      // gateway did. The retired check tested this as `peakRanOutOfLadder` against the max_proxy sweep
-      // and treated it as a violation; it is not a violation, it is a fact that must be DISCLOSED. So
-      // what is checked is that the disclosure agrees with the rungs.
+      // (3) A reading must not claim a ceiling it did not establish. `lower_bound` is true exactly when
+      // the winning rung is the highest one probed - we stopped because the range ended, not because
+      // the gateway did. The retired check (`peakRanOutOfLadder`) treated this as a violation; it is a
+      // fact that must be DISCLOSED, so what's checked is that the disclosure agrees with the rungs.
       const topProbed = Math.max(
         0,
         ...(Array.isArray(perf.sweep_max_proxy) ? perf.sweep_max_proxy : []).map((p) => Number(p.conc) || 0),
@@ -220,53 +197,41 @@ export function c6Inversions(gwKey, rawMatrix) {
 }
 
 // ---- C9 WAS HERE, AND IT WAS WRONG ----------------------------------------------------------------
-// It failed the build on any published p99 below its own p50. That rule is true of two percentiles OF
-// ONE DISTRIBUTION and false of every pair this board actually publishes, because all of them are
-// DIFFERENCES:
+// It failed the build whenever a published p99 sat below its own p50 - true of two percentiles of one
+// distribution, false of every pair this board actually publishes, because all of them are
+// DIFFERENCES (added_gap_p50 = P50(gateway gaps) - P50(mock gaps), etc). If the mock's own jitter
+// grows faster into the tail, the difference legitimately shrinks; plano's p50=15us/p99=11us was
+// flagged as broken when it wasn't.
 //
-//   added_gap_p50 = P50(gateway gaps) - P50(mock gaps)
-//   added_gap_p99 = P99(gateway gaps) - P99(mock gaps)
-//
-// Two independent differences. If the mock's own jitter grows faster into the tail than the
-// gateway's, the difference shrinks, and p99 < p50 is the honest result. plano published
-// p50=15us p99=11us against a 20ms pacing interval and this guard called it broken.
-//
-// The defect C9 was written for was real but different: added_ttft_p50 came from a SINGLE stream
-// while added_ttft_p99 came from a hundred samples - two populations wearing one name. No data-level
-// check can tell that apart from legitimate shrinkage, because both look identical in the artifact.
-// The guard for it is structural and lives where it can work: both percentiles are computed from the
-// same sample set in metric.rs, asserted by
+// The real defect C9 was written for was different: added_ttft_p50 came from a SINGLE stream while
+// added_ttft_p99 came from a hundred samples - two populations under one name, indistinguishable from
+// legitimate shrinkage at the data level. That guard is structural now, in metric.rs, asserted by
 // `the_ttft_percentiles_come_from_one_sample_set_so_p99_can_never_sit_below_p50`.
 //
 // Left as a comment rather than deleted silently: a guard removed without its reasoning is
 // indistinguishable from one lost in a refactor.
 
 // ---- C8: ONE ENGINE PER BOARD ---------------------------------------------------------------------
-// The board's whole claim is that every gateway was measured by the same instrument, so the only thing
-// that differs between two columns is the gateway. That claim is false the moment two snapshots were
-// produced by different harness commits, and an instrument change (e.g. a mock rebuild that alters
-// which cells are judged served) can otherwise look indistinguishable from simultaneous gateway
-// regressions across the whole board.
+// The board's claim is that every gateway was measured by the same instrument, so only the gateway
+// should differ between columns. An instrument change (e.g. a mock rebuild altering which cells are
+// judged served) can otherwise look indistinguishable from simultaneous regressions across the board.
 //
-// The engine commit is therefore data, and disagreement is a publish failure rather than something a
-// human has to notice. Three ways to fail:
+// The engine commit is therefore data, and disagreement is a publish failure. Three ways to fail:
 //   - two published gateways carry different engine commits (a mixed board)
 //   - a gateway carries `dirty: true` (a modified tree does not identify what actually ran)
-//   - a gateway carries no engine stamp at all, while another does (silently pre-stamp data mixed in)
-// A board where NO gateway is stamped is left alone: that is entirely pre-stamp data, and failing it
-// would only punish history it cannot fix. The moment one stamped run lands, all of them must be.
-// Commits the repo ATTESTS are the same instrument, with built-artifact evidence. See
-// site/instrument-equivalence.json for the rule an entry has to meet. Returns commit -> instrument
-// id; a commit nobody attested maps to itself, so an unreadable or absent file degrades to the
-// original commit-equality behaviour rather than to a board that publishes anything.
+//   - a gateway carries no engine stamp at all while another does (silent pre-stamp data mixed in)
+// A board where NO gateway is stamped is left alone (pre-stamp data); the moment one stamped run
+// lands, all of them must be. Commits the repo ATTESTS as the same instrument (with built-artifact
+// evidence, see site/instrument-equivalence.json) count as equal. Returns commit -> instrument id; an
+// unattested commit maps to itself, degrading to plain commit-equality.
 export function instrumentOf(fileText) {
   const map = new Map();
   let doc;
   try { doc = JSON.parse(fileText); } catch { return map; }
   for (const inst of (doc && doc.instruments) || []) {
     if (!inst || !inst.id || !Array.isArray(inst.commits)) continue;
-    // An entry with no artifact evidence is INERT, not trusted: the file's own rule is that identical
-    // binaries are what admits an entry, and a rule nothing enforces is a comment.
+    // An entry with no artifact evidence is INERT, not trusted: identical binaries are what admits an
+    // entry, and a rule nothing enforces is a comment.
     const ev = inst.evidence && inst.evidence.otb_release_sha256;
     const hashes = ev ? Object.values(ev) : [];
     const proven = hashes.length >= inst.commits.length && new Set(hashes).size === 1;
@@ -292,7 +257,7 @@ export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)
     checked += 1;
     if (eng.dirty === true)
       errors.push(`C8: ${k} was measured by a DIRTY harness tree (engine.commit=${eng.commit.slice(0, 12)} with uncommitted edits) - the commit does not identify what ran, so this run is not reproducible and must be re-measured on a clean tree`);
-    // The instrument, not the commit. Two commits that build the same binaries measured the same way,
+    // The instrument, not the commit: two commits can build the same binaries measured the same way,
     // and failing that costs a whole field re-run to change nothing.
     const inst = equiv.get(eng.commit) || eng.commit;
     if (!seen.has(inst)) { seen.set(inst, []); commitsOf.set(inst, new Set()); }
@@ -304,11 +269,10 @@ export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)
   if (seen.size > 1) {
     const groups = [...seen.entries()].map(([c, ks]) => `${c.slice(0, 12)}: ${ks.join(", ")}`).join(" | ");
     const msg = `C8: the board mixes ${seen.size} harness engines (${groups}) - columns measured by different instruments are not comparable, so a defect fixed between those commits applies to only part of the field; re-run the lagging gateways on the newest engine`;
-    // THE OVERRIDE, for the rare case where the board must ship over C8's objection. It is deliberately
-    // awkward: it takes the reason as its value, it cannot be set by accident, and it does not silence
-    // anything. The mix is still reported, still counted, and rides along in the returned result so the
-    // caller publishes the fact that a human overrode a publish guard. An override nobody can see after
-    // the fact is just a disabled check.
+    // The override, for the rare case the board must ship over C8's objection: deliberately awkward,
+    // takes the reason as its value (so it can't be set by accident), and doesn't silence anything -
+    // the mix is still reported/counted and the override rides along in the result, so the caller
+    // publishes the fact that a human overrode a publish guard.
     const why = (opts.override !== undefined ? opts.override : process.env.OTB_ALLOW_MIXED_ENGINES) || "";
     if (why.trim().length >= 12) {
       return { errors, checked, commits: [...seen.keys()], overridden: { check: "C8.mix", reason: why.trim(), detail: msg } };
@@ -322,13 +286,11 @@ export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)
 
 // The raw matrix on disk - the INDEPENDENT oracle (Design F R1). Never read through the accessor.
 //
-// A snapshot IS a raw on-disk artifact, exactly as independent of seal.mjs/metric() as the per-suite
-// file. rawMatrixFor() resolves the same artifact gen-data resolved, but by its OWN independent
-// re-derivation of the selection rule (newest snapshot by measured_at, taken over the per-suite file
-// when at least as new), never by importing gen-data. This must cover every gateway, including a
-// snapshot-sourced one: excluding snapshot-sourced rows from the oracle would leave the whole board
-// unverified once every row is snapshot-sourced. R3 below then asserts that this independent resolution
-// AGREES with the stamp the bundle shipped, so a selection bug is caught rather than silently mirrored.
+// rawMatrixFor() resolves the same artifact gen-data resolved, but via its own independent
+// re-derivation of the selection rule (newest snapshot by measured_at, over the per-suite file when
+// at least as new), never by importing gen-data. Must cover every gateway including snapshot-sourced
+// ones, or the oracle goes blind once every row is snapshot-sourced. R3 then asserts this independent
+// resolution AGREES with the bundle's own stamp, catching a selection bug rather than mirroring it.
 const SNAP_DIR = join(ROOT, "results", "snapshots");
 
 function readJsonOrNull(p) {
@@ -371,9 +333,8 @@ function rawMatrix(gwKey) {
 
 // hasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? Memory projects
 // no per-gateway record, so "is this row publishing memory?" can only be asked of the cells themselves.
-// Exported so test.mjs's BOARD_HAS_DATA can reuse this predicate verbatim instead of re-implementing it:
-// the guard and its harness must agree on what "this row publishes something" means, or the harness can
-// declare a board populated that the guard considers empty (and vice versa).
+// Exported so test.mjs's BOARD_HAS_DATA reuses this predicate verbatim - the guard and its harness must
+// agree on what "populated" means, or one can declare a board the other considers empty.
 export function hasCellMemory(m) {
   if (!m || typeof m !== "object") return false;
   for (const cells of [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)]) {
@@ -386,10 +347,10 @@ export function hasCellMemory(m) {
 }
 
 // ---- the caption-literal lint (C3) + accessor-routing lint (C5) --------------
-// A source token in a per-datum caption literal is the bug class (memory mislabelled "6x6"). The lints
-// scan the caption-RENDERING regions of app.js/charts.py - the SWEEP_CAPTION table is the ONE allowed
-// home for source tokens. Tab-level methodology prose (the chooser lead lines that describe the run
-// design) is explicitly out of scope; the C3 lint targets caption(cell)/pathNote/pill/annot renderers.
+// A source token in a per-datum caption literal is the bug class (memory mislabelled "6x6"). The lint
+// scans the caption-RENDERING regions of app.js - SWEEP_CAPTION is the ONE allowed home for source
+// tokens. Tab-level methodology prose is explicitly out of scope; C3 targets
+// caption(cell)/pathNote/pill/annot renderers.
 
 function readSrc(rel) {
   const p = join(HERE, rel);
@@ -397,24 +358,20 @@ function readSrc(rel) {
 }
 
 // ---- the lints, as PURE EXPORTED FUNCTIONS (audit #20) -----------------------------------------
-// Each lint used to be an inline loop over the repo's own source, which meant it could only ever be
-// observed in its GREEN state: there was no way to write a RED-before test proving the lint FIRES on the
-// bug it claims to catch (and C5's could not fire at all - see below). Extracted as pure
-// source-text -> findings functions, they are unit-testable against synthetic source that CONTAINS the
-// violation, so "the lint works" is proven rather than assumed.
+// Each lint used to be an inline loop over the repo's own source, so it could only ever be observed in
+// its GREEN state - no RED-before test could prove it FIRES on the bug it claims to catch (C5's
+// couldn't fire at all, see below). Extracted as pure source-text -> findings functions, they're
+// unit-testable against synthetic source that CONTAINS the violation.
 
-// (1) SWEEP-KEY LEAK (C3a): the internal sweep keys are caption VOCABULARY and live ONLY in the caption
-// table / the seal. A key appearing as a user-facing string literal anywhere else is caption drift.
-// THE TOKEN IN ANY QUOTE, AND AN EXEMPTION NARROW ENOUGH TO MEAN SOMETHING.
+// (1) SWEEP-KEY LEAK (C3a): the internal sweep keys are caption VOCABULARY and live ONLY in the
+// caption table / the seal. A key appearing as a user-facing string literal anywhere else is caption
+// drift. THE TOKEN IN ANY QUOTE, AND AN EXEMPTION NARROW ENOUGH TO MEAN SOMETHING.
 //
-// Two holes, both in the direction of not firing. (1) Only DOUBLE-quoted tokens were scanned, so a
-// single-quoted literal, a template literal or a Python f-string carrying the same token walked past a
-// lint whose whole job is to catch that token in prose. (2) The exemption skipped any line matching
-// `\bsource\b` or `sweep:` ANYWHERE on it - and a caption renderer is a function that is about a
-// datum's source, so the lines most likely to contain the word "source" are precisely the lines this
-// lint exists to police. The exemption now covers the one thing it was written for: the token appearing
-// as the VALUE of a `sweep` key (provenance DATA assignment), which is checked against the text
-// immediately preceding that token rather than against the line as a whole.
+// Matches the token in ANY quote style (not just double-quoted), so a single-quoted literal, a
+// template literal or an f-string carrying the same token can't walk past the lint. The exemption
+// covers only the one thing it was written for: the token appearing as the VALUE of a `sweep` key
+// (provenance DATA assignment) - checked against the text immediately preceding that token, not
+// against the whole line, so a caption renderer's own reference to "source" doesn't blind it.
 export const SWEEP_KEY_TOKENS = ["6x6-diagonal", "6x6-translation", "6x6-memory-window",
   "6x6-memory-diagonal", "6x6-memory-translation", "6x6-stream-diagonal", "6x6-stream-translation",
   "perf-suite", "xlate-suite", "stream-suite"];
@@ -428,42 +385,39 @@ export function lintSweepKeys(src, name, allowRegion) {
     if (inAllowed) { if (allowRegion.exit.test(line)) inAllowed = false; return; }
     const code = line.replace(/\/\/.*$/, "").replace(/#.*$/, "");
     for (const m of code.matchAll(scan)) {
-      // rec.source = {…sweep: "6x6-diagonal"…} / {"sweep": '6x6-diagonal'} is legitimate PROVENANCE
-      // DATA assignment, not a caption - judged by what sits immediately before THIS token.
+      // rec.source = {…sweep: "6x6-diagonal"…} is legitimate PROVENANCE DATA assignment, not a
+      // caption - judged by what sits immediately before THIS token.
       if (/\bsweep["'`]?\s*[:=]\s*$/.test(code.slice(0, m.index))) continue;
       errors.push(`C3: ${name}:${i + 1} a sweep-key token leaked into a caption literal (keys live only in SWEEP_CAPTION): ${line.trim().slice(0, 80)}`);
       break;
     }
   });
-  // COVERAGE means "the scanner actually parsed this file and FOUND its allowed region" - proof the lint
-  // is live. The old tag was set by the EXEMPTION path (and by the error path), so a lint that never
-  // scanned anything still reported itself covered (audit #20).
+  // COVERAGE means "the scanner actually parsed this file and FOUND its allowed region" - proof the
+  // lint is live. The old tag was set by the EXEMPTION path too, so a lint that never scanned anything
+  // still reported itself covered (audit #20).
   return { errors, scanned: sawRegion };
 }
 
-// (2) ACCESSOR ROUTING (C5): every read of a sealed metric's number must go through metric()/mval(). The
-// codebase typically binds the envelope to a local first (`const env = p[key]` /
-// `const env = p && p.rps_sustained_20ms`) and reads `env.value` on a later line, so this lint is
-// TAINT-BASED and whole-file rather than a same-line text match: any identifier handed to an envelope
-// predicate or accessor (isEnvelope/metric/mval, or _is_env/mval in Python) IS an envelope, and reading
-// its raw `.value` / `.get("value")` outside the accessor definitions themselves bypasses the reader.
+// (2) ACCESSOR ROUTING (C5): every read of a sealed metric's number must go through metric()/mval().
+// The codebase typically binds the envelope to a local first (`const env = p[key]`) and reads
+// `env.value` on a later line, so this lint is TAINT-BASED and whole-file rather than same-line: any
+// identifier handed to an envelope predicate/accessor (isEnvelope/metric/mval, or _is_env/mval in
+// Python) IS an envelope, and reading its raw `.value` / `.get("value")` outside the accessor
+// definitions themselves bypasses the reader.
 const JS_ACCESSOR_DEFS = /^\s*(?:export\s+)?function\s+(?:metric|mval|isEnvelope)\b|^\s*(?:export\s+)?const\s+(?:metric|mval|isEnvelope)\s*=/;
 const PY_ACCESSOR_DEFS = /^\s*def\s+(?:mval|mvalid|menote|_is_env)\b/;
 // THE FIELD-NAME LINT POLICES THE WHOLE SEALED VOCABULARY, NOT FOUR NAMES OF IT.
 //
-// The direct-form scan below used to iterate GATED_FIELDS - the four throughput metrics - and nothing
-// else, so it covered 4 of the ~20 fields seal.mjs actually seals. Every latency, ttft, gap, growth,
-// plateau and RSS envelope could be dereferenced straight to its raw number and the lint reported
-// green: `g.best_cell.added_latency_p99_us.value`, `g.best_cell["added_ttft_p99_us"]["value"]` and
-// `g.matrix...peak_rss_mib.value` all passed a check whose whole purpose is to forbid exactly that.
-// A lint that knows a fifth of its own vocabulary is the inert-check failure in miniature: it fires
-// often enough to look alive while the bug class walks past it.
+// The direct-form scan used to iterate GATED_FIELDS (four throughput metrics) and nothing else, so
+// ~16 other sealed fields (latency, ttft, gap, growth, plateau, RSS) could be dereferenced straight to
+// their raw number and still report green. A lint that knows a fifth of its own vocabulary is the
+// inert-check failure in miniature: it fires often enough to look alive while the bug class walks past.
 //
-// So the direct form is DISCOVERED rather than enumerated. Each raw-deref spelling captures the FIELD
-// NAME it dereferences, and seal.mjs's own `isMetricField` decides whether that name is a sealed
-// metric - the same predicate gen-data seals by and C1 asserts by. There is no second list to keep in
-// step: a field added to seal.mjs's vocabulary is policed here the moment it is added, and the RSS
-// family (discovered by regex, never enumerated anywhere) is covered for the first time.
+// So the direct form is DISCOVERED rather than enumerated: each raw-deref spelling captures the FIELD
+// NAME it dereferences, and seal.mjs's own `isMetricField` (the same predicate gen-data seals by and
+// C1 asserts by) decides whether that name is sealed. No second list to keep in step - a field added
+// to seal.mjs's vocabulary is policed here the moment it's added, and the RSS family (discovered by
+// regex, never enumerated anywhere) is covered for the first time.
 const ID = "[A-Za-z_$][\\w$]*";
 // Each entry captures group 1 = the dereferenced field name.
 const JS_FIELD_DEREFS = [
@@ -479,16 +433,12 @@ const PY_FIELD_DEREFS = [
   new RegExp(`\\[\\s*["'](${ID})["']\\s*\\][^\\n]*?\\[\\s*["']value["']\\s*\\]`, "g"),
   new RegExp(`\\[\\s*["'](${ID})["']\\s*\\][^\\n]*?\\.get\\(\\s*["']value["']`, "g"),
 ];
-// A SEALED FIELD BOUND TO A LOCAL IS AN ENVELOPE, whether or not that local ever meets an accessor.
-//
-//   const rec = g.best_cell.added_latency_p50_us;
-//   return rec.value;
-//
-// routed around BOTH passes below: the binding line carries no `.value`, and `rec` was never handed to
-// metric()/mval()/isEnvelope(), so the taint set never learned it was an envelope. Two lines, no lint,
-// no error - the exact shape a reader writes when the deref is inconvenient on one line. The field's
-// OWN NAME is sufficient evidence of the type, so a binding read off a sealed field taints its target
-// exactly as an accessor call does.
+// A SEALED FIELD BOUND TO A LOCAL IS AN ENVELOPE, whether or not that local ever meets an accessor:
+//   const rec = g.best_cell.added_latency_p50_us; return rec.value;
+// routes around both passes below (the binding line carries no `.value`, and `rec` was never handed
+// to an accessor, so the taint set never learned it was an envelope). The field's OWN NAME is
+// sufficient evidence of the type, so a binding read off a sealed field taints its target exactly as
+// an accessor call does.
 const JS_BINDING = new RegExp(`(?:const|let|var)\\s+(${ID})\\s*=\\s*([^;\\n]*)`, "g");
 const PY_BINDING = new RegExp(`^\\s*(${ID})\\s*=\\s*([^\\n]*)`, "gm");
 const JS_FIELD_IN_EXPR = new RegExp(`\\.(${ID})\\b|\\[\\s*["'\`](${ID})["'\`]\\s*\\]`, "g");
@@ -500,10 +450,10 @@ export function lintAccessorRouting(src, name, lang = "js") {
   const accessorDef = isPy ? PY_ACCESSOR_DEFS : JS_ACCESSOR_DEFS;
   const predicate = isPy ? /\b(?:_is_env|mval|mvalid|menote)\(\s*([A-Za-z_$][\w$]*)\s*[),]/g
     : /\b(?:isEnvelope|metric|mval)\(\s*([A-Za-z_$][\w$]*)\s*[),]/g;
-  // EVERY SPELLING OF "READ THE RAW NUMBER OFF THE ENVELOPE", not just the dotted one. A lint that
-  // catches `env.value` and misses `env["value"]`, `env[key].value` and `const { value } = env` is a
-  // lint that a reader routes around by accident, in three keystrokes, and then reports itself green -
-  // and the bracket form is the one a reader reaches for FIRST when the field name is a variable.
+  // EVERY SPELLING OF "read the raw number off the envelope", not just the dotted one - `env.value`,
+  // `env["value"]`, `env[key].value`, `const { value } = env` all bypass the accessor in a few
+  // keystrokes and would otherwise report green, and the bracket form is the one a reader reaches for
+  // FIRST when the field name is a variable.
   const valueReads = (v) => isPy
     ? [new RegExp(`\\b${v}\\.get\\(\\s*["']value["']`),
       new RegExp(`\\b${v}\\s*\\[\\s*["']value["']\\s*\\]`),
@@ -517,9 +467,8 @@ export function lintAccessorRouting(src, name, lang = "js") {
   // ever handed to an envelope accessor/predicate is an envelope-typed local.
   const tainted = new Set();
   for (const m of src.matchAll(predicate)) tainted.add(m[1]);
-  // PASS 1b: ...and so is every identifier bound DIRECTLY OFF A SEALED FIELD (see JS_BINDING above).
-  // The name of the field is the type evidence; no accessor call is needed to know what `rec` is in
-  // `const rec = g.best_cell.added_latency_p50_us`.
+  // PASS 1b: ...and so is every identifier bound DIRECTLY OFF A SEALED FIELD (see JS_BINDING above) -
+  // the field's own name is the type evidence, no accessor call needed.
   {
     const bind = isPy ? PY_BINDING : JS_BINDING;
     const fieldIn = isPy ? PY_FIELD_IN_EXPR : JS_FIELD_IN_EXPR;
@@ -549,9 +498,8 @@ export function lintAccessorRouting(src, name, lang = "js") {
     if (inAccessor[i]) return;
     const code = isPy ? line.replace(/#.*$/, "") : line.replace(/\/\/.*$/, "");
     // (a) the direct form: a metric FIELD dereferenced straight to its raw number, in any spelling.
-    // The field name is DISCOVERED from the deref and judged by seal.mjs's isMetricField, so this arm
-    // covers the whole sealed vocabulary (gated, latency, ttft/gap, memory, and the RSS family that no
-    // list anywhere enumerates) instead of the four GATED_FIELDS it used to know about.
+    // The field name is DISCOVERED from the deref and judged by seal.mjs's isMetricField, covering the
+    // whole sealed vocabulary rather than the four GATED_FIELDS it used to know about.
     for (const re of (isPy ? PY_FIELD_DEREFS : JS_FIELD_DEREFS)) {
       re.lastIndex = 0;
       for (const m of code.matchAll(re)) {
@@ -571,27 +519,20 @@ export function lintAccessorRouting(src, name, lang = "js") {
 
 // (2b) COVERAGE WIRING (R2): every declared invariant branch has a LIVE call site tagging it.
 //
-// THE ANTI-INERT GATE WAS ITSELF INERT, AND ON A PARTIAL BOARD IT COULD NOT BE ANYTHING ELSE.
+// R2's runtime coverage check asks "was every required branch exercised by this bundle" - which has
+// no honest answer mid-run (a branch can be silent for lack of input yet), so that finding is
+// downgraded to a warning while the board is filling. That meant on a partial board the ERROR arm was
+// unreachable: commenting out the one line tagging R1.oracle left both check-consistency.mjs and
+// test.mjs exiting 0 - the independent oracle could be disabled entirely and the gate stayed green.
 //
-// R2's runtime coverage check asks "was every required branch exercised by this bundle". Mid-run that
-// question has no honest answer - a branch can be silent because its input has not landed yet - so the
-// finding is downgraded to a warning while the board is still filling (see the long note at the R2
-// gate below, which is right about the tension it describes). The cost was that on a 5-of-14 board the
-// ERROR arm was unreachable, and therefore so was every consequence of switching a check OFF: comment
-// out the one line that tags R1.oracle and both `node check-consistency.mjs` and `node test.mjs` still
-// exited 0. The independent oracle could be disabled entirely and the publish gate stayed green.
+// "No input yet" and "not wired up" are different facts; only the first depends on board completeness.
+// The second is a property of the SOURCE - a branch no surviving call site tags can never be exercised
+// by any bundle - so it's checked statically against this file's own text, unconditionally.
 //
-// "THIS BRANCH HAD NO INPUT" AND "THIS BRANCH IS NOT WIRED UP" ARE DIFFERENT FACTS, and only the first
-// one depends on how full the board is. The second is a property of the SOURCE: a branch that no
-// surviving call site tags can never be exercised by any bundle, complete or not, and that is a defect
-// today rather than a maybe-tomorrow. So it is checked statically, against this file's own text, and
-// it is an ERROR unconditionally - board completeness has nothing to say about whether a line exists.
-//
-// A commented-out call site is not a call site: a leading `//` on the line is precisely how a check
-// gets switched off "temporarily", so any tag whose line has a comment marker before it is ignored.
-// The reverse direction is checked too: a call site tagging a branch nobody declared is a token that
-// can never be required, which is the same hole approached from the other side (it is how C8.engine
-// was tagged-but-undeclared, hard-failing every stamped board).
+// A commented-out call site is not a call site (a leading `//` is how a check gets switched off
+// "temporarily"). The reverse is checked too: a call site tagging an undeclared branch is a token that
+// can never be required (this is how C8.engine was tagged-but-undeclared, hard-failing every stamped
+// board).
 export function lintCoverageWiring(src, branches) {
   const errors = [];
   const live = new Set();
@@ -614,34 +555,26 @@ export function lintCoverageWiring(src, branches) {
 
 // C3b AND C3c ARE GONE WITH THE PIPELINE THEY POLICED.
 //
-// C3b asserted that each of charts.py's three lanes fed its own `_<lane>_source` stamp to
-// `_sweep_label`, so no lane could ship PNGs carrying numbers with no provenance disclosure. C3c
-// parsed charts.py's SWEEP_CAPTION key set and compared it to app.js's, so two caption vocabularies
-// in two languages could not drift apart.
-//
-// Both existed because the board had a SECOND renderer, written in another language, publishing the
-// same numbers with its own captions. It does not any more: the Charts tab draws from the bundle in
-// the browser, so there is one renderer, one caption vocabulary, and nothing to hold in sync. A guard
-// that parses a deleted file cannot fail honestly - it fails because the file is absent, which is not
-// the defect it was written to catch.
+// C3b asserted each of charts.py's three lanes fed its own source stamp to `_sweep_label`; C3c
+// compared charts.py's SWEEP_CAPTION key set to app.js's, so two caption vocabularies couldn't drift
+// apart. Both existed because the board had a second renderer, in another language. It no longer does
+// - the Charts tab draws from the bundle in the browser, so there's one renderer, one vocabulary,
+// nothing to sync. A guard parsing a deleted file can't fail honestly.
 
 // ---- the INDEPENDENT ORACLE (Design F R1) --------------------------------------------------------
 // Re-derive what a metric MUST publish from the RAW artifact, through a path DISJOINT from
 // metric()/seal.mjs.
 //
-// THE ORACLE NO LONGER RE-DERIVES A GATE, because there is no longer a gate: a present number is always
-// published (see seal.mjs). What it re-derives now is the two FACTS that ride with the number - the rig
-// ceiling the measurement was taken against and the fraction of it reached - because those are published
-// and anything published must be verified. An oracle that checked only the value would let a headroom
-// fraction attach to the wrong metric, or drift from the ceiling it claims to be a fraction of, and
-// report green.
+// The oracle no longer re-derives a gate (there is no gate: a present number is always published, see
+// seal.mjs). What it re-derives is the two facts published alongside the number - the rig ceiling the
+// measurement was taken against, and the fraction of it reached - since anything published must be
+// verified, or a headroom fraction could attach to the wrong metric and report green.
 //
-// WHICH FIELDS' FACTS A METRIC CARRIES. Almost always its own, with one deliberate exception:
-// `streams_sustained_fps` is the rate produced by the SAME bisect that produced `streams_sustained`, so
-// it carries no comparison of its own and inherits the count's (gen-data.mjs seals it that way for
-// exactly this reason, see AUDIT #11 there). Looking for a name that is never written yields `undefined`
-// and the oracle would demand no headroom for a rate the bundle correctly annotates - the shape of the
-// bug that blocked the deploy for two days on the retired flag's name.
+// WHICH FIELDS' FACTS A METRIC CARRIES: almost always its own, except `streams_sustained_fps`, which
+// is produced by the same bisect as `streams_sustained` and so inherits that count's facts (gen-data
+// seals it that way, see AUDIT #11 there). Looking up a name that's never written yields `undefined`
+// and demands no headroom for a rate correctly annotated - the shape of the bug that blocked deploy
+// for two days under the retired flag's name.
 const STREAM_FACT_OWNER = { streams_sustained_fps: "streams_sustained" };
 export function comparisonFactsFor(raw, field) {
   const owner = STREAM_FACT_OWNER[field] || field;
@@ -651,17 +584,13 @@ export function comparisonFactsFor(raw, field) {
   return { headroom: raw[`${owner}_headroom`] ?? null, ceiling };
 }
 
-// WHAT THE BOARD SHOULD SHOW FOR ONE RAW VALUE, resolved by the same function the seal uses.
+// WHAT THE BOARD SHOULD SHOW for one raw value, resolved by the same function the seal uses.
 //
-// This used to restate the rule. It implemented the capacity branch only, so every PACED field whose
-// mock-bound flag was true had the seal publish (correctly - matching a paced target is the gateway
-// keeping up, not a mock ceiling) while the oracle demanded null. Twenty-five of those mismatches
-// blocked the deploy on every commit for two days, and the board went stale while the numbers it
-// should have been showing sat in the repo.
-//
-// An independent oracle is worth having because it re-derives the answer from the RAW artifact
-// instead of trusting the bundle. That independence is about the DATA PATH, not about owning a
-// second copy of the display rule: a second copy does not catch drift, it IS the drift.
+// This used to restate the rule and implemented only the capacity branch, so every paced field with
+// mock_bound=true had the seal correctly publish while the oracle demanded null - 25 mismatches
+// blocked the deploy for two days. An independent oracle is worth having because it re-derives the
+// answer from the RAW artifact, not because it owns a second copy of the display rule: a second copy
+// doesn't catch drift, it IS the drift.
 // How many gateways the repo DECLARES, read from the manifests rather than from the bundle: the
 // bundle only knows who has published, which is the very thing being judged.
 export function declaredGatewayCount() {
@@ -681,23 +610,20 @@ export function oracleExpected(raw, absentReason = null) {
 
 // WHAT THE WHOLE ENVELOPE MUST SAY, not only what number it must show.
 //
-// The oracle compared `.v` and nothing else, which left everything the envelope says ABOUT its number
-// unverified: a reason flattened back to "not_measured" (the exact regression the absence-carrying seal
-// was written to end), a zero-note swapped so a measured streaming failure published as a missing RPS
-// ceiling, a lost `detail` that is the evidence a reader is shown - every one of them preserves the
-// number and so every one of them verified green. The reason WAS measured; it is data, and data the
-// board renders, so the oracle re-derives it exactly as it re-derives the value.
-//   value      - through displayedValue, the one display rule.
-//   reason     - the engine's absence token for a hole.
-//   note       - a certified 0's meaning, from seal.mjs's zeroNoteFor: the one place that map lives.
-//   detail     - the engine's prose for the absence, which must survive the seal.
-//   headroom   - the fraction of the rig's own ceiling the measurement reached, and
-//   ceiling    - the ceiling that fraction is of. Both null when the engine had no usable reference,
-//                which costs the facts and NOT the value.
+// Comparing only `.v` left everything the envelope says ABOUT its number unverified - a reason
+// flattened back to "not_measured", a zero-note swapped so a measured streaming failure published as
+// a missing RPS ceiling, a lost `detail` (the evidence a reader is shown) - all of which preserve the
+// number and so all verified green. The reason IS data, so the oracle re-derives it like the value:
+//   value    - through displayedValue, the one display rule.
+//   reason   - the engine's absence token for a hole.
+//   note     - a certified 0's meaning, from seal.mjs's zeroNoteFor (the one place that map lives).
+//   detail   - the engine's prose for the absence, which must survive the seal.
+//   headroom - the fraction of the rig's own ceiling the measurement reached, and
+//   ceiling  - the ceiling that fraction is of. Both null when the engine had no usable reference.
 //
-// The `reason: "mock_bound"|"unverifiable"` branch is gone with the suppression that produced it. Nothing
-// here can return a null value for a raw number that is present, which is the property C2 asserts from
-// the other direction.
+// The `reason: "mock_bound"|"unverifiable"` branch is gone with the suppression that produced it.
+// Nothing here can return a null value for a raw number that is present - the property C2 asserts
+// from the other direction.
 export function oracleEnvelope(raw, { absent = null, zeroNote = null, headroom = null, ceiling = null } = {}) {
   const absentReason = absent && absent.reason ? absent.reason : null;
   const v = displayedValue(raw, { absentReason });
@@ -708,26 +634,23 @@ export function oracleEnvelope(raw, { absent = null, zeroNote = null, headroom =
   const none = { v, reason: null, note: null, detail: null, ...facts };
   if (raw == null)
     return { ...none, reason: absentReason || "not_measured", detail: (absent && absent.detail) || null,
-      // An absent metric publishes no comparison: seal.mjs attaches the facts through `withExtras`,
-      // which the absent branch returns before reaching.
+      // An absent metric publishes no comparison: seal.mjs attaches facts through `withExtras`, which
+      // the absent branch returns before reaching.
       headroom: null, ceiling: null };
   if (Number(raw) === 0) return { ...none, v: 0, note: zeroNote };
   return none;
 }
 
 // ---- R4: the SELECTION itself, re-derived --------------------------------------------------------
-// The oracle above verifies the numbers at the coordinates the BUNDLE CLAIMS. That left the choice of
-// coordinates entirely unchecked: a projection that picked the wrong cell publishes correct values
-// under the wrong name, and every value comparison agrees with it. So the board could show one
-// gateway's second-best diagonal as its headline, or a translation cell the fair tier should have
-// outranked, and the independent oracle would report green on every number.
+// The oracle above verifies the numbers at the coordinates the BUNDLE CLAIMS, leaving the choice of
+// coordinates unchecked - a projection that picked the wrong cell publishes correct values under the
+// wrong name, and every value comparison agrees with it.
 //
 // These re-derive WHICH cell each projected record must be, from the raw artifact and the PUBLISHED
-// rule (gen-data.mjs bestCell/translationCell). That is a second implementation of a ranking, which is
-// what deferred it - but the alternative is a check that verifies the arithmetic of an answer without
-// ever asking whether it is the answer to the right question. It is written against the rule as stated
-// in gen-data's own comments, so a deliberate rule change fails here loudly and is updated in both
-// places, which is the point.
+// rule (gen-data.mjs bestCell/translationCell) - a second implementation of a ranking, which is what
+// deferred it, but the alternative verifies the arithmetic of an answer without ever asking whether
+// it's the answer to the right question. Written against the rule as stated in gen-data's own
+// comments, so a deliberate rule change fails here loudly and must be updated in both places.
 // oracleAddedP99Rank(cell): the rank a candidate sorts by. A measured p99 ranks as itself; a
 // below-resolution absence ranks 0 (the best reading the rig can express, not a hole); anything else
 // sorts last.
@@ -784,11 +707,10 @@ export function absentReasonFor(absences, prefix, k) {
   return e && e.reason ? e.reason : null;
 }
 
-// opts.syntheticFixture: this bundle is a HAND-BUILT fixture with no on-disk oracle (an invariant
-// unit-test), so the "a matrix-sourced publish must be oracle-verifiable" requirement is waived. AUDIT
-// #18: this replaces the old SILENT hatch (`no results/matrix on disk anywhere => the whole oracle layer
-// is not required`), which the REAL bundle could fall into - an unverifiable publish would then pass. The
-// waiver is now an EXPLICIT caller opt-in that the CLI never passes, so a real bundle can never take it.
+// opts.syntheticFixture: a HAND-BUILT fixture with no on-disk oracle (an invariant unit-test), so the
+// "matrix-sourced publish must be oracle-verifiable" requirement is waived. AUDIT #18: replaces the
+// old silent hatch (no results/matrix anywhere => oracle layer not required), which a REAL bundle
+// could fall into. The waiver is now an explicit caller opt-in the CLI never passes.
 export function checkConsistency(data, app, opts = {}) {
   const { syntheticFixture = false } = opts;
   const errors = [];
@@ -798,49 +720,40 @@ export function checkConsistency(data, app, opts = {}) {
   // AUDIT #16: how many independent-oracle comparisons ACTUALLY ran. Coverage is claimed from this
   // counter, never from merely reaching the branch.
   let oracleCompared = 0;
-  // AUDIT #21: coverage is now PER-GATEWAY, not a single global counter. The old `oracleCompared > 0`
-  // gate was satisfied by ONE oracled row, so twelve completely unoracled gateways still reported the
-  // R1.oracle branch as covered. These two sets are reconciled at the end: every gateway that publishes
-  // a matrix-sourced number must appear in oracledKeys.
+  // AUDIT #21: coverage is PER-GATEWAY, not a single global counter - the old `oracleCompared > 0` gate
+  // was satisfied by one oracled row, so twelve unoracled gateways still reported R1.oracle covered.
+  // Reconciled at the end: every gateway publishing a matrix-sourced number must appear in oracledKeys.
   const matrixPublishers = new Set();
   const oracledKeys = new Set();
-  // Gateways where a cell or a whole block could not be compared at all. Oracle credit is per gateway,
-  // so a row that lost a block in silence used to keep the credit its OTHER blocks earned; these are
-  // subtracted before the reconciliation below, which is what makes "this gateway was oracled" mean
-  // "all of it was" rather than "some of it was".
+  // Gateways where a cell or block couldn't be compared at all. Subtracted before reconciliation below,
+  // so "this gateway was oracled" means "all of it was" rather than "some of it was".
   const unverified = new Set();
 
   // ---- C1 + C2: envelope integrity across the WHOLE bundle -------------------
-  // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an envelope,
-  // never a bare number. (C2) a suppressed envelope has value:null and no other numeric field on it.
-  // `timings_s` IS A COST RECORD, NOT A METRIC BLOCK, and its keys collide with metric names.
+  // Walk every object. (C1) a *_mock_bound key must not survive; a gated metric field must be an
+  // envelope, never a bare number. (C2) a suppressed envelope has value:null and no other numeric field.
   //
-  // It maps each metric GROUP to the seconds that group spent on this cell, so it legitimately
-  // carries keys named `cpu_fps` and `streams_sustained` whose values are DURATIONS. C1 matches on
-  // the field NAME, so it read those seconds as unsealed metrics and blocked the deploy the first
-  // time a real snapshot carried them - the engine only started serializing timings_s today, so the
-  // collision could not appear until a box published. A duration is not a measurement of the
-  // gateway and must not be sealed; the subtree is skipped whole, the way rss_series and
-  // load_recipe already are by not being metric fields at all.
+  // `timings_s` IS A COST RECORD, NOT A METRIC BLOCK: it maps each metric GROUP to seconds spent on
+  // this cell, so it legitimately carries keys named `cpu_fps`/`streams_sustained` whose values are
+  // DURATIONS. C1 matches on field NAME, so it misread those as unsealed metrics and blocked the
+  // deploy the first time a real snapshot carried them. A duration is not a gateway measurement and
+  // must not be sealed; the subtree is skipped whole, like rss_series/load_recipe.
   const walk = (node, path, inTimings = false) => {
     if (Array.isArray(node)) { node.forEach((v, i) => walk(v, `${path}[${i}]`, inTimings)); return; }
     if (node == null || typeof node !== "object") return;
     if (inTimings) return;
     for (const [k, v] of Object.entries(node)) {
       if (k === "timings_s") { covered("C1.timings"); continue; }
-      /* `absences` IS A REASON MAP, NOT A METRIC BLOCK, and it is skipped whole for the same reason
-         `timings_s` is: its keys are metric names but its values are {reason, detail} records, which
-         are not envelopes and are never supposed to be.
+      /* `absences` IS A REASON MAP, NOT A METRIC BLOCK, skipped whole for the same reason as
+         `timings_s`: its keys are metric names but its values are {reason, detail} records, never
+         envelopes.
 
-         It only surfaced when memory absences started appearing on refuted cells. The perf and
-         stream entries were already there and passed silently because `isMetricField` is false for
-         "perf.added_latency_p50_us" and true for "memory.peak_rss_mib" - the memory vocabulary
-         registers its prefixed names and the others do not - so C1 was inspecting one third of this
-         map and ignoring the rest. Reading a reason record as a partial envelope is a false
-         positive whichever third it lands on.
+         It surfaced when memory absences appeared on refuted cells - `isMetricField` is false for
+         "perf.added_latency_p50_us" and true for "memory.peak_rss_mib" (only memory registers
+         prefixed names), so C1 was inspecting a third of this map and ignoring the rest.
 
-         The map's own contract - every published null carries a reason - is checked by the absence
-         invariants and by bench-audit.py, which is where it belongs. */
+         The map's own contract (every published null carries a reason) is checked by the absence
+         invariants and bench-audit.py, which is where it belongs. */
       if (k === "absences") { covered("C1.absences"); continue; }
       if (k.endsWith("_mock_bound")) {
         errors.push(`C1: ${path}.${k} - a raw *_mock_bound flag survives in the bundle (must be consumed at seal time)`);
@@ -848,15 +761,10 @@ export function checkConsistency(data, app, opts = {}) {
       }
       if (isMetricField(k)) {
         covered("C1.field");
-        // EVERY MALFORMED SHAPE, not just a bare number.
-      //
-      // This read `!isEnvelope(v) && typeof v === "number"`, so the ONLY thing it could catch was a raw
-      // numeric leak. A metric field carrying a bare string, a boolean, an array, or - the dangerous
-      // one - a HALF-BUILT envelope like `{value: 20057}` with `certified` dropped or renamed, matched
-      // neither branch and sailed through. `isEnvelope` requires `typeof x.certified === "boolean"`, so
-      // an under-built envelope is not an envelope, and it was not a number either, so nothing fired.
-      // C1's own claim is "no raw ungated metric field exists in the bundle"; for those shapes it was
-      // not being checked at all, and this file is the deploy gate.
+        // EVERY MALFORMED SHAPE, not just a bare number. This used to check
+        // `!isEnvelope(v) && typeof v === "number"`, which only caught a raw numeric leak - a metric
+        // field carrying a string, boolean, array, or a HALF-BUILT envelope like `{value: 20057}` with
+        // `certified` dropped matched neither branch and sailed through undetected.
       if (!isEnvelope(v) && v !== null && v !== undefined) {
           // The message names WHAT was found, because the fix for a bare number and the fix for a
           // half-built envelope are different, and `${v}` renders an object as "[object Object]".
@@ -885,14 +793,13 @@ export function checkConsistency(data, app, opts = {}) {
   // ---- C9: a row suppressed for engine mismatch must be suppressed COMPLETELY -------------------
   //
   // OTB_SINGLE_ENGINE keeps the board single-instrument by blanking rows an older harness measured,
-  // rather than mixing them in or overriding C8. That is honest only if "blank" means blank: a row
-  // that kept ONE stale measurement while the rest went n/a would put another instrument's number on
-  // the board with nothing marking it, which is worse than the mix C8 refuses, because the mix at
-  // least declares itself.
+  // rather than mixing them in or overriding C8. That's honest only if "blank" means blank: a row
+  // keeping one stale measurement while the rest went n/a would put another instrument's number on the
+  // board with nothing marking it - worse than the mix C8 refuses, which at least declares itself.
   //
-  // So suppression is VERIFIED here, not trusted, and the list is the bundle's own published claim -
-  // an exemption a bundle can grant itself is not a check. A key on that list must carry no
-  // measurement of any kind, and must say what it is waiting for.
+  // So suppression is VERIFIED here, not trusted: the list is the bundle's own published claim, and an
+  // exemption a bundle can grant itself is not a check. A key on the list must carry no measurement
+  // and must say what it's waiting for.
   const suppressedKeys = new Set(
     Array.isArray(data.suppressed_for_engine) ? data.suppressed_for_engine : []);
   for (const g of data.gateways || []) {
@@ -930,19 +837,14 @@ export function checkConsistency(data, app, opts = {}) {
       else covered("C3.stamp");
     }
 
-    // ---- C6: sustained@20ms <= max_proxy on EVERY served cell (a physical-plausibility invariant) ------
-    // max_proxy is the UNCONSTRAINED throughput ceiling; sustained-under-SLO cannot EXCEED it. Derived
-    // from the RAW matrix cell (Design F R1, the independent oracle), never via the accessor. sustained@
-    // 20ms and max_proxy are swept in SEPARATE phases, each with its own noise band, so two independent
-    // ceilings legitimately overlap by a margin that scales with 1/throughput (sub-1% on a fast gateway,
-    // up to ~8% on a ~500-rps one); an inversion within that margin is measurement noise, not a real
-    // "sustained beat the ceiling". C6 therefore FLAGS every inverted cell as a WARNING, visible in the
-    // build log so the FIELD RUN re-measures the offender, but does NOT hard-fail: a hard assert would
-    // false-fail every honest run on sub-measurement-noise, blocking all publishing. A max_proxy of 0 is
-    // "did not qualify" (no ceiling), not an inversion, and is skipped. The magnitude is stamped so a GROSS
-    // (implausible) inversion stands out in the log for a human to escalate at re-measure time.
-    // C6 is a PURE EXPORTED FUNCTION (c6Inversions, below) so its RED-before proof injects a synthetic
-    // inversion rather than depending on a particular gateway staying inverted in the shipped data.
+    // ---- C6: sustained@20ms <= max_proxy on EVERY served cell (physical-plausibility invariant) ------
+    // max_proxy is the unconstrained ceiling; sustained-under-SLO can't exceed it. Derived from the RAW
+    // matrix cell (R1), never via the accessor. The two are swept in separate phases with separate
+    // noise bands that legitimately overlap by a margin scaling with 1/throughput (sub-1% on a fast
+    // gateway, up to ~8% on a ~500-rps one), so C6 WARNS on inversion rather than hard-failing - a hard
+    // assert would false-fail every honest run on sub-noise inversions. max_proxy=0 means "did not
+    // qualify", not an inversion, and is skipped. c6Inversions is a PURE EXPORTED FUNCTION so its
+    // RED-before proof injects a synthetic inversion instead of depending on shipped data.
     const c6 = c6Inversions(g.key, rawMatrix(g.key));
     if (c6.cellsChecked > 0) covered("C6.cell");
     errors.push(...c6.violations);
@@ -951,11 +853,10 @@ export function checkConsistency(data, app, opts = {}) {
     if (c7.checked > 0) covered("C7.hwm");
     warnings.push(...c7.warnings);
     // ---- R1 independent oracle -------------------------------------------------------------------
-    // Coverage is claimed ONLY when a comparison ACTUALLY HAPPENED (oracleCompared increments in cmp()
-    // below), never merely from reaching this branch. The oracle independently re-derives EVERY sealed
-    // matrix cell (all perf + stream metrics), the translation cell, the streaming record and the memory
-    // block, resolved from the artifact the bundle ACTUALLY projected from (snapshot or per-suite file),
-    // re-derived here independently rather than trusting the bundle's own claim.
+    // Coverage is claimed only when a comparison ACTUALLY HAPPENED (oracleCompared increments in cmp()
+    // below), never from merely reaching this branch. Re-derives EVERY sealed matrix cell (all perf +
+    // stream metrics), the translation cell, the streaming record and the memory block, resolved from
+    // the artifact the bundle actually projected from.
     const resolved = rawMatrixFor(g.key);
     const m = resolved ? resolved.matrix : null;
     // A gateway that publishes matrix-sourced numbers MUST be oracle-checkable: with no raw artifact on
@@ -968,10 +869,9 @@ export function checkConsistency(data, app, opts = {}) {
     if (matrixSourced && !m && !syntheticFixture)
       errors.push(`R2: ${g.key} publishes matrix-sourced numbers but no raw matrix artifact (snapshot or results/matrix/${g.key}.json) is on disk - the independent oracle cannot verify a single one of them (an unverifiable publish is a failure, not an exemption)`);
     // ---- R3: the oracle must be reading the SAME run the bundle published --------------------------
-    // The oracle is only meaningful if its independently-resolved artifact is the one gen-data projected
-    // from. Compare the two measured_at stamps: a mismatch means the selection rules diverged (e.g. an
-    // older snapshot shadowing a newer run), which would otherwise make the oracle verify the wrong file
-    // and report green. Also asserts the bundle's own "from snapshot" claim matches what is on disk.
+    // Compares the two measured_at stamps: a mismatch means the selection rules diverged (e.g. an
+    // older snapshot shadowing a newer run), which would otherwise verify the wrong file and report
+    // green. Also asserts the bundle's own "from snapshot" claim matches disk.
     if (m && !syntheticFixture) {
       const shownAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : NaN;
       const rawAt = m.measured_at ? Date.parse(m.measured_at) : NaN;
@@ -1035,10 +935,8 @@ export function checkConsistency(data, app, opts = {}) {
             ["stream", cell && cell.stream, rawCell.stream], ["memory", cell && cell.memory, rawCell.memory]]) {
             if (!sealedSub && !rawSub) continue;
             // A WHOLE BLOCK MISSING ON ONE SIDE IS THE LOUDEST THING IN THIS FILE, not the quietest.
-            // `!sealedSub || !rawSub -> continue` skipped a gateway's entire perf, stream or memory
-            // lane without a word, while the gateway still earned its per-gateway oracle credit from
-            // whichever block did compare - so a bundle that lost a block wholesale, or invented one
-            // the artifact never carried, verified green and reported itself covered.
+            // `!sealedSub || !rawSub -> continue` used to skip a gateway's entire perf/stream/memory
+            // lane silently while it still earned oracle credit from whichever block DID compare.
             if (!sealedSub || !rawSub) {
               errors.push(`R1: ${g.key}.${at}.${prefix}: the block exists in the ${sealedSub ? "published bundle" : "raw artifact"} ` +
                 `but not in the ${sealedSub ? "raw artifact" : "published bundle"} - every metric in it went unverified`);
@@ -1051,19 +949,13 @@ export function checkConsistency(data, app, opts = {}) {
             }
             // AND EVERY FRONTIER READING'S OWN ABSENCE REASON, which nothing above reaches.
             //
-            // `isMetricField` recognises scalar keys; the frontier is a Vec of readings, each with its
-            // own sealed rate whose absence reason lives in the cell's map under a BOUND-KEYED name
-            // (`perf.frontier.10ms.rps`). So this loop walked straight past it, and the projection could
-            // - and did - lose every frontier absence reason without a single check firing.
-            //
-            // The bug it missed: `sealFrontier` looked up the bare `frontier.10ms.rps` instead of the
-            // prefixed key, found nothing, and defaulted every absent reading to `not_measured` with no
-            // detail. one-api genuinely cannot serve under a 10 ms tail - its own rungs never got below
-            // 34 ms, and the engine says so with `below_resolution` plus the prose naming the bound.
-            // Flattened, no surface could tell "measured, and it cannot do this" from "nothing was
-            // measured", and the neutral reading FLATTERS the gateway. An oracle that compares the
-            // bundle against the raw artifact has to compare THIS too, or the comparison has a hole
-            // exactly where the metric's meaning lives.
+            // `isMetricField` recognises scalar keys; the frontier is a list of readings, each with its
+            // own sealed rate whose absence reason lives under a BOUND-KEYED name
+            // (`perf.frontier.10ms.rps`), so this loop walked past it. The bug this missed:
+            // `sealFrontier` looked up the bare key instead of the prefixed one, defaulting every absent
+            // reading to `not_measured` with no detail - flattening "measured, and it cannot do this"
+            // (e.g. one-api's rungs never got below 34ms) into indistinguishable-from-nothing-measured,
+            // which flatters the gateway.
             if (prefix === "perf" && Array.isArray(sealedSub.frontier)) {
               for (const r of sealedSub.frontier) {
                 const at2 = r.bound_ms == null ? "unbounded" : `${r.bound_ms}ms`;
@@ -1102,8 +994,8 @@ export function checkConsistency(data, app, opts = {}) {
           cmp(`${name}.${k}`, shownOf(rec[k]), expectOf(raw, rawCellSel.absences, prefix, k));
         }
       }
-      // (c) R4: the SELECTION, re-derived from the raw artifact rather than read off the bundle.
-      // Only for matrix-sourced records: a fallback record is projected from a legacy suite file by a
+      // (c) R4: the SELECTION, re-derived from the raw artifact rather than read off the bundle. Only
+      // for matrix-sourced records - a fallback record is projected from a legacy suite file by a
       // different rule, and holding it to the matrix's ranking would fail an honest legacy row.
       const bestDialect = g.best_cell && g.best_cell.path && g.best_cell.path.dialect;
       if (g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix") {
@@ -1139,7 +1031,7 @@ export function checkConsistency(data, app, opts = {}) {
 
   // ---- C3 lint: per-datum provenance captions ROUTE through the one renderer -------------------------
   // The bug class is a caption that hard-codes a source token for a datum it does not describe (memory
-  // mislabelled "6x6"). Since every per-datum provenance label now renders through caption(cell) /
+  // mislabelled "6x6"). Since every per-datum provenance label renders through caption(cell) /
   // _sweep_label(source) keyed by source.sweep, the lint's job is to (a) forbid the internal sweep-KEY
   // tokens (6x6-diagonal, …) from appearing as a user-facing string literal outside SWEEP_CAPTION/seal
   // (a key leaking into prose is the drift), and (b) assert the LANES pathNotes route through caption().
@@ -1159,8 +1051,8 @@ export function checkConsistency(data, app, opts = {}) {
   else covered("C3.route");
 
   // ---- C5 lint: every sealed-metric read routes through metric()/mval() ----
-  // Taint-based and whole-file, applied to both app.js and charts.py.
-  // ONE RENDERER, so one file to lint. charts.py was the second and is deleted.
+  // Taint-based and whole-file. ONE RENDERER, so one file to lint - charts.py was the second and is
+  // deleted.
   for (const [src, name, lang] of [[appSrc, "app.js", "js"]]) {
     const r = lintAccessorRouting(src, name, lang);
     errors.push(...r.errors);
@@ -1180,36 +1072,24 @@ export function checkConsistency(data, app, opts = {}) {
     // the normal, healthy state. Declared so the branch is guarded when it does fire.
     "C9.suppressed",
   ];
-  // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still HAS a call site is a question
-  // about this file, answerable without a single gateway, and it is never downgraded by how full the
-  // board is - see lintCoverageWiring. This is what makes "switch a check off" a failing state on a
-  // 5-of-14 board, where the coverage gate below can only warn.
+  // WIRING FIRST, COVERAGE SECOND. Whether each declared branch still has a call site is a question
+  // about this file, answerable without a single gateway, and never downgraded by board fullness (see
+  // lintCoverageWiring) - this is what makes "switch a check off" a failing state even on a partial
+  // board, where the coverage gate below can only warn.
   errors.push(...lintCoverageWiring(readSrc("check-consistency.mjs"), CHECK_BRANCHES).errors);
-  // C8.engine was tagged by the branch below but never DECLARED here, so R2's own
-  // "every covered branch is a declared branch" assertion (test.mjs) hard-failed on any bundle whose
-  // gateways carry engine stamps - i.e. on every post-stamp real board, while passing on the synthetic
-  // fixtures that skip C8 entirely. Declaring it is not a relaxation: the branch already runs and its
-  // errors already fire. It stays OUT of REQUIRED because eng.checked is 0 on a legitimately
-  // all-unstamped (pre-stamp) board, and C8 already errors on the dishonest case - a MIX of stamped
-  // and unstamped rows - so requiring coverage here would fail the one board C8 deliberately permits.
+  // C8.engine fires but was never DECLARED here, so R2's "every covered branch is declared" assertion
+  // hard-failed on any bundle with engine stamps while passing on fixtures that skip C8 entirely.
+  // Declaring it is not a relaxation - it stays OUT of REQUIRED because eng.checked is 0 on a
+  // legitimately all-unstamped board, and C8 already errors on the dishonest case (a mix of stamped
+  // and unstamped rows).
   // R4.selection is declared but not REQUIRED for the same reason: a gateway can be a matrix publisher
-  // on its per-cell memory alone (no best_cell, no translation_cell, no streaming), and that row has no
-  // projected selection to re-derive. It is required of nothing and fires on everything that has one.
-  // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches: they fire only on a violation, so
-  // they are NOT required to be covered by a healthy bundle (their absence is the GOOD state). REQUIRED =
-  // the branches a healthy bundle with projected cells MUST exercise. C3.lint and C5.lint are tagged when
-  // the SCANNER ran, not when it found a violation or took an exemption, so an inert (never-scanning)
-  // lint is itself a coverage failure.
-  // REQUIRED_ALWAYS = the branches required of ANY bundle, including a pure-fallback or synthetic one.
-  // It is not the whole requirement: a bundle that publishes matrix numbers owes four more (see
-  // REQUIRED below). The two used to be a constant and an unexported local respectively, and only the
-  // constant was returned - so test.mjs, which iterates the returned REQUIRED directly, asserted
-  // coverage of nine branches and knew nothing about C6.cell, C7.hwm, R1.oracle or R3.selection. The
-  // oracle's own coverage token was outside the set the test walked, which is why deleting the line
-  // that tags it failed nothing. The returned REQUIRED is now what this bundle is ACTUALLY required to
-  // cover, and the unconditional floor is returned beside it under its own name.
-  // C3.parity is gone: it compared charts.py's caption vocabulary to app.js's, and there is only
-  // one renderer now, so there is no second vocabulary that could drift from it.
+  // on per-cell memory alone, with no projected selection to re-derive.
+  // C1.mock_bound / C2.suppressed / C4.leak are ERROR-only branches (their absence is the GOOD state),
+  // so they're not required of a healthy bundle. C3.lint and C5.lint are tagged when the SCANNER ran,
+  // not when it found a violation, so an inert (never-scanning) lint is itself a coverage failure.
+  // REQUIRED_ALWAYS = branches required of ANY bundle, including a pure-fallback or synthetic one; a
+  // bundle publishing matrix numbers owes four more (see REQUIRED below). C3.parity is gone: it
+  // compared charts.py's caption vocabulary to app.js's, and there's only one renderer now.
   const REQUIRED_ALWAYS = ["C1.field", "C1.certified", "C3.stamp", "C3.route",
     "C3.lint", "C5.lint", "C4.cell", "C5.route"];
   // The oracle branches are required whenever the bundle publishes ANY matrix-sourced number; a gateway
@@ -1217,8 +1097,8 @@ export function checkConsistency(data, app, opts = {}) {
   // unverifiable). A bundle with NO matrix-sourced cells at all (a pure-fallback or synthetic fixture)
   // legitimately has nothing to oracle, and only that exempts these branches.
   const publishesMatrix = matrixPublishers.size > 0;
-  // PER-GATEWAY oracle reconciliation: every gateway that publishes a matrix-sourced number must have
-  // been independently oracled, by name, not merely "at least one comparison happened anywhere".
+  // PER-GATEWAY oracle reconciliation: every gateway publishing a matrix-sourced number must have been
+  // independently oracled, by name, not merely "at least one comparison happened anywhere".
   if (publishesMatrix && !syntheticFixture) {
     const unoracled = [...matrixPublishers].filter((k) => !oracledKeys.has(k)).sort();
     if (unoracled.length)
@@ -1236,43 +1116,24 @@ export function checkConsistency(data, app, opts = {}) {
     ? [...REQUIRED_ALWAYS, "C6.cell", "C7.hwm", "R1.oracle", "R3.selection"] : REQUIRED_ALWAYS;
   const missing = REQUIRED.filter((b) => !cover.has(b));
   if (missing.length) {
-    // A BRANCH WITH NO INPUT IS NOT AN INERT CHECK.
+    // A BRANCH WITH NO INPUT IS NOT AN INERT CHECK, on a COMPLETE board where every branch has
+    // something to bite on - silence there really does mean the check went dead.
     //
-    // This gate exists because a check that stops firing is worse than no check: it converts "nobody
-    // looked" into "it passed". That reasoning holds for a COMPLETE board, where every branch has
-    // something to bite on and silence really does mean the check went dead.
+    // It does not hold mid-run: a 14-gateway field run publishes each result as it lands, so between
+    // the first and last gateway the board is legitimately partial and branches like C3.stamp/C4.cell
+    // simply have nothing to bite on yet. Treating that as inert made the first gateway of a run
+    // unpublishable and froze the whole site behind the slowest box. So the gate keeps its teeth only
+    // where a board carries every gateway the repo declares, and warns while the board is filling.
     //
-    // It does not hold mid-run. A 14-gateway field is measured over hours, one box per gateway, and
-    // the board publishes each result as it lands - so between the first gateway and the last it is
-    // legitimately partial, and branches like C3.stamp and C4.cell simply have no cell of the right
-    // shape yet. Treating that as an inert check made the FIRST gateway of a run unpublishable and
-    // kept the whole site frozen behind the slowest box, which is the opposite of publishing as
-    // results arrive. The check has not gone quiet; it has nothing to say yet.
+    // A bundle with NO ROWS AT ALL is different: "partial" used to mean `publishers < declared`, which
+    // is also true of zero gateways - so the one input where every branch is unexercised took the
+    // gentle (warning) arm instead of erroring, and the empty-bundle test had to be marked skipped to
+    // stay green.
     //
-    // So the gate keeps its teeth exactly where they mean something - a board carrying every gateway
-    // the repo declares - and reports the same gap as a warning while the board is still filling.
-    //
-    // A BUNDLE WITH NO ROWS AT ALL IS NOT A BOARD THAT IS STILL FILLING - IT IS A BROKEN PROJECTION.
-    //
-    // "Partial" was `publishers < declared`, which is also true of a bundle carrying NO GATEWAYS
-    // WHATSOEVER - so the one input on which every single required branch is unexercised took the
-    // gentle arm and produced no error at all. That is precisely the failure path R2 exists for, and it
-    // was the one input that could not reach it. The suite's own test of it
-    // (`checkConsistency({gateways: []})` must error) had to be marked skipped to stay green, which is
-    // how a skip came to conceal a failing assertion.
-    //
-    // The mid-run argument is about a board that HAS ROWS: fourteen gateways are on it, some have
-    // published and the rest are still on their boxes, and the branches their cells would exercise have
-    // no input yet. A bundle with zero rows is not that. The repo declares gateways, so a projection
-    // that emitted none of them lost every row it was given - nothing about board timing explains that,
-    // and there is nothing to publish either way, so the gate keeps its teeth.
-    //
-    // NOTE the deliberately different quantity on each side: rows ON THE BOARD decides whether this is
-    // a board at all, and matrix PUBLISHERS decides whether it has finished filling. A fresh checkout
-    // (fourteen rows, none benchmarked yet - gen-data emits exactly that, see its "empty is not
-    // undatable" note) is a real board at the start of its life and warns; it does not block a deploy.
-    // And "a check was switched off" no longer depends on any of this: that is caught statically and
-    // unconditionally by lintCoverageWiring, which is the whole point of separating the two facts.
+    // `rowsOnBoard` (is this a board at all) and `matrixPublishers` (has it finished filling) are
+    // checked separately so a zero-row bundle still errors while a fresh, unbenchmarked checkout still
+    // warns. Whether a check was switched off no longer depends on any of this - that's caught
+    // statically and unconditionally by lintCoverageWiring.
     const declared = declaredGatewayCount();
     const rowsOnBoard = (data.gateways || []).length;
     const partial = declared > 0 && rowsOnBoard > 0 && matrixPublishers.size < declared;

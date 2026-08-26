@@ -53,24 +53,18 @@ _rig_asset_updated_at(){
 # so an unmeasurable field can never be emitted as "" (which downstream would read as a real value).
 _rig_json_str(){ if [ -z "${1:-}" ]; then printf 'null'; else printf '"%s"' "$1"; fi; }
 
-# BOX QUALIFICATION PROVENANCE: the same idea, one step further out. The rig binaries are one half of
-# the instrument; the box they run on is the other, and a contaminated box can publish a fake gateway
-# regression just as a silently-rebuilt mock can, even when its absolute numbers still look inside the
-# healthy range. So the box's qualifying measurement (the no-gateway floor median + jitter stats, the
-# gateway's own peak replay, and the computed drift percentages and bands they were judged against) is
-# recorded inside this same provenance block rather than in a second store: one place to look when two
-# runs disagree, and one place to query when the bands get recalibrated from repeat runs.
+# BOX QUALIFICATION PROVENANCE: the box a rig runs on is as much part of the instrument as the
+# binaries, and a contaminated box can produce a fake gateway regression even while its absolute
+# numbers look inside the healthy range. So qualification data is recorded in this same provenance
+# block rather than a second store.
 #
 # NOTHING WRITES $BOX_QUALIFY_FILE. The qualification verdict is produced by the ENGINE: `otb run`
-# qualifies the box against OTB_QUALIFY_BASELINE (the median of observed_rps across prior snapshots,
-# computed in run-on-ec2.sh and exported into the box's run script) and publishes it as
-# `rig.box_qualify` inside the snapshot. The path below is a fallback that has never been populated,
-# kept only so an out-of-band verdict file would still be read if one ever appeared. This comment used
-# to state the write as fact, which reads as though that file were the source of truth.
-# BEFORE the 6x6 starts; matrix/run.sh's snapshot then carries it with no change of its own. Wholly
-# best-effort: no file (a local run, an older harness) -> the key is simply absent, never fabricated.
-# The content is emitted only after python confirms it PARSES as a JSON object, so a truncated or
-# garbage file can never corrupt the snapshot it is folded into.
+# qualifies the box against OTB_QUALIFY_BASELINE (median observed_rps across prior snapshots, computed
+# in run-on-ec2.sh and exported into the box's run script) and publishes it as `rig.box_qualify`
+# inside the snapshot. The path below is an unpopulated fallback kept in case an out-of-band verdict
+# file ever appears. Best-effort: no file -> key absent, never fabricated. Content is emitted only
+# after python confirms it parses as a JSON object, so a truncated/garbage file can't corrupt the
+# snapshot it's folded into.
 _rig_box_qualify_json(){
   local f="${BOX_QUALIFY_FILE:-${RIG_ROOT:-.}/results/box-qualify/qualification.json}"
   [ -r "$f" ] || return 0

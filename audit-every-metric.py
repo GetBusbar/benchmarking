@@ -4,22 +4,14 @@
 #
 # EVERY METRIC, EVERY CELL, EVERY GATEWAY - enumerated, not sampled.
 #
-# The other verifiers each take one metric family and prove it deeply: `verify-frontier` re-derives the
-# frontier from its rungs, `verify-turnover` proves each maximum is a turnover rather than a failure
-# cliff, `verify-latency` re-derives added latency from its two legs. This one is the opposite shape -
-# it goes WIDE. It walks every published field of every cell and asks the questions that apply to any
-# measurement at all:
+# The other verifiers each prove one metric family deeply (verify-frontier, verify-turnover,
+# verify-latency). This one goes WIDE instead: for every published field of every cell it checks
+# whether a present value is possible (finite, correctly signed, correctly ordered), whether an
+# absent value has a stated reason, and whether fields that must agree with each other do.
 #
-#   - is a value that is present actually possible (finite, non-negative where the quantity cannot be
-#     negative, a percentile ordering that is not inverted)?
-#   - is a value that is ABSENT absent for a stated reason, or did it just vanish?
-#   - do fields that must agree with each other agree?
-#
-# WHY WIDE MATTERS. Both engine bugs found on 2026-07-29 were in metrics nobody had a second opinion
-# about. A deep verifier only exists for a metric someone already suspected. A wide sweep is how a
-# metric nobody thought about gets looked at at all - and the output here is deliberately a per-metric
-# INVENTORY (how many cells publish it, how many are absent, and why), because a metric that is absent
-# everywhere is invisible to every check that only looks at values.
+# The output is deliberately a per-metric INVENTORY (present/absent counts and why), because a
+# metric that is absent everywhere is invisible to any check that only looks at values - and past
+# engine bugs have hidden in exactly those metrics nobody had a deep verifier for.
 
 import glob
 import json
@@ -33,52 +25,32 @@ NON_NEGATIVE = {
     "streams_sustained", "streams_sustained_fps",
     "idle_rss_mib", "steady_state_rss_mib", "peak_rss_mib", "peak_rss_hwm_mib", "recovered_rss_mib",
     "time_to_plateau_s", "load_s", "idle_window_s", "recovery_window_s",
-    # COST. Every one of these is a count, a duration or a rate derived from two monotonic counters,
-    # so none can be negative. A negative here is the pid-reuse case the engine already refuses
-    # (`procsample::cost` returns HarnessError rather than subtracting into a negative) - so if one
-    # ever reaches the artifact, the refusal has been bypassed and this is the second line of defence.
+    # COST fields: derived from two monotonic counters, so none can be negative. `procsample::cost`
+    # already refuses the pid-reuse case that would go negative; a negative here means that refusal
+    # was bypassed, so this is the second line of defence.
     "cpu_us_per_request", "rps_per_cpu_second", "cost_window_conc", "cost_threads",
     "cost_core_utilisation", "cost_window_ok", "cost_window_rps",
     "cost_nonvol_ctxt_per_request", "cost_majflt",
 }
 # THERE IS NO p50<=p99 CHECK HERE, AND THE ONE THAT USED TO BE WAS UNSOUND.
 #
-# It read "(p50 field, p99 field) pairs from one distribution: p50 must not exceed p99" and listed
-# added_latency, added_ttft and added_gap. Not one of those is from one distribution. Every `added_*`
-# figure is a DIFFERENCE of two distributions' percentiles:
+# Each `added_*` figure is a DIFFERENCE of two distributions' percentiles
+# (e.g. added_gap_p50 = gateway_gap_p50 - direct_gap_p50), and a difference does not inherit
+# monotonicity from its operands - (X50-Y50) <= (X99-Y99) is not guaranteed, so p50 can legitimately
+# exceed p99 for an added_* figure with no engine defect involved. A prior version of this check
+# flagged exactly that as a violation.
 #
-#     added_gap_p50 = gateway_gap_p50 - direct_gap_p50
-#     added_gap_p99 = gateway_gap_p99 - direct_gap_p99
-#
-# A difference does not inherit monotonicity from its operands. Nothing forces
-# (X50 - Y50) <= (X99 - Y99): a gateway whose overhead is roughly constant while the DIRECT baseline's
-# own tail stretches produces a smaller added figure at p99 than at p50, with no percentile anywhere
-# out of order. The rule held most of the time only because gateway overhead usually grows with the
-# tail, which is a tendency, not an invariant.
-#
-# It fired on the 2026-07-30 field run: agentgateway anthropic>anthropic, added_gap p50=4us vs
-# p99=3us. That is a legitimate reading one microsecond apart over 100 samples, and the gate called it
-# a defect. Acting on it would have meant "fixing" an engine that was computing correctly - the exact
-# inversion of this project's rule that an impossible number is an engine bug, because the number was
-# never impossible.
-#
-# The sound version of this check needs the RAW legs, and the snapshot does not carry them: the stream
-# block publishes only added_* (plus sample counts), and the perf block publishes direct/gateway at p99
-# only, with no p50 leg. So there is nothing here to check monotonically today. The mechanism is
-# DELETED rather than left as an empty list, because a gate that cannot fire reads like coverage and
-# is not. What the added_* figures ARE checked against is verify-latency.py, which proves each one
-# equals the difference of its own published legs - the statement that is actually true of them.
+# A sound version would need the RAW legs, which the snapshot doesn't carry (stream publishes only
+# added_*; perf publishes direct/gateway at p99 only). The mechanism is DELETED rather than left as
+# an empty list, since a gate that can't fire reads like coverage and isn't. verify-latency.py checks
+# the statement that's actually true of added_*: that it equals the difference of its own legs.
 
 
-# The gateway's pinned core count, and how far the two samplers may disagree before it is a defect.
-#
-# NOT TUNING KNOBS. `run-on-ec2.sh` pins the gateway to CORES=0-3, so four is the divisor the
-# utilisation fraction is taken over - if that split changes, this must change with it or the check
-# silently compares against the wrong denominator. The tolerance is deliberately LOOSE (3x) because
-# the honest direction of disagreement is one-sided: the utilisation window spans a little more wall
-# time than the load window, so implied-from-CPU runs BELOW measured. Only the impossible direction
-# is flagged - a gateway appearing to burn more CPU than its cores accumulated, which means it is not
-# confined to them and the comparable-basis claim is false.
+# NOT TUNING KNOBS. `run-on-ec2.sh` pins the gateway to CORES=0-3, so 4 is the utilisation
+# denominator - must track that pin or this compares against the wrong core count. Tolerance is
+# loose (3x) because disagreement is expected to be one-sided (utilisation window > load window, so
+# implied-from-CPU runs below measured); only the impossible direction (more CPU than cores have) is
+# flagged.
 COST_PINNED_CORES = 4
 COST_UTIL_TOLERANCE = 3.0
 
@@ -92,16 +64,9 @@ def num(v):
 def scalar_fields(block):
     """Every leaf NUMBER in a metric block, skipping evidence arrays, prose, and non-numeric fields.
 
-    THE NON-NUMERIC EXCLUSION IS LOAD-BEARING, not tidiness. The first version treated "num() returned
-    None" as "this measurement is absent", which made every string and boolean field look like a null
-    with no reason recorded - `load_recipe` (a string, 92 cells), `egress_reverified` (a boolean, 31),
-    `stream.reason` (a string, 33). Three of the five "absences" it reported were fields that are not
-    measurements at all and were never absent.
-
-    That is the same false-alarm class as reading `.value` off a `{t_s, rss_mib}` sample and concluding
-    a board with 26 idle series had none: an extractor that cannot read a field reports it missing, and
-    a missing field looks exactly like a defect. So decide what a field IS from the artifact, and only
-    then ask whether it has a value.
+    The non-numeric exclusion is load-bearing: treating `num() is None` as "absent" makes every
+    string/boolean field (recipes, verdict flags, reasons) look like an unexplained null, when it was
+    never a measurement to begin with. Decide what a field IS before asking whether it has a value.
     """
     out = {}
     for k, v in (block or {}).items():
@@ -182,42 +147,24 @@ def main():
                     problems.append(f"{at}: peak_rss ({peak}) is below idle ({idle}) - load cannot use less than rest")
                 if rec is not None and peak is not None and rec > peak:
                     problems.append(f"{at}: recovered_rss ({rec}) exceeds peak ({peak}) - it cannot recover to above its own peak")
-                # A WARNING, NOT A VIOLATION, AND THE PERCENTAGE IS THE WRONG INSTRUMENT.
-                #
-                # `check-consistency.mjs` already owns this fact and classifies it as an explained
-                # artefact: VmHWM cannot be below an observed RSS for a FIXED tree, so an overshoot means
-                # a child counted in the sampled peak had exited before the VmHWM sum was taken - two
-                # instants, one tree. Making it a hard failure here would have two oracles disagreeing
-                # about whether the same measurement is a defect, which is worse than either verdict.
-                #
-                # The threshold was 1% and it fired on exactly one cell: bifrost openai>anthropic, 1.33%.
-                # But one transient worker is an ABSOLUTE quantity, not a proportion - the same worker is
-                # 0.3 MiB (0.6%) on agentgateway's 48 MiB tree and 11.5 MiB (1.33%) on bifrost's 876 MiB
-                # one. Board-wide: 32 of 92 cells overshoot, median 0.22%, and the only cell above 1% is
-                # the largest tree on the board. That is the artefact's signature, not a defect's.
+                # A WARNING, NOT A VIOLATION. `check-consistency.mjs` already owns this as an explained
+                # artefact: VmHWM can't be below an observed RSS for a fixed tree, so an overshoot means
+                # a child counted in the sampled peak had exited before the VmHWM sum was taken. Treating
+                # it as a hard failure here would put two oracles in disagreement over the same reading.
+                # A percentage threshold is the wrong instrument too - the overshoot is a roughly
+                # constant absolute quantity (one transient worker), so it reads as a smaller percentage
+                # on a bigger tree; use MiB, not %, to judge it.
                 if hwm is not None and peak is not None and peak > hwm:
                     warnings.append(
                         f"{at}: sampled peak ({peak:.1f} MiB) exceeds kernel HWM ({hwm:.1f} MiB) by "
                         f"{(peak - hwm):.1f} MiB ({(peak / hwm - 1) * 100:.2f}%) - transient-worker artefact"
                     )
 
-                # NO CPU-vs-CORES CROSS-CHECK HERE ANY MORE, AND THE REASON IS WORTH KEEPING.
-                #
-                # There was one: it compared the gateway CPU against what /proc/stat said its pinned
-                # cores had accumulated, on the grounds that a process cannot use more CPU than its
-                # cores report busy. It fired on tensorzero, on its first field run, on three cells -
-                # and the investigation showed the CHECK was wrong, not the gateway.
-                #
-                # /proc/stat per-CPU counters are TICK-SAMPLED. Measured on a live box, tensorzero
-                # accumulated 66-255 process jiffies in five seconds while those cores reported 3-18
-                # busy, because it serves ~380us requests that begin and end between ticks. Eleven of
-                # twelve gateways passed only because they were continuously busy enough for ticks to
-                # land on them.
-                #
-                # `cost_core_utilisation` is now DERIVED from the gateway own precisely-accounted CPU,
-                # so re-deriving it here would compare a number with itself - the tautology this file
-                # already fell for once (cpu_us_per_request x rps_per_cpu_second is 1,000,000 by
-                # construction). A check that cannot fail is worse than no check, so there is none.
+                # NO CPU-vs-CORES CROSS-CHECK HERE ANY MORE. A prior version compared gateway CPU
+                # against /proc/stat's per-core accumulation, but those counters are tick-sampled and
+                # false-fired on a gateway serving sub-tick (~380us) requests. `cost_core_utilisation`
+                # is now derived from the gateway's own precisely-accounted CPU, so re-deriving it here
+                # would just compare a number with itself - a check that can't fail is worse than none.
 
                 st = cell.get("stream") or {}
                 if st.get("stream_served") is True:

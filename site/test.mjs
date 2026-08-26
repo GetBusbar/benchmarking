@@ -5,12 +5,6 @@
 // under node, and the canvas is exercised through a recording 2d-context stub.
 //
 //   node site/test.mjs
-//
-// Covers: gen-data emits GW_CLASS for every gateway; search/capability filtering
-// (the class/lang chip rows are retired; stale params must be ignored); path-URL
-// state round-trip (/<category>/<view>?<params>) including legacy-hash decoding
-// and the HOME landing page at the site root; the sweep chart component drawing
-// real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
 import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
@@ -34,22 +28,12 @@ const ROOT = join(HERE, "..");
 const app = createRequire(import.meta.url)(join(HERE, "app.js"));
 
 let passed = 0;
-// The runner CATCHES a failing test, records it, and keeps going, then exits non-zero at the end with
-// every failure listed: a throwing test aborting the file at that line would silently skip every test
-// after it, which is the worst failure mode for a suite whose job is to be the gate. Ordering must not
-// decide coverage.
+// Catches a failing test and keeps going rather than aborting the file, so one throw
+// can't silently skip every test after it; failures are collected and listed at exit.
 const failures = [];
-// A SKIP IS NOT A PASS AND MUST NOT BE PRINTED AS ONE.
-//
-// The gated families below (empty board, no matrix donor, board still filling) returned early from
-// INSIDE the test body, so the runner saw a function that did not throw and printed `ok - <name>` for
-// a check that never executed a single assertion. On an empty board that is most of this suite reading
-// green, per-test, with only a file-level warn banner to say otherwise - and the whole point of a suite
-// that gates a publish is that its per-test output can be read as evidence. A skip now says skip, is
-// counted apart from passes, and is summarised at the end.
-//
-// EXIT SEMANTICS ARE UNCHANGED: a skip is not a failure, so it does not set a non-zero exit. The suite
-// still exits non-zero if and only if something actually failed.
+// Gated families (empty board, no matrix donor, board still filling) return early from
+// inside the test body without asserting anything - print `skip`, not `ok`, so a green
+// run can't be mistaken for coverage. A skip is not a failure and does not affect exit code.
 const skipped = [];
 function test(name, fn) {
   try {
@@ -77,34 +61,21 @@ process.on("exit", () => {
 });
 
 // ---- sealed-envelope fixture helpers (mirror seal.mjs / gen-data) ------------
-// Every metric in the bundle is a SEALED ENVELOPE. These builders take RAW intent (the value, plus the
-// two facts the engine publishes about the comparison it was taken in) and produce the exact envelope
-// shape gen-data emits, so fixtures stay readable while exercising the real reader (app.metric/mval).
-//
-// The raw intent USED to be (value + `*_mock_bound`), the engine's verdict that our own rig had set the
-// limit, and a GATED metric was certified only when that verdict was `false`; a positive value with a
-// `true` or `null` flag was published as {value:null, suppressed:true}. That is gone: a present number is
-// always published, and the builders now take `*_headroom` (the fraction of the rig's own ceiling the
-// measurement reached) and `*_rig_ceiling` / `*_mock_ceiling` (the ceiling that fraction is of), which
-// ride ON the certified envelope for the reader to weigh. See seal.mjs.
-//
-// A measured 0 is still certified, and its NOTE names which zero it is: RPS ceilings note
-// ZERO_NO_CEILING, streaming counts note ZERO_MEASURED_FAIL - a measured failure, never folded into
-// "not measured" (#3). The fixtures seal through the REAL exported sealMetric(), so `seal` IS the choke
-// point under test: a fixture builder here can never drift from what seal.mjs actually does.
+// Every metric is a sealed envelope; these builders produce the exact shape gen-data emits
+// (value plus `*_headroom` / `*_rig_ceiling` / `*_mock_ceiling`) so fixtures stay readable
+// while exercising the real reader (app.metric/mval). See seal.mjs.
+// A measured 0 is still certified, with a NOTE naming which zero it is (ZERO_NO_CEILING for
+// RPS ceilings, ZERO_MEASURED_FAIL for streaming counts) rather than folded into "not measured".
+// Fixtures seal through the real exported sealMetric(), so they can't drift from seal.mjs.
 const seal = sealMetric;
 const SRC = (kind, sweep) => ({ kind, sweep, build: "img:1", measured_at: "2026-07-24T00:00:00Z" });
 /* ---- the frontier, as a fixture --------------------------------------------------------------------
-   THE RETIRED THROUGHPUT INTENTS ARE GONE from these builders: `rps_sustained_20ms`, `rps_max_proxy`,
-   their headroom/ceiling/concurrency siblings and their two sweep arrays. No producer emits any of them
-   (engine/src/frontier.rs replaced the pair with one sweep read at each declared bound), so a fixture that
-   still offered them would let a test assert on a shape the board can never receive - which is exactly how
-   the retired scalars' captions came to describe a test that never ran.
-   The intent is now the CURVE, because the curve is the finding:
+   Retired throughput intents (rps_sustained_20ms, rps_max_proxy, etc.) are intentionally absent: no
+   producer emits them since engine/src/frontier.rs replaced them with one sweep read per declared bound.
+   The intent is now the CURVE:
      frontier: 30000                          - flat: the same rate at every published bound
-     frontier: {1: 7015, 5: 15438, none: ...} - a real shape; a slot left out is a bound with NO qualifying
-                                                rung, which the engine omits from the array entirely
-     frontier: null                           - no frontier at all (a record measured before it existed)
+     frontier: {1: 7015, 5: 15438, none: ...} - a real shape; a slot left out means no qualifying rung
+     frontier: null                           - no frontier at all (measured before it existed)
    A slot whose value is null is a reading whose RATE is absent, carrying the engine's own reason. */
 const FRONTIER_SLOTS = [1, 5, 10, 50, 100, "none"];
 function fxFrontier(spec = 30000, o = {}) {
@@ -116,12 +87,11 @@ function fxFrontier(spec = 30000, o = {}) {
     const isLower = o.lowerBound === true || (Array.isArray(o.lowerBound) && o.lowerBound.includes(k));
     return {
       bound_ms: k === "none" ? null : k,
-      // Sealed through the REAL sealMetric, so a fixture reading can never carry an envelope shape the
-      // producer would not emit. An absent rate carries the engine's own absence reason.
+      // Sealed through the real sealMetric so the envelope shape matches the producer.
       rps: seal(v, { absent: v == null ? (o.absent || { reason: "below_resolution", detail: "every cleanly-served rung had a tail latency at or above this bound" }) : null }),
       concurrency: v == null ? null : (o.conc ?? 512),
-      // THE OBSERVED TAIL, not the bound: 40% of it, so a fixture never accidentally asserts that a reading
-      // sat exactly on its own bound (which would not have qualified - the comparison is p99 < bound).
+      // 40% of the bound, not the bound itself: p99 < bound must hold, so the fixture can't
+      // accidentally sit exactly on the boundary it's supposed to be under.
       p99_us: v == null ? null : (o.p99_us ?? (k === "none" ? 40_000 : k * 400)),
       first_disqualified_conc: v == null || isLower ? null : (o.firstDisq ?? 1024),
       lower_bound: isLower,
@@ -202,11 +172,10 @@ function cellPerf(o = {}) {
 function cellStream(o = {}) { return streamRec({ ...o, withPathSource: false }); }
 
 // ---- gen-data: run it for real into a temp dir ------------------------------
-// Mid-refresh, the freshness guard hard-fails gen-data ON PURPOSE (a partial field re-run
-// is exactly what it exists to block). That guard protects the PUBLISHED bundle; it must
-// not also block testing the app logic. So: run gen-data for real when the raw results are
-// coherent, and fall back to the committed site/data.json (the last bundle the guard
-// accepted) when the guard trips. Any OTHER gen-data failure still fails the suite.
+// The freshness guard intentionally hard-fails gen-data mid-refresh (blocking a partial
+// field re-run) to protect the published bundle, but that must not also block testing
+// app logic - so fall back to the committed site/data.json when the guard trips. Any
+// other gen-data failure still fails the suite.
 const out = mkdtempSync(join(tmpdir(), "site-test-"));
 let data;
 try {
@@ -215,10 +184,8 @@ try {
 } catch (e) {
   const msg = String(e.stderr || e.message || "");
   if (!msg.includes("FRESHNESS FAILURE")) throw e;
-  // site/data.json is GITIGNORED, so this fallback only exists on a machine that has generated one.
-  // In CI it does not exist, and a bare readFileSync would replace the real, explanatory gen-data
-  // failure with an ENOENT about a file nobody was looking for. Re-throw the original instead: the
-  // reason the bundle could not be built is the finding, not the missing fallback.
+  // site/data.json is gitignored, so the fallback only exists on a machine that generated one; in
+  // CI it won't, so re-throw the original error rather than let a bare readFileSync mask it with ENOENT.
   if (!existsSync(join(HERE, "data.json"))) {
     console.error("gen-data failed AND there is no committed site/data.json to fall back to; the original failure follows.");
     throw e;
@@ -230,27 +197,13 @@ try {
 }
 
 // ---- an EMPTY board is a legitimate state, not a broken one ------------------
-//
-// The consistency guard is deliberately anti-inert: it fails if its own invariant branches were never
-// exercised, because a check that cannot fire is worse than no check at all. That would make "no
-// results" an impossible state to publish, even though clearing every result to start a board over is a
-// legitimate one.
-//
-// A board with no measurements has nothing to be inconsistent ABOUT. Every surface reads n/a, which is
-// the honest rendering, and gen-data already produces it (13 gateways, no best_cell). So the real-bundle
-// family below is vacuous here and says so out loud, while staying exactly as strict the moment a single
-// gateway carries data. The n/a rendering itself is asserted unconditionally, so "empty" cannot become a
-// hole that hides a broken board.
-// "Carries data" must mean PUBLISHES A NUMBER, which is exactly check-consistency's own `matrixSourced`
-// predicate (a projected best_cell / translation_cell / streaming record, or per-cell memory). The old
-// `g.best_cell || g.matrix` also accepted a bare `g.matrix` OBJECT, which a gateway that failed to serve
-// still carries (matrix.served=false, zero cells, no projected record). That mismatch is what made a board
-// of only-failed-to-serve rows report BOARD_HAS_DATA=true and then fail 14 ways: R2 demanded the REQUIRED
-// branches (C1.field, C1.certified, C4.cell) that only a published cell can exercise, and every RED
-// self-test below TypeError'd on an undefined donor row. A gateway that served nothing published nothing
-// and has nothing to be inconsistent about - the same reasoning the comment above already states ("gen-data
-// already produces it (13 gateways, no best_cell)"). This narrows the predicate to match that stated intent;
-// it does not weaken any assertion, because every branch it now skips is one the bundle cannot exercise.
+// The consistency guard is anti-inert (fails if its invariant branches never fire), so an empty
+// board - which has nothing to be inconsistent about, every surface reading n/a - must be treated
+// as vacuous rather than broken; the real-bundle checks below are skipped for it, not weakened.
+// "Carries data" means publishes a number (check-consistency's `matrixSourced`: a projected
+// best_cell/translation_cell/streaming record, or per-cell memory) - not a bare `g.matrix` object,
+// which a gateway that failed to serve still carries. Treating the latter as data made a board of
+// only-failed-to-serve rows look populated and crash the RED self-tests on undefined donor rows.
 const BOARD_HAS_DATA = (data.gateways || []).some((g) => g &&
   ([g.best_cell, g.translation_cell, g.streaming].some((r) => r && r.source) || hasCellMemory(g.matrix)));
 if (!BOARD_HAS_DATA) {
@@ -263,31 +216,18 @@ const testWithData = (name, fn) =>
   (BOARD_HAS_DATA ? test(name, fn)
     : skip(name, "the board carries no measurements: no gateway publishes a number to be inconsistent about"));
 
-// THE RED SELF-TESTS NEED A STRICTLY NARROWER THING THAN BOARD_HAS_DATA.
-//
-// Each of them reverts one seal on a clone of the real bundle and asserts the invariant catches it,
-// so each needs a donor row publishing a MATRIX-SOURCED best_cell. `BOARD_HAS_DATA` is satisfied by
-// any sourced record at all - streaming, translation, or per-cell memory - which is the right
-// predicate for the checks that consume those. The two can therefore disagree, and the comment on
-// `matrixGw` below already anticipated that they might.
-//
-// They did. Mid-run, the first gateway to land was one-api: it publishes streaming and memory but no
-// matrix-sourced best_cell, so BOARD_HAS_DATA said "populated", every RED test ran, and all seven
-// hard-failed on a precondition their own message correctly described as "board is dataless, not
-// dishonest". A run publishes each gateway as it finishes, so a board with one thin row is a normal
-// state for hours, not a defect - and it froze the entire site behind it.
-//
-// Skipping is only honest while the board is still filling. Once it carries every gateway the repo
-// declares, a missing donor means something really did stop publishing, and these must run.
+// The RED self-tests need a narrower gate than BOARD_HAS_DATA: each reverts one seal on a clone of
+// the real bundle and needs a donor row with a MATRIX-SOURCED best_cell specifically, not just any
+// sourced record (streaming/translation/memory also satisfy BOARD_HAS_DATA). Without this, a board
+// whose first-landed gateway published only streaming/memory (e.g. one-api) made every RED test run
+// and hard-fail on a missing donor, freezing the site on what was just a normal partial-run state.
+// Skipping is only honest while the board is still filling; once it carries every declared gateway,
+// a missing donor is a real regression and these must run.
 const BOARD_HAS_MATRIX_DONOR = (data.gateways || []).some(
   (g) => g && g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix");
-// A DONOR ROW IS NOT THE SAME THING AS A DONOR WITH SEVERAL SURFACES, and the oracle-surface test
-// needs the second. It corrupts one envelope on each of: a NON-best matrix cell, the translation
-// cell, and a best_cell latency field - so a gateway that declares exactly ONE cell offers only the
-// third, and the test fails on a board that is behaving perfectly. That is not hypothetical: one-api
-// declares a single cell and was the first gateway to publish in the 2026-07-29 run, so the test went
-// red on a one-row board while the row itself was correct. The gate now counts what the test actually
-// consumes, so the two cannot disagree about when it is runnable.
+// A donor row is not the same as a donor with several surfaces, which the oracle-surface test needs:
+// it corrupts a non-best matrix cell, the translation cell, and a best_cell latency field, so a
+// gateway declaring only one cell can't satisfy it even though the row itself is correct.
 const donorSurfaces = (g) => {
   if (!(g && g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix")) return 0;
   let n = 1;                                    // the best_cell latency field is always available
@@ -305,19 +245,11 @@ const BOARD_HAS_MULTI_SURFACE_DONOR = (data.gateways || []).some((g) => donorSur
 const DECLARED_GATEWAYS = (data.gateways || []).length;
 const isPublishing = (g) => !!(g && [g.best_cell, g.translation_cell, g.streaming].some((r) => r && r.source));
 const PUBLISHING_GATEWAYS = (data.gateways || []).filter(isPublishing).length;
-// "COMPLETE" MUST BE A STATE THE BOARD CAN ACTUALLY REACH.
-//
-// This was `publishing >= declared`, i.e. all fourteen. That is not "the run has finished", it is "the
-// run has finished AND every gateway succeeded" - so one gateway that can never publish (its matrix
-// ran and served nothing; a gateway the mock cannot drive; a retired row still declared) pinned
-// completeness at false FOREVER, and every test gated on it became permanently unrunnable while
-// reporting itself as a temporary skip. A gate that can only ever be closed is the same defect as a
-// check that can only ever pass, wearing the opposite sign.
-//
-// A gateway is STILL PENDING only when its result has not landed yet. One whose matrix DID land and
-// served nothing has published everything it is ever going to: that is a finished, measured row (the
-// board renders it as a failure to serve), not a box we are waiting on. Completeness is therefore
-// "nothing is still pending", which a real field run reaches even when some gateways fail.
+// "Complete" must be a state the board can actually reach. `publishing >= declared` required every
+// gateway to succeed, so one gateway that can never publish (served nothing, mock can't drive it,
+// retired-but-still-declared) pinned completeness at false forever and made gated tests permanently
+// unrunnable while reporting as a temporary skip. Completeness is instead "nothing is still pending":
+// a gateway whose matrix landed and served nothing is a finished row, not one we're waiting on.
 const matrixServedSomething = (m) => !!(m && m.upstreams && Object.values(m.upstreams).some(
   (up) => Object.values((up && up.cells) || {}).some((c) => c && c.served === true)));
 const PENDING_GATEWAYS = (data.gateways || []).filter(
@@ -335,22 +267,10 @@ const testWithMultiSurfaceDonor = (name, fn) =>
   (BOARD_HAS_MULTI_SURFACE_DONOR ? test(name, fn)
     : skip(name, `no gateway publishing 2+ oracled surfaces yet (${PUBLISHING_GATEWAYS}/${DECLARED_GATEWAYS} gateways publishing)`));
 
-// THERE IS NO "ONLY WHEN THE WHOLE FIELD HAS LANDED" GATE ANY MORE, and it is worth saying why it
-// went rather than letting it reappear.
-//
-// It existed for two tests described as claims about the whole FIELD: that R2's own failure path
-// fires, and that the oracle reaches several distinct surfaces. Neither claim actually needed a full
-// board. The R2 failure-path assertions are entirely SYNTHETIC (`checkConsistency({gateways: []})`) and
-// consume no board data at all, so gating them on board completeness was wrong on its own terms; the
-// oracle-surface test needs ONE matrix donor row, which is what testWithMatrixDonor already means.
-//
-// And the gate was not merely redundant, it was concealing a real regression: forced open, the R2 test
-// FAILED, because an empty bundle took the partial-board arm of R2's coverage gate and produced a
-// warning where the test (correctly) demanded an error. The skip read as "waiting for the board to
-// fill" and meant "this assertion does not hold". A skip that hides a red test is worse than the red
-// test, because it is quiet. Both tests now run on today's board; the invariant they broke on is fixed
-// in check-consistency.mjs (see the "a board with nothing on it is not a board that is still filling"
-// note there).
+// No "only when the whole field has landed" gate exists here on purpose: it used to guard two tests
+// that didn't actually need a full board (R2's failure path is synthetic/board-independent; the
+// oracle-surface test only needs one matrix donor) and was hiding a real regression - forced open,
+// the R2 test failed on an empty bundle taking the wrong coverage-gate arm. Fixed in check-consistency.mjs.
 
 // ---- freshness guard (matrix-sole-source): relaxed rules ----
 // Under matrix-sole-source each gateway is ONE atomic matrix run (hours long) published INDEPENDENTLY,
@@ -364,14 +284,9 @@ const testWithMultiSurfaceDonor = (name, fn) =>
 // since the main data load above falls back to the committed bundle when the guard trips.
 function buildSyntheticRepo(measuredAtByGw) {
   // measuredAtByGw: { key: { matrix: isoString, ... }, ... }
-  //
-  // THE FIXTURE HAS TO BE THE SHAPE THE ENGINE ACTUALLY WRITES. This built
-  // `gateways/<key>/gateway.sh` and `results/<suite>/<key>.json` - a manifest format that no longer
-  // exists and a per-suite results layout the engine stopped writing when it moved to
-  // `results/snapshots/`. gen-data discovers neither, so every test built on this fixture was
-  // asserting against an empty board and failing for that reason rather than for the guard it names.
-  // Same migration debt the history appender carried: code left pointing at directories nothing
-  // produces any more, going quietly red instead of guarding anything.
+  // Fixture must match the shape the engine actually writes now (definition.json + results/snapshots/);
+  // the old gateway.sh + per-suite results/<suite>/<key>.json layout is no longer discovered by
+  // gen-data, so a fixture built on it silently tests against an empty board.
   const root = mkdtempSync(join(tmpdir(), "site-fresh-"));
   for (const [key, suites] of Object.entries(measuredAtByGw)) {
     mkdirSync(join(root, "gateways", key), { recursive: true });
@@ -404,15 +319,14 @@ function buildSyntheticRepo(measuredAtByGw) {
         rps_max_proxy: 12000,
       };
       // The matrix suite is what the board displays, so it lands as a snapshot exactly as the engine
-      // writes one. Any other suite key stays in its legacy per-suite file, which is the point of the
-      // tests that assert a never-displayed legacy stamp cannot mask a stale board.
+      // writes one; any other suite key stays in its legacy per-suite file (a never-displayed stamp
+      // must not be able to mask a stale board).
       if (suite === "matrix") {
         doc.matrix = {
           gateway: key,
           served: true,
-          // The board ages what it DISPLAYS, and displayedMeasuredMs() reads the stamp off the
-          // matrix rather than the envelope, so a fixture without it makes every freshness guard
-          // silently inapplicable.
+          // displayedMeasuredMs() reads the age stamp off the matrix, not the envelope; a fixture
+          // without it silently makes the freshness guard inapplicable.
           measured_at: iso,
           upstreams: {
             openai: {
@@ -471,23 +385,11 @@ function genData(root) {
 const isoAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
 const isoDaysAgo = (d) => new Date(Date.now() - d * 86400000).toISOString();
 
-// THE SEAL AND ITS ORACLE MUST BE THE SAME RULE, over every input either can see.
-//
-// check-consistency.mjs re-derives what the board should show, straight from the raw artifact, as an
-// independent check on the bundle. That independence is about the DATA PATH. It used to extend to the
-// RULE as well - the oracle carried its own copy of the display condition - and the copy implemented
-// only the capacity branch. When paced metrics arrived, the seal learned that matching a paced target
-// is the gateway keeping up rather than a mock ceiling, and the oracle did not. Every cell whose
-// mock-bound flag was true then had the seal publish and the oracle demand null: 25 mismatches, which
-// hard-failed the deploy on every commit for two days while the board served a stale build.
-//
-// A second copy of a rule does not catch drift. It is the drift. Both call `displayedValue`, and this
-// walks the whole input space to hold them there.
-//
-// The space USED to be (raw, flag, gated, paced) - the flag being the engine's retired verdict that our
-// own rig had set the limit, which suppressed the value. There is no flag and no gate now, so the space
-// is the raw value and the absence reason, and the property is stronger than agreement: a present number
-// must SHOW.
+// The seal and its oracle must be the same rule, over every input either can see. check-consistency.mjs
+// re-derives what the board should show, independent of the seal's data path, but must not carry its
+// own copy of the display condition - a prior divergence there (oracle missing the paced-target branch)
+// caused 25 mismatches and hard-failed deploys for two days. Both now call `displayedValue`; this test
+// walks the input space to hold them there. Property: a present number must SHOW.
 test("seal and oracle agree on every (raw, absentReason) the board can produce", () => {
   const RAWS = [null, 0, 1, 1234.5, -1];
   const REASONS = [null, "not_measured", "below_resolution", "rig_limited", "harness_error"];
@@ -497,19 +399,13 @@ test("seal and oracle agree on every (raw, absentReason) the board can produce",
       const absent = reason ? { reason } : null;
       const oracle = oracleExpected(raw, reason);
       const sealed = sealMetric(raw, { absent });
-      // COMPARE LIKE WITH LIKE - the two sides must answer the SAME question.
-      //
-      // `oracleExpected` is `displayedValue`, which answers "what does the board SHOW". For a
-      // `below_resolution` absence that is 0: the comparison ran, the difference came out at or under
-      // what the rig can resolve, and that is the best reading the test can express. The SEAL never
-      // writes that 0 - it publishes {value: null, reason: "below_resolution"} and the DISPLAY layer
-      // (app.metric) turns the reason into the ≈0 state. Reading `sealed.value` here compared a
-      // seal-layer field against a display-layer answer and reported a disagreement where the two
-      // agree completely. The envelope goes through the reader every surface uses instead.
+      // Compare like with like: `oracleExpected` answers "what does the board SHOW" (display layer),
+      // so read the sealed envelope through app.metric() too rather than comparing sealed.value
+      // (seal layer) directly - those disagree even when the two layers actually agree.
       const shown = app.metric(sealed).v;
       if (shown !== oracle)
         mismatches.push(`raw=${raw} reason=${reason}: seal shows ${shown}, oracle expects ${oracle}`);
-      // AND NOTHING SUPPRESSES. The retired shape is unreachable by construction; this holds it there.
+      // The retired "suppressed" shape must stay unreachable.
       if (sealed.suppressed)
         mismatches.push(`raw=${raw} reason=${reason}: the seal produced a SUPPRESSED envelope, which no longer exists`);
       if (raw != null && sealed.value !== Number(raw))
@@ -517,21 +413,17 @@ test("seal and oracle agree on every (raw, absentReason) the board can produce",
     }
   }
   assert(mismatches.length === 0, `seal/oracle disagree:\n  ${mismatches.join("\n  ")}`);
-  // AND THE BELOW-RESOLUTION 0 BELONGS TO THE DISPLAY LAYER, not to the seal. Pinned separately so the
-  // loop above cannot be read as a claim that the seal invents a zero for a field nothing was measured
-  // on: the envelope carries the absence and its reason, and the reader derives the ≈0 from the reason.
+  // The below-resolution ≈0 belongs to the display layer, not the seal: the seal only carries the
+  // absence and its reason.
   const belowRes = sealMetric(null, { absent: { reason: "below_resolution" } });
   assert.equal(belowRes.value, null, "the seal publishes the absence, never a fabricated 0");
   assert.equal(belowRes.reason, "below_resolution", "with the engine's own reason, which is what carries the display");
   assert.equal(app.metric(belowRes).v, 0, "the ≈0 is the display reader's, derived from that reason");
 });
 
-// THE FACTS RIDE WITH THE NUMBER, AND ONLY WITH A NUMBER.
-//
-// `headroom` and `rig_ceiling` are what replaced the suppression: a reader gets the fraction of our own
-// rig's ceiling the measurement reached and decides for themselves. They attach through `withExtras`, so
-// they reach a certified 0 as well as a certified positive - a 0 beside a real ceiling is the claim that
-// most demands its evidence - and they must never appear on an absence, which has no comparison.
+// `headroom`/`rig_ceiling` replaced suppression: readers get the fraction of the rig's own ceiling
+// reached and decide for themselves. They must attach to a certified 0 as well as a positive value,
+// but never to an absence, which has no comparison to state a fraction of.
 test("headroom and its ceiling ride on certified envelopes and never on an absence", () => {
   const opts = { headroom: 0.83, ceiling: 52013 };
   for (const raw of [1, 1234.5, 0]) {
@@ -573,10 +465,8 @@ test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor kep
 });
 
 test("freshness guard PASSES a board with MIXED per-gateway ages (independent cadences are honest)", () => {
-  // The core relaxation: one gateway measured today, another 3 weeks ago. Under the OLD lag guard the
-  // 3-week-old row would hard-fail (it "lags the board-newest"); now that is honest and expected on a
-  // living board where any one gateway is re-run alone. Board must PASS. The fixture keys are
-  // synthetic on purpose: the guard is a function of AGE, not of which gateway is which.
+  // One gateway measured today, another 3 weeks ago: the old lag guard hard-failed the 3-week row for
+  // "lagging the board-newest", but on a living board an independently re-run gateway is honest.
   const { err, data } = genData(buildSyntheticRepo({
     alpha: { matrix: isoAgo(1) },         // today
     bravo: { matrix: isoDaysAgo(21) },    // 3 weeks ago - would have hard-failed the old lag guard
@@ -591,9 +481,8 @@ test("freshness guard PASSES a board with MIXED per-gateway ages (independent ca
 });
 
 test("freshness guard does NOT hard-fail a legitimate hours-long single matrix run (span check relaxed)", () => {
-  // One atomic matrix run legitimately spans HOURS (a full 6x6 takes ~5h): timestamps 5h apart within
-  // a row are a real run, not a franken-mix. The old MAX_SPAN_H=3 hard-failed exactly this; now only a
-  // >12h sanity cap can trip. Board must PASS.
+  // A full 6x6 matrix run legitimately spans ~5h; the old MAX_SPAN_H=3 hard-failed that as a
+  // franken-mix. Now only a >12h sanity cap can trip.
   const msg = genThrows(buildSyntheticRepo({
     alpha: { perf: isoAgo(6), matrix: isoAgo(1) }, // 5h span - a real long matrix run
   }));
@@ -614,10 +503,9 @@ test("freshness guard sets the PER-GATEWAY stale flag past MAX_GATEWAY_AGE_DAYS 
 });
 
 test("MED-2: the wholesale-stale floor is MATRIX-scoped - a never-displayed legacy re-run cannot mask a stale board", () => {
-  // Every DISPLAYED number is 200d old (matrix ancient) but one untouched results/perf/<gw>.json was
-  // re-run 'yesterday'. Folding the retired suite made boardNewest=yesterday, so the 180d hard-fail
-  // (the KEPT last line of defense) never fired and a wholesale-stale matrix board published. The floor
-  // now ages the DISPLAYED (matrix-preferring) stamps, so the legacy re-run does NOT save it: hard fail.
+  // Displayed numbers are 200d old but a legacy results/perf/<gw>.json was re-run yesterday. Folding
+  // the retired suite into boardNewest used to mask this and skip the 180d hard-fail; the floor now
+  // ages only the displayed (matrix) stamps, so the legacy re-run can't save a stale board.
   const msg = genThrows(buildSyntheticRepo({
     alpha: { matrix: isoDaysAgo(200), perf: isoAgo(24) },  // displayed=200d old; legacy=1d (never shown)
     bravo: { matrix: isoDaysAgo(200) },
@@ -627,9 +515,8 @@ test("MED-2: the wholesale-stale floor is MATRIX-scoped - a never-displayed lega
 });
 
 test("MED-1: latest_measured_at reflects the DISPLAYED (matrix) stamp, not a newer never-displayed legacy re-run", () => {
-  // All matrix data is 90d old; one gateway had an ad-hoc SUITES=perf re-run 1h ago. The board footer
-  // 'Latest measurement' must age the DISPLAYED numbers (90d), NOT claim '1h ago' off a legacy stamp
-  // that is never shown. latest_measured_at must equal the newest MATRIX stamp, not the perf stamp.
+  // A never-shown legacy perf re-run must not make the footer claim "1h ago" over 90d-old displayed
+  // numbers; latest_measured_at must equal the newest matrix stamp, not the perf stamp.
   const matrixNewer = isoDaysAgo(90), legacyFresh = isoAgo(1);
   const { err, data } = genData(buildSyntheticRepo({
     alpha: { matrix: matrixNewer, perf: legacyFresh },  // legacy fresher than the displayed matrix
@@ -641,9 +528,8 @@ test("MED-1: latest_measured_at reflects the DISPLAYED (matrix) stamp, not a new
 });
 
 test("NIT-5: the per-gateway badge stamp (ageBasisMs) prefers the MATRIX stamp over a newer legacy suite", () => {
-  // LOW-R3-3 regression guard: g.measured_at (the per-row 'measured Nd ago' badge) must age the DISPLAYED
-  // numbers - the matrix stamp - even when a newer legacy results/perf/<gw>.json is present. Deriving it
-  // from the max-across-suites would drive a 'measured 1h ago' badge over 90d-old shown numbers.
+  // LOW-R3-3 regression guard: g.measured_at (the "measured Nd ago" badge) must age the matrix stamp,
+  // not the max across suites - else a fresher legacy perf file drives the badge over 90d-old shown numbers.
   const matrixStamp = isoDaysAgo(90), legacyFresh = isoAgo(1);
   const { err, data } = genData(buildSyntheticRepo({
     alpha: { matrix: matrixStamp, perf: legacyFresh },
@@ -657,10 +543,9 @@ test("NIT-5: the per-gateway badge stamp (ageBasisMs) prefers the MATRIX stamp o
 });
 
 test("HIGH-3: the span cap is MATRIX-scoped - a matrix-only re-run past a weeks-old legacy stamp PASSES", () => {
-  // The core HIGH-3 fix: legacy suites (perf/stream/streamcpu/memory) are fallback-only and are NEVER
-  // refreshed by a matrix-only re-run, so they legitimately carry weeks-old stamps while matrix=today.
-  // Folding them into the span made an honest incremental matrix re-run trip the >12h cap and abort the
-  // deploy. The span cap now considers ONLY the matrix suite's own timestamps, so this must PASS.
+  // Legacy suites (perf/stream/streamcpu/memory) are fallback-only and never refreshed by a matrix-only
+  // re-run, so folding them into the span cap tripped the >12h cap on an honest incremental re-run.
+  // The cap now considers only the matrix suite's own timestamps.
   const msg = genThrows(buildSyntheticRepo({
     incr: { perf: isoDaysAgo(21), matrix: isoAgo(1) }, // matrix today, legacy 3 weeks old - honest re-run
   }));
@@ -668,11 +553,9 @@ test("HIGH-3: the span cap is MATRIX-scoped - a matrix-only re-run past a weeks-
 });
 
 test("HIGH-3: a per-gateway FUTURE measured_at is warned and never posts a negative age badge", () => {
-  // NIT (future-date, per-gateway): the board-wide floor only checks the max stamp; a lone clock-skewed
-  // FUTURE stamp on one gateway would slip past and render a negative "measured Nd ago" badge. gen-data
-  // must skip the future stamp from the age computation (and the board floor throw catches a future
-  // matrix stamp outright). Here a legacy suite is future-dated: the board floor throws on it first
-  // (generated_at would predate the newest embedded measured_at), which is the honest hard-fail.
+  // The board-wide floor only checks the max stamp, so a clock-skewed future stamp on one gateway
+  // could slip past and render a negative "measured Nd ago" badge; gen-data must exclude future
+  // stamps from the age computation and hard-fail on them instead.
   const msg = genThrows(buildSyntheticRepo({
     fresh: { matrix: isoAgo(2) },
     skewed: { matrix: isoAgo(1), perf: isoAgo(-48) }, // perf 2 days in the FUTURE (rig clock skew)
@@ -683,12 +566,8 @@ test("HIGH-3: a per-gateway FUTURE measured_at is warned and never posts a negat
 });
 
 test("OOTB config artifact round-trips into data.json (results/config/<gw>.txt → g.ootb_config)", () => {
-  // Config transparency: a gateway whose run captured results/config/<key>.txt must carry that exact
-  // text into the bundle as g.ootb_config (app.js renders it in the Config drawer). Build a fresh,
-  // coherent synthetic repo (so the freshness guard passes), drop a config sidecar for ONE gateway,
-  // reference it via that gateway's perf.ootb_config pointer, run gen-data for real, and assert the
-  // artifact appears verbatim on that gateway and is ABSENT on the gateway with no sidecar (graceful
-  // degradation - the not-yet-wired gateways).
+  // A gateway with results/config/<key>.txt must carry that exact text into g.ootb_config (rendered
+  // in app.js's Config drawer), and a gateway with no sidecar must have it absent, not fabricated.
   const t = isoAgo(1);
   const root = buildSyntheticRepo({
     withcfg: { perf: t, matrix: isoAgo(2) },
@@ -740,13 +619,10 @@ test("gen-data emits gateways with a class for every entry", () => {
   for (const g of data.gateways) {
     assert.ok(typeof g.cls === "string" && g.cls.length > 0, `${g.key} has no cls`);
   }
-  // And the class is not invented by the board: it is each project's OWN self-description, read
-  // straight out of that gateway's manifest. Assert that for EVERY gateway rather than spot-checking
-  // one by name, so the assertion holds for a gateway dropped in tomorrow.
+  // The class is each project's own self-description read from its manifest, not invented by the
+  // board; assert for every gateway, not a spot-check, so it holds for one added tomorrow.
   for (const g of data.gateways) {
-    // definition.json is the manifest the engine runs from; gateway.sh has not existed since the
-    // field moved off shell manifests, so reading it made this assertion throw ENOENT rather than
-    // check anything.
+    // definition.json is the manifest the engine runs from (gateway.sh no longer exists).
     const man = JSON.parse(readFileSync(join(ROOT, "gateways", g.key, "definition.json"), "utf8"));
     if (!man.class) continue;               // a manifest may omit it; gen-data then defaults it
     assert.equal(g.cls, man.class, `${g.key}: published cls must be the manifest's own class`);
@@ -754,15 +630,10 @@ test("gen-data emits gateways with a class for every entry", () => {
 });
 
 test("star snapshot is well formed, carries no stale key, and gen-data attaches it", () => {
-  // The committed snapshot (gateways/stars.json, refreshed by `node gateways/fetch-stars.mjs`).
-  //
-  // A gateway missing from the stars snapshot must NOT hard-fail the build: a star count is decoration,
-  // gen-data already degrades a missing entry to `stars: null`, and the board renders that as no star
-  // data, so a gateway added since the last refresh is honest, not a build break.
-  //
-  // What IS asserted: every entry present must be well formed, and the snapshot must carry NO key
-  // without a gateway directory. A stale key is real drift (a renamed or deleted gateway leaving a
-  // phantom count behind); a missing key is just a pending refresh.
+  // Committed snapshot (gateways/stars.json, refreshed by `node gateways/fetch-stars.mjs`). A gateway
+  // missing from it degrades to stars:null, not a build failure (pending refresh, not drift). What IS
+  // asserted: every present entry is well formed, and no key exists without a live gateway directory
+  // (a stale key would mean a renamed/deleted gateway leaving a phantom count).
   const snap = JSON.parse(readFileSync(join(ROOT, "gateways", "stars.json"), "utf8"));
   const live = new Set(readdirSync(join(ROOT, "gateways")).filter(
     (d) => existsSync(join(ROOT, "gateways", d, "definition.json"))));
@@ -939,10 +810,8 @@ test("decode rejects a bogus sort column", () => {
   assert.equal(back.sortCol, "rps");
 });
 
-// A RETIRED SORT ID STILL LANDS ON A RANKING. `?sort=rps20` / `?sort=rpsmax` are in every Performance link
-// ever shared and in the charts' deep links; the two columns they name are gone with the two scalar metrics
-// they read, and both links MEANT "rank by throughput" - which is now the frontier reading at the selected
-// bound. Falling through to the tab default would land in the same place by accident; the alias says so.
+// `?sort=rps20` / `?sort=rpsmax` are in old shared links; both columns are retired but both meant
+// "rank by throughput", which is now the frontier reading at the selected bound.
 test("a retired throughput sort id decodes onto the column that carries that ranking now", () => {
   for (const old of ["rps20", "rpsmax"]) {
     const st = app.decodeUrl("/gateways/performance", `?sort=${old}&dir=desc`);
@@ -999,13 +868,8 @@ test("star counts format compactly and degrade to null", () => {
 });
 
 test("the unified tab order: Gateways · Memory · Performance · Frontier · Streaming · matrix · Charts · method", () => {
-  // FRONTIER SITS BESIDE PERFORMANCE, not at the end: it is the same measurement read every published way,
-  // and a reader who has just looked at a ranking at one bound is one tab away from the whole curve. The
-  // order is asserted because it is the reading order of the board, not an implementation detail.
-  //
-  // CHARTS SITS AFTER EVERY DATA TAB, next to Method. It replaced 25 static PNGs, and the reading
-  // order is "the numbers, then the same numbers as a picture" - a gallery a reader meets before
-  // knowing what is in it teaches nothing.
+  // Frontier sits beside Performance (same measurement, different bound) rather than at the end.
+  // Charts sits after every data tab, next to Method: numbers first, then the same numbers as a picture.
   assert.deepEqual(app.VIEWS, ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"]);
   assert.equal(app.VIEW_LABELS.gateways, "Gateways");
   assert.equal(app.VIEW_LABELS.memory, "Memory");
@@ -1032,10 +896,8 @@ const mkMatrix = (cells) => ({ upstreams: Object.fromEntries(
     Object.entries(ing).map(([i, c]) => [i, c])) }])) });
 
 test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none filtered", () => {
-  // best_cell (openai diagonal) -> that reading. THE THROUGHPUT IS READ THROUGH THE FRONTIER now, at a
-  // named bound: `passCell` takes a metric FIELD and the frontier is an array of readings, not a field, so
-  // the sibling accessor is frontierCell. The latency half of this record is still a plain envelope and is
-  // still read by passCell, which is the point of keeping both here.
+  // Throughput is read through the frontier at a named bound (frontierCell), since it's an array of
+  // readings, not a plain metric field like passCell reads. Latency is still a plain envelope via passCell.
   const green = { best_cell: bcCell({ dialect: "openai", frontier: 30000 }) };
   assert.equal(app.frontierCell(green.best_cell, 10).na, false);
   assert.equal(app.frontierCell(green.best_cell, 10).text, "30,000");
@@ -1056,9 +918,8 @@ test("Passthrough is BEST-OF: every gateway shows on its best diagonal, none fil
 });
 
 test("Streaming tab keeps measured streaming refusals as visible rows", () => {
-  // Principle 3: filtering a competitor out reads as hiding it. A streaming gateway (projected
-  // g.streaming) stays; a measured refusal (no projected streaming) still appears as a muted row, and
-  // naText labels a stream_served:false record "did not stream" with the evidence.
+  // Filtering a competitor out reads as hiding it: a measured refusal (no projected streaming) still
+  // appears as a muted row, labeled "did not stream" with evidence via naText.
   const st = app.newState();
   st.view = "streaming";
   const streams = { display: "s", key: "s", lang: "Go", streaming: streamRec({ added_ttft_p99_us: 1 }) };
@@ -1072,9 +933,8 @@ test("Streaming tab keeps measured streaming refusals as visible rows", () => {
 });
 
 test("Performance Custom shows EVERY gateway (unfiltered); a gateway lacking the pinned cell reads n/a", () => {
-  // Unlike the old Matched tab, Performance Custom NEVER filters a competitor out: every gateway
-  // appears, and one that does not serve the pinned in->out cell simply reads n/a on that row.
-  // g0 serves openai->anthropic, g1 serves only openai->gemini. Cell perf is SEALED in place.
+  // Unlike the old Matched tab, Performance Custom never filters a competitor out: every gateway
+  // appears, and one lacking the pinned in->out cell simply reads n/a.
   const g0 = { display: "g0", key: "g0", lang: "Rust",
     matrix: mkMatrix({ anthropic: { openai: { served: true, perf: cellPerf({ frontier: 100, added_latency_p99_us: 200 }) } } }) };
   const g1 = { display: "g1", key: "g1", lang: "Go",
@@ -1101,24 +961,16 @@ testWithData("consistency guard: table == drawer == compare == charts on the rea
 });
 
 // A best_cell whose metrics are sealed envelopes: every surface reads the value through metric(), so no
-// render site holds a raw scalar of its own (invariant P1).
-//
-// The second half of this test used to assert the SUPPRESSION: a `rps_sustained_20ms_mock_bound: true`
-// cell published {value:null} and read n/a on every surface, "so there is no ungated field to leak". The
-// leak class it guarded is real and still guarded (the raw scalar is consumed at seal time), but the
-// price was deleting the measurement itself - a number the harness took correctly, withheld because our
-// own rig might have bounded it. It now publishes, with the fraction of that ceiling it reached riding
-// alongside so a reader can weigh it. So the second half holds the OPPOSITE property: the near-ceiling
-// number reaches every surface, its `headroom` and `rig_ceiling` reach it too, and the bundle is still
-// structurally clean (C1/C2) with them on board.
+// render site holds a raw scalar of its own (invariant P1). The second half asserts the opposite of the
+// old suppression behavior: a near-ceiling number now publishes, with headroom/rig_ceiling riding
+// alongside so a reader can weigh it, and the bundle stays structurally clean (C1/C2) with them on board.
 test("sealed envelope: every surface reads best_cell through metric(); a frontier reading is one too", () => {
   const g = { key: "seal", display: "Seal", lang: "Rust",
     best_cell: bcCell({ added_latency_p99_us: 111, frontier: { 1: 22222, 10: 30000, none: 33333 } }) };
   // table (passCell) reads the envelope value
   assert.equal(app.passCell(g, "added_latency_p99_us", String).v, 111);
-  // AND THE THROUGHPUT READINGS ARE ENVELOPES TOO, one per bound, read through the same metric()
-  // accessor - which is the property that survived the two scalars this test used to check. The rate is
-  // sealed; the concurrency, the observed tail and the boundary proof ride beside it as plain evidence.
+  // Throughput readings are envelopes too, one per bound, read through the same metric() accessor.
+  // The rate is sealed; concurrency, observed tail, and boundary proof ride beside it as plain evidence.
   assert.equal(app.frontierCell(g.best_cell, 1).v, 22222);
   assert.equal(app.frontierCell(g.best_cell, 10).v, 30000);
   assert.equal(app.frontierCell(g.best_cell, null).v, 33333);
@@ -1134,10 +986,9 @@ test("sealed envelope: every surface reads best_cell through metric(); a frontie
   assert.equal(laneRow("10ms").cell(rec).v, 30000, "the drawer row reads the same reading the table does");
   assert.equal(laneRow("unbounded").cell(rec).v, 33333);
   assert.deepEqual(checkConsistency({ gateways: [g] }, app, SYNTH).errors, [], "a clean sealed bundle is consistent");
-  // A LATENCY metric near the rig's own ceiling is still PUBLISHED with the comparison's own facts on it
-  // (the headroom/ceiling pair that replaced the suppression). The throughput lane no longer carries
-  // headroom - a frontier reading is a maximum over qualifying rungs, not a comparison against a rig
-  // reference - so the property is asserted where it still exists.
+  // A latency metric near the rig's own ceiling still publishes, with headroom/ceiling attached. The
+  // throughput lane doesn't carry headroom (a frontier reading is a max over qualifying rungs, not a
+  // rig comparison), so this is asserted only where headroom applies.
   const bound = { key: "sealb", display: "SealB", lang: "Rust",
     best_cell: { ...bcCell({ frontier: 24999 }),
       added_latency_p99_us: seal(24999, { headroom: 0.97, ceiling: 25700 }) } };
@@ -1150,11 +1001,9 @@ test("sealed envelope: every surface reads best_cell through metric(); a frontie
     "the facts on the envelope are structurally clean: C1 accepts them, C2 finds no suppression");
 });
 
-// The HIGH class: a certified fallback value must NOT be suppressed. Run gen-data for real over a
-// matrix with no swept diagonal (so the perf/xlate fallbacks fire) + certified legacy suites, then assert
-// the SEALED envelope surfaces the certified 17,437 (never dropped by a lost mock_bound flag). The
-// 17,437 is a real measured anthropic-in/openai-out throughput from the field; the fixture gateway is
-// synthetic because the class is about the SEAL, not about who produced the number.
+// The HIGH class: a certified fallback value must not be suppressed. Runs gen-data over a matrix with
+// no swept diagonal (so perf/xlate fallbacks fire) and asserts the sealed envelope surfaces the certified
+// value rather than dropping it via a lost mock_bound flag.
 test("HIGH class: a certified xlate-fallback value survives the seal and reaches the table", () => {
   const root = mkdtempSync(join(tmpdir(), "site-fb-"));
   mkdirSync(join(root, "gateways", "fbgw"), { recursive: true });
@@ -1201,12 +1050,9 @@ test("HIGH class: a certified xlate-fallback value survives the seal and reaches
   // The certified LATENCY values are sealed as certified envelopes (value present) - never suppressed.
   assert.equal(app.mval(g.best_cell.added_latency_p99_us), 20, "certified perf-fallback latency survives");
   assert.equal(app.mval(g.translation_cell.added_latency_p99_us), 30, "certified xlate-fallback latency survives (the HIGH class)");
-  /* AND THE THROUGHPUT PUBLISHES NOTHING AT ALL, on purpose. A legacy suite record carries one scalar taken
-     under one chosen ceiling; the frontier is six readings off a sweep the suite never recorded, so there is
-     nothing to project. gen-data emits `frontier: []` rather than dressing the old 19,286 as one bound's
-     reading - which would be the retired defect exactly, a number published under a bound it was not
-     measured at. THE UI'S JOB HERE IS TO SHOW NO THROUGHPUT, never a zero and never a blank that reads as
-     one, and that is what is asserted. */
+  /* Throughput publishes nothing at all, on purpose: a legacy suite record has one scalar taken under
+     one ceiling, not the six-reading sweep a frontier needs, so gen-data emits frontier: [] rather than
+     dressing the old scalar as a reading at a bound it was never measured at. */
   assert.deepEqual(g.best_cell.frontier, [], "a perf-suite fallback projects NO frontier");
   assert.deepEqual(g.translation_cell.frontier, [], "an xlate-suite fallback projects NO frontier");
   const cell = app.frontierCell(g.best_cell, app.DEFAULT_BOUND_MS);
@@ -1221,18 +1067,14 @@ test("HIGH class: a certified xlate-fallback value survives the seal and reaches
   assert.ok(!JSON.stringify(bundle).includes("_mock_bound"), "no *_mock_bound flag survives the seal");
 });
 
-/* WAS: "a zero RPS cell renders 0 with the no-qualifying-ceiling tooltip". That test asserted that a
-   measured `rps_max_proxy` of 0 rendered as an honest "0" annotated "no tested load held p99 < 1 s at
-   <0.1% errors". BOTH HALVES ARE GONE: the metric is deleted, and the sentence was wrong twice over (no
-   gate enforced 1 s, and the frontier grants no error tolerance at all). There is no throughput zero left
-   to render - a bound no rung qualified at is an ABSENCE carrying the engine's own reason.
-   So the property is inverted into the guard that the zero cannot come back, and the two absences the
-   engine distinguishes are asserted to render apart, which is the finding that replaced it. */
+/* Formerly asserted a measured rps_max_proxy of 0 rendered as "0" with a tooltip; that metric is gone,
+   and a bound no rung qualified at is now an absence with the engine's own reason, not a zero. This
+   asserts the zero cannot come back, and that the engine's two distinct absence reasons render apart. */
 test("a throughput hole is an ABSENCE with the engine's reason, never a zero", () => {
   const st = { ...app.newState(), mode: "peak" };
-  /* THE ENGINE DISTINGUISHES TWO ABSENCES and the board must render them apart (frontier.rs
-     `absence_for`: "the two cases are genuinely different and the old code published one token for both").
-     (a) NOTHING SERVED CLEANLY ANYWHERE - a fact about the GATEWAY, and a genuine hole: no value at all. */
+  /* The engine distinguishes two absences (frontier.rs absence_for) and the board must render them
+     apart, rather than one token for both.
+     (a) nothing served cleanly anywhere - a fact about the gateway, a genuine hole: no value at all. */
   const nothing = { best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 18, none: 20 },
     frontierOpts: { absent: { reason: "not_measured", detail: "no concurrency in this sweep served every request it accepted, across 9 rung(s) probed" } } }) };
   const at1 = app.frontierCell(nothing.best_cell, 1);
@@ -1267,26 +1109,20 @@ test("a throughput hole is an ABSENCE with the engine's reason, never a zero", (
 });
 
 // ---- check-consistency: STRUCTURAL INVARIANTS C1–C5 + R1 oracle + R2 coverage ------------------------
-// The onthebench 11th-phase test. Each invariant has a RED-before test that reintroduces the dishonesty
-// on a clone of the real bundle and asserts the SPECIFIC invariant fails (revert-the-seal → class fails).
+// Each invariant has a RED-before test that reintroduces the dishonesty on a clone of the real bundle
+// and asserts that specific invariant fails (revert-the-seal -> class fails).
 const clone = () => structuredClone(data);
-// The RED self-tests below revert one seal on a clone of the REAL bundle, so they need a donor row that
-// actually publishes a matrix-sourced best_cell. When none exists they used to hand back `undefined` and
-// die on `g.best_cell` with a bare TypeError - which reads as "the guard is broken" when the truth is
-// "this board published nothing to revert". Fail with the precondition named instead, so a genuine
-// regression stays loud and a dataless board is diagnosable at a glance. (BOARD_HAS_DATA gates these
-// tests off entirely in that case; this is the belt-and-braces message if the two ever disagree.)
+// These reverts need a donor row publishing a matrix-sourced best_cell; without one, fail with the
+// precondition named (not a bare TypeError on g.best_cell) so a dataless board is diagnosable at a glance.
 const matrixGw = (d) => {
   const g = d.gateways.find((x) => x.best_cell && x.best_cell.source && x.best_cell.source.kind === "matrix");
   assert.ok(g, "RED self-test precondition: no gateway in the bundle publishes a matrix-sourced best_cell, " +
     "so there is no seal to revert (board is dataless, not dishonest)");
   return g;
 };
-// THE DONOR MUST BE THE ONE THE TEST CAN ACTUALLY USE, not merely the first matrix row. The
-// oracle-surface test corrupts one envelope on each of three surfaces, so it needs the row that
-// carries the most of them - picking the first matrix publisher hands it a one-cell gateway like
-// one-api and the test fails on a board that is behaving perfectly. Falls back to the first matrix
-// row so its own precondition assert still speaks when the board has nothing at all.
+// Picks the donor with the most surfaces (not merely the first matrix row): the oracle-surface test
+// corrupts one envelope per surface, so a one-cell gateway like one-api would fail it wrongly.
+// Falls back to matrixGw so the precondition assert still fires when the board has nothing.
 const richestMatrixGw = (d) => {
   const ranked = (d.gateways || [])
     .map((g) => [donorSurfaces(g), g])
@@ -1307,27 +1143,18 @@ testWithMatrixDonor("R2 coverage: every REQUIRED invariant branch is exercised b
   for (const b of REQUIRED) assert.ok(cover.has(b), `required invariant branch not exercised: ${b}`);
   // the declared branch set is a superset of what a healthy bundle exercises
   for (const b of cover) assert.ok(CHECK_BRANCHES.includes(b), `covered branch ${b} not in CHECK_BRANCHES`);
-  // THE SET THIS TEST WALKS MUST BE THE SET THE BUNDLE OWES.
-  //
-  // checkConsistency used to return the unconditional nine-branch floor under the name REQUIRED while
-  // enforcing a wider set internally, so this loop - the only place anything iterates REQUIRED - had
-  // never heard of R1.oracle, C6.cell, C7.hwm or R3.selection. Deleting the line that tags the
-  // independent oracle's coverage therefore failed nothing here. A matrix-publishing bundle owes all
-  // four, so assert they are IN the set as well as covered by it; a future narrowing of REQUIRED can
-  // no longer quietly narrow what this test checks.
+  // REQUIRED used to be a nine-branch floor that never heard of R1.oracle/C6.cell/C7.hwm/R3.selection,
+  // so disabling the oracle's coverage tag failed nothing here. Assert those four are IN the set as
+  // well as covered, so REQUIRED can't quietly narrow what this test checks.
   for (const b of ["R1.oracle", "C6.cell", "C7.hwm", "R3.selection"])
     assert.ok(REQUIRED.includes(b),
       `a matrix-publishing bundle must be REQUIRED to exercise ${b}; REQUIRED = ${JSON.stringify(REQUIRED)}`);
 });
 
 // ---- THE ANTI-INERT GATE MUST NOT ITSELF BE INERT (round-2 audit) --------------------------------
-// R2's coverage finding is downgraded to a warning while the board is still filling, for a good
-// reason (a branch whose input has not landed is not a branch that went dead). On today's 5-of-14
-// board that made the ERROR arm unreachable, and with it every consequence of switching a check OFF:
-// commenting out the single line that tags R1.oracle left BOTH `node check-consistency.mjs` and
-// `node test.mjs` exiting 0. The independent oracle could be disabled outright and the publish gate
-// stayed green. Wiring is a fact about the SOURCE, not about the board, so it is checked statically
-// and never downgraded.
+// R2's coverage finding downgrades to a warning while the board is still filling, which on a partial
+// board made the ERROR arm unreachable: disabling R1.oracle's coverage tag left the publish gate green.
+// Wiring is a fact about the source, not the board, so it's checked statically and never downgraded.
 test("R2 WIRING: a switched-off check is caught regardless of how full the board is", () => {
   const branches = ["A.one", "B.two"];
   const wired = 'if (x) covered("A.one");\nif (y) covered("B.two");\n';
@@ -1340,8 +1167,8 @@ test("R2 WIRING: a switched-off check is caught regardless of how full the board
   assert.equal(eDel.length, 1);
   assert.match(eDel[0], /B\.two.*NO live call site/);
 
-  // (2) COMMENTED-OUT call site - the way a check is really switched off, and the way the round-2
-  // audit proved the oracle could be disabled. A `//` before the tag means the tag is not there.
+  // (2) Commented-out call site - the way a check is really switched off. A `//` before the tag
+  // means the tag is not there.
   const commented = 'if (x) covered("A.one");\n// if (y) covered("B.two");\n';
   const eCom = checkMod.lintCoverageWiring(commented, branches).errors;
   assert.equal(eCom.length, 1, `a commented-out tag is not a call site; got ${JSON.stringify(eCom)}`);
@@ -1361,9 +1188,8 @@ test("R2 WIRING: a switched-off check is caught regardless of how full the board
   assert.deepEqual(checkMod.lintCoverageWiring(real, CHECK_BRANCHES).errors, [],
     "check-consistency.mjs must tag every branch it declares, and declare every branch it tags");
 
-  // (5) THE PROOF THAT THIS REACHES THE PUBLISH GATE: switching a tag off in a copy of the real source
-  // is an ERROR out of checkConsistency itself, on TODAY'S PARTIAL BOARD - not a warning, not
-  // conditional on the board being complete. This is the assertion the round-2 audit found missing.
+  // (5) Proof this reaches the publish gate: switching a tag off in a copy of the real source is an
+  // error from checkConsistency itself even on today's partial board - not a warning.
   const off = real.replace(/^(\s*)(if \(oracleCompared > 0\) covered\("R1\.oracle"\);)/m, "$1// $2");
   assert.notEqual(off, real, "the R1.oracle tag must be findable, or this proof is vacuous");
   const e = checkMod.lintCoverageWiring(off, CHECK_BRANCHES).errors;
@@ -1372,10 +1198,8 @@ test("R2 WIRING: a switched-off check is caught regardless of how full the board
 });
 
 // ---- R2's ERROR arm is reachable on an EMPTY bundle ----------------------------------------------
-// The partial-board downgrade is for a board that is PUBLISHING and still filling. A bundle with zero
-// publishers is not filling, it is empty, and every required branch being unexercised is precisely the
-// inert-check failure R2 exists to report. Treating zero-of-fourteen as "partial" made the failure
-// path unreachable and forced the suite to skip its own test of it.
+// The partial-board downgrade is for a board that is publishing and still filling. A bundle with zero
+// publishers is empty, not filling, so it must take R2's error arm, not the warning.
 test("R2: an EMPTY bundle takes the ERROR arm, not the still-filling warning", () => {
   const { errors, warnings } = checkConsistency({ gateways: [] }, app);
   const err = errors.find((e) => e.startsWith("R2: coverage"));
@@ -1386,11 +1210,9 @@ test("R2: an EMPTY bundle takes the ERROR arm, not the still-filling warning", (
 });
 
 testWithMatrixDonor("C1 RED: EVERY malformed metric shape fails C1, not just a bare number", () => {
-  // C1's walk used to read `!isEnvelope(v) && typeof v === "number"`, so a raw numeric leak was the
-  // ONLY thing it could catch. A bare string, a boolean, an array, or - the dangerous one - a
-  // half-built envelope like {value: 20057} with `certified` dropped matched neither branch and sailed
-  // through the deploy gate. `isEnvelope` demands a boolean `certified`, so a partial envelope is not
-  // an envelope, and it is not a number either, so nothing fired. This test only ever drove the number.
+  // C1 used to only catch a raw numeric leak (`!isEnvelope(v) && typeof v === "number"`); a bare
+  // string/boolean/array, or a half-built envelope like {value: 20057} missing `certified`, matched
+  // neither branch and sailed through the deploy gate.
   for (const [what, bad] of [
     ["a bare number", 20057],
     ["a bare string", "n/a"],
@@ -1400,8 +1222,8 @@ testWithMatrixDonor("C1 RED: EVERY malformed metric shape fails C1, not just a b
   ]) {
     const d = clone();
     const g = matrixGw(d);
-    // INJECTED ON A SURVIVING ENVELOPE. It used to be `rps_max_proxy`, which no producer emits; the
-    // invariant is about the SHAPE of any sealed metric, so any metric field proves it.
+    // Injected on a surviving envelope, not the retired rps_max_proxy: the invariant is about the
+    // shape of any sealed metric, so any metric field proves it.
     g.best_cell.added_latency_p99_us = bad;
     const e = checkConsistency(d, app).errors;
     assert.ok(
@@ -1428,8 +1250,8 @@ testWithMatrixDonor("C1 RED: a surviving *_mock_bound flag fails C1", () => {
 testWithMatrixDonor("C2 RED: a suppressed metric that still exposes a value fails C2", () => {
   const d = clone();
   const g = matrixGw(d);
-  // Injected on a surviving metric field, and with the retired suppression reason it used to carry: the
-  // vocabulary is dead, and C2 is the guard that it stays dead whatever field it is smuggled in on.
+  // The retired suppression reason it used to carry; C2 guards that this dead vocabulary stays dead
+  // whatever field it's smuggled in on.
   g.best_cell.added_latency_p99_us = { value: 19469, certified: false, suppressed: true, reason: "mock_bound" };
   const e = checkConsistency(d, app).errors;
   assert.ok(e.some((x) => x.startsWith("C2:") && x.includes("added_latency_p99_us")),
@@ -1475,21 +1297,12 @@ testWithMatrixDonor("R1 RED: a best_cell envelope that disagrees with the RAW ma
 });
 
 /* ---- C6: THE FRONTIER'S ORDERING AND ITS DISCLOSURE, proven on INJECTED data --------------------
-   WHAT THIS FAMILY USED TO TEST, AND WHY NONE OF IT SURVIVES AS WRITTEN. C6 compared `rps_sustained_20ms`
-   against `rps_max_proxy` and failed the build when the "sustained" figure exceeded the "maximum" - with a
-   whole severity band around it (the cell's own sweep scatter excused a small inversion, a gross-percentage
-   ceiling capped what noise could excuse, a plateau median explained an inversion of up to half the
-   scatter, and a peak that won at its top rung was flagged separately). Six tests pinned those edges.
-   Both metrics are DELETED. The inversion they policed is now unrepresentable: a reading is a maximum over
-   the rungs qualifying at its bound, relaxing a bound only ADDS rungs, so a looser reading cannot be
-   smaller - which is why the elaborate band has nothing left to be a band around. The scatter machinery is
-   gone with it, and so are the tests that pinned its edges: there is no chosen tolerance left to test.
-   What C6 checks now is the same INVARIANT from the other side, and it is checked precisely because it is
-   structural - an invariant nothing verifies is an invariant nobody notices breaking. The three claims:
-   the bounds ascend with the unbounded reading last; the readings do not invert; and `lower_bound` agrees
-   with the rungs actually probed. The third is the direct descendant of the retired "won at its top rung"
-   test - the state is identical, but it is no longer a violation: a rate whose sweep ran out of ladder is
-   published and DISCLOSED as a floor, and what must hold is that the disclosure is truthful. */
+   C6 formerly compared rps_sustained_20ms against rps_max_proxy with a whole severity band around it;
+   both metrics are deleted and that inversion is now unrepresentable (a reading is a max over qualifying
+   rungs, so a looser bound can't be smaller). C6 now checks the same invariant from the other side:
+   bounds ascend with the unbounded reading last, readings don't invert, and `lower_bound` agrees with
+   the rungs actually probed (the direct descendant of the retired "won at its top rung" check - now a
+   disclosure-truthfulness requirement rather than a violation). */
 // A raw matrix carrying one cell whose frontier is the readings given, plus the sweep rungs they were read
 // from (which is what `lower_bound` is checked against).
 const c6Matrix = (readings, opts = {}) => ({
@@ -1526,12 +1339,9 @@ test("C6 RED: the bounds must ASCEND, with the unbounded reading last", () => {
     `the unbounded reading must be last; got: ${JSON.stringify(misplaced.violations)}`);
 });
 
-/* C6 RED: THE FLOOR DISCLOSURE MUST BE TRUTHFUL, in both directions.
-   This is what became of "a peak sweep that WON at its top rung is an error": the state is real and
-   common, it is no longer an error, and the rate is published either way - so what must hold is that the
-   artifact says WHICH it is. A reading that won at the top of the ladder and does not say so publishes our
-   own range as the gateway's answer; one that says so when the curve turned over inside the range
-   understates a peak it did establish. */
+/* A reading winning at the top rung is no longer an error, but the disclosure must be truthful: it
+   must say so (else it publishes our own range as the gateway's answer), and must not claim it when
+   the curve turned over inside the range (which would understate a peak actually established). */
 test("C6 RED: lower_bound must agree with the rungs actually probed, in both directions", () => {
   const sweep = [{ conc: 64, rps: 100 }, { conc: 256, rps: 120 }];
   // Won at c=256, the top rung probed, but claims a ceiling.
@@ -1567,12 +1377,10 @@ test("C6 GREEN: a monotone frontier, an absent reading and an unserved cell are 
 });
 
 // ---- C7: the sampled peak can never exceed the kernel's own high-water mark ----------------------
-// Found in this run's shipped data: one gateway at 165.1 > 164.7, another at 45.0 > 44.7. VmHWM is
-// maintained by the kernel on every charge, so for a FIXED process tree it cannot sit below any RSS the
-// sampler observed. Both readers sum over the tree ENUMERATED AT READ TIME, and the two reads happen at
-// different instants - so a worker that exits between the load and the VmHWM read is counted in the
-// sampled peak and missing from the HWM sum. A real transient-child artefact on multi-process gateways,
-// not a fabricated number: it WARNS so the next run can attribute it, and no measured value is rewritten.
+// Kernel VmHWM can't sit below any RSS the sampler observed for a fixed process tree, but the two
+// readers enumerate the tree at different instants - so a worker exiting between reads can be counted
+// in the sampled peak and missing from the HWM sum. Real transient-child artefact, not fabricated data:
+// it warns rather than rewriting a measured value.
 const c7Mem = (peak, hwm, served = true) => ({ memory: { served, peak_rss_mib: peak, peak_rss_hwm_mib: hwm } });
 
 test("C7 RED: a sampled peak above the kernel HWM is flagged as a warning", () => {
@@ -1588,19 +1396,16 @@ test("C7 GREEN: a plausible pair, equality, an unserved window and nulls are NOT
   assert.equal(c7HwmBelowPeak("gw", c7Mem(208.3, 212.8)).warnings.length, 0, "hwm above peak is correct");
   assert.equal(c7HwmBelowPeak("gw", c7Mem(263.0, 263.0)).warnings.length, 0, "equality is not an overshoot");
   assert.equal(c7HwmBelowPeak("gw", c7Mem(45, 44.7, false)).checked, 0, "an unserved window is not checked");
-  // NULL-SAFE: an honest-null memory window (a gateway that served no cell) must never be flagged, and
-  // must never be counted as checked - the honest-null path is correct data, not a violation.
+  // An honest-null memory window (gateway served no cell) is correct data, not a violation, so it
+  // must never be flagged or counted as checked.
   for (const bad of [null, undefined, {}, { memory: null }, c7Mem(null, null), c7Mem(45, null), c7Mem(null, 44.7)])
     assert.equal(c7HwmBelowPeak("gw", bad).checked, 0, `C7 must be null-safe on ${JSON.stringify(bad)}`);
 });
 
 test("C7 RED: memory lives PER CELL now, and a new-shape matrix must still be checked", () => {
-  // THE SHAPE THE PRODUCER ACTUALLY WRITES. matrix/run.sh emits no top-level `memory` key at all: the
-  // window is folded into each served cell. C7 read only the top-level block, so on every artifact the
-  // current producer writes it checked NOTHING - and "C7.hwm" is a REQUIRED coverage token once a bundle
-  // publishes matrix numbers, which a per-cell memory row is itself enough to make true. An all-new-shape
-  // field run would therefore satisfy the requirement and starve the token in the same breath, turning 13
-  // freshly measured gateways into a hard publish failure. This fixture is that field run in miniature.
+  // matrix/run.sh emits no top-level `memory` key; the window is folded into each served cell. C7 used
+  // to read only the top-level block, so it checked nothing on current producer output, while C7.hwm is
+  // a required coverage token - turning a fresh field run into a hard publish failure.
   const perCell = (peak, hwm, served = true) => ({
     upstreams: { openai: { cells: {
       openai: { served: true, memory: { served, peak_rss_mib: peak, peak_rss_hwm_mib: hwm } },
@@ -1631,19 +1436,17 @@ testWithData("C7: the live bundle's hwm-below-peak rows warn but never hard-fail
     assert.match(w, /sampled peak_rss [\d.]+ MiB > kernel peak_rss_hwm [\d.]+ MiB/);
 });
 
-// C6 IS A HARD FAILURE. It was a warning on the theory that two independently-swept ceilings overlap
-// on noise. That theory was wrong and it hid a real defect: the two sweeps searched different
-// concurrency ranges, so the peak search terminated on its own bound rather than on the gateway. Both
-// sweeps now share one SWEEP constant, so an inversion has no benign mechanism left. Whatever
-// inversions the live bundle still carries must therefore reach ERRORS, and must be well formed.
+// C6 is a hard failure now, not a warning: the "two independently-swept ceilings overlap on noise"
+// theory was wrong (the sweeps searched different concurrency ranges) and both now share one SWEEP
+// constant, so an inversion has no benign mechanism left.
 test("C6 on the live bundle: every inversion is adjudicated against its own cell's scatter, and says which", () => {
   const { errors, warnings } = checkConsistency(data, app);
   const keys = new Set(data.gateways.map((g) => g.key));
   const c6 = [...errors, ...warnings].filter((x) => x.includes("sustained@20ms"));
   for (const m of c6) {
     assert.ok(keys.has(m.split(".")[0]), `a C6 message must name a gateway in the bundle; got: ${m}`);
-    // NO SILENT TOLERANCE: whichever channel it lands in, the message must carry the magnitude AND the
-    // basis for the verdict, so a reader can check the judgement instead of trusting it.
+    // Whichever channel it lands in, the message must carry the magnitude and basis for the verdict,
+    // so a reader can check the judgement instead of trusting it.
     assert.match(m, /% inversion/, `a C6 message must state the magnitude; got: ${m}`);
     assert.match(m, /scatter|too few rungs|ceiling on excusable noise/,
       `a C6 message must state the basis it was judged against; got: ${m}`);
@@ -1661,15 +1464,14 @@ test("C6 on the live bundle: every inversion is adjudicated against its own cell
 const STREAM_CELL = {
   stream_served: true, added_ttft_p50_us: 40, added_ttft_p99_us: 90,
   added_gap_p50_us: 5, added_gap_p99_us: 12, streams_sustained: 1300, streams_sustained_fps: 39000,
-  // NO `cpu_fps` / `cpu_fps_concurrency`: the producer retired the metric (it counted relay frames/sec
-  // without the delivery gate, so dropping frames could raise the score). A fixture that still offered it
-  // would be a raw artifact shape the engine cannot emit.
+  // No cpu_fps/cpu_fps_concurrency: the producer retired that metric (it counted relay frames/sec
+  // without the delivery gate, so dropping frames could raise the score).
   streams_sustained_mock_bound: false,
 };
-/* rawFrontier(spec): the frontier as the ENGINE writes it into a raw artifact - bounds in MICROSECONDS
-   under `p99_bound_us`, rates as bare numbers - which is the shape gen-data's sealFrontier consumes. The
-   sealed, bound_ms-in-milliseconds shape is what fxFrontier above builds, and the two are deliberately kept
-   apart: a fixture that fed the SEALED shape into gen-data would test the seal against itself. */
+/* rawFrontier(spec): the frontier as the engine writes it into a raw artifact - bounds in microseconds
+   under p99_bound_us, rates as bare numbers - which is what gen-data's sealFrontier consumes. Kept
+   deliberately distinct from the sealed shape fxFrontier builds, so a fixture can't test the seal
+   against itself. */
 function rawFrontier(spec) {
   return FRONTIER_SLOTS.filter((k) => Object.prototype.hasOwnProperty.call(spec, k)).map((k) => ({
     p99_bound_us: k === "none" ? null : k * 1000,
@@ -1680,8 +1482,8 @@ function rawFrontier(spec) {
     lower_bound: false,
   }));
 }
-// CELL_MEM: one served cell's own memory window, as matrix/run.sh emits it (RAW scalars - gen-data seals
-// them in place). This is the ONLY shape memory ships in now: per cell, cold-started, plateau-terminated.
+// CELL_MEM: one served cell's own memory window, as matrix/run.sh emits it (raw scalars - gen-data seals
+// them in place). The only shape memory ships in now: per cell, cold-started, plateau-terminated.
 const CELL_MEM = { served: true, protocol: "per-cell, own cold-started process", serve_error: "",
   load_recipe: { concurrency: 64, payload_bytes: 4096 },
   idle_rss_mib: 120.5, steady_state_rss_mib: 890.2, recovered_rss_mib: 130.0,
@@ -1698,9 +1500,8 @@ function buildStreamMemRepo() {
       matrix: ["100000", "000000", "000000", "000000", "000000", "000000"] }));
   mkdirSync(join(root, "results", "matrix"), { recursive: true });
   const iso = new Date(Date.now() - 3600000).toISOString();
-  // The RAW cell shape the engine emits: one frontier off one sweep. `sweep_max_proxy` keeps its producer
-  // name (it is the rung array gen-data carries onto the record as `sweep`); the two retired scalars and the
-  // second sweep array are gone with the metrics that needed them.
+  // The raw cell shape the engine emits: one frontier off one sweep. `sweep_max_proxy` keeps its
+  // producer name (gen-data carries it onto the record as `sweep`).
   const perf = { added_latency_p50_us: 10, added_latency_p99_us: 20,
     frontier: rawFrontier({ 1: 40000, 10: 45000, none: 50000 }),
     sweep_max_proxy: [{ conc: 256, rps: 50000, p99_us: 100, fail: 0 }] };
@@ -1727,17 +1528,14 @@ function genInto(root) {
   }
 }
 
-// translationCell()'s FAIR tier (openai ingress, so every gateway's translation number shares the same
-// input side) has a second tier that fires only when the matrix has NO openai-ingress cross-dialect
-// cell at all: ANY served cross-dialect cell it did measure (see the two-tier selection in gen-data.mjs).
-// Nothing else drives the matrix into the shape that makes the "any" tier the ONLY candidate, so a
-// regression that deleted the `any` array entirely (leaving only `fair`) would keep every other test green.
+// translationCell()'s FAIR tier requires openai ingress; the ANY tier fires only when no such cell
+// exists (see the two-tier selection in gen-data.mjs). Only this fixture makes ANY the sole candidate,
+// so a regression deleting the `any` array entirely would keep every other test green.
 test("translationCell falls through to the ANY tier when no openai-ingress cell exists", () => {
   const root = buildStreamMemRepo();
   const mpath = join(root, "results", "matrix", "sgw.json");
   const m = JSON.parse(readFileSync(mpath, "utf8"));
-  // Only a gemini-in/openai-out cell: cross-dialect, but its ingress is NOT openai, so it can only
-  // ever be picked by the "any" tier, never the "fair" one.
+  // Cross-dialect but non-openai ingress, so it's only ever picked by the "any" tier.
   m.upstreams.openai.cells.gemini = {
     served: true,
     perf: { added_latency_p50_us: 40, added_latency_p99_us: 90, frontier: rawFrontier({ 10: 12000, none: 13000 }) },
@@ -1774,10 +1572,9 @@ test("translationCell prefers the FAIR (openai-ingress) tier even when an ANY ca
   assert.equal(app.mval(g.translation_cell.added_latency_p99_us), 200);
 });
 
-// A BELOW-RESOLUTION added latency is the engine's BEST outcome (the difference was at or under what
-// the rig can resolve), so it must RANK as 0 in bestCell's lowest-p99 choice, never as the Infinity a
-// plain missing number sorts as. Non-openai diagonals only: bestCell prefers the openai diagonal
-// deterministically, which would mask the ranking under test.
+// A below-resolution p99 is the engine's best outcome, so it must rank as 0 in bestCell's lowest-p99
+// choice, never as the Infinity a plain missing number sorts as. Non-openai diagonals only, since
+// bestCell prefers the openai diagonal deterministically, which would mask the ranking under test.
 test("bestCell ranks a below-resolution p99 as 0, beating a measured diagonal", () => {
   const root = buildStreamMemRepo();
   const mpath = join(root, "results", "matrix", "sgw.json");
@@ -1803,9 +1600,8 @@ test("bestCell ranks a below-resolution p99 as 0, beating a measured diagonal", 
   assert.equal(app.mval(g.best_cell.added_latency_p99_us), 0, "the site ranks/renders it as 0");
 });
 
-// The same win must QUALIFY a translation cell: a served cross-dialect cell whose p99 is below
-// resolution is a measured matrix result, and it must be selected - not silently dropped so the
-// legacy xlate suite's stale number publishes over the matrix (matrix-sole-source).
+// A served cross-dialect cell whose p99 is below resolution is a measured matrix result and must be
+// selected for translation, not dropped in favor of the legacy xlate suite's stale number.
 test("translationCell selects a below-resolution matrix cell instead of falling back to legacy xlate", () => {
   const root = buildStreamMemRepo();
   const mpath = join(root, "results", "matrix", "sgw.json");
@@ -1841,9 +1637,8 @@ test("gen-data projects streaming from the best diagonal matrix cell", () => {
   // metrics are sealed envelopes
   assert.equal(app.mval(g.streaming.added_ttft_p99_us), 90);
   assert.equal(app.mval(g.streaming.streams_sustained), 1300);
-  // `cpu_fps` IS RETIRED (it counted relay frames/sec without the delivery gate, so dropping frames could
-  // raise the score). The frame rate a reader can act on is the one measured where every expected frame
-  // arrived, which is what is asserted in its place.
+  // cpu_fps is retired (it counted relay frames/sec without the delivery gate, so dropping frames
+  // could raise the score); streams_sustained_fps replaces it.
   assert.equal(g.streaming.cpu_fps, undefined, "the retired metric cannot come back through the projection");
   assert.equal(app.mval(g.streaming.streams_sustained_fps), 39000);
   // the table accessor reads the same projected value
@@ -1852,9 +1647,8 @@ test("gen-data projects streaming from the best diagonal matrix cell", () => {
 });
 
 test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stream_served gate)", () => {
-  // A cell that did not stream still carries a stream record ({stream_served:false, …}). The old
-  // truthiness projection surfaced it as a served streamer; gen-data must now project ONLY when the
-  // diagonal cell's stream_served === true, so g.streaming is ABSENT for a non-streaming cell.
+  // A cell that did not stream still carries a stream record ({stream_served:false, ...}); the old
+  // truthiness projection wrongly surfaced it as a served streamer.
   const root = buildStreamMemRepo();  // sgw streams (STREAM_CELL.stream_served === true)
   // Add a second gateway whose diagonal cell served perf but DID NOT stream.
   mkdirSync(join(root, "gateways", "nostream"), { recursive: true });
@@ -1881,27 +1675,16 @@ test("MEDIUM-1: a NON-streaming diagonal cell does NOT project g.streaming (stre
   assert.equal(app.streamCell(quiet, "streams_sustained", String).na, true);
 });
 
-// THE STREAMING SUPPRESSION IS GONE, AND THESE TWO HOLD IT GONE.
-//
-// This pair used to assert the inverse: a cpu_fps or streams_sustained whose engine `*_mock_bound` flag
-// read `true` (our own rig set the limit) or `null` (no usable reference) was replaced with {value:null}
-// at seal time, so every surface read n/a. That deleted correct measurements, and it deleted them from
-// the gateways doing best: the mock paces its stream deltas, so its frames/sec is a TARGET rate, and a
-// relay forwarding every frame as it arrives lands within a percent of it - the best possible outcome,
-// suppressed for looking like a ceiling. 24 of 69 cells on the 2026-07-28 board published nothing.
-//
-// The number is now always published, and the two facts the retired verdict was derived from ride with
-// it: `headroom` (the fraction of the ceiling reached) and `rig_ceiling` (the ceiling it is a fraction
-// of - for the stream metrics DERIVED from the mock's declared pacing). So the property under test is
-// the opposite one, and it is stronger: no near-ceiling reading and no missing reference can cost the
-// value, and where the engine supplied the facts they travel with it.
+// The streaming suppression is gone: this pair used to assert the inverse, that a cpu_fps/streams_sustained
+// with `*_mock_bound: true` or `null` was replaced with {value:null} - deleting correct measurements,
+// worst for the gateways doing best (a relay keeping pace with the mock's paced rate looked like hitting
+// a ceiling). The number is now always published, with `headroom`/`rig_ceiling` riding alongside.
 test("streaming honesty: a near-ceiling cpu_fps is PUBLISHED with its headroom, never suppressed", () => {
   const certified = { key: "cert", display: "Cert", lang: "Rust",
     streaming: streamRec({ cpu_fps: 48000, cpu_fps_headroom: 0.62, cpu_fps_mock_ceiling: 77419 }) };
   assert.equal(app.streamCell(certified, "cpu_fps", String).text, "48000");
   assert.equal(app.mval(app.canonicalStreaming(certified).cpu_fps), 48000);
-  // 0.993 of the mock's own paced ceiling - the reading the retired flag suppressed hardest, because
-  // keeping pace with a paced upstream is exactly what a relay doing its job looks like.
+  // 0.993 of the mock's own paced ceiling - the reading the retired flag suppressed hardest.
   const atCeiling = { key: "bound", display: "B", lang: "Rust",
     streaming: streamRec({ cpu_fps: 51649, cpu_fps_headroom: 0.993, cpu_fps_mock_ceiling: 52013 }) };
   assert.equal(app.streamCell(atCeiling, "cpu_fps", String).na, false, "a near-ceiling cpu_fps is NOT n/a");
@@ -1929,8 +1712,8 @@ test("streaming honesty: a near-ceiling streams_sustained is PUBLISHED with its 
   const env = app.canonicalStreaming(atCeiling).streams_sustained;
   assert.equal(env.headroom, 0.998, "with the fraction of the paced ceiling it reached");
   assert.equal(env.rig_ceiling, 10019);
-  // streams_sustained_fps carries no comparison of its own: it is the rate out of the SAME bisect, so it
-  // inherits the count's facts (gen-data seals it that way, and the oracle looks them up the same way).
+  // streams_sustained_fps carries no comparison of its own; it inherits the count's headroom/ceiling
+  // since it's the rate from the same bisect.
   const fps = app.canonicalStreaming(atCeiling).streams_sustained_fps;
   assert.equal(fps.headroom, 0.998, "the rate inherits the count's comparison, never an invented one");
   const noRef = { key: "sn", display: "SN", lang: "Rust",
@@ -1984,10 +1767,8 @@ test("translation honesty: the translation cell's own frontier is read at the SA
 });
 
 test("streaming: a null added-TTFT/gap reads n/a on the table (the envelope carries the absence)", () => {
-  // An unreliable streaming c1 window sets added_ttft/gap to null while stream_served stays true. Under the
-  // sealed envelope that null is a {value:null, reason:"not_measured"} envelope; streamCell reads n/a. A
-  // measured value reads the number. There is no "site-visible vs chart draws-bar" gate to tie any more -
-  // the envelope IS the single decision (the retired drift check cannot arise: one datum, one value).
+  // An unreliable streaming window sets added_ttft/gap to null while stream_served stays true; under
+  // the sealed envelope that's {value:null, reason:"not_measured"}, so streamCell reads n/a.
   const okStream = streamRec({ added_ttft_p99_us: 90, added_gap_p99_us: 12,
     streams_sustained: 1300, cpu_fps: 48000 });
   const okGw = { key: "tok", display: "Tok", lang: "Rust", streaming: okStream };
@@ -2002,8 +1783,8 @@ test("streaming: a null added-TTFT/gap reads n/a on the table (the envelope carr
 });
 
 test("gen-data emits memory PER CELL and projects no per-gateway memory scalar", () => {
-  // Memory is per-cell, not a per-gateway scalar the harness has to select: the window lives on the
-  // cell, and the reader chooses the cell (Min|Max|Same|Custom) and can see which.
+  // Memory is per-cell, not a per-gateway scalar: the window lives on the cell, and the reader
+  // chooses the cell (Min|Max|Same|Custom).
   const bundle = genInto(buildStreamMemRepo());
   const g = bundle.gateways.find((x) => x.key === "sgw");
   assert.equal(g.memory_read, undefined, "NO per-gateway memory scalar may be projected");
@@ -2012,8 +1793,7 @@ test("gen-data emits memory PER CELL and projects no per-gateway memory scalar",
   assert.equal(app.mval(cell.memory.idle_rss_mib), 120.5);
   assert.equal(app.mval(cell.memory.steady_state_rss_mib), 890.2);
   assert.equal(app.mval(cell.memory.recovered_rss_mib), 130.0);
-  // The growth rate is a SEALED metric, not a bare scalar: it is published whether or not the cell
-  // plateaued (any threshold admits a leak slower than itself), so it must be an envelope like the rest.
+  // Growth rate is sealed, not a bare scalar: published whether or not the cell plateaued.
   assert.ok(app.isEnvelope(cell.memory.growth_rate_mib_per_min), "growth_rate_mib_per_min is sealed");
   assert.ok(app.isEnvelope(cell.memory.time_to_plateau_s), "time_to_plateau_s is sealed");
   assert.equal(cell.memory.plateaued, true, "the plateau VERDICT is a raw bool, not a metric envelope");
@@ -2054,9 +1834,8 @@ test("recovery sparkline: renders only when rss_series exists (≥2 points), nev
   // With a series → an inline SVG recovery curve.
   const svg = app.rssSparkline([ { t_s: 0, rss_mib: 40 }, { t_s: 60, rss_mib: 1000 }, { t_s: 180, rss_mib: 45 } ]);
   assert.ok(/<svg/.test(svg) && /<path /.test(svg), "a series yields an inline-SVG path");
-  // The caption reports the final figure and names WHICH point it is. It no longer says "recovered" for a
-  // bare call: that word belongs to the Recovered @N s column, which reads a different point of the same
-  // falling curve, and two figures under one word read as an inconsistency (one-api: 139.1 vs 129.6).
+  // Doesn't say "recovered" for a bare call - that word belongs to the Recovered @N s column, a
+  // different point on the same curve, and two figures under one word would read as an inconsistency.
   assert.ok(/45\.0 MiB at the last sample/.test(svg), `the caption reports the final figure and names the point: ${svg}`);
   // Given the column's own scalar and window, it names that window too, so the two are comparable on sight.
   const withMark = app.rssSparkline([ { t_s: 0, rss_mib: 40 }, { t_s: 60, rss_mib: 1000 }, { t_s: 180, rss_mib: 45 } ], null, 40, "load", { recoveredAt: 60, recoveryWindowS: 30 });
@@ -2067,16 +1846,10 @@ test("recovery sparkline: renders only when rss_series exists (≥2 points), nev
   assert.equal(app.rssSparkline([ { t_s: 0, rss_mib: 40 } ]), "", "a single point → no sparkline");
 });
 
-// Under the sealed envelope, streaming is ONE projected record whose throughput metrics
-// (streams_sustained, cpu_fps) are sealed at projection time; every surface reads them through the
-// envelope, so there is no headline-vs-cell "projection drift" to guard - one record, one value.
-//
-// The second half used to prove that a `cpu_fps_mock_bound: true` reading was {value:null} and "cannot
-// leak". What it actually proved was that the reading was deleted: 99,999 frames/sec measured, nothing
-// published, because our own rig might have been the limiter. It now publishes with its headroom, and
-// what this half holds is that the envelope stays STRUCTURALLY clean while carrying those facts - C1
-// accepts `headroom`/`rig_ceiling` as envelope fields, and C2's "no suppression anywhere" still holds,
-// which is the guard that the retired shape has not come back.
+// Streaming is one projected record whose throughput metrics are sealed at projection time, so there's
+// no headline-vs-cell drift to guard. The second half checks the near-ceiling case publishes with
+// headroom/rig_ceiling while the bundle stays structurally clean (C1 accepts those fields, C2 finds
+// no suppression) - the retired suppress-and-null shape must not come back.
 test("streaming: a sealed streaming record publishes its throughput metrics, facts and all", () => {
   const certified = { key: "sg", display: "SG", lang: "Rust",
     streaming: streamRec({ streams_sustained: 1300, cpu_fps: 48000 }) };
@@ -2108,10 +1881,9 @@ test("download: gatewayResultsJson is the gateway's complete record as parseable
 });
 
 test("Performance Custom (openai->anthropic) has no silent all-n/a served row", () => {
-  // In Custom mode on a pinned pair, any gateway that SERVES that cell should have per-cell perf,
-  // or its row is all n/a. A gateway whose per-cell sweep never ran AT ALL (mid re-run) is
-  // known-pending: app.js reads that HONESTLY as "served, not measured on this cell" (see the
-  // perfBlock fallback in cellPopFull) rather than fabricating a value; anything else all-n/a is a bug.
+  // In Custom mode, a gateway serving the pinned cell should have per-cell perf, or its row is all n/a.
+  // A cell whose sweep never ran (mid re-run) reads honestly as "served, not measured" (cellPopFull's
+  // perfBlock fallback) rather than fabricating a value.
   const st = { ...app.newState(), view: "performance", mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   const KEYS = ["added_latency_p50_us", "added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"];
   let checked = 0;
@@ -2128,10 +1900,9 @@ test("Performance Custom (openai->anthropic) has no silent all-n/a served row", 
     const anyVal = KEYS.some((k) => app.chooserPerfCell(g, k, String, st).v != null);
     assert.ok(anyVal, `${g.key} serves the pinned cell but every metric is n/a`);
   }
-  // Whether the CURRENT live bundle happens to have a gateway serving openai->anthropic is a fact
-  // about the field, not something this test can guarantee - so a live-bundle miss only logs. The
-  // guard logic itself (the two branches above) is guaranteed to run at least once by the synthetic,
-  // fixture-driven test right after this one, so the assertions are never silently skipped entirely.
+  // Whether the live bundle has a gateway serving openai->anthropic is a field fact this test can't
+  // guarantee, so a miss only logs; the fixture-driven test right after this one guarantees the guard
+  // logic itself runs at least once.
   if (checked === 0) console.log("  (note: no gateway in the live bundle currently serves openai->anthropic)");
 });
 
@@ -2156,8 +1927,8 @@ test("Performance Custom (openai->anthropic): the served/swept-vs-unswept guard 
     const anyVal = KEYS.some((k) => app.chooserPerfCell(g, k, String, st).v != null);
     assert.ok(anyVal, "a served, swept cell must surface a real value, not n/a");
   }
-  // (b) served but never swept: every metric must read n/a HONESTLY (app.js's cellPopFull falls back
-  // to "served, not measured on this cell" rather than fabricating a value from a different cell).
+  // (b) served but never swept: every metric must read n/a honestly (cellPopFull's fallback), not
+  // fabricate a value from a different cell.
   {
     const root = buildStreamMemRepo();
     const mpath = join(root, "results", "matrix", "sgw.json");
@@ -2226,9 +1997,8 @@ test("naText keeps long diagnostic notes out of cell values", () => {
   const pass = data.gateways.find((g) => g.xlate && g.xlate.xlate_passthrough === true);
   if (pass) assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
   assert.equal(app.naText({ xlate_served: false, xlate_passthrough: true }, "xlate_served", "xlate_error").text, "n/a (passthrough)");
-  // "manifest defines no <hook>" = the harness never probed that lane: "not tested", never a capability
-  // verdict. (Governance is retired from the board, so this is asserted on a synthetic record - the
-  // naText rule itself still applies to any suite whose note carries that string.)
+  // "manifest defines no <hook>" means the harness never probed that lane: "not tested", never a
+  // capability verdict. Governance is retired from the board, so asserted on a synthetic record.
   assert.equal(
     app.naText({ served: false, serve_error: "manifest defines no gw_governed_launch hook" }, "served", "serve_error").text,
     "not tested");
@@ -2255,17 +2025,16 @@ test("stripRigPaths scrubs absolute bench-box paths from diagnostic notes", () =
 });
 
 test("NOISE: the rig's resolution is DERIVED from box qualification, never a chosen constant", () => {
-  // Every box runs the same qualification before measuring, and identical boxes still land apart.
-  // That spread IS what the rig cannot resolve - a measurement, not a policy. A hard-coded 1% or 2%
-  // would be an undeclared rule deciding which published comparisons count.
+  // Identical boxes still land apart; that spread is what the rig cannot resolve, derived from
+  // measurement rather than a hard-coded threshold that would decide which comparisons count.
   const board = (drifts) => ({
     gateways: drifts.map((d, i) => ({ key: `g${i}`, rig: { box_qualify: { drift_pct: d } } })),
   });
   // The real 2026-07-30 field: 13 identical boxes spanning -6.22%..+2.05%.
   assert.ok(Math.abs(app.rigResolutionPct(board([-6.22, -1.04, 1.86, 2.05, -0.38])) - 8.27) < 1e-9);
 
-  // ONE box has no spread to observe. Inventing a floor from a single sample is exactly the magic
-  // number this exists to avoid, so it reports that it cannot say.
+  // One box has no spread to observe; inventing a floor from a single sample is the magic number
+  // this exists to avoid, so it reports that it cannot say.
   assert.equal(app.rigResolutionPct(board([1.5])), null);
   assert.equal(app.rigResolutionPct({ gateways: [] }), null);
 
@@ -2276,16 +2045,15 @@ test("NOISE: the rig's resolution is DERIVED from box qualification, never a cho
 });
 
 test("CHARTS: the tab draws from the live board, ranks by the metric's own direction, and drops nobody silently", () => {
-  // The registry is what replaced 25 PNGs. Every entry must be drawable: a label, a direction, a
-  // getter. A metric that cannot say which way is better cannot be ranked.
+  // Replaced 25 static PNGs. Every entry must be drawable: a label, a direction, a getter.
   assert.ok(app.CHART_METRICS.length >= 4);
   for (const m of app.CHART_METRICS) {
     assert.ok(m.id && m.label && typeof m.get === "function", `chart metric ${m.id} is not drawable`);
     assert.equal(typeof m.desc, "boolean", `${m.id} must declare which direction is better`);
   }
 
-  // COST IS ON A LOG AXIS AND THAT IS NOT A PREFERENCE. The real board spans 89us to 199,333us -
-  // 2,247x - and on a linear axis twelve of fourteen gateways are a single pixel beside the slowest.
+  // Log axis, not a preference: the board spans 89us to 199,333us (2,247x), so a linear axis would
+  // squash most gateways into a single pixel beside the slowest.
   const cpu = app.CHART_METRICS.find((m) => m.id === "cpu");
   assert.equal(cpu.log, true, "cost per request must be logarithmic");
   assert.equal(cpu.desc, false, "less CPU per request is better");
@@ -2296,16 +2064,14 @@ test("CHARTS: the tab draws from the live board, ranks by the metric's own direc
   const rows = app.chartRows(cpu, [mk("slow", 199333), mk("fast", 89), mk("mid", 273)], st);
   assert.deepEqual(rows.map((r) => r.key), ["fast", "mid", "slow"], "lower-is-better sorts ascending");
 
-  // A gateway with no value is EXCLUDED FROM THE BARS but is not lost - renderCharts names it under
-  // the chart. A chart that silently omits rows reports a tidier field than the one measured, and on
-  // this board an absent number usually means a refusal a reader needs to see.
+  // A gateway with no value is excluded from the bars but not lost - renderCharts names it under the
+  // chart, since silently omitting it would report a tidier field than the one measured.
   const withHole = app.chartRows(cpu, [mk("has", 100), { key: "none", name: "none", lang: "Go", best_cell: bcCell({}) }], st);
   assert.deepEqual(withHole.map((r) => r.key), ["has"]);
 });
 
 test("SATURATION: a utilisation figure cannot be read as a verdict unless the window reached the peak", () => {
-  // The real numbers from 2026-07-31. Same utilisation SHAPE, opposite meaning, and only the ratio
-  // to the cell's own peak separates them - which is the mistake I made in prose before catching it.
+  // Same utilisation shape, opposite meaning; only the ratio to the cell's own peak separates them.
   const cell = (util, wrps, peak) => ({
     cost_core_utilisation: seal(util),
     cost_window_rps: seal(wrps),
@@ -2344,8 +2110,8 @@ test("NOISE: the table marks the boundary where its own ranking stops meaning an
   assert.ok(tied.has("d"), "24,500 is 2.4% from 25,101 - also inside it");
   assert.ok(!tied.has("a"), "the first row has nothing above it to tie with");
 
-  // NOTHING is marked when the resolution is unknown. Asserting a tie needs a figure, and a board
-  // with one box has no spread to derive one from - so it must not claim ties either way.
+  // Nothing is marked when the resolution is unknown: a board with one box has no spread to derive
+  // a figure from, so it must not claim ties either way.
   assert.equal(app.tiedRuns(rows, col, {}, null).size, 0);
 
   // A column that renders its own cell is not a ranking this can reason about.
@@ -2358,29 +2124,22 @@ test("NOISE: two values closer than the rig can resolve are NOT a ranking", () =
   assert.equal(app.indistinguishable(46031, 48394, 8.27), true);
   // A gap wider than the rig's own spread IS a finding.
   assert.equal(app.indistinguishable(25101, 48394, 8.27), false);
-  // RELATIVE TO THE LARGER VALUE, so the rule means the same thing at the bottom of the board as at
-  // the top. 19 vs 20 is 5% apart and 49,000 vs 50,000 is 2% - both inside a rig that resolves 8.27%,
-  // and both correctly tied. The absolute gaps (1 and 1,000) differ by three orders of magnitude,
-  // which is exactly why an absolute threshold could not serve this board.
+  // Relative to the larger value, so the rule means the same thing at the bottom of the board as at
+  // the top - an absolute threshold couldn't serve a board where gaps span orders of magnitude.
   assert.equal(app.indistinguishable(19, 20, 8.27), true);
   assert.equal(app.indistinguishable(49000, 50000, 8.27), true);
   // And a small-value pair that IS resolvable stays resolvable: 19 vs 25 is 24% apart.
   assert.equal(app.indistinguishable(19, 25, 8.27), false);
   // Two MEASURED zeros are the same measurement, not an undefined ratio.
   assert.equal(app.indistinguishable(0, 0, 8.27), true);
-  // With no resolution known (a single box), nothing may be declared indistinguishable: that would
-  // be asserting a tie on the strength of a figure we just said we could not derive.
+  // With no resolution known (a single box), nothing may be declared indistinguishable.
   assert.equal(app.indistinguishable(100, 101, null), false);
 });
 
 test("COST: the cost columns appear only on a board that can answer them, and read through the envelope", () => {
-  // ADDITIVE, NOT A REPLACEMENT. The existing columns are untouched; these follow the per-cell-memory
-  // precedent and appear only when the board carries the field.
-  //
-  // WHY GATE AT ALL, when every other absence renders per row: a row missing ONE metric still has the
-  // rest, so "not measured" there is disclosure. A cost column on a board measured before the capture
-  // existed is n/a on EVERY row - a column asking a question nothing on the page can answer, which is
-  // noise. It lights up by itself on the first board carrying the field.
+  // Additive, not a replacement: existing columns are untouched; cost columns appear only when the
+  // board carries the field. Gated because a column that's n/a on every row (measured before the
+  // capture existed) is noise, unlike a per-row absence which is honest disclosure.
   const noCost = { gateways: [{ key: "a", best_cell: bcCell({}) }] };
   assert.equal(app.hasCost(noCost), false);
   const ids = app.columnsFor("performance", noCost).map((c) => c.id);
@@ -2414,10 +2173,9 @@ test("COST: the cost columns appear only on a board that can answer them, and re
 // was on the page, so a reader saw "53.6 µs" beside "82,328 req/s" with nothing saying they came from
 // different windows - and multiplying them yields 4.41 cores on a 4-core box: an impossible number
 // assembled from two correct ones.
-// A NEGATIVE GROWTH RATE IS NOT A LEAK. agentgateway published "-0.4 (leak)" on the live board: memory
-// being RELEASED, labelled as the one thing it is the opposite of, under a note asserting RSS was
-// "still climbing at this rate". The drawer already read the engine's shape verdict correctly from the
-// same field; the column ignored it, so one board rendered one fact two contradictory ways.
+// A negative growth rate is not a leak: agentgateway once published "-0.4 (leak)" on the live board -
+// memory being released, labelled as the opposite. The column ignored the engine's shape verdict the
+// drawer already read correctly, so one board rendered one fact two contradictory ways.
 test("MEMORY: the growth cell states the rate and passes no verdict", () => {
   const seal = (v) => ({ value: v, certified: true, suppressed: false });
   // shape: 1 climbing, 0 swinging, -1 releasing (engine codes, read via mcode not mval - 0 is real).
@@ -2438,10 +2196,8 @@ test("MEMORY: the growth cell states the rate and passes no verdict", () => {
       return col.get(data.gateways[0], st).text || "";
     } finally { app.state.data = saved; }
   };
-  // THE TABLE PRINTS THE NUMBER AND NOTHING ELSE (SHOW_GROWTH_VERDICT = false). The rate and its sign
-  // are the finding: +12.5 is a leak whether or not the word is printed, and -0.4 is not one whether
-  // or not it is. A verdict beside the number only creates a way to be wrong about somebody else's
-  // product, which is what happened - 22 cells read "(leak)" while their memory was falling.
+  // The table prints the number and nothing else (SHOW_GROWTH_VERDICT = false): a verdict beside the
+  // number only creates a way to be wrong (22 cells once read "(leak)" while memory was falling).
   for (const [rate, shape] of [[-0.4, -1], [12.5, 1], [0.3, 0]]) {
     const t = suffix(rate, shape);
     assert.doesNotMatch(t, /leak|releasing|swing/, `the cell states the rate alone: ${t}`);
@@ -2450,13 +2206,9 @@ test("MEMORY: the growth cell states the rate and passes no verdict", () => {
   assert.equal(app.SHOW_GROWTH_VERDICT, false, "the switch is off; flip it to true to bring the words back");
 });
 
-/* THE CONCURRENCY SELECTOR: the answer to "you gave busbar 4x the concurrency".
-
-   The default column shows each gateway at the rung where ITS throughput peaked - a measurement, not a
-   setting - but it renders as "77,248 @ 128 conc" beside "44,475 @ 32 conc", and a screenshot of that
-   cannot defend itself. Pinning a rung makes every row report the same concurrency, so whatever is
-   left is the gateway. The refutation was already measured: at c=128 litellm-rust carries 47,825,
-   within 0.5% of its own peak, and busbar leads at every rung. */
+/* The concurrency selector: the default column shows each gateway at its own peak rung, so a
+   screenshot comparing "77,248 @ 128 conc" to "44,475 @ 32 conc" can't defend itself. Pinning a rung
+   makes every row report the same concurrency, so whatever's left is the gateway. */
 test("CONC: pinning a rung ranks every gateway at that rung, and never invents one", () => {
   const seal = (v) => ({ value: v, certified: true, suppressed: false });
   const gw = (key, rungs) => ({
@@ -2479,15 +2231,14 @@ test("CONC: pinning a rung ranks every gateway at that rung, and never invents o
       app.state.conc = conc;
       return col.get(data.gateways.find((g) => g.key === key), { data, mode: "peak", bound: 10, conc });
     };
-    // THE SAME RUNG FOR EVERY ROW, and no per-row "@ N conc" - the header says it once.
+    // The same rung for every row; no per-row "@ N conc" - the header says it once.
     assert.equal(at(32, "fast").v, 75460);
     assert.equal(at(32, "slow").v, 48042);
     assert.doesNotMatch(at(32, "fast").text, /conc/, "the rung is in the header, not repeated per row");
     // And the ratio holds at the other rung, which is the whole point: 1.61x at 128, 1.57x at 32.
     assert.equal(at(128, "fast").v, 77018);
     assert.equal(at(128, "slow").v, 47825);
-    // A GATEWAY THAT NEVER DROVE THE RUNG READS n/a. Interpolating between the rungs it did drive
-    // would be the board inventing a measurement it never took.
+    // A gateway that never drove the rung reads n/a; interpolating would invent a measurement.
     const missing = at(128, "shallow");
     assert.ok(missing.na, "no reading at a rung this gateway never drove");
     assert.match(missing.note || "", /did not drive/, missing.note);
@@ -2513,8 +2264,7 @@ test("CONC: the selector defaults to Best and offers only the rungs the run drov
   assert.deepEqual(app.concChoices(data), [8, 32, 128]);
   // A board with no rungs offers nothing, so the control can hide rather than show a lone "Best".
   assert.deepEqual(app.concChoices({ gateways: [{ key: "old", best_cell: bcCell({}) }] }), []);
-  // Best is the default: a control that opened on a pinned rung would answer a question the reader has
-  // not asked, and the peak IS the honest headline for a single gateway.
+  // Best is the default: a control opening on a pinned rung would answer an unasked question.
   assert.equal(app.selectedConc({ conc: null }), null);
   assert.equal(app.selectedConc({ conc: 128 }), 128);
 });
@@ -2541,8 +2291,8 @@ test("COST: the CPU column names the concurrency its window ran at, from the dat
     const cpu = app.columnsFor("performance", withCost).find((c) => c.id === "cpu");
     const label = typeof cpu.label === "function" ? cpu.label() : cpu.label;
     assert.match(label, /c=8/, `the column states its window: ${label}`);
-    // NOT HARDCODED: the engine's COST_WINDOW_CONCURRENCY can move, and a stale literal would
-    // mislabel every row on the board.
+    // Not hardcoded: the engine's COST_WINDOW_CONCURRENCY can move, so a stale literal would mislabel
+    // every row.
     const moved = { gateways: [{ key: "a",
       best_cell: { ...bcCell({}), cpu_us_per_request: seal(9), cost_window_conc: seal(64) } }] };
     app.state.data = moved;
@@ -2555,8 +2305,7 @@ test("COST: the CPU column names the concurrency its window ran at, from the dat
 });
 
 test("COST: an absent cost renders 'not measured', never a 0 that would look infinitely efficient", () => {
-  // A gateway measured before the capture existed carries a null envelope. Rendering that as 0 would
-  // make the LEAST-measured gateway look like the cheapest one on the board.
+  // Rendering a null envelope as 0 would make the least-measured gateway look cheapest.
   const board = {
     gateways: [
       { key: "measured", best_cell: { ...bcCell({}), cpu_us_per_request: seal(40) } },
@@ -2571,26 +2320,21 @@ test("COST: an absent cost renders 'not measured', never a 0 that would look inf
 });
 
 test("FINDING 39: a sub-1/s rate survives every axis tick and every hover sentence", () => {
-  // THE RATE HAS NOW LEAKED AT SIXTEEN BOUNDARIES ACROSS FIVE AUDIT ROUNDS, always the same shape:
-  // one renderer is taught the fractional rate and a sibling reading the SAME number is missed. These
-  // pin the two that round 5 found, so the next miss is a red test rather than a published "0".
+  // A recurring class of bug: one renderer is taught the fractional rate and a sibling reading the
+  // same number is missed, publishing a "0" for a gateway that was measurably serving.
 
-  // fmtTick is the y-axis label formatter for the RPS sweep chart. niceStep correctly produces a
-  // sub-1 step for a sub-1 domain, so the gridlines were being drawn - and then every one of them
-  // was labelled "0", an axis whose entire scale read zero for a gateway that was measurably serving.
+  // fmtTick is the y-axis label formatter for the RPS sweep chart.
   assert.equal(app.fmtTick(0.25), "0.25");
   assert.equal(app.fmtTick(0.1), "0.1");
   assert.equal(app.fmtTick(0.04), "0.04");
-  // 0 is still "0" - it is a MEASURED zero, and the whole point is that it stays distinguishable
-  // from a truncated fraction rather than both rendering alike.
+  // A measured 0 stays distinguishable from a truncated fraction rather than both rendering alike.
   assert.equal(app.fmtTick(0), "0");
   // and nothing about the integer domain moved: these are what the published charts already show.
   assert.equal(app.fmtTick(1), "1");
   assert.equal(app.fmtTick(44382), "44.4k");
 
-  // cellPerfTip composes a "req/s" SENTENCE, and it was the last literal fmtInt() on a rate in app.js.
-  // Its integer form asserted the gateway carried nothing, from a reading that says otherwise - while
-  // frontierCell, the live equivalent reading the same envelope, printed "0.25".
+  // cellPerfTip was the last literal fmtInt() on a rate in app.js; its integer form asserted the
+  // gateway carried nothing, while frontierCell (reading the same envelope) printed "0.25".
   const best = bcCell({ ingress: "openai", egress: "openai", frontier: 30000 });
   const slow = { served: true, perf: cellPerf({ frontier: 0.25 }) };
   const tip = app.cellPerfTip(slow, "anthropic", "openai", best, 10);
@@ -2601,9 +2345,8 @@ test("FINDING 39: a sub-1/s rate survives every axis tick and every hover senten
 // ---- per-cell perf: best-path deviation on the matrix hover -----------------
 test("cellPerfTip shows a green cell's perf and its deviation from the gateway's best cell", () => {
   // cellPerfTip reads the sealed envelopes via mval(): a certified cell + reference show the number + delta;
-  // an envelope with no value cannot become a number on hover (asserted in the next test).
-  // THE RATE IS NAMED WITH ITS BOUND - "while 99% of requests finished under 10 ms" - and both sides of the
-  // delta are read at the SAME bound, or the percentage would be between two different questions.
+  // an envelope with no value cannot become a number on hover (asserted in the next test). Both sides
+  // of the delta are read at the same bound, or the percentage would compare two different questions.
   const best = bcCell({ ingress: "openai", egress: "openai", frontier: 30000 });
   const green = { served: true, perf: cellPerf({ frontier: 25500, added_latency_p99_us: 900 }) };
   const tip = app.cellPerfTip(green, "anthropic", "openai", best, 10);
@@ -2612,8 +2355,8 @@ test("cellPerfTip shows a green cell's perf and its deviation from the gateway's
   assert.ok(tip.includes("-15.0% req/s vs the OpenAI→OpenAI cell"), tip); // human labels, not raw dialect keys
   const bestTip = app.cellPerfTip({ served: true, perf: cellPerf({ frontier: 30000 }) }, "openai", "openai", best, 10);
   assert.ok(bestTip.includes("reference cell"), bestTip);
-  // A FLOOR SAYS SO ON THE HOVER TOO: the sweep ran out of ladder with that concurrency still qualifying,
-  // so the rate is real and is not a maximum. Rendering it as a bare number would state a ceiling.
+  // A floor says so on the hover too: the sweep ran out of ladder while still qualifying, so the
+  // rate is real but not a maximum - a bare number would falsely state a ceiling.
   const floorTip = app.cellPerfTip(
     { served: true, perf: cellPerf({ frontier: 25500, frontierOpts: { lowerBound: true }, added_latency_p99_us: 900 }) },
     "anthropic", "openai", best, 10);
@@ -2654,10 +2397,9 @@ test("FINDING 33: cellPerfTip renders only what the envelope carries - an absent
   const t = app.cellPerfTip({ served: true, perf: cellPerf({ frontier: 25500, added_latency_p99_us: 900 }) }, "anthropic", "openai", noRef, 10);
   assert.ok(t.includes("25,500 req/s while 99% of requests finished under 10 ms"), t);
   assert.ok(!t.includes("vs the"), `no delta against a reference with no number; got: ${t}`);
-  /* AND THE BOUND IS THE ONE THE CALLER ASKED FOR, on both sides. This is the failure mode a bound selector
-     introduces and the retired scalars could not have: a surface still showing the previous bound's number
-     after the reader switched. Reading the same pair at 1 ms must produce the 1 ms figures and the 1 ms
-     delta - a shape where the two bounds disagree is exactly the divergence this family of tests forbids. */
+  /* The bound is the one the caller asked for, on both sides: a bound selector can leave a surface
+     showing the previous bound's number after the reader switches, so the number and its delta must
+     agree on the same bound. */
   const shaped = { served: true, perf: cellPerf({ frontier: { 1: 5000, 10: 25500, none: 26000 }, added_latency_p99_us: 900 }) };
   const shapedBest = bcCell({ ingress: "openai", egress: "openai", frontier: { 1: 10000, 10: 30000, none: 31000 } });
   const at1 = app.cellPerfTip(shaped, "anthropic", "openai", shapedBest, 1);
@@ -2681,11 +2423,9 @@ function stubCanvas() {
   return { width: 520, height: 230, getContext: () => ctx, calls };
 }
 
-// NIT-4: prefer the CANONICAL matrix best_cell sweep arrays (the single source the drawer actually
-// charts) over the RETIRED results/perf/<gw>.json. Scan every gateway's matrix diagonal for a cell that
-// carries the sweep arrays; fall back to the perf suite only if no matrix arrays exist yet (the shipped
-// bundle predates the array-emitting matrix/run.sh - MED-5 coverage gap). existsSync-guarded so a
-// cleaned results/perf/ (retirement) never ENOENT-crashes this test.
+// Prefer the canonical matrix best_cell sweep arrays over the retired results/perf/<gw>.json; fall
+// back to the perf suite only if no matrix arrays exist yet. existsSync-guarded so a cleaned
+// results/perf/ never ENOENT-crashes this test.
 function committedSweep() {
   const mdir = join(ROOT, "results", "matrix");
   if (existsSync(mdir)) {
@@ -2700,8 +2440,8 @@ function committedSweep() {
       }
     }
   }
-  // Legacy fallback: whatever results/perf/*.json happens to be on disk. DISCOVERED, never a named
-  // file - naming one made this helper silently return null the day that gateway was renamed or removed.
+  // Legacy fallback: whatever results/perf/*.json is on disk, discovered rather than a named file
+  // (a named file would silently return null the day that gateway was renamed or removed).
   const pdir = join(ROOT, "results", "perf");
   if (existsSync(pdir)) {
     for (const f of readdirSync(pdir).filter((x) => x.endsWith(".json")).sort()) {
@@ -2713,10 +2453,8 @@ function committedSweep() {
   return null;
 }
 
-// A synthetic stand-in for `committedSweep()`, same shape (conc/rps rungs, doubling concurrency),
-// used ONLY when no committed sweep data exists on disk (a clean checkout, an empty board, CI before
-// any field run has ever published), so the test below always exercises `drawSweep` rather than passing
-// by skipping on a bare board.
+// A synthetic stand-in for `committedSweep()`, used only when no committed sweep data exists on disk,
+// so the test below always exercises `drawSweep` rather than passing by skipping on a bare board.
 function syntheticSweep() {
   const rung = (conc, rps) => ({ conc, rps, p99_us: 9_000, fail: 0 });
   return {
@@ -2750,8 +2488,8 @@ test("sweep chart marks the published peak and honors a shared x-domain", () => 
     points: [{ x: 32, y: 45061 }, { x: 52, y: 45995 }, { x: 256, y: 39747 }],
     mark: { x: 52, y: 45995, label: "45,995 @ c=52" },
   }];
-  // shared x-domain wider than this series' own probed range: X() must span the shared domain, so
-  // the two stacked charts (RPS + p99) align on ONE concurrency axis.
+  // Shared x-domain wider than this series' own probed range: X() must span it, so the two stacked
+  // charts (RPS + p99) align on one concurrency axis.
   const geo = app.drawSweep(canvas, series, { yLabel: "RPS", xDomain: [8, 2048] });
   assert.ok(geo, "geometry back");
   // the shared domain sets the axis extremes (log scale): X(8) is the left edge, X(2048) the right
@@ -2836,11 +2574,8 @@ test("gen-data preserves the per-cell verdict_note reason for grey cells", () =>
 // anthropic diagonal, and an openai->anthropic translation cell.
 const CHOOSER_GW = {
   key: "cg", display: "CG", lang: "Rust",
-  // Each cell carries its own frontier, and the three have DIFFERENT SHAPES on purpose: the openai
-  // diagonal is nearly flat (30,000 at 1 ms), the anthropic diagonal needs a loose tail to reach its own
-  // ceiling (12,000 at 1 ms, 25,000 unbounded), the translation cell sits between them. A chooser that
-  // read the wrong cell used to show a wrong number; it can now also show a wrong SHAPE, which is the
-  // thing a reader is being asked to compare.
+  // Each cell's frontier has a different shape on purpose (flat/loose-tail/between), so a chooser
+  // reading the wrong cell can now show a wrong shape, not just a wrong number.
   best_cell: bcCell({ dialect: "openai", added_latency_p50_us: 100, added_latency_p99_us: 110,
     frontier: { 1: 29000, 10: 30000, none: 32000 } }),
   matrix: { upstreams: {
@@ -2855,24 +2590,15 @@ const CHOOSER_GW = {
 };
 
 test("cell chooser: a shared ?mode= link renders the mode it names, and a tab flip is lossless", () => {
-  /* FOUND BY SCREENSHOTTING EVERY VIEW x EVERY MODE and comparing the control to the URL that produced it:
-     /gateways/performance?mode=same&d=openai rendered OWN CELL, with "?mode=same&d=openai" still in the
-     address bar. Every ?mode= link ever shared to a perf tab showed the wrong cells under a URL that named
-     the right ones, and on memory every ?mode= link showed Min. decodeUrl was never at fault - it parses the
-     mode correctly - showView threw it away one line later.
-
-     THE MECHANISM. showView set `state.view = view` and THEN computed `modeFamily(state.view)` as the view
-     being LEFT, so leaving and arriving always compared equal, the stash branch was unreachable, and what
-     actually ran on every render was `state.mode = resolveMode(modeMemo[family])`. The memo is pre-seeded
-     (perf:"peak", memory:"min"), so `?? state.mode` never fell through and the seed won every time.
-
-     Asserted on modeOnArrival, the pure decision showView now delegates to, because showView is DOM-bound and
-     this has to be provable without a browser. The source-order guard below is what stops the two lines from
-     being swapped back. */
+  /* Every ?mode= link ever shared to a perf tab showed the wrong cells despite decodeUrl parsing the
+     mode correctly: showView set state.view = view and THEN computed modeFamily(state.view) as the
+     view being left, so leaving and arriving always compared equal and the memo's seed always won.
+     Asserted on modeOnArrival, the pure decision showView delegates to, since showView is DOM-bound.
+     The source-order guard below stops the two lines from being swapped back. */
   const seed = { perf: "peak", memory: "min" };
 
-  // A SAME-FAMILY ARRIVAL KEEPS THE MODE IT WAS GIVEN. This is the deep-link case: boot decodes ?mode=same
-  // into state and the first render must not overwrite it - and neither must the second, or a re-render.
+  // A same-family arrival keeps the mode it was given (the deep-link case): boot decodes ?mode=same
+  // into state and neither the first render nor a re-render may overwrite it.
   for (const m of ["peak", "same", "custom"])
     assert.equal(app.modeOnArrival("performance", "performance", m, seed).mode, m,
       `a re-render of the view you are on must not replace ?mode=${m} with the memo's seed`);
@@ -2883,9 +2609,9 @@ test("cell chooser: a shared ?mode= link renders the mode it names, and a tab fl
   for (const m of ["min", "max", "same", "custom"])
     assert.equal(app.modeOnArrival("memory", "memory", m, seed).mode, m, `?mode=${m} must survive on memory`);
 
-  /* A CROSS-FAMILY FLIP STILL COERCES, AND IS STILL LOSSLESS - the behaviour the memo exists for, which was
-     dead code until now. Custom on Performance -> Memory coerces to the memory family's remembered mode, and
-     coming back restores Custom rather than the coercion memory forced. */
+  /* A cross-family flip still coerces and is still lossless - the behavior the memo exists for.
+     Custom on Performance -> Memory coerces to memory's remembered mode; coming back restores
+     Custom rather than the coercion memory forced. */
   const toMem = app.modeOnArrival("performance", "memory", "custom", seed);
   assert.equal(toMem.mode, "min", "memory renders its own family's mode, never a perf-selected one");
   assert.equal(toMem.memo.perf, "custom", "and the outgoing family's choice is stashed, not discarded");
@@ -2896,11 +2622,11 @@ test("cell chooser: a shared ?mode= link renders the mode it names, and a tab fl
   assert.equal(app.modeOnArrival("performance", "memory", "peak", { perf: "peak" }).mode, "min",
     "peak selects on throughput, which is exactly what a memory number must not be selected by");
 
-  /* THE SOURCE-ORDER GUARD. The defect was one line in the wrong order, and it is invisible in behaviour
-     until you compare a rendered control to the URL beside it, so it is pinned here in the shape it broke. */
+  // The source-order guard: the defect was one line in the wrong order, invisible in behavior until
+  // compared to the URL beside it, so it's pinned here.
   const src = readFileSync(join(HERE, "app.js"), "utf8");
-  // Matched on STATEMENT LINES, not on substrings: the comment above the fix quotes `state.view = view`
-  // verbatim to explain the defect, and a substring search would find the prose before the code.
+  // Matched on statement lines, not substrings, since the comment above the fix quotes state.view = view
+  // verbatim and a substring search would find the prose instead of the code.
   const lines = src.slice(src.indexOf("function showView(view) {")).split("\n");
   const at = (re) => lines.findIndex((l) => re.test(l));
   const iLeaving = at(/^\s*const leaving = modeFamily\(state\.view\);\s*$/);
@@ -2926,8 +2652,8 @@ test("cell chooser: Peak reads the best diagonal, Same reads a chosen diagonal, 
   const cust = { ...app.newState(), mode: "custom", xlateIn: "openai", xlateOut: "anthropic" };
   assert.equal(app.chooserPerfCell(g, "added_latency_p99_us", String, cust).text, "145");
   assert.equal(app.frontierChooserCell(g, cust).v, 26000);
-  // AND THE CHOSEN CELL'S SHAPE TRAVELS WITH IT. The three cells have different curves; the shape column
-  // must read the chosen one, or the row shows one cell's rate beside another cell's slope.
+  // The chosen cell's shape travels with it: the shape column must read the chosen one, or the row
+  // shows one cell's rate beside another cell's slope.
   assert.equal(app.frontierShapeCell(g, peak).text, `${app.heldPct(29000 / 32000)}% of its full rate at ${app.boundLabel(1)}`);
   assert.equal(app.frontierShapeCell(g, same).text, `${app.heldPct(12000 / 27000)}% of its full rate at ${app.boundLabel(1)}`);
   // Not the same share, because they are not the same cell: 91% against 44%.
@@ -2961,24 +2687,13 @@ test("Cluster-B: drawer/compare (laneRecord) read the SAME chosen cell as the ta
     app.mval(app.canonicalPerf(g).rps_sustained_20ms), "Peak lane record == canonicalPerf");
 });
 
-// Finding 22 was that the drawer chart plotted a curve for a metric the table showed no number for, so
-// the chart contradicted the cell beside it. The fix was structural: the sweep array travels INSIDE the
-// sealed envelope (env.sweep), so a metric with no published value has no curve to plot either.
-//
-// The state the test used to demonstrate that with was a suppression - a `mock_bound: true` sustained
-// whose 99,999 and whose sweep were both discarded at seal time. A near-ceiling number is now published,
-// and its curve is published WITH it: that curve is the evidence for exactly the reading a reader most
-// needs to weigh, and dropping it was the second half of the same mistake. The invariant survives
-// against the state that genuinely publishes nothing - a metric that was never measured on this cell.
-/* THE DRAWER/COMPARE CURVE IS ONE SWEEP, MARKED AT THE SELECTED BOUND.
-   This test used to assert that perfSweepSeries plotted TWO curves (the sustained sweep and the max-proxy
-   sweep) and dropped either one whose headline was absent. Both halves are gone with the two metrics: they
-   were ONE sweep read twice, so the "two curves" were the same rungs drawn twice with two markers, and the
-   pair could disagree with itself. The cell now publishes that sweep ONCE (`rec.sweep`) and every reading is
-   a maximum over a subset of it, so the properties worth guarding are the ones asserted here:
-     - one series, off the cell's own rungs, chooser-aware (it must be the CHOSEN cell's sweep);
-     - the marker is the reading AT THE SELECTED BOUND, at the concurrency that reading names - so the dot a
-       reader sees is the number the ranked column shows, and moving the bound moves the dot;
+// Finding 22 was the drawer chart plotting a curve for a metric the table showed no number for. Fixed
+// structurally: the sweep array travels inside the sealed envelope (env.sweep), so a metric with no
+// published value has no curve to plot either - including the state that genuinely publishes nothing.
+/* The drawer/compare curve is one sweep, marked at the selected bound (the cell publishes its sweep
+   once via rec.sweep, and every reading is a maximum over a subset of it). Properties guarded here:
+     - one series, off the cell's own rungs, chooser-aware (must be the CHOSEN cell's sweep);
+     - the marker is the reading at the selected bound, at the concurrency that reading names;
      - a cell with no rungs plots nothing rather than an empty frame captioned as a measurement. */
 test("Cluster-B/22: perfSweepSeries plots the ONE sweep, chooser-aware, marked at the selected bound", () => {
   const colors = { sustained: "#4cc38a", max: "#6cb6ff" };
@@ -2996,8 +2711,8 @@ test("Cluster-B/22: perfSweepSeries plots the ONE sweep, chooser-aware, marked a
   assert.equal(peak[0].peak.rps, 30000, "marked at the reading for the selected bound");
   assert.equal(peak[0].peak.conc, 64, "at the concurrency that reading names");
   assert.match(peak[0].label, /10 ms/, "and the label says which bound the mark is");
-  // MOVE THE BOUND: the same rungs, a different mark. A curve whose marker did not follow the selector
-  // would show the reader a dot that is not the number in the column beside it.
+  // Same rungs, different mark: a curve whose marker didn't follow the selector would show a dot
+  // that isn't the number in the column beside it.
   const at1 = app.perfSweepSeries(withSweep, colors, { ...app.newState(), mode: "peak", bound: 1 });
   assert.equal(at1[0].peak.rps, 20000);
   assert.match(at1[0].label, /1 ms/);
@@ -3069,12 +2784,11 @@ test("Δ-to-Peak: a non-peak cell reports its deviation vs the gateway's own bes
   const d = app.deltaToPeak(cp, g.best_cell, 10);
   // p99 145 vs 110 = +31.8% latency; 26,000 vs 30,000 at the 10 ms bound = -13.3% req/s.
   assert.ok(/\+31\.8% latency/.test(d), d);
-  // THE THROUGHPUT HALF NAMES ITS BOUND. Both sides are read at the same one, and the label says which:
-  // a bare "-13.3% RPS" over a board with six published readings is a percentage between two unstated
-  // questions, which is the ambiguity the two retired scalars shipped with.
+  // The throughput half names its bound: a bare "-13.3% RPS" over six published readings would be a
+  // percentage between two unstated questions.
   assert.ok(/-13\.3% req\/s at 10 ms/.test(d), d);
-  // At a DIFFERENT bound the same pair of cells deviates differently, because the two cells have different
-  // shapes - which is the finding, and it is invisible if the delta is computed at one hidden bound.
+  // At a different bound the same pair of cells deviates differently (different shapes), which is
+  // invisible if the delta is computed at one hidden bound.
   const at1 = app.deltaToPeak(cp, g.best_cell, 1);
   assert.ok(/-31\.0% req\/s at 1 ms/.test(at1), at1);
   // The peak cell itself has no delta.
@@ -3105,13 +2819,13 @@ testWithData("matrix popup shows the SAME chosen-cell values the Performance/Cus
       "the table reads the same reading at the same bound");
   } finally { app.state.bound = prev; }
   // … and the Δ-to-Peak vs the gateway's own best diagonal.
-  // "vs its own cell", NOT "vs peak": best_cell prefers the openai diagonal and otherwise ranks on latency,
-  // so it is a representative cell and a positive req/s delta against it is ordinary, not impossible.
+  // "vs its own cell", not "vs peak": best_cell is a representative cell (openai diagonal, else ranked
+  // on latency), so a positive req/s delta against it is ordinary, not impossible.
   assert.ok(/vs its own cell \(OpenAI→OpenAI\)/.test(html), "popup names the reference cell without calling it a peak");
   assert.ok(!/vs peak/.test(html), "and never calls it the peak");
   assert.ok(/\+31\.8% latency/.test(html), "popup shows Δ latency");
-  // THE SHAPE IS ON THE POPUP TOO: a rate alone cannot say whether this cell is fast because the tail was
-  // allowed to grow, which is what the matrix is most often opened to find out.
+  // The shape is on the popup too: a rate alone can't say whether this cell is fast because the tail
+  // was allowed to grow.
   assert.ok(/frontier-spark/.test(html), "the popup carries the cell's own curve");
   // The consistency guard proves popup == table per cell on the whole bundle (no divergence ships).
   const { errors } = checkConsistency(data, app);
@@ -3199,36 +2913,24 @@ test("URL round-trips the chooser mode + selection (peak / same / custom)", () =
 });
 
 /* ================================================================================================
-   AUDIT GROUP C - the 11th-phase MISSING TESTS. Each block is a CLASS test (one test covering all the
-   siblings of a finding), and each carries its RED-before proof: the assertion is written so that
-   reverting the fix makes it fail, and where the subject is a LINT the lint is driven against synthetic
-   source that CONTAINS the violation, so "the check works" is demonstrated rather than assumed.
+   AUDIT GROUP C - the 11th-phase MISSING TESTS. Each block is a CLASS test (covers all siblings of a
+   finding) with a RED-before proof: reverting the fix makes it fail; a lint is driven against
+   synthetic source containing the violation, so "the check works" is demonstrated, not assumed.
    ================================================================================================ */
 
 // ---- sealMetric(), the single honesty choke point, is tested DIRECTLY -----------------------
-// The fixture helpers call the REAL exported function, so every "honesty" test in this file is a test OF
-// seal.mjs rather than of a copy that could silently diverge; these cases pin the contract itself.
 test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copied logic in the tests)", () => {
-  // The fixture builders must be wired to the REAL seal - this is what makes every other test in this
-  // file a test OF seal.mjs rather than of a copy that can silently diverge.
+  // Fixture builders are wired to the real seal, so every "honesty" test here tests seal.mjs itself.
   assert.equal(seal, sealMetric, "test fixtures must seal through the REAL seal.mjs export");
   // (a) absent -> NOT MEASURED (never suppressed: nothing was hidden, nothing was measured).
   assert.deepEqual(sealMetric(null), { value: null, certified: false, suppressed: false, reason: "not_measured" });
   assert.deepEqual(sealMetric(undefined), { value: null, certified: false, suppressed: false, reason: "not_measured" });
-  // (b) PRESENT -> always certified. There is no second condition any more: this used to be the "ungated"
-  //     case (latency/RSS, which had no mock-bound flag) and it is now the whole rule. A present ZERO is
-  //     certified too, and case (d) below pins its shape, because a 0 additionally carries a note.
+  // (b) PRESENT -> always certified, including a zero (case (d) pins its shape with a note).
   assert.deepEqual(sealMetric(12.5), { value: 12.5, certified: true, suppressed: false });
-  // (c) A PRESENT NUMBER IS PUBLISHED, whatever the comparison says about it.
-  //
-  //     This case used to be the gate: `sealMetric(100, {gated: true, flag: true})` returned
-  //     {value: null, certified: false, suppressed: true, reason: "mock_bound"}, and a `null` flag (no
-  //     usable reference) returned the same with reason "unverifiable". Both threw away a measurement the
-  //     harness had taken correctly, on the strength of a comparison against our own rig - and hardest on
-  //     the gateways that came closest to keeping up. Nothing about the number was in doubt; only how to
-  //     weigh it, and the answer to that is to publish the weighing, not to delete the number.
-  //
-  //     So the facts ride ON the certified envelope, and the seal reaches no conclusion:
+  // (c) A present number is published regardless of the comparison. Formerly a `gated`/`flag` pair
+  //     could suppress it to {value:null, reason:"mock_bound"} or "unverifiable" - deleting correct
+  //     measurements, worst for the gateways closest to keeping up. Now the facts ride on the
+  //     certified envelope instead, and the seal reaches no conclusion:
   assert.deepEqual(sealMetric(100, { headroom: 0.83, ceiling: 120 }),
     { value: 100, certified: true, suppressed: false, headroom: 0.83, rig_ceiling: 120 },
     "a near-ceiling number publishes, with the fraction and the ceiling a reader needs to weigh it");
@@ -3237,26 +2939,19 @@ test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copie
     "even AT the ceiling: 0.999 is a fact about the comparison, never a reason to withhold the number");
   assert.deepEqual(sealMetric(100), { value: 100, certified: true, suppressed: false },
     "and no usable reference costs the FACTS, not the value - it used to cost both");
-  // (d) a measured 0 is CERTIFIED and carries a note naming what the zero MEANS: never folded into
-  //     {value:null, reason:"not_measured"}, which would publish a measured FAILURE as an unmeasured cell.
-  //
-  //     THE NOTE IS PER-FIELD, NOT A DEFAULT. This case asserted that a bare `sealMetric(0, {})` came
-  //     back annotated ZERO_NO_CEILING, because the note used to be the default argument and the caller
-  //     only reached it under a `gated` flag. With the gate gone the default became live for every field,
-  //     and 37 `growth_rate_mib_per_min` zeros and 6 `added_gap_p50_us` zeros shipped claiming "served,
-  //     but no tested load held p99 < 1 s at <0.1% errors" - a sentence about a throughput ceiling,
-  //     rendered on a memory growth rate. `zeroNoteFor` now answers null outside the two families that
-  //     have such a meaning, so an unannotated zero stays a bare 0.
+  // (d) a measured 0 is certified and carries a note naming what the zero means, never folded into
+  //     {value:null, reason:"not_measured"} (which would publish a measured failure as unmeasured).
+  //     The note is per-field, not a default: `zeroNoteFor` answers null outside the two families that
+  //     have such a meaning, so an unannotated zero stays a bare 0 rather than borrowing an unrelated
+  //     sentence (a prior bug shipped a throughput-ceiling sentence on memory growth-rate zeros).
   assert.deepEqual(sealMetric(0, {}),
     { value: 0, certified: true, suppressed: false },
     "a zero on a field with no zero-note vocabulary must not borrow a throughput sentence");
   assert.equal(zeroNoteFor("growth_rate_mib_per_min"), null,
     "and the ONE place that mapping lives must be the thing that says so");
-  /* THE FIELD THAT STILL CARRIES THIS NOTE IS A STREAMING ONE. It used to be `rps_max_proxy`: a throughput
-     ceiling whose zero meant "served, but no tested load held the qualifying gates". That metric is
-     deleted, and a frontier reading has no zero of that kind at all - a bound no rung qualified at is an
-     ABSENCE with the engine's own reason, not a certified 0. `streams_sustained` is the surviving member of
-     the family (seal.mjs THROUGHPUT_FIELDS), so it is what proves the per-field mapping still works. */
+  /* The retired rps_max_proxy carried this note; that metric is gone, and a frontier reading has no
+     zero of that kind (an unqualified bound is an absence, not a certified 0). streams_sustained is
+     the surviving THROUGHPUT_FIELDS member, proving the per-field mapping still works. */
   assert.deepEqual(sealMetric(0, { zeroNote: zeroNoteFor("streams_sustained") }),
     { value: 0, certified: true, suppressed: false, note: ZERO_MEASURED_FAIL },
     "a surviving throughput field's zero carries its own note, and says which zero it is");
@@ -3276,9 +2971,9 @@ test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copie
   const absent = sealMetric(null, { extras: { concurrency: 8, conc_at: 16 }, headroom: 0.5, ceiling: 100 });
   assert.deepEqual(Object.keys(absent).filter((k) => typeof absent[k] === "number"), [],
     "an absent envelope must carry NO recoverable numeric field - not an extra, not a ceiling");
-  // (f) the raw scalar and its engine siblings are CONSUMED - the retired `*_mock_bound` verdict cannot
-  //     reappear under any name, and the facts that replaced it are published under their OWN names
-  //     (`headroom`, `rig_ceiling`), never as the raw `<field>_headroom` key C1 refuses.
+  // (f) the raw scalar and its engine siblings are consumed - the retired *_mock_bound verdict cannot
+  //     reappear under any name, and the replacement facts publish under their own names, never the
+  //     raw <field>_headroom key C1 refuses.
   for (const env of [withExtras, absent, sealMetric(0, {}), sealMetric(100, { headroom: 0.83, ceiling: 120 })])
     for (const k of Object.keys(env))
       assert.ok(!/_(mock_bound|headroom|rig_ceiling|mock_ceiling)$/.test(k),
@@ -3286,9 +2981,8 @@ test("#24 CLASS: the REAL sealMetric() is the honesty choke point (no hand-copie
 });
 
 test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an unmeasured one", () => {
-  // The site: a measured 0 shows the number 0 with a MEASURED-FAILURE note; an unmeasured one reads n/a.
-  // Publishing "the gateway was offered stream load and sustained none of it" as "not measured" would
-  // flatter the gateway, so null - an absent field - is the ONLY not-measured state.
+  // A measured 0 shows "0" with a measured-failure note; an unmeasured one reads n/a. Publishing a
+  // sustained-none-of-it failure as "not measured" would flatter the gateway.
   const failed = app.metric(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }), String);
   const unmeasured = app.metric(sealMetric(null), String);
   assert.equal(failed.text, "0");
@@ -3297,11 +2991,9 @@ test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an un
   assert.equal(unmeasured.text, "not measured");
   assert.equal(unmeasured.na, true);
   assert.match(unmeasured.note, /not measured/);
-  // AND THERE IS NO THIRD STATE. This used to assert that a rig-limited 1300 was one - a suppressed
-  // envelope reading n/a with a "rig-limited" note, "never conflated with either" of the two above. It
-  // was a third state only because the seal invented it: the harness measured 1300 streams and the board
-  // showed a blank. A near-ceiling reading is now simply a measurement, so it renders as its number and
-  // the only two no-number states left are the honest ones - a measured 0 and an absence.
+  // There is no third state: a rig-limited reading used to be a suppressed envelope reading n/a, a
+  // state the seal invented (the harness measured 1300 streams and the board showed a blank). A
+  // near-ceiling reading is now simply a measurement, and the only two no-number states are honest.
   const atCeiling = app.metric(sealMetric(1300, { headroom: 0.98, ceiling: 1326 }), String);
   assert.equal(atCeiling.na, false, "a near-ceiling stream count is a number, not a state");
   assert.equal(atCeiling.text, "1300");
@@ -3309,8 +3001,8 @@ test("#3 CLASS: a MEASURED stream-sustain failure renders differently from an un
 });
 
 test("a measured FAILURE renders red with its counts, never as the n/a an untested cell gets", () => {
-  // one-api's c=1 leg after the restart bug: 0 ok, 14201 fail. The owner's rule: a failure is marked
-  // in the cell - digits prove the measurement ran, red says the gateway failed it.
+  // one-api's c=1 leg after the restart bug: 0 ok, 14201 fail. Rule: a failure is marked in the
+  // cell - digits prove the measurement ran, red says the gateway failed it.
   const env = sealMetric(null, { absent: { reason: "not_measured",
     detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" } });
   const cell = app.metric(env, String);
@@ -3348,18 +3040,15 @@ test("a measured FAILURE renders red with its counts, never as the n/a an untest
 });
 
 test("a measured zero's meaning is VISIBLE on the table cell, not only in a hover tooltip", () => {
-  // The 2026-07-28 board rendered rps_sustained_20ms=0 as a bare "0" beside a real maximum, which
-  // reads as "this gateway does nothing". The td writer now prints the short reason under the number.
+  // A bare "0" beside a real maximum reads as "this gateway does nothing"; the td writer now prints
+  // the short reason under the number.
   const zeroCeiling = app.metric(sealMetric(0, { zeroNote: ZERO_NO_CEILING }), String);
   assert.match(app.metricTd(zeroCeiling), /class=""/);
   assert.match(app.metricTd(zeroCeiling), /<span class="zero-why">no load held the gate<\/span>/);
   const zeroFail = app.metric(sealMetric(0, { zeroNote: ZERO_MEASURED_FAIL }), String);
   assert.match(app.metricTd(zeroFail), /<span class="zero-why">measured failure<\/span>/);
-  // A plain zero on a field with NO zero-note vocabulary (memory growth 0.0, an added gap of 0) renders
-  // bare, exactly as before. ZERO_WHY is keyed by the envelope's own note token, and the two tokens mean
-  // "no tested load held the qualifying gates" (RPS ceilings) and "offered stream load, sustained none"
-  // (streaming counts) - neither is a true statement about a memory growth rate, so an untagged zero must
-  // arrive at the td with no note for the writer to render. seal.mjs's own header states the same scope.
+  // A plain zero on a field with no zero-note vocabulary (memory growth, added gap) renders bare.
+  // ZERO_WHY is keyed by the envelope's own note token; an untagged zero carries no note to render.
   const plainZero = app.metric(sealMetric(0, {}), String);
   assert.ok(!app.metricTd(plainZero).includes("zero-why"), "an unannotated zero stays a bare 0");
   // And n/a cells are untouched by the writer refactor.
@@ -3367,10 +3056,8 @@ test("a measured zero's meaning is VISIBLE on the table cell, not only in a hove
 });
 
 test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and is never a bare n/a", () => {
-  // The engine publishes a difference that came out at or under the rig's resolution as
-  // {reason:"below_resolution", detail:"..."} in the cell's absences map. That is the BEST result the
-  // comparison can express; rendering it as n/a turned a win into a hole (APISIX published an
-  // added-gap p99 with no p50 - impossible for one distribution - on the 2026-07-28 board).
+  // A below-resolution difference is {reason:"below_resolution", detail:"..."} in the cell's absences
+  // map - the best result the comparison can express; rendering it as n/a would turn a win into a hole.
   const absent = { reason: "below_resolution", detail: "the gateway's own inter-frame gap at this percentile (20073us) came in under the mock's (21070us)" };
   const env = sealMetric(null, { absent });
   assert.equal(env.value, null, "the envelope still carries NO number - 0 was not measured");
@@ -3383,9 +3070,8 @@ test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and 
   assert.match(cell.note, /came in under the mock's/, "the tooltip carries the engine's own evidence");
   // mval agrees with metric(): the compare table and deltas rank it as 0, not as missing.
   assert.equal(app.mval(env), 0);
-  // The oracle derives the same display from the RAW artifact, or R1 would block every deploy. Its
-  // signature is (raw, absentReason): the flag and the gated/paced pair it also used to take were the
-  // retired suppression's inputs and are gone from both sides of the rule.
+  // The oracle derives the same display from the raw artifact, or R1 would block every deploy. Its
+  // signature is (raw, absentReason) - the retired flag/gated/paced inputs are gone from both sides.
   assert.equal(oracleExpected(null, "below_resolution"), 0);
   assert.equal(oracleExpected(null, "not_measured"), null,
     "every OTHER absence still displays as nothing");
@@ -3402,13 +3088,8 @@ test("#2b CLASS: a below-resolution difference renders as ≈0, ranks as 0, and 
 });
 
 // ---- #25: the snapshot ingest path (task #65) had NO test at all ----------------------------------
-// certifyRepo(root, mutate?): apply an optional edit to buildStreamMemRepo's matrix artifact on the way
-// in, so the tests below assert on the SELECTION they exist to test.
-//
-// It used to also stamp `*_mock_bound: false` into every cell, because without the flag a gated RPS
-// sealed to "unverifiable" and published nothing - so a test about which snapshot wins would have failed
-// on the honesty gate instead. There is no gate to satisfy now (a present number is published, annotated
-// with the comparison's facts), so the stamping is gone and the helper does only what its name says.
+// certifyRepo(root, mutate?): apply an optional edit to buildStreamMemRepo's matrix artifact on the
+// way in, so the tests below assert on the selection they exist to test.
 function certifyRepo(root, mutate) {
   const mpath = join(root, "results", "matrix", "sgw.json");
   const m = JSON.parse(readFileSync(mpath, "utf8"));
@@ -3422,11 +3103,10 @@ function writeSnapshot(root, key, { measuredAt, matrix, files }) {
     JSON.stringify({ gateway: key, measured_at: measuredAt, matrix, config: files ? { files } : undefined }));
 }
 test("the ootb_config pointer is UNTRUSTED: a path that escapes results/ is refused, never read", () => {
-  // The pointer arrives inside a producer-written results JSON and its CONTENTS are published verbatim
-  // onto a public page. A `..` in it therefore reads an arbitrary local file straight onto the board.
-  // Nothing malicious is required for this to bite - a producer bug writing an absolute or relative
-  // path would exfiltrate a file rather than fail - so the shape the harness actually writes
-  // (config/<key>.txt) is allowlisted and anything else is refused LOUDLY, not silently ignored.
+  // The pointer's contents are published verbatim onto a public page, so a `..` in it would read an
+  // arbitrary local file straight onto the board - not necessarily malicious, a producer bug writing
+  // a bad path would exfiltrate a file. The shape the harness writes (config/<key>.txt) is allowlisted;
+  // anything else is refused loudly.
   for (const bad of ["../../lib/harness.sh", "/etc/passwd", "config/../../README.md",
     "config/sub/dir.txt", "notconfig/x.txt", "config/x.yaml"]) {
     const root = buildStreamMemRepo();
@@ -3454,9 +3134,8 @@ test("the ootb_config pointer is UNTRUSTED: a path that escapes results/ is refu
 });
 
 test("a DEGRADED-MODE snapshot must never become the board's source just by being newer", () => {
-  // A local verify-local run with KEEP_ARTIFACTS=1 leaves its snapshot in results/snapshots/; without
-  // this guard, recency alone would let that probe-only snapshot (1 cell, no perf, no streaming, no
-  // memory, no best_cell) silently shadow a complete field run.
+  // A local verify-local run leaves a probe-only snapshot in results/snapshots/; without this guard,
+  // recency alone would let it silently shadow a complete field run.
   const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
   const probeOnly = (at) => ({ gateway: "sgw", build: "local", matrix_version: 2, served: true,
     measured_at: at, cell_perf_sweep: false, cell_stream: false, cell_memory: false,
@@ -3472,8 +3151,8 @@ test("a DEGRADED-MODE snapshot must never become the board's source just by bein
       return true;
     }, "a probe-only snapshot must never silently replace a complete run");
   }
-  // (b) GREEN: a newer FULL run supersedes normally, even when it found FEWER served cells. A re-run
-  //     that finds less IS the new truth; this guard is about the run's MODE, never about its numbers.
+  // (b) GREEN: a newer full run supersedes normally even when it found fewer served cells - a re-run
+  //     finding less is the new truth; this guard is about the run's mode, not its numbers.
   {
     const root = buildStreamMemRepo();
     const fullButEmptier = { gateway: "sgw", build: "field", matrix_version: 2, served: true,
@@ -3484,13 +3163,9 @@ test("a DEGRADED-MODE snapshot must never become the board's source just by bein
     assert.equal(g.matrix_from_snapshot, true, "a newer FULL run must still win");
     assert.equal(g.best_cell, undefined, "and its honest zero-served result must publish as such");
   }
-  // (c) RED: a LONE degraded snapshot - nothing on disk for it to shadow - must be refused too.
-  //     This case used to publish, on the reasoning that "absence of a better run is not a reason to
-  //     publish nothing". But the board does not publish "nothing" for a gateway with no artifact; it
-  //     publishes n/a, which is the true statement. What it published instead was a probe-only run
-  //     under that gateway's name, as a board RESULT, with no marker of any kind - so the one gateway
-  //     the reader has no other information about is the one shown a smoke run. Shadowing was never the
-  //     defect; becoming the board's source is, and a lone smoke snapshot does that most cheaply.
+  // (c) RED: a lone degraded snapshot - nothing on disk for it to shadow - must be refused too. A
+  //     gateway with no artifact should publish n/a, not an unmarked probe-only run as a board result.
+  //     Shadowing was never the defect; becoming the board's source is.
   {
     const root = buildStreamMemRepo();
     rmSync(join(root, "results", "matrix", "sgw.json"), { force: true });
@@ -3551,15 +3226,11 @@ test("#25 CLASS: the snapshot ingest path - newest wins, RECENCY beats existence
 });
 
 // ---- #21 CLASS: RIG PROVENANCE - the measurement instrument must describe itself ------------------
-// The mock is fetched from a MOVING GitHub release tag ("rig"), rebuilt by CI on every mock/ change.
-// So two runs of a byte-identical harness can produce DIFFERENT cell verdicts
-// purely because the instrument changed underneath them - which is exactly what happened here: bcf9912
-// tightened the mock's request_shape_ok so bedrock/cohere began rejecting a raw OpenAI body forwarded
-// verbatim, the release assets were rebuilt 2026-07-24T19:03Z, and served-cell counts fell board-wide
-// for a reason that had nothing to do with any gateway. Nothing in either run's output recorded which
-// binaries produced it, so establishing that took a long investigation. The snapshot now carries a
-// mock+ugen sha256 (the authoritative identity) plus the release asset updated_at, and gen-data
-// projects it, so a future cross-run comparison can tell at a glance whether the instrument moved.
+// The mock is fetched from a moving GitHub release tag, rebuilt by CI on every mock/ change, so two
+// runs of a byte-identical harness can produce different cell verdicts purely because the instrument
+// changed (a real incident: a mock tightening dropped served-cell counts board-wide with no gateway
+// at fault). The snapshot now carries a mock+ugen sha256 plus the release asset updated_at, projected
+// by gen-data, so a future cross-run comparison can tell at a glance whether the instrument moved.
 test("#21 CLASS: rig provenance travels from the snapshot into the bundle, and is NULL-SAFE without it", () => {
   const iso = (hAgo) => new Date(Date.now() - hAgo * 3600000).toISOString();
   const RIG = {
@@ -3617,8 +3288,8 @@ test("#21 CLASS: the footer rig stamp shows one digest, flags DISAGREEING rows, 
   assert.equal(run(withRig(["abc"])), "", "a truncated digest is not an instrument identity");
   // one instrument across the board -> the short digest.
   assert.equal(run(withRig(["a".repeat(64), "a".repeat(64)])), `Rig (mock): ${"a".repeat(12)}`);
-  // THE CASE THAT MATTERS: rows measured by DIFFERENT instruments must say so loudly, because that is
-  // precisely the condition (a mid-week rig rebuild) that made this run's verdicts incomparable.
+  // The case that matters: rows measured by different instruments must say so loudly (a mid-week rig
+  // rebuild is exactly what makes a run's verdicts incomparable).
   const mixed = run(withRig(["a".repeat(64), "b".repeat(64), "b".repeat(64)]));
   assert.match(mixed, /2 DIFFERENT builds across rows/);
   assert.ok(mixed.includes("aaaaaaaaaaaa (1)") && mixed.includes("bbbbbbbbbbbb (2)"),
@@ -3626,13 +3297,10 @@ test("#21 CLASS: the footer rig stamp shows one digest, flags DISAGREEING rows, 
 });
 
 /* ---- #26: THE OPERATING CONCURRENCY - the Performance-tab payload of task #65 --------------------
-   WHERE IT LIVES CHANGED. It used to ride INSIDE the sealed throughput envelope (`conc_at` / `concurrency`
-   on `rps_sustained_20ms`, captured by gen-data from the raw cell's `conc_at_sustained`), and `concAt()`
-   read it out. Those metrics are deleted. The concurrency is now a FIELD ON THE READING - each frontier
-   reading names the concurrency its winning rate was observed at - which is a better home for it: the
-   number belongs to the reading, and each of the six readings has its own.
-   `concAt()` survives for the metrics that still carry it inside their envelope (the stream ceiling), so it
-   is still exercised here; the render half is asserted against the frontier reading that drives it now. */
+   Formerly rode inside the sealed throughput envelope on the (now deleted) rps_sustained_20ms metric.
+   Concurrency is now a field on each frontier reading, since it belongs to the reading and each of the
+   six readings has its own. concAt() survives for metrics that still carry it inside their envelope
+   (the stream ceiling); the render half is asserted against the frontier reading that drives it now. */
 test("#26 CLASS: the operating concurrency travels with the reading and drives the '@ N conc' render", () => {
   // (a) the accessor, on an envelope that still carries a rung inside it: conc_at WINS over the legacy
   // *_concurrency; either alone works; neither -> null.
@@ -3672,10 +3340,9 @@ test("#26 CLASS: the operating concurrency travels with the reading and drives t
 // ---- #27: the producer's fabricated-0 -> honest-NULL change; the site must be NULL-SAFE ------------
 test("#27 CLASS: every RSS field is NULL-SAFE - a null RSS renders 'not measured', never 0", () => {
   const root = certifyRepo(buildStreamMemRepo(), (m) => {
-  // The producer emits NULL (never a fabricated 0) for an RSS it could not obtain: a failed fixed load or
-  // a payload mismatch nulls the steady state + peak/hwm, and the disclosure rides in memory.protocol as
-  // text. On this path the plateau VERDICT is withheld as null too: `false` would assert that we watched
-  // this gateway fail to settle, when what happened is that we could not watch it at all.
+  // The producer emits null (never a fabricated 0) for an RSS it could not obtain; the disclosure rides
+  // in memory.protocol as text. The plateau verdict is also null: `false` would assert we watched the
+  // gateway fail to settle, when we couldn't watch it at all.
   const mem = m.upstreams.openai.cells.openai.memory;
   mem.steady_state_rss_mib = null;
   mem.peak_rss_mib = null;
@@ -3689,9 +3356,8 @@ test("#27 CLASS: every RSS field is NULL-SAFE - a null RSS renders 'not measured
   });
   const g = genInto(root).gateways.find((x) => x.key === "sgw");
   const mem = g.matrix.upstreams.openai.cells.openai.memory;
-  // (a) SEALED, not bare: a null RSS is an explicit not-measured envelope, and the NEW producer fields
-  //     (peak_rss_hwm_mib / growth rate / time to plateau) are sealed BY DISCOVERY plus the named memory
-  //     vocabulary - no whitelist to lag the producer (#11).
+  // (a) sealed, not bare: a null RSS is an explicit not-measured envelope, and newer producer fields
+  //     are sealed by discovery plus the named memory vocabulary - no whitelist to lag the producer.
   for (const k of ["idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
     "peak_rss_hwm_mib", "growth_rate_mib_per_min", "time_to_plateau_s"])
     assert.ok(app.isEnvelope(mem[k]), `${k} must be a sealed envelope, not a bare scalar`);
@@ -3706,11 +3372,9 @@ test("#27 CLASS: every RSS field is NULL-SAFE - a null RSS renders 'not measured
   assert.equal(cell.na, true);
   assert.equal(cell.text, "not measured");
   assert.equal(cell.v, null);
-  // (c) #14: the window durations RENDER from the data, not from a hard-coded "60 s" - and they now have
-  //     to be found on the CELL, which is where the producer writes them.
-  // `steady` is the STEADINESS window (how long the RSS had to hold still before the plateau was
-  // believed). It rides in load_recipe.plateau_window_s; this fixture predates it, so it reads null and
-  // the caption states the settling time without claiming a confirmation length it does not know.
+  // (c) #14: window durations render from the data, not a hard-coded "60 s", and are found on the cell.
+  // `steady` is the steadiness window (load_recipe.plateau_window_s); this fixture predates it, so it
+  // reads null and the caption states the settling time without claiming a confirmation length it lacks.
   assert.deepEqual(app.memWindows(mem), { idle: 30, recovery: 45, steady: null });
   assert.deepEqual(app.boardMemWindows(bundle), { idle: 30, recovery: 45, steady: null },
     "the board's window labels must read the PER-CELL windows, not fall back to the 60 s default");
@@ -3795,11 +3459,8 @@ test("#15/#20 RED: the C5 accessor-routing lint FIRES on the access style the co
   assert.deepEqual(checkMod.lintAccessorRouting(readFileSync(join(HERE, "app.js"), "utf8"), "app.js", "js").errors, []);
 });
 
-/* #2/#22 RETIRED WITH THE PIPELINE THEY GUARDED.
-   These asserted that charts.py disclosed provenance per lane, and that its caption vocabulary matched
-   app.js's. Both existed because the board had a SECOND renderer in another language publishing the
-   same numbers. There is one renderer now, so there is no second vocabulary to drift and no lane to
-   leave undisclosed - and a test that reads a deleted file fails for the wrong reason. */
+/* #2/#22 retired with the pipeline they guarded: they asserted a second renderer (charts.py) disclosed
+   provenance and matched app.js's caption vocabulary. There is one renderer now. */
 test("#21: C6 fires on an INJECTED frontier inversion - the assertion cannot silently pass when a row is absent", () => {
   /* Drive the invariant DIRECTLY on an injected cell rather than a named gateway's live data, so the
      assertion cannot skip vacuously when that gateway's file is missing or its inversion resolves.
@@ -3910,8 +3571,8 @@ test("#1 CLASS: the MEMORY tab's Tested-on cell is the SAME pill, showing the me
 function cellMem(o = {}) {
   const { steady_state_rss_mib = 100, idle_rss_mib = 20, recovered_rss_mib = 30,
     plateaued = true, time_to_plateau_s = 25, growth_rate_mib_per_min = 0.1, rss_series = null,
-    // shape: undefined by default ON PURPOSE, so every fixture that does not opt in exercises the
-    // no-shape-published path a pre-shape board takes. Opting in is how a test says "I mean a wave".
+    // shape: undefined by default, so a fixture that doesn't opt in exercises the no-shape-published
+    // path a pre-shape board takes.
     shape = undefined } = o;
   const rec = {
     steady_state_rss_mib: seal(steady_state_rss_mib), idle_rss_mib: seal(idle_rss_mib),
@@ -3943,12 +3604,9 @@ test("memory chooser RED: Peak is not offered, not decodable, and cannot select 
   assert.ok(!app.modesFor("memory").has("peak"), "modesFor(memory) must not contain Peak");
   assert.ok(app.modesFor("performance").has("peak"), "the perf lanes keep Peak (select on throughput, report throughput)");
   assert.deepEqual([...app.MEM_CHOOSER_MODES], ["min", "max", "same", "custom"]);
-  // (2) a SHARED URL carrying ?mode=peak that lands on memory falls back to memory's own default,
-  // not to a peak cell. That default is MIN: it shows every gateway on its own lowest steady-state
-  // cell, so nobody drops out of the view a reader arrives at. Same is a like-for-like comparison
-  // and a gateway that does not serve the chosen dialect correctly reads n/a there - honest, but the
-  // wrong thing to land on by default, because one-api declares a single cell and vanished entirely
-  // from a board whose widest dialect was anthropic.
+  // (2) a shared URL carrying ?mode=peak on memory falls back to Min, not a peak cell: Min shows
+  // every gateway on its own lowest cell, so nobody drops out. Same would be a fine like-for-like
+  // comparison but the wrong default, since a gateway not serving the chosen dialect reads n/a there.
   assert.equal(app.decodeUrl("/gateways/memory", "?mode=peak").mode, "min",
     "a ?mode=peak link opened on the memory tab must fall back to memory's default, Min");
   assert.equal(app.decodeUrl("/gateways/performance", "?mode=peak").mode, "peak", "the perf tabs still decode Peak");
@@ -4016,11 +3674,9 @@ test("memory: a gateway that reaches no steady state on ANY cell is flagged at G
   assert.equal(app.neverPlateaued(leaky), true);
   assert.equal(app.neverPlateaued(fine), false);
   assert.equal(app.worstGrowth(leaky), 12.25, "the flag quantifies itself with the worst rate across cells");
-  // THE NAME CELL CARRIES NO PILL, IN ANY MODE. A red tag on a gateway's NAME reads as a verdict on
-  // the gateway, when what was measured is one window of one metric - a much larger claim than the
-  // data supports, and permanent-looking next to the name. The verdict itself is unchanged and still
-  // computed (the assertions above); what changed is that it no longer brands the row. The finding
-  // reaches the reader through the Growth column and the per-cell tooltip instead.
+  // The name cell carries no pill, in any mode: a red tag on the gateway's name would read as a
+  // verdict on the gateway when only one window of one metric was measured. The finding still
+  // reaches the reader, through the Growth column and per-cell tooltip instead.
   for (const mode of ["min", "max", "same", "custom"]) {
     const st = memState([leaky, fine], { mode });
     for (const g of [leaky, fine]) {
@@ -4033,11 +3689,9 @@ test("memory: a gateway that reaches no steady state on ANY cell is flagged at G
 });
 
 test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure is never a gateway defect", () => {
-  // The producer is deliberately TRI-STATE. plateaued:null is written when the cold-restarted process
-  // never opened its port, when the fixed load stopped delivering, and when the trailing window held
-  // fewer than the four samples the steadiness test needs. `null !== true` collapsed every one of those
-  // into "never settles": a permanent, named accusation on the public board about a gateway the rig never
-  // watched. On macOS, where no RSS is readable at all, that was EVERY gateway on EVERY local board.
+  // The producer is deliberately tri-state: plateaued:null covers several cases where the gateway
+  // couldn't be watched at all. `null !== true` used to collapse every one of those into "never
+  // settles" - a permanent, named accusation about a gateway the rig never watched.
   const unmeasured = memGw("unmeasured", {
     "openai>openai": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
     "openai>gemini": { steady_state_rss_mib: null, plateaued: null, growth_rate_mib_per_min: null },
@@ -4068,10 +3722,9 @@ test("memory: a WITHHELD plateau verdict is not a negative one - a rig failure i
 });
 
 test("drawer protocol matrix: a truthy-but-EMPTY cells map is not data", () => {
-  // The drawer read `g.matrix.cells`, a legacy FLAT map the per-cell artifact stopped filling. It is
-  // now always `{}` - which is truthy - so it passed the `if (!g.matrix.cells)` guard and then every
-  // lookup missed, rendering "n/a" on all six protocol rows of every gateway on the board. The
-  // measurements were present the entire time, one level down under upstreams.
+  // The drawer read g.matrix.cells, a legacy flat map now always `{}` - truthy, so it passed the
+  // `if (!g.matrix.cells)` guard and every lookup missed, rendering n/a everywhere despite the
+  // measurements being present one level down under upstreams.
   const cell = (served) => ({ served, status: 200, path: "/v1/chat/completions" });
   const modern = { matrix: { cells: {}, upstreams: {
     openai: { cells: { openai: cell(true) } },
@@ -4098,13 +3751,9 @@ test("drawer protocol matrix: a truthy-but-EMPTY cells map is not data", () => {
 });
 
 test("sort: a MEASURED TIE breaks on the next measurement, not on the alphabet", () => {
-  // Three gateways sustained a measured ZERO ("no load held the gate") - a real result and a real
-  // three-way tie. The comparator fell straight to display order, so the bottom of the column read
-  // One-API, Plano, TensorZero: alphabetical, presented in a ranked table, which a reader scanning a
-  // sorted column takes as a ranking. Nothing in the data said that.
-  // Driven through the comparator's OWN contract - a column is anything with {id, get} - so this
-  // pins the ordering rule itself rather than a particular view's cell-selection machinery. The
-  // separate test below is what holds the real column sets to naming ids that exist.
+  // A measured three-way tie used to fall to alphabetical display order in a ranked table, which a
+  // reader scanning a sorted column takes as a ranking. Driven through the comparator's own contract
+  // (a column is anything with {id, get}) to pin the ordering rule itself.
   const col = { id: "rps20", get: (g) => ({ v: g.rps }) };
   const tie = { id: "lat50", get: (g) => ({ v: g.lat }) };
   const perfGw = (display, rps, lat) => ({ display, rps, lat });
@@ -4144,9 +3793,8 @@ test("sort: a MEASURED TIE breaks on the next measurement, not on the alphabet",
 });
 
 test("sort: every declared tiebreak names a column that actually exists in its own view", () => {
-  // A tiebreak pointing at a renamed or deleted column does not throw - `cols.find` returns
-  // undefined and the comparator quietly reverts to the alphabet. That is the failure this whole
-  // change was made to remove, and it would come back silently on the next column rename.
+  // A tiebreak pointing at a renamed or deleted column doesn't throw - cols.find returns undefined
+  // and the comparator silently reverts to the alphabet on the next column rename.
   for (const [view, id] of Object.entries(app.VIEW_TIEBREAK)) {
     const set = app.COLUMN_SETS[view];
     assert.ok(set, `VIEW_TIEBREAK names view ${view}, which has no column set`);
@@ -4156,10 +3804,9 @@ test("sort: every declared tiebreak names a column that actually exists in its o
 });
 
 test("memory: a WAVE is not a leak, and the board must stop calling it one", () => {
-  // "Never settles" described two different gateways under one red pill. One climbs without bound; the
-  // other swings around a level it keeps returning to - a garbage collector doing its job. Both fail the
-  // steadiness test, so both were rendered NEVER SETTLES in red beside a number the column labels a leak
-  // rate. The second gateway was being accused of the first one's defect, on a public board, by name.
+  // "Never settles" described two different gateways under one red pill: one climbs without bound,
+  // the other swings around a level it returns to (a GC doing its job). Both fail the steadiness
+  // test, so the second was being accused of the first's defect.
   const climbing = memGw("climbing", {
     "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 51, shape: 1 },
   });
@@ -4179,9 +3826,8 @@ test("memory: a WAVE is not a leak, and the board must stop calling it one", () 
   assert.match(sp, /never grew either/, "the tooltip explains what it saw instead of asserting a defect");
   assert.ok(!/still growing/.test(sp), "and nothing about a wave may be described as growth");
 
-  // THE FALLBACK. A board generated before shapes existed carries no shape at all, and an unshaped
-  // gateway must NOT be quietly cleared - "no evidence of growth" and "evidence of no growth" are
-  // different claims, and only the second earns the neutral pill.
+  // The fallback: an unshaped gateway (pre-shape board) must not be quietly cleared - "no evidence
+  // of growth" and "evidence of no growth" are different claims, and only the second earns neutral.
   const unshaped = memGw("unshaped", {
     "openai>openai": { steady_state_rss_mib: null, plateaued: false, growth_rate_mib_per_min: 51 },
   });
@@ -4229,10 +3875,9 @@ test("memory idle: one cold-sample median wherever the row shows, and GONE when 
     assert.match(c.note, /median of 3 cold samples/, "the spread is disclosed, not hidden behind one sample");
   }
   assert.deepEqual([...seen], ["22.0"], "idle is one number wherever it appears");
-  // THE ROW IS ALL-OR-NOTHING (the owner's rule): a chosen cell the gateway does not serve renders a
-  // FULLY empty row. Idle - measured, real, cell-independent - must not survive as one lone number on
-  // an otherwise-empty row: that combo reads as a measured cell with holes, which is the exact shape
-  // the 2026-07-28 board shipped for litellm-rust (idle 251.8, everything else n/a, no pill).
+  // The row is all-or-nothing: a chosen cell the gateway doesn't serve renders a fully empty row.
+  // Idle must not survive as one lone number on an otherwise-empty row (that combo reads as a
+  // measured cell with holes).
   const empty = memCol("memidle").get(g, memState([g], { mode: "custom", xlateIn: "gemini", xlateOut: "cohere" }));
   assert.equal(empty.na, true, "an untested chosen cell empties the WHOLE row, idle included");
 });
@@ -4300,9 +3945,9 @@ test("memory degrades to the LEGACY single-window shape when the bundle has no p
 });
 
 test("memory: a record with NO displayable value paints NO pill (all-or-nothing, the plano shape)", () => {
-  // plano on the 2026-07-28 board: a served openai>openai cell whose memory window produced nothing -
-  // every envelope null. The pill advertised a measurement over four n/a columns. The pill's contract
-  // is content, not existence: a row is fully measured or fully empty, never a combo.
+  // A served cell whose memory window produced nothing (every envelope null) used to have the pill
+  // advertise a measurement over four n/a columns. The pill's contract is content, not existence: a
+  // row is fully measured or fully empty, never a combo.
   const nothing = { steady_state_rss_mib: null, idle_rss_mib: null, recovered_rss_mib: null,
     time_to_plateau_s: null, growth_rate_mib_per_min: null, plateaued: null };
   const g = memGw("g", { "openai>openai": nothing });
@@ -4318,14 +3963,11 @@ test("memory: a record with NO displayable value paints NO pill (all-or-nothing,
   assert.ok(memCol("tested").render(ok, st2).includes("tested-pill"), "one displayable value restores the pill");
 });
 
-// ---- the plano shape through the SIDE DOOR: a hidden envelope key satisfying the pill -------------
-// recordShowsValues asks "does this record put at least one number on the row", and it used to ask it
-// of EVERY envelope on the record - including the ones no column and no drawer entry ever renders.
-// The harness's own direct-to-mock leg, the kernel HWM sibling of peak RSS, the plateau timing: each
-// is a real sealed envelope with a real value sitting on a record whose every VISIBLE cell is n/a. Any
-// one of them was enough to paint a "Tested on" pill over four n/a columns and to keep idle alive
-// beside it - the exact plano regression the all-or-nothing rule was written to stop, arriving through
-// a key the reader cannot see. UNDISPLAYED_ENVELOPE_KEYS is the fix; emptying it reopens the door.
+// ---- the all-or-nothing pill through the SIDE DOOR: a hidden envelope key satisfying the pill -----
+// recordShowsValues used to ask "does this record put at least one number on the row" of EVERY
+// envelope, including ones no column ever renders (harness direct-to-mock leg, kernel HWM sibling,
+// plateau timing) - any of which could paint the pill despite every visible cell being n/a.
+// UNDISPLAYED_ENVELOPE_KEYS is the fix; emptying it reopens the door.
 test("all-or-nothing: an UNDISPLAYED envelope key cannot satisfy the pill (the plano shape, side door)", () => {
   // A memory window whose every DISPLAYED metric is absent, carrying one hidden envelope with a value.
   const hiddenOnly = (extra) => ({
@@ -4370,11 +4012,9 @@ test("all-or-nothing: an UNDISPLAYED envelope key cannot satisfy the pill (the p
 });
 
 // ---- the RSS sparkline is bound by the same all-or-nothing rule -----------------------------------
-// rss_series is a raw array, not a sealed envelope, so nothing in the metric machinery constrains it:
-// without an explicit guard a live sparkline outlived the rule and survived as the ONE occupied cell
-// on a row of n/a, which is precisely the "measured, but only a bit" state the owner's rule forbids.
-// The column has TWO code paths and only the renderer emits markup - the get() guard governs the CSS
-// class and the sort value, so removing the guard from render() alone leaves the line on the page.
+// rss_series is a raw array, not a sealed envelope, so nothing in the metric machinery constrains it;
+// without an explicit guard a live sparkline could survive as the one occupied cell on an n/a row.
+// The column has two code paths and only the renderer emits markup, so both need the guard.
 test("memory: the RSS sparkline obeys all-or-nothing too (the get() guard does not govern the markup)", () => {
   const series = [0, 30, 60, 90, 120].map((t, i) => ({ t_s: t, rss_mib: 100 + i * 5 }));
   const empties = { steady_state_rss_mib: seal(null), idle_rss_mib: seal(null), recovered_rss_mib: seal(null),
@@ -4430,23 +4070,18 @@ test("memory drawer/compare read the SAME chosen cell as the table (no lane dive
 });
 
 // ---- Min/Max name a cell through the MEMORY chooser, and every other lane must hear it ------------
-// chooserDialects answers "which (ingress, egress) is the chosen cell" for every non-memory surface:
-// the drawer's perf and streaming lanes, the compare table and the sweep charts all read it. Its modes
-// used to be peak / same / else-custom, and Min and Max are neither - so they fell into the CUSTOM arm
-// and returned whatever stale (xlateIn, xlateOut) pair the user last had selected on another tab. The
-// memory column then correctly showed the min cell while every other lane showed a cell the reader had
-// not chosen, captioned by lanePathNote as "the lowest steady-state cell the table shows". Two
-// different cells, one label, no disagreement visible anywhere.
-//
-// The existing chooser tests cover `peak` and `same` only, which is why this shipped.
+// chooserDialects answers "which cell is chosen" for every non-memory surface (drawer, compare,
+// sweep charts). Its modes used to be peak/same/else-custom, and Min/Max fell into the custom arm,
+// returning a stale (xlateIn, xlateOut) pair from another tab - so the memory column showed the min
+// cell while every other lane showed the reader's last Custom selection under the same caption.
 test("chooser: Min/Max resolve to the MEMORY chooser's own cell, never the stale Custom pair", () => {
   const g = memGw("g", {
     "openai>openai": { steady_state_rss_mib: 50 },       // the MIN cell
     "anthropic>anthropic": { steady_state_rss_mib: 900 }, // the MAX cell
     "gemini>bedrock": null,                               // served, no memory: the stale Custom pair
   });
-  // The reader's last Custom selection points at a cell that is REAL and WRONG - so a leak shows up as
-  // another gateway's numbers under a memory caption, not as a convenient n/a.
+  // The reader's last Custom selection points at a cell that is real and wrong, so a leak shows up
+  // as another gateway's numbers, not as a convenient n/a.
   const stale = { xlateIn: "gemini", xlateOut: "bedrock", sameDialect: "openai" };
 
   for (const [mode, ing, eg] of [["min", "openai", "openai"], ["max", "anthropic", "anthropic"]]) {
@@ -4471,10 +4106,9 @@ test("chooser: Min/Max resolve to the MEMORY chooser's own cell, never the stale
 });
 
 test("gen-data SEALS the per-cell memory window: no published memory number ships as a bare scalar", () => {
-  // The producer's per-cell block, exactly as the design says it publishes it. Everything the board
-  // renders off it must come back as an envelope, including growth rate and time-to-plateau, which are
-  // NOT rss-shaped and so cannot be discovered by the RSS pattern (the bug that shipped peak_rss_hwm_mib
-  // unsealed). plateaued is a boolean verdict, not a metric, and stays a bare bool.
+  // Everything the board renders off the per-cell block must come back as an envelope, including
+  // growth rate and time-to-plateau, which aren't rss-shaped and so weren't discovered by the RSS
+  // pattern (the bug that shipped peak_rss_hwm_mib unsealed). plateaued is a bool, not a metric.
   const root = buildStreamMemRepo();
   const raw = JSON.parse(readFileSync(join(root, "results", "matrix", "sgw.json"), "utf8"));
   const cellMemory = { steady_state_rss_mib: 119.7, idle_rss_mib: 7.1, recovered_rss_mib: 40.2,
@@ -4527,16 +4161,9 @@ test("protocol grid: a matrix-less gateway renders an all-n/a row with its reaso
 
 /* ---- LEDGER 2026-07-29: the deferred SITE-* findings, each with the RED it now fails ------------- */
 
-// SITE-01. The oracle compared `.v` and nothing else, so everything the envelope SAYS about its number
-// was unverified: a reason flattened back to "not_measured", a zero-note swapped between "no qualifying
-// ceiling" and "measured failure", a lost detail. Each preserves the number, so each verified green.
-// The `paced_match` arm this test used to carry is gone with the suppression it belonged to: it was a
-// boolean restatement of the retired `*_mock_bound` verdict ("this number matched the paced upstream"),
-// which was all a verdict could express. The engine now publishes the ceiling and the fraction of it
-// reached, so the same information arrives as `headroom` + `rig_ceiling` - numbers a reader can weigh,
-// where 0.993 and 0.20 were both `paced_match: undefined` before. They are PUBLISHED fields, so the
-// oracle must re-derive them for the same reason it re-derives the reason and the note: anything the
-// envelope says about its number is data the board renders, and an unverified fact can drift.
+// SITE-01. The oracle compared `.v` and nothing else, so everything else the envelope says about its
+// number was unverified (reason, note, detail). headroom/rig_ceiling are published fields too, and
+// the oracle must re-derive them for the same reason - an unverified fact can drift.
 test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, headroom, ceiling", () => {
   const oe = checkMod.oracleEnvelope;
   // an absence carries the ENGINE's reason and its prose, not a flattened token
@@ -4559,7 +4186,7 @@ test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, 
   // a present number NEVER resolves to a null value: the branch that could is gone, which is the
   // property C2 asserts from the bundle side (no envelope in a published bundle is suppressed).
   for (const h of [null, 0, 0.5, 1, 1.4]) assert.equal(oe(9, { headroom: h, ceiling: 10 }).v, 9);
-  // THE SEAL AND THE ORACLE MUST AGREE ON ALL OF IT, not only on the number.
+  // The seal and the oracle must agree on all of it, not only on the number.
   for (const raw of [null, 0, 7]) {
     for (const headroom of [null, 0, 0.5, 0.993, 1]) {
       for (const ceiling of [null, 52013]) {
@@ -4576,13 +4203,10 @@ test("SITE-01: the oracle re-derives the whole envelope - reason, note, detail, 
 });
 
 testWithMatrixDonor("SITE-01 RED: a mangled reason / note / headroom on a CORRECT number fails the oracle", () => {
-  // Mangled on a surviving sealed envelope. It used to be `rps_sustained_20ms`, which no producer emits;
-  // the oracle's claim is about the SHAPE of a published envelope, so any sealed metric on the record proves
-  // it. (A frontier reading's rate is an envelope too and is oracled through the same walk.)
+  // Mangled on a surviving sealed envelope (any metric field proves the shape claim, not just the
+  // retired rps_sustained_20ms). A frontier reading's rate is an envelope too, oracled the same way.
   const at = (d) => matrixGw(d).best_cell.added_latency_p99_us;
-  // THE CONTROL, so each mangle below is proved to be what fires the oracle rather than something else on
-  // the board being the real cause. An untouched clone owes NO R1 finding on this envelope at all; if this
-  // line ever fails, every assertion under it is passing for the wrong reason.
+  // The control: an untouched clone owes no R1 finding, or the RED cases below prove nothing.
   assert.deepEqual(checkConsistency(clone(), app).errors.filter((x) => x.startsWith("R1:")), [],
     "an unmangled bundle must produce no independent-oracle finding, or the RED cases below prove nothing");
   // (a) a note the raw data does not imply: the number is untouched, so a value-only oracle sees nothing.
@@ -4599,11 +4223,9 @@ testWithMatrixDonor("SITE-01 RED: a mangled reason / note / headroom on a CORREC
     assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("`reason`")),
       `the oracle must catch an invented reason; got ${JSON.stringify(e.slice(0, 3))}`);
   }
-  // (c) A HEADROOM THE RAW ARTIFACT DOES NOT IMPLY. This case used to mangle `paced_match`, the boolean
-  //     the retired verdict was carried as. The published fact is now a fraction, which is strictly more
-  //     mangleable than a boolean was - it can attach to the wrong metric, or drift away from the ceiling
-  //     it claims to be a fraction of - and every one of those preserves the number, so a value-only
-  //     oracle reports green on all of them. Both halves of the fact are mangled here, separately.
+  // (c) a headroom the raw artifact does not imply - a fraction, more mangleable than the retired
+  //     boolean verdict was (can attach to the wrong metric, or drift from its own ceiling). Both
+  //     halves of the fact are mangled here, separately.
   {
     const d = clone(); at(d).headroom = 0.42;
     const e = checkConsistency(d, app).errors;
@@ -4725,7 +4347,7 @@ test("SITE-05: the C3 lint sees every quoting style, and its exemption is a swee
   assert.equal(fires(`const note = '6x6-diagonal';`).length, 1, "single quotes must be scanned");
   assert.equal(fires('const note = `6x6-diagonal`;').length, 1, "template literals must be scanned");
   assert.equal(fires('const note = "6x6-diagonal";').length, 1, "double quotes, as before");
-  // A CAPTION RENDERER IS EXACTLY WHERE THIS BUG CLASS LIVES, and it mentions "source" by nature.
+  // A caption renderer is exactly where this bug class lives, and it mentions "source" by nature.
   assert.equal(fires('function sourceLabel(x) { return "6x6-diagonal"; }').length, 1,
     "a line mentioning `source` must NOT be exempt: caption renderers are where the leak happens");
   assert.equal(fires('const t = sweepy + "6x6-diagonal";').length, 1,
@@ -4740,8 +4362,8 @@ test("SITE-05: the C3 lint sees every quoting style, and its exemption is a swee
   assert.deepEqual(checkMod.lintSweepKeys(appSrc, "app.js", region).errors, []);
 });
 
-// SITE-06. The C5 routing lint knew one spelling of "read the raw number off the envelope". A reader
-// routes around the other three by accident, in three keystrokes, and the lint reports itself green.
+// SITE-06. The C5 routing lint knew one spelling of "read the raw number off the envelope"; a reader
+// can route around it in three keystrokes and the lint reports green.
 test("SITE-06: the C5 lint catches bracket, bracket-chain and destructuring reads, not just `.value`", () => {
   const bad = (body) => checkMod.lintAccessorRouting(
     `function draw(p, key) {\n  const env = p[key];\n  if (!isEnvelope(env)) return;\n  ${body}\n}\n`, "fake.js", "js").errors;
@@ -4764,12 +4386,10 @@ test("SITE-06: the C5 lint catches bracket, bracket-chain and destructuring read
 });
 
 // ---- the C5 lint polices the WHOLE sealed vocabulary, not four names of it (round-2 audit) --------
-// The direct-form arm iterated GATED_FIELDS - four throughput metrics - so it covered 4 of the ~20
-// fields seal.mjs seals. Every latency, ttft, gap, growth, plateau and RSS envelope could be
-// dereferenced straight to its raw number with the lint reporting green, which is the bug class the
-// lint exists for, walking past the lint. The three forms below were each PROVEN green before this
-// change. The field name is now discovered from the deref and judged by seal.mjs's own isMetricField,
-// so the vocabulary cannot drift from the thing that defines it.
+// The direct-form arm used to iterate GATED_FIELDS - four throughput metrics out of ~20 seal.mjs
+// seals - so every other envelope could be dereferenced straight to its raw number with the lint
+// reporting green. The field name is now discovered from the deref and judged by isMetricField, so
+// the vocabulary can't drift from the thing that defines it.
 test("C5 lint: EVERY sealed metric field is policed, not just the four gated ones", () => {
   const errs = (src) => checkMod.lintAccessorRouting(src, "fake.js", "js").errors;
   const fires = (src, why) => assert.ok(errs(src).length >= 1, `${why}\n  source: ${src.trim()}\n  got: []`);
@@ -4804,19 +4424,11 @@ test("C5 lint: EVERY sealed metric field is policed, not just the four gated one
     "a field NAME passed as a string argument does not make the result an envelope");
 });
 
-// SITE-07. The finding was that a published number said NOTHING about the comparison it came out of: the
-// paced branch's comment promised "the flag stays on the envelope as the signal it always was" and
-// nothing of the kind survived, so a gateway that merely matched the mock's paced target and one proven
-// far below its ceiling were indistinguishable in the bundle. That is a real difference between two
-// published numbers, and it was being dropped on the floor.
-//
-// The `paced_match: true` this test used to assert is gone with the verdict it restated - and the finding
-// it was the fix for is BETTER served now, which is why the test survives rather than being deleted. The
-// engine publishes the ceiling and the fraction of it reached, so instead of one boolean covering every
-// near-match, the envelope carries the number itself: 0.993 and 0.20 were both `paced_match: undefined`
-// before. What must hold is unchanged in shape - the signal reaches the envelope in a form C1 accepts
-// (named fields, never the raw `*_mock_bound` / `*_mock_ceiling` keys C1 refuses), it distinguishes the
-// two cases in the bundle, and C2 finds nothing suppressed.
+// SITE-07. A published number said nothing about the comparison it came from: a gateway that merely
+// matched the mock's paced target and one proven far below its ceiling were indistinguishable in the
+// bundle. The retired `paced_match: true` boolean is gone; the engine now publishes the ceiling and
+// the fraction reached instead, in a form C1 accepts (named fields, never raw *_mock_bound keys),
+// distinguishing the two cases while C2 finds nothing suppressed.
 test("SITE-07: a near-ceiling publish carries the comparison's facts, in a form C1 accepts", () => {
   const matched = sealMetric(39000, { headroom: 0.993, ceiling: 39275, zeroNote: ZERO_MEASURED_FAIL });
   assert.equal(matched.value, 39000, "matching a paced target publishes the number");
@@ -4843,9 +4455,8 @@ test("SITE-07: a near-ceiling publish carries the comparison's facts, in a form 
   assert.deepEqual(checkConsistency(d, app, SYNTH).errors, []);
 });
 
-// SITE-08. The gated measured-zero returned before the extras were attached, so a certified 0 lost its
-// concurrency and its sweep - the curve that is the evidence FOR the zero, and the reading whose
-// evidence a reader most needs, since a 0 beside a real maximum is the claim that most demands it.
+// SITE-08. The gated measured-zero used to return before the extras were attached, so a certified 0
+// lost its concurrency and sweep - the evidence for the zero, which a reader most needs to see.
 test("SITE-08: a certified MEASURED ZERO keeps its concurrency and its sweep evidence", () => {
   const sweep = [{ conc: 64, rps: 0, p99_us: 900000, fail: 12 }, { conc: 128, rps: 0, p99_us: 900000, fail: 40 }];
   const z = sealMetric(0, { zeroNote: ZERO_NO_CEILING, extras: { concurrency: 64, conc_at: 64, sweep },
@@ -4855,14 +4466,12 @@ test("SITE-08: a certified MEASURED ZERO keeps its concurrency and its sweep evi
   assert.equal(z.note, ZERO_NO_CEILING, "the note still names WHICH zero this is");
   assert.equal(z.concurrency, 64, "a certified zero was measured AT a concurrency");
   assert.deepEqual(z.sweep, sweep, "and its sweep is the evidence the zero rests on");
-  // The comparison's facts attach through the SAME path as the extras, for the same reason: a 0 beside a
-  // real ceiling is the claim that most demands its evidence, so "0 out of a rig ceiling of 25,700"
-  // reaches the reader rather than a bare 0.
+  // The comparison's facts attach through the same path as the extras: a 0 beside a real ceiling
+  // most demands its evidence, so "0 out of a rig ceiling of 25,700" reaches the reader.
   assert.equal(z.headroom, 0, "a measured zero states its headroom too - zero of the ceiling is a reading");
   assert.equal(z.rig_ceiling, 25700);
-  // AN ABSENCE - now the only no-value envelope - carries none of it: no extra, no fact, nothing
-  // recoverable (C2). This half used to make that point about a SUPPRESSED envelope, the shape that no
-  // longer exists; the property is the same one and the absence is what still has it.
+  // An absence - now the only no-value envelope - carries none of it: no extra, no fact, nothing
+  // recoverable (C2).
   const s = sealMetric(null, { extras: { concurrency: 64, sweep }, headroom: 0.9, ceiling: 25700 });
   assert.equal(s.value, null);
   assert.equal(s.suppressed, false, "an absence is not a suppression: nothing was withheld, nothing was measured");
@@ -4872,9 +4481,8 @@ test("SITE-08: a certified MEASURED ZERO keeps its concurrency and its sweep evi
   assert.equal(s.rig_ceiling, undefined);
 });
 
-// SITE-09. The legacy top-level memory reseal tested RSS_FIELD_RE only and passed no absent option: the
-// narrower-whitelist bug (peak_rss_hwm_mib shipping bare) re-created one level up, plus a flattened
-// absence reason on reseal.
+// SITE-09. The legacy top-level memory reseal used to test RSS_FIELD_RE only and pass no absent option,
+// re-creating the narrower-whitelist bug one level up plus a flattened absence reason on reseal.
 test("SITE-09: the LEGACY top-level memory block seals by the same vocabulary and carries its absences", () => {
   const root = buildStreamMemRepo();
   const mpath = join(root, "results", "matrix", "sgw.json");
@@ -4894,9 +4502,9 @@ test("SITE-09: the LEGACY top-level memory block seals by the same vocabulary an
   assert.equal(app.isEnvelope(mem.peak_rss_hwm_mib), true, "RSS discovery still applies");
 });
 
-// SITE-10. sealMatrixCellsInPlace rebuilt each cell's stream object from a fixed key list, which deleted
-// the engine's `reason` prose and its c=1 note: the bundle published a refusal with its explanation
-// removed. Seven reasons and five c1 notes in the recovered 2026-07-29 snapshots.
+// SITE-10. sealMatrixCellsInPlace used to rebuild each cell's stream object from a fixed key list,
+// deleting the engine's `reason` prose and its c=1 note - a refusal published with its explanation
+// removed.
 test("SITE-10: the in-place stream reseal carries the WHY (reason + c1 note), not only the status", () => {
   const root = buildStreamMemRepo();
   const mpath = join(root, "results", "matrix", "sgw.json");
@@ -4923,22 +4531,14 @@ test("SITE-10: the in-place stream reseal carries the WHY (reason + c1 note), no
   assert.equal(na.note, "the rig cannot pose an SSE request in this dialect");
 });
 
-/* SITE-12 IS DELETED, AND NOTHING SURVIVES IT.
-   It asserted that on a legacy stream-suite fallback row, `cpu_fps` carried the provenance of the SEPARATE
-   streamcpu suite that produced it (its own build and measured_at) rather than being dated to the stream
-   suite's run, plus the reader disclosing that split with a "from a separate run" note.
-   `cpu_fps` IS RETIRED. It counted relay frames/sec under an unpaced firehose WITHOUT the delivery gate, so
-   a gateway dropping frames could post a higher rate than one delivering every frame - a loss rate with a
-   numerator. No producer emits it and no surface renders it, so there is no metric left whose provenance
-   could be mis-stamped.
-   The per-envelope-stamp MACHINERY it exercised is not orphaned: `metric()` still composes the "from a
-   separate run than the rest of this record" note from any envelope carrying its own `source`, and the
-   surviving streaming metrics all come from one run today. If a future metric is ever again projected from a
-   different suite than its record, this test is the shape to restore - against that metric. */
+/* SITE-12 is deleted, and nothing survives it: it asserted that a legacy stream-suite fallback's
+   cpu_fps carried its own separate-suite provenance. cpu_fps is retired (it counted relay frames/sec
+   without the delivery gate, so dropping frames could raise the score), so there's no metric left
+   whose provenance could be mis-stamped. metric() still composes the "from a separate run" note from
+   any envelope carrying its own `source`, so this is the shape to restore if a future metric needs it. */
 
-// SITE-13. StreamServed is `true`, `false`, or a STATUS TOKEN ("not_measured", "not_probed",
-// "untestable"). Every non-true value fell through to "did not stream", which asserts a MEASURED refusal
-// about cells the harness never offered anything to: two identical-looking n/a cells, different stories.
+// SITE-13. stream_served is true, false, or a status token. Every non-true value used to fall through
+// to "did not stream", asserting a measured refusal about cells the harness never even offered anything to.
 test("SITE-13: a lane that never ran does not read as a lane that refused", () => {
   const na = (status) => app.naText({ stream_served: status }, "stream_served", "stream_error").text;
   assert.equal(na(false), "did not stream", "a MEASURED refusal keeps its wording");
@@ -4964,8 +4564,8 @@ test("SITE-13: a lane that never ran does not read as a lane that refused", () =
   assert.equal(app.laneServed(null, "stream_served"), false);
 });
 
-// SITE-14. The roster's desc toggle reversed the WHOLE comparison, so tied rows also reversed their name
-// order: toggling a column with dense ties reshuffled rows whose values had not changed.
+// SITE-14. The roster's desc toggle used to reverse the whole comparison, so tied rows also reversed
+// their name order: toggling a column with dense ties reshuffled rows whose values hadn't changed.
 test("SITE-14: descending reverses the ranking, never the name tiebreak", () => {
   const col = { get: (g) => ({ v: g.v }) };
   const rows = [{ display: "charlie", v: 1 }, { display: "alpha", v: 1 }, { display: "bravo", v: 2 }];
@@ -4982,9 +4582,8 @@ test("SITE-14: descending reverses the ranking, never the name tiebreak", () => 
   assert.deepEqual(rows.slice().sort(app.rowComparator(scol, true)).map((r) => r.display), ["charlie", "bravo", "alpha"]);
 });
 
-// SITE-16. bestIndex highlighted the FIRST of several tied bests, so two gateways both below resolution
-// on a metric (both ranking 0, the same reading) showed one winner - a distinction the measurement says
-// it cannot make.
+// SITE-16. bestIndex used to highlight only the first of several tied bests, showing one winner for
+// a distinction the measurement can't make.
 test("SITE-16: every tied best is highlighted, because a tie is a tie", () => {
   const idx = (vals, best) => [...app.bestIndex(vals, best)].sort((a, b) => a - b);
   assert.deepEqual(idx([0, 0, 12], "min"), [0, 1], "two below-resolution zeros are equal-best");
@@ -4994,18 +4593,16 @@ test("SITE-16: every tied best is highlighted, because a tie is a tie", () => {
   assert.deepEqual(idx([1, 2], null), [], "an EVIDENCE row (best:null) crowns nobody");
 });
 
-// The empty-state's `view === "translation"` arm could not be taken: `view` is coerced to a TABLE_VIEWS
-// member, and translation stopped being a tab when the pinned pair became a chooser MODE. A branch that
-// cannot fire is not a safety net, it is a claim about the UI that stopped being true.
+// The empty-state's `view === "translation"` arm can't fire: `view` is coerced to a TABLE_VIEWS member,
+// and translation stopped being a tab when the pinned pair became a chooser mode.
 test("the roster's empty state has no unreachable translation arm", () => {
   assert.equal(app.TABLE_VIEWS.has("translation"), false);
   assert.equal(/view === "translation"/.test(readFileSync(join(HERE, "app.js"), "utf8")), false,
     "a branch keyed on a view the table cannot be in is dead code, not a fallback");
 });
 
-// TOOL-01. A gated test returned early from inside its own body, so the runner saw a function that did
-// not throw and printed `ok - <name>` for a check that never asserted anything: on an empty board most
-// of this suite read green, per test, with only a file-level warn to say otherwise.
+// TOOL-01. A gated test returning early from inside its own body used to print `ok - <name>` for a
+// check that never asserted anything.
 test("TOOL-01: a skipped test is recorded as a skip, not counted as a pass, and does not fail the run", () => {
   const passedBefore = passed, skippedBefore = skipped.length, failedBefore = failures.length;
   skip("SELF-TEST probe (not a real check)", "proving a skip is visible and counted apart");
@@ -5017,9 +4614,8 @@ test("TOOL-01: a skipped test is recorded as a skip, not counted as a pass, and 
   skipped.pop();   // leave the run's own tally honest
 });
 
-// SITE-15. sanitizeState seeded the data-derived Same dialect for the WHOLE state at boot, so a deep
-// link into performance or streaming - tabs whose own default is the declared one, which is exactly why
-// syncUrl omits ?d= on memory only - had its dialect rewritten from the data before it rendered a row.
+// SITE-15. sanitizeState used to seed the data-derived Same dialect for the whole state at boot, so a
+// deep link into performance or streaming had its dialect rewritten from the data before rendering.
 test("SITE-15: the data-derived Same dialect is seeded for the MEMORY tab, not for every arrival", () => {
   const st = app.state;
   const saved = { view: st.view, d: st.sameDialect, pinned: st.sameDialectPinned, data: st.data };
@@ -5051,21 +4647,17 @@ test("SITE-15: the data-derived Same dialect is seeded for the MEMORY tab, not f
 console.log(`\n${passed} tests passed${skipped.length ? `, ${skipped.length} skipped (see the list below - a skip is not a pass)` : ""}`);
 
 // ---- C8: THE BOARD IS GROUPED BY INSTRUMENT, NOT BY COMMIT SHA -----------------------------------
-//
-// C8's claim is that one instrument measured every column. The commit sha is a PROXY for that, and it
-// is loose in exactly one direction: a commit can change while the instrument does not. A gateway's
-// own config file, a test, a workflow - none of them can alter how a DIFFERENT gateway was measured,
-// yet each moves the sha and each used to cost a full field re-run to satisfy a check that would have
-// learned nothing. The proxy is never loose the other way, so attesting equivalence can only ever
-// excuse a difference the built binaries prove is not there.
+// C8's claim is that one instrument measured every column. The commit sha is a proxy for that, loose
+// in one direction: a commit can change (config, test, workflow) without the instrument changing,
+// costing a full field re-run for nothing. Attesting equivalence can only excuse a difference the
+// built binaries prove isn't there.
 test("C8: commits the repo attests are one instrument, with artifact evidence, do not read as a mixed board", () => {
   const snapOf = (commit) => ({ snap: { rig: { engine: { commit, dirty: false } } } });
   const A = "a".repeat(40), B = "b".repeat(40);
   const resolve = (k) => snapOf(k === "plano" ? B : A);
   const keys = ["bifrost", "one-api", "plano"];
 
-  // RED-before: with no attestation, two commits are two instruments and the board is refused. This
-  // is the behaviour being preserved for every case that is NOT attested, so it is asserted first.
+  // RED-before: with no attestation, two commits are two instruments and the board is refused.
   const bare = checkMod.engineAgreement(keys, resolve, { equivalence: new Map() });
   assert.equal(bare.errors.length, 1, "an unattested mix must still fail");
   assert.match(bare.errors[0], /mixes 2 harness engines/);
@@ -5079,9 +4671,8 @@ test("C8: commits the repo attests are one instrument, with artifact evidence, d
   assert.deepEqual(ok.errors, [], "commits proven to build the same binary are one instrument");
   assert.equal(ok.checked, 3);
 
-  // An attestation whose evidence does NOT show identical binaries is inert. The file's rule is that
-  // identical bytes admit an entry; a rule nothing enforces is a comment, and this is the case where
-  // a real instrument change would otherwise be waved through by a hand-written claim.
+  // An attestation whose evidence does not show identical binaries is inert - otherwise a real
+  // instrument change would be waved through by a hand-written claim.
   const unproven = checkMod.instrumentOf(JSON.stringify({
     instruments: [{ id: "wishful", commits: [A, B],
       evidence: { otb_release_sha256: { [A]: "1111", [B]: "2222" } } }],
@@ -5097,11 +4688,9 @@ test("C8: commits the repo attests are one instrument, with artifact evidence, d
 });
 
 // ---- C8: the override is loud, reasoned, and published ------------------------------------------
-//
-// A publish guard sometimes has to be overridden. The failure mode of an override is that it is
-// silent: a boolean env var flips, the board ships, and six months later nobody can say which numbers
-// were published over an objection. So the override takes the REASON as its value and hands it back to
-// the caller to publish. An override nobody can see after the fact is a disabled check.
+// A publish guard override's failure mode is silence: a boolean env var flips and six months later
+// nobody can say which numbers were published over an objection. So the override takes the reason as
+// its value and hands it back to the caller to publish.
 test("C8: the mixed-board override demands a reason and returns it for publication", () => {
   const snapOf = (commit) => ({ snap: { rig: { engine: { commit, dirty: false } } } });
   const resolve = (k) => snapOf(k === "plano" ? "b".repeat(40) : "a".repeat(40));
@@ -5110,8 +4699,8 @@ test("C8: the mixed-board override demands a reason and returns it for publicati
 
   assert.equal(run(undefined).errors.length, 1, "no override: the mix is refused");
 
-  // A truthy-but-meaningless value is NOT an override. This is the "1"/"true" habit the check exists
-  // to refuse, and it fails with a message saying what the field is for.
+  // A truthy-but-meaningless value ("1"/"true") is not an override; it fails with a message saying
+  // what the field is for.
   const bogus = run("1");
   assert.equal(bogus.overridden, undefined, "a flag is not a justification");
   assert.match(bogus.errors.join("\n"), /not a reason/);
@@ -5127,13 +4716,10 @@ test("C8: the mixed-board override demands a reason and returns it for publicati
 });
 
 // ---- C9: n/a beats a mixed board, and "blank" must mean blank -----------------------------------
-//
-// OTB_SINGLE_ENGINE is the third answer to C8, between re-measuring the whole field and overriding
-// the guard: show what the current engine measured, blank what it has not reached. That is only
-// honest if suppression is TOTAL. A row that went n/a everywhere except one surviving number would
-// put an older instrument's reading on the board with nothing marking it - strictly worse than the
-// mix C8 refuses, because the mix at least declares itself. So the bundle's own suppression claim is
-// verified rather than trusted: an exemption a bundle grants itself is not a check.
+// OTB_SINGLE_ENGINE (the third answer to C8) shows what the current engine measured, blanking what
+// it hasn't reached - only honest if suppression is total. A row n/a everywhere except one surviving
+// number would put an older instrument's reading on the board unmarked, worse than the mix C8 refuses.
+// So the bundle's own suppression claim is verified rather than trusted.
 test("C9: a row claiming suppression must publish NOTHING, and say what it waits for", () => {
   const base = () => ({
     suppressed_for_engine: ["kong"],
@@ -5167,7 +4753,7 @@ test("C9: a row claiming suppression must publish NOTHING, and say what it waits
   disagrees.gateways[0].engine.current = true;
   assert.match(c9(disagrees).join("\n"), /suppression and the stamp disagree/i);
 
-  // AND THE GUARD MUST NOT FIRE ON A BOARD THAT SUPPRESSES NOTHING - the normal, healthy state.
+  // And the guard must not fire on a board that suppresses nothing - the normal, healthy state.
   const clean = base();
   clean.suppressed_for_engine = [];
   clean.gateways[0].matrix = { served: true };
@@ -5194,10 +4780,8 @@ test("C8: the repo's own instrument-equivalence.json meets the evidence rule it 
   }
 });
 // ---- a board whose age cannot be established is not a fresh board -------------------------------
-// The 180-day floor ran only `if (boardNewest > 0)`, so the one case it could not judge was the one
-// it waved through. That is the shape of every guard that turned out to be inert today: the retry
-// budget nothing called, the box qualification that always seeded, the history appender scanning
-// directories nothing writes. Silent, not wrong, which is why none were noticed.
+// The 180-day floor used to run only `if (boardNewest > 0)`, so the one case it couldn't judge was
+// the one it waved through - the shape of an inert guard: silent, not wrong.
 // A gateway manifest with no results beside it: the shape both halves below start from.
 function undatableRoot(withUnstampedMatrix) {
   const root = mkdtempSync(join(tmpdir(), "site-undatable-"));
@@ -5209,9 +4793,8 @@ function undatableRoot(withUnstampedMatrix) {
   }));
   mkdirSync(join(root, "results", "snapshots"), { recursive: true });
   if (withUnstampedMatrix) {
-    // A matrix that SERVED - real cells, real numbers - and carries no measured_at anywhere. This is
-    // the board the guard was written for: it publishes, and nobody can say how old what it publishes
-    // is. Note the deliberate absence of `measured_at` at every level.
+    // A matrix that served - real cells, real numbers - and carries no measured_at anywhere: the
+    // board the guard was written for. Note the deliberate absence of measured_at at every level.
     mkdirSync(join(root, "results", "matrix"), { recursive: true });
     writeFileSync(join(root, "results", "matrix", "alpha.json"), JSON.stringify({
       served: true,
@@ -5224,25 +4807,19 @@ function undatableRoot(withUnstampedMatrix) {
   return root;
 }
 test("freshness guard REFUSES a board it cannot date, rather than passing it", () => {
-  // A gateway that PUBLISHES NUMBERS with no resolvable displayed stamp anywhere. Its row will show
-  // measurements the board cannot age, which is exactly what publishing generated_at=now over would
-  // misrepresent, so it is still a hard failure and its strictness is unchanged.
+  // A gateway publishing numbers with no resolvable displayed stamp anywhere: publishing
+  // generated_at=now over that would misrepresent it, so it's still a hard failure.
   const msg = genThrows(undatableRoot(true));
   assert.ok(msg, "expected gen-data to THROW on a board that publishes numbers it cannot date, but it succeeded");
   assert.match(msg, /FRESHNESS FAILURE \(undatable board\)/, `expected the undatable-board failure, got: ${msg}`);
 });
 // ---- ...but an EMPTY board is a legitimate state, and the guard must not eat it -------------------
-//
-// "Undatable" and "empty" both make boardNewest 0, and the guard originally asked only that question -
-// so it hard-failed a board where NOTHING had been benchmarked, which is not ambiguous at all: there
-// is nothing to date, and the honest bundle says n/a on every row (the whole BOARD_HAS_DATA family at
-// the top of this file exists to describe exactly that state).
-//
-// The cost was not cosmetic. A clean checkout commits no artifacts, so results/snapshots/ is empty and
-// gen-data threw on every fresh clone - which meant THIS FILE died at its own gen-data call, above,
-// before its first assertion: zero ok lines, zero FAIL lines, and a site suite that gated nothing in
-// CI while reading as "the job failed for an unrelated reason". The committed-data.json fallback could
-// not help because site/data.json is gitignored. This test is the guard on the guard.
+// "Undatable" and "empty" both make boardNewest 0, and the guard originally asked only that question,
+// so it hard-failed a board where nothing had been benchmarked - not ambiguous: there's nothing to
+// date, and the honest bundle says n/a everywhere. A clean checkout commits no artifacts, so
+// results/snapshots/ is empty and gen-data threw on every fresh clone, killing this test file at its
+// own gen-data call before the first assertion (site/data.json is gitignored, so the fallback couldn't
+// help either). This test is the guard on the guard.
 test("freshness guard PUBLISHES a board with nothing measured on it (empty is not undatable)", () => {
   const { data, err } = genData(undatableRoot(false));
   assert.ok(!err, `a board with no measurements at all must publish an honest empty bundle, not throw: ${err}`);
@@ -5251,14 +4828,10 @@ test("freshness guard PUBLISHES a board with nothing measured on it (empty is no
   assert.ok(data.generated_at, "the bundle still stamps when it was generated");
 });
 // ---- a DECLARED entrant is a row from the moment its definition lands (owner policy 2026-08-26) ----
-//
-// The board used to drop a gateway with no measurement so an unmeasured row could not read, beside
-// full grids, as "this one has nothing to show". The owner reversed that: the roster is meant to show
-// what is ON the bench, so a declared-but-unrun entrant (e.g. higress between its merge and its first
-// field run) appears immediately, rendering n/a on every lane with a version and contributor from its
-// manifest. It is a disclosed PENDING entrant, not a hidden one; the same row fills with numbers the
-// moment a snapshot lands. This test pins that: `ghost` is declared, never run, and MUST be a row
-// beside the measured `alpha`, carrying a null measured_at rather than fabricated data.
+// The board used to drop a gateway with no measurement to avoid an unmeasured row reading, beside
+// full grids, as "nothing to show". Reversed: the roster shows what's on the bench, so a
+// declared-but-unrun entrant appears immediately as a disclosed pending row, filling in once measured.
+// `ghost` is declared, never run, and must be a row beside measured `alpha`, with null measured_at.
 test("a declared-but-unmeasured gateway is a row (n/a) beside measured ones", () => {
   const root = mkdtempSync(join(tmpdir(), "site-unmeasured-"));
   for (const name of ["alpha", "ghost"]) {
@@ -5290,21 +4863,14 @@ test("a declared-but-unmeasured gateway is a row (n/a) beside measured ones", ()
   assert.ok(!ghost.matrix, "an unmeasured entrant has no matrix behind it");
 });
 // ---- the rig's ceiling is a FACT ABOUT THE COMPARISON, never a reason to withhold ------------------
-// This test's title used to be "matching a PACED upstream publishes the value; matching a CAPACITY still
-// suppresses", and it pinned exactly that split: a stream metric at the mock's paced rate published,
-// while a throughput metric at the rig's capacity was replaced with {value:null, reason:"mock_bound"}, on
-// the reasoning that publishing it "would rank the rig rather than the gateway".
-//
-// The split was the wrong shape of answer. Both halves are the same situation - a measurement taken
-// against equipment that has a ceiling of its own - and in both the number is correct; what differs is
-// only how much weight it will bear. Suppressing the throughput half deleted correct measurements and
-// deleted the most of them from the gateways that performed best, while the reader was given no way to
-// tell a withheld number from one that was never taken. There is no split now: a present number is always
-// published, with the ceiling it was taken against and the fraction of it reached, and the reader does
-// the weighing the seal used to do on their behalf and without telling them.
+// Formerly a stream metric at the mock's paced rate published while a throughput metric at the rig's
+// capacity was suppressed to {value:null, reason:"mock_bound"} - the wrong shape of answer, since both
+// are the same situation: a measurement against equipment with its own ceiling, and in both the number
+// is correct. There is no split now: a present number is always published, with the ceiling it was
+// taken against and the fraction reached, and the reader does the weighing the seal used to do for them.
 test("seal: a measurement at the rig's own ceiling is PUBLISHED, with the ceiling and the fraction reached", () => {
-  // Stream metrics: the mock paces deltas, so its frames/sec is a TARGET rate. Reaching it is the gateway
-  // keeping up - 24 of 69 cells were deleted for exactly this in the 2026-07-28 run.
+  // Stream metrics: the mock paces deltas, so its frames/sec is a target rate; reaching it is the
+  // gateway keeping up.
   const paced = sealMetric(12275, { headroom: 0.997, ceiling: 12312 });
   assert.equal(paced.value, 12275, "a gateway that kept pace must publish its rate");
   assert.equal(paced.certified, true);
@@ -5312,17 +4878,16 @@ test("seal: a measurement at the rig's own ceiling is PUBLISHED, with the ceilin
   assert.equal(paced.headroom, 0.997);
   assert.equal(paced.rig_ceiling, 12312);
 
-  // Throughput metrics: the SAME rule, which is the whole change. A saturating load really can hit the
-  // rig's capacity rather than the gateway's, and that is what the 0.997 says - it is stated, not acted on.
+  // Throughput metrics: the same rule. A saturating load really can hit the rig's capacity rather
+  // than the gateway's, and 0.997 says so - it is stated, not acted on.
   const capacity = sealMetric(12275, { headroom: 0.997, ceiling: 12312 });
   assert.equal(capacity.value, 12275, "a near-ceiling throughput number is published, not withheld");
   assert.equal(capacity.suppressed, false, "the SUPPRESSED envelope shape no longer exists at all");
   assert.equal(capacity.reason, undefined, "and a certified number carries no absence reason");
   assert.deepEqual(capacity, paced, "there is no longer a paced path and a capacity path - there is one rule");
 
-  // AN UNMEASURABLE REFERENCE used to suppress on both paths ("certifying a number on no evidence is what
-  // the gate exists to prevent"). It was the number that had the evidence; the missing evidence was for
-  // the INTERPRETATION, so it is the interpretation that goes missing - the fraction is simply not stated.
+  // An unmeasurable reference used to suppress on both paths. It's the number that had the evidence;
+  // the missing evidence was for the interpretation, so the fraction is simply not stated.
   const unreferenced = sealMetric(12275, { headroom: null, ceiling: null });
   assert.equal(unreferenced.value, 12275, "an unusable reference costs the fraction, not the measurement");
   assert.equal(unreferenced.certified, true);
@@ -5370,29 +4935,24 @@ test("benchmark version: current rows are quiet, older rows are marked red with 
 
 // ================================================================================================
 // THE THREE SURFACES NOTHING WAS WATCHING (round-2 audit)
-//
-// Each of these was verified to be CORRECT in the source and to produce ZERO test failures when
-// deliberately broken. A fix nothing can go red for is a fix that lasts until the next refactor.
+// Each was verified correct in the source and produced zero test failures when deliberately broken.
 // ================================================================================================
 
 // ---- the drawer ---------------------------------------------------------------------------------
-// drawerHtml() was called by NO test in this suite. It is the surface a reader opens to see the
-// evidence behind a row - every lane, every metric, the provenance stamp and the failure notes - and
-// nothing asserted a single character of it. Concretely: the drawer's metric list filters out absent
-// metrics with `.filter((x) => !x.c.na || x.c.failed)`, and a MEASURED FAILURE is `na: true,
-// failed: true` - so deleting `|| x.c.failed` deletes a gateway's worst measured result from the one
-// place a reader goes looking for it, and no test noticed.
+// drawerHtml() was called by no test in this suite. Concretely: the drawer's metric list filters out
+// absent metrics with `.filter((x) => !x.c.na || x.c.failed)`, and a measured failure is `na: true,
+// failed: true` - so deleting `|| x.c.failed` would delete a gateway's worst measured result from
+// the one place a reader goes looking for it, unnoticed.
 const FAIL_DETAIL = { reason: "not_measured", detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" };
 const failEnv = () => sealMetric(null, { absent: FAIL_DETAIL });
-/* The drawer fixture carries FOUR DISTINCT STATES on one record, because the drawer's job is to render
-   them apart and each pair of them is one substitution away from being indistinguishable:
+/* The drawer fixture carries four distinct states on one record, since each pair is one substitution
+   away from being indistinguishable:
      a measured FAILURE   - the 1 ms reading's rate: the harness ran and the gateway failed everything
      a below-RESOLUTION   - the p50 added latency: the comparison ran and the answer was under the floor
      a real reading       - the 10 ms reading
      a LOWER BOUND        - the unbounded reading: a floor, not a ceiling
-   The fourth replaces the retired SUPPRESSION state (a sealed envelope withholding a number it had). It
-   is genuinely new, it is the state the frontier introduced, and rendering it as a ceiling would be the
-   same class of error the suppression was: a surface making a claim the measurement does not support. */
+   The fourth is the state the frontier introduced; rendering it as a ceiling would be a claim the
+   measurement doesn't support. */
 const drawerGw = () => ({
   key: "dgw", display: "Drawer GW", lang: "Rust", cls: "AI proxy",
   repo: "https://github.com/example/dgw",
@@ -5449,13 +5009,11 @@ test("drawer: the surface renders - name, class, lanes, values and provenance", 
 });
 
 // ---- the compare table --------------------------------------------------------------------------
-// renderCompare() reached for document.getElementById on its first useful line and the suite has no
-// DOM, so the entire compare surface was structurally untestable: the one place three gateways' numbers
-// sit side by side and a winner is declared, covered by nothing. The row-building half is now
-// compareBodyHtml(gws, st), a pure function, and this is the regression the audit named: routing those
-// cells through mval() instead of metric() collapses states the table renders apart - a measured
-// failure becomes a bare n/a with no evidence, below-resolution's "≈0" becomes a plain 0, and an absence
-// loses the engine's reason for it.
+// renderCompare() used to reach for document.getElementById on its first line, so the compare surface
+// was structurally untestable in a suite with no DOM. The row-building half is now the pure
+// compareBodyHtml(gws, st): routing cells through mval() instead of metric() collapses states the
+// table renders apart - a measured failure becomes bare n/a, below-resolution's "≈0" becomes plain 0,
+// an absence loses its reason.
 test("compare: the table renders through metric(), so a bare-mval read cannot collapse the states", () => {
   const failing = { key: "a", display: "Alpha", lang: "Rust", cls: "AI proxy",
     best_cell: { ...bcCell({ dialect: "openai", added_latency_p99_us: 110,
@@ -5468,18 +5026,11 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
         detail: "the difference was at or below what the rig can resolve" } }) } };
   const bound = { key: "b", display: "Beta", lang: "Go", cls: "AI proxy",
     best_cell: { ...bcCell({ dialect: "openai", added_latency_p99_us: 500 }),
-      // A metric the ENGINE reports as rig-limited: an absence with a stated reason, and the reason is
-      // the disclosure. This used to be `sealMetric(32000, {gated: true, flag: true})` - a SUPPRESSED
-      // envelope, the seal hiding a number it had. That shape is gone (the 32,000 would now publish), and
-      // with it went the only fixture in this test that produced a reason to render.
-      //
-      // `rig_limited` IS A DECLARED TOKEN WITH NO CURRENT PRODUCER, and this comment used to call it a
-      // "live engine absence token", which is not true: `Absent::RigLimited` is constructed nowhere in
-      // the engine outside test modules (checked across measurement.rs, suite.rs, run.rs, record.rs).
-      // It stays as the fixture because what is under test is the SITE's behaviour - a no-number cell
-      // must disclose WHY rather than vanishing into the same n/a an unmeasured cell gets - and that
-      // property holds for any reason token the engine may emit. What must not stand is a test comment
-      // asserting a fact about the engine that stopped being true.
+      // A metric the engine reports as rig-limited: an absence with a stated reason. This used to be
+      // a suppressed envelope hiding a number it had; that shape is gone.
+      // `rig_limited` is a declared token with no current producer (Absent::RigLimited is constructed
+      // nowhere in the engine outside test modules). It stays as the fixture because what's under
+      // test is the site's behavior for any reason token the engine may emit.
       gateway_c1_p99_us: sealMetric(null, { absent: { reason: "rig_limited" } }) } };
   const st = { ...app.newState(), view: "performance", mode: "peak",
     data: { gateways: [failing, bound] }, cmp: ["a", "b"] };
@@ -5492,11 +5043,9 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
   assert.match(h, /class="na failcell"/, "and is marked red, not folded in with the untested cells");
   // (2) BELOW-RESOLUTION reads ≈0, which is a RESULT (equal-best), not a hole and not a plain 0.
   assert.match(h, /≈0/, "below-resolution renders as ≈0 - the best answer the comparison can express");
-  // (3) A metric with NO NUMBER carries its reason on the tooltip rather than vanishing silently. The
-  // assertion is anchored on the engine reason's own prose, not on the word "mock": every perf column
-  // title in this table says "direct-to-mock", so a loose /mock/i matched the table's furniture and
-  // passed no matter what the cell rendered.
-  // (The prose is HTML-escaped into the title attribute, so the match avoids its apostrophe.)
+  // (3) A metric with no number carries its reason on the tooltip. Anchored on the engine reason's
+  // own prose, not the word "mock" (every perf column title says "direct-to-mock", so a loose /mock/i
+  // would pass regardless of what the cell rendered). Prose is HTML-escaped, so the match avoids the apostrophe.
   assert.match(h, /own ceiling bounded this number/,
     "a cell with no number discloses WHY, in the reason's own words");
   // (4) The contest is still called, on the metric that both gateways measured.
@@ -5511,18 +5060,15 @@ test("compare: the table renders through metric(), so a bare-mval read cannot co
 
 // ================================================================================================
 // THE FRONTIER SURFACES: the bound is named, switchable, and re-ranks the board
-//
-// The retired board's failure was not a wrong number, it was a caption: every surface described the
-// throughput gate as "p99 < 1 s" while the engine enforced 20 ms - a bar 96% of the 1632 recorded rungs
-// pass, against 57% for the real one - so a reader who reasoned carefully about our numbers reasoned about
-// a test we never ran. Everything below is a guard on the property that replaced it: the bound the board is
-// showing is DECLARED, the reader can change it, and changing it changes the ranking in front of them.
+// The retired board's failure was a caption, not a wrong number: every surface described the
+// throughput gate as "p99 < 1 s" while the engine enforced 20 ms. Everything below guards the
+// replacement property: the bound shown is declared, the reader can change it, and changing it
+// changes the ranking in front of them.
 // ================================================================================================
 
 test("FRONTIER: the board's bound vocabulary MIRRORS seal.mjs, which mirrors the engine", () => {
-  // app.js is loaded as a plain <script> and cannot import the module, so the list is duplicated. A second
-  // source of truth is only acceptable while something checks it: a bound added to the engine and to
-  // seal.mjs must not leave the board rendering a table one column short, silently.
+  // app.js can't import the module, so the bound list is duplicated; a second source of truth is only
+  // acceptable while something checks it stays in sync.
   assert.deepEqual(app.FRONTIER_BOUNDS_MS, FRONTIER_BOUNDS_MS,
     "the board's declared bounds must equal seal.mjs's, which mirror frontier::P99_BOUNDS_US");
   assert.equal(app.DEFAULT_BOUND_MS, DEFAULT_BOUND_MS, "and so must the bound the board opens on");
@@ -5537,8 +5083,8 @@ test("FRONTIER: the board's bound vocabulary MIRRORS seal.mjs, which mirrors the
 });
 
 test("FRONTIER: every surface NAMES the bound it is showing, and none can imply one it did not use", () => {
-  // THE PHRASING WAS SETTLED WITH THE OWNER: "18,995 req/s while 99% of requests finished under 10 ms".
-  // Not "rps at 10 ms", which reads as a category error - the bound is not a rate.
+  // Phrasing: "18,995 req/s while 99% of requests finished under 10 ms", not "rps at 10 ms" (a
+  // category error - the bound is not a rate).
   for (const b of app.FRONTIER_BOUNDS_MS) {
     assert.equal(app.boundClause(b), `while 99% of requests finished under ${b} ms`);
     assert.match(app.boundColLabel(b), new RegExp(`99% under ${b} ms`));
@@ -5547,8 +5093,8 @@ test("FRONTIER: every surface NAMES the bound it is showing, and none can imply 
   assert.match(app.boundClause(null), /no latency bound at all/);
   assert.match(app.boundClause(null), /failed no request it accepted/);
   assert.ok(!/99%/.test(app.boundColLabel(null)), "the unbounded column must not imply a percentile bound");
-  // NO SURFACE MAY STATE A BOUND AS A BARE NUMBER-AND-UNIT: the column header, the tooltip, the caption
-  // and the popup all render their clause from boundClause(), so there is one sentence to be wrong.
+  // No surface may state a bound as a bare number-and-unit: header, tooltip, caption and popup all
+  // render their clause from boundClause(), so there is one sentence to be wrong.
   const col = app.COLUMN_SETS.performance.find((c) => c.id === "rps");
   const prev = app.state.bound;
   try {
@@ -5578,16 +5124,14 @@ test("FRONTIER: the bound is in the URL, is a fixed point, and a bound the board
   assert.ok(!app.encodeUrl({ ...app.newState(), view: "performance" }).includes("bound="));
   // ...and the unbounded reading is spelled out rather than encoded as an empty value.
   assert.match(app.encodeUrl({ ...app.newState(), view: "performance", bound: null }), /bound=none/);
-  // A BOUND THE BOARD DOES NOT PUBLISH IS IGNORED, not honoured. 20 ms is the retired gate's ceiling and
-  // the value a reader is most likely to try by hand; rendering a column labelled "99% under 20 ms" over
-  // readings taken at 10 ms would be the original defect, re-created by a URL parameter.
+  // A bound the board does not publish is ignored, not honoured. 20 ms is the retired gate's ceiling,
+  // the value a reader is most likely to try by hand - honoring it would re-create the original defect.
   assert.equal(app.decodeUrl("/gateways/performance", "?bound=20").bound, app.DEFAULT_BOUND_MS);
   assert.equal(app.decodeUrl("/gateways/performance", "?bound=abc").bound, app.DEFAULT_BOUND_MS);
   assert.equal(app.decodeUrl("/gateways/performance", "?bound=").bound, app.DEFAULT_BOUND_MS);
-  // The selector is offered ONLY where something is read at a bound: a control over the memory columns
-  // would imply those numbers had a tail-latency bound too.
-  // Charts joins them: its throughput and dollar metrics are READ AT A BOUND, and a chart that ignored
-  // the selector while sitting beside tables that honour it would be showing a different question.
+  // The selector is offered only where something is read at a bound: a control over the memory
+  // columns would imply those numbers had a tail-latency bound too. Charts joins them since its
+  // throughput/dollar metrics are read at a bound too.
   assert.deepEqual([...app.BOUND_VIEWS].sort(), ["charts", "frontier", "performance"]);
   for (const v of ["streaming", "memory"]) assert.ok(!app.BOUND_VIEWS.has(v), `${v} is not read at a bound`);
   assert.ok(!app.encodeUrl({ ...app.newState(), view: "memory", bound: 1 }).includes("bound="),
@@ -5595,11 +5139,10 @@ test("FRONTIER: the bound is in the URL, is a fixed point, and a bound the board
 });
 
 test("FRONTIER: switching the bound RE-RANKS the board, in front of the reader", () => {
-  /* THE LOAD-BEARING BEHAVIOUR. The whole claim of the frontier is that a gateway's position depends on the
-     tail you are willing to accept; a selector that changed only the digits in place would leave that claim
-     unmade. These two gateways are the field's two shapes, from the 2026-07-29 board: agentgateway holds
-     23,630 under a 1 ms tail and gains 7% unbounded; apisix carries 10,697 at 1 ms and nearly doubles by
-     5 ms. Ranked at 1 ms the flat one wins; ranked unbounded the steep one does. */
+  /* The load-bearing behavior: the frontier's claim is that a gateway's position depends on the tail
+     you're willing to accept, so a selector that only changed digits in place wouldn't prove it. Two
+     shapes: a flat gateway holding its rate under a tight tail, and a steep one that needs a loose
+     tail to go fast. Ranked at 1 ms the flat one wins; ranked unbounded the steep one does. */
   const flat = { key: "flat", display: "Flat GW", lang: "Rust",
     best_cell: bcCell({ dialect: "openai", frontier: { 1: 23630, 5: 24712, 10: 25158, none: 25290 } }) };
   const steep = { key: "steep", display: "Steep GW", lang: "Go",
@@ -5614,18 +5157,18 @@ test("FRONTIER: switching the bound RE-RANKS the board, in front of the reader",
   assert.deepEqual(rank(null), ["steep", "flat"], "with no bound at all the ranking INVERTS");
   // ...and the two are not the same machine, which is what the shape column says in one number.
   const heldOf = (g, bound) => app.frontierShapeCell(g, { ...app.newState(), mode: "peak", bound });
-  // THE BOUND IS PART OF THE TEXT, always, including on the 1 ms rows: a reader must never have to know
-  // which bound is the default to know whether "93%" means "at the tightest tail we publish" or "at 50 ms".
+  // The bound is part of the text, always, including on the 1 ms rows: a reader must never have to
+  // know which bound is the default to know what "93%" refers to.
   assert.equal(heldOf(flat, 10).text, "93% of its full rate at 1 ms", "flat: it keeps nearly all of it under a 1 ms tail");
   assert.equal(heldOf(steep, 10).text, "41% of its full rate at 1 ms", "steep: it needs a loose tail to go fast");
-  // BIGGER IS BETTER now that the column states a share rather than a gain, so the column's descending
-  // default puts the gateway that holds its rate on top - the direction the header's own words point.
+  // Bigger is better now that the column states a share rather than a gain, so descending puts the
+  // gateway that holds its rate on top.
   assert.ok(heldOf(flat, 10).v > heldOf(steep, 10).v, "so the shape column separates them at any bound");
-  // The share is bound-INDEPENDENT (it is a property of the whole curve), which is why it is a stable
-  // second ranking rather than a third reading of the selected bound.
+  // The share is bound-independent (a property of the whole curve), so it's a stable second ranking
+  // rather than a third reading of the selected bound.
   assert.equal(heldOf(steep, 1).text, heldOf(steep, null).text);
-  // AND SELECTING A BOUND MOVES THE FRONTIER TAB'S SORT ONTO THAT BOUND'S COLUMN, so the re-rank is
-  // visible rather than merely available.
+  // Selecting a bound moves the frontier tab's sort onto that bound's column, so the re-rank is
+  // visible, not merely available.
   const st = { ...app.newState(), view: "frontier", bound: 10, sortCol: app.boundColId(10) };
   Object.assign(app.state, st, { data: { gateways: rows } });
   try {
@@ -5644,10 +5187,9 @@ test("FRONTIER: the tab publishes every reading as its own column, marked at the
   for (const b of app.BOUND_CHOICES) {
     const c = cols.find((x) => x.id === app.boundColId(b));
     assert.ok(c, `the frontier tab has a column for ${app.boundLabel(b)}`);
-    /* THE SHARED WORDS ARE STATED ONCE, IN A SPANNING GROUP HEADER, and each sub-header carries only what
-       differs. Six headers each reading "Req/s · 99% under N ms" was the same five words six times across
-       the widest table on the board. The 99% qualifier has NOT been dropped - it moved into the group
-       header, which is now the only place on that table it appears, so this asserts both halves. */
+    /* The shared words are stated once, in a spanning group header, and each sub-header carries only
+       what differs (six headers each reading "Req/s · 99% under N ms" was the same words six times).
+       The 99% qualifier moved into the group header rather than being dropped. */
     assert.equal(String(c.label), app.boundLabel(b), "the sub-header carries only its own bound");
     assert.equal(c.group, app.BOUND_GROUP_LABEL, "and shares the one spanning group header");
     assert.ok(String(c.title).includes(app.boundClause(b)), "and states its own clause, not a shared one");
@@ -5678,22 +5220,21 @@ test("FRONTIER: the tab publishes every reading as its own column, marked at the
 });
 
 test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguishable markers", () => {
-  /* THE SHAPE HAS TO BE LEGIBLE WITHOUT READING NUMBERS, which is what the sparkline is for, and the scale
-     is what makes it honest. Shared, so two rows are comparable; logarithmic, so equal slopes are equal
-     ratios (the ratio IS the finding) and the slowest gateway on the board is still visible - the field
-     spans litellm-rust at 44,363 req/s and plano at 19, which no shared linear axis can show at once. */
+  /* The shape has to be legible without reading numbers, and the scale is what makes it honest.
+     Shared, so rows are comparable; logarithmic, so equal slopes are equal ratios and the slowest
+     gateway is still visible on a field spanning several orders of magnitude. */
   const board = { gateways: [
     { key: "fast", best_cell: bcCell({ dialect: "openai", frontier: { 1: 40000, none: 44363 } }) },
     { key: "slow", best_cell: bcCell({ dialect: "openai", frontier: { none: 19 } }) },
   ] };
   const scale = app.boardFrontierScale(board);
   assert.deepEqual(scale, { min: 19, max: 44363 }, "the domain spans the whole board, not one row");
-  // A SLOW ROW IS STILL A SHAPE, not an empty frame with one dot: its curve is drawn on the same scale and
-  // its points are placed, so "slow" reads as slow rather than as broken.
+  // A slow row is still a shape, not an empty frame with one dot: its curve is drawn on the same
+  // scale, so "slow" reads as slow rather than broken.
   const slow = app.frontierSpark(board.gateways[1].best_cell.frontier, { ...scale, boundMs: 10 });
   assert.match(slow, /<path d="M/, "the slow row still draws a path");
   assert.match(slow, /log scale/, "and says which scale it is on, for a screen reader");
-  // THE THREE MARKERS, THREE CLAIMS. A ceiling, a floor, and a bound the gateway served but could not hold.
+  // Three markers, three claims: a ceiling, a floor, and a bound the gateway served but could not hold.
   const three = [
     { bound_ms: 1, rps: sealMetric(null, { absent: { reason: "below_resolution", detail: "none held it" } }),
       concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false },
@@ -5708,21 +5249,16 @@ test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguish
   // A record with no frontier draws NOTHING - never an empty frame that reads as a measurement.
   assert.equal(app.frontierSpark([], { ...scale }), "");
   assert.equal(app.frontierSpark(null, { ...scale }), "");
-  /* THE SLOWEST SHAPE ON THE BOARD MUST STILL BE A SHAPE. plano's real curve: nothing under any declared
-     bound (its tail is ~890 ms at c=8) and 19 req/s unbounded. There is no share of full rate to state - a
-     share of a rate it never reached under any bound is not a number - but the CURVE is the whole finding, so
-     the cell keeps it and withholds only the percentage. Rendering the cell as n/a here would delete the
-     finding for exactly the gateways it is about, and "no data" is a neutral impression of a damning
-     measurement. */
+  /* The slowest shape on the board must still be a shape: a curve with nothing under any declared bound
+     has no share-of-full-rate to state, but the curve itself is the finding, so the cell keeps it and
+     withholds only the percentage. Rendering n/a here would delete the finding for the gateways it's about. */
   const floorOnly = bcCell({ dialect: "openai", frontier: { 1: null, 5: null, 10: null, 50: null, 100: null, none: 19 } });
   const g = { key: "slow", display: "Slow", lang: "Go", best_cell: floorOnly };
   const cell = app.frontierShapeCell(g, { ...app.newState(), mode: "peak" });
   assert.equal(cell.na, false, "a curve with no share to state is still a curve");
-  /* AND IT SAYS SO IN WORDS. A bare "—" was what shipped, and the owner read it as missing data - which is
-     the one thing it is not: this gateway SERVED and no concurrency it was offered held any published tail.
-     A dash is the neutral rendering of a damning measurement, and a "0%" would be worse: it would claim a
-     share at a bound where no rung qualified at all. The cell states the finding as a sentence, in the same
-     measured-zero ink a "no rung held this tail" carries in the reading columns. */
+  /* And it says so in words: a bare "—" reads as missing data, the one thing this isn't (the gateway
+     served, no offered concurrency held any published tail). A "0%" would be worse, claiming a share
+     at a bound where no rung qualified. The cell states the finding as a sentence instead. */
   assert.equal(cell.text, "served nothing under 100 ms", "the percentage - not the curve - is what is withheld, and the cell says why in words");
   assert.ok(!/\b0\s*%/.test(cell.text), "and never as 0%, which would claim a measured share it does not have");
   assert.equal(cell.zero, true, "carrying the measured-zero styling, not an absence styling");
@@ -5735,17 +5271,11 @@ test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguish
 });
 
 test("FRONTIER: an absent reading keeps its OWN reason, which needs the block-prefixed absences key", () => {
-  /* THIS PINS A FIX THAT SHIPPED WITHOUT A TEST, AND THE BUG IT FIXED WAS SILENT.
-
-     `sealFrontier` looks its absences up under `perf.frontier.<bound>.rps` - the block-prefixed key the
-     engine actually writes - and once looked them up under the bare `frontier.<bound>.rps`. Nothing threw:
-     every lookup simply missed, so all 36 absent frontier readings degraded to a flat `not_measured` with
-     no detail, and the board stopped being able to say WHY a gateway carried nothing at a bound. "No rung
-     held this tail" and "we did not measure this" render identically once the reason is gone, which is
-     invariant 1 - a measured absence and an unmeasured one must never look alike.
-
-     It was found by a chart agent noticing the reasons had vanished, not by any check. A refactor that
-     renamed the prefix, or "simplified" the lookup back to the bare key, would restore the silence. */
+  /* Pins a fix that shipped without a test, for a silent bug: sealFrontier looks absences up under the
+     block-prefixed perf.frontier.<bound>.rps key the engine writes, and once looked them up under the
+     bare frontier.<bound>.rps. Nothing threw - every lookup simply missed, degrading all absent frontier
+     readings to a flat not_measured with no detail, so a measured absence and an unmeasured one looked
+     alike (invariant 1 violation). Found by a chart agent noticing the reasons had vanished, not a check. */
   const readings = [
     { p99_bound_us: 1000, rps: null, concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false },
     { p99_bound_us: null, rps: 19, concurrency: 8, p99_us: 889100, first_disqualified_conc: null, lower_bound: false },
@@ -5764,9 +5294,8 @@ test("FRONTIER: an absent reading keeps its OWN reason, which needs the block-pr
   assert.match(tight.rps.detail || "", /carried no measurable throughput/,
     "the detail is the half a reader acts on; losing it is the silent form of this bug");
 
-  // AND THE BARE KEY MUST NOT BE THE ONLY THING THAT WORKS: an absences map written the old way is still
-  // honoured (the `|| absences[key]` fallback), so this test cannot pass merely because both spellings
-  // were collapsed into one.
+  // The bare key must also still work (the `|| absences[key]` fallback), so this test can't pass
+  // merely because both spellings were collapsed into one.
   const bareOnly = sealFrontier(readings, { "frontier.1ms.rps": { reason: "below_resolution", detail: "legacy spelling" } });
   assert.equal(bareOnly.find((r) => r.bound_ms === 1).rps.reason, "below_resolution",
     "the legacy unprefixed key is still read, so older bundles keep their reasons");
@@ -5777,9 +5306,8 @@ test("FRONTIER: an absent reading keeps its OWN reason, which needs the block-pr
 });
 
 test("FRONTIER: every metric's definition is reachable from the surface that shows it", () => {
-  /* THE DEFINITIONS ARE GENERATED FROM THE ENGINE'S CONSTANTS (suite.rs metric_definitions) and surfaced
-     where the number is, because the failure they exist to prevent is a reader reasoning carefully about a
-     test that never ran. A definition filed on another page is a definition nobody reads. */
+  /* Definitions are generated from the engine's constants (suite.rs metric_definitions) and surfaced
+     where the number is - a definition filed on another page is a definition nobody reads. */
   const defs = {
     "perf.frontier": "THROUGHPUT AT A TAIL LATENCY YOU ACCEPT. For each declared bound...",
     "perf.added_latency": "WHAT THE GATEWAY ADDS, at concurrency 1...",
@@ -5787,8 +5315,8 @@ test("FRONTIER: every metric's definition is reachable from the surface that sho
     memory: "See matrix.memory.protocol...",
   };
   const data = { gateways: [], definitions: defs };
-  // SELECTED BY PREFIX, never by an enumerated list: a definition the engine adds under `perf.` reaches the
-  // Performance surfaces with no change here, which is the only way this cannot go stale.
+  // Selected by prefix, never an enumerated list, so a definition added under `perf.` reaches the
+  // Performance surfaces with no change here.
   assert.deepEqual(app.definitionsFor(app.DEFINITION_PREFIXES.performance, data).map((e) => e[0]),
     ["perf.added_latency", "perf.frontier"]);
   assert.deepEqual(app.definitionsFor(app.DEFINITION_PREFIXES.streaming, data).map((e) => e[0]), ["stream.streams_sustained"]);
@@ -5811,13 +5339,10 @@ test("FRONTIER: every metric's definition is reachable from the surface that sho
 });
 
 test("FRONTIER: the retired throughput vocabulary is unreachable from every board surface", () => {
-  // The producer cannot emit these any more; this is the guard that no RENDERER can either. A caption or a
-  // note that still names them would describe a measurement the board no longer takes - which is precisely
-  // the class of error the frontier was built to end.
+  // The producer can't emit these any more; this guards that no renderer can either.
   const raw = readFileSync(join(HERE, "app.js"), "utf8");
-  // COMMENTS ARE WHERE THE HISTORY IS KEPT DELIBERATELY - every deletion in this file names what it removed
-  // and why - so they are stripped and the scan is of STRING LITERALS ONLY: the text a reader can actually
-  // see on the page.
+  // Comments are where history is kept deliberately, so they're stripped and the scan is of string
+  // literals only: the text a reader can actually see on the page.
   const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   const literals = src.match(/"[^"\n]*"|'[^'\n]*'|`[^`]*`/g) || [];
   for (const tok of ["rps_sustained_20ms", "rps_max_proxy", "cpu_fps", "mock_bound", "unverifiable", "paced_match"]) {
@@ -5843,16 +5368,14 @@ test("FRONTIER: the retired throughput vocabulary is unreachable from every boar
 });
 
 // ---- the repo URL reaches an href at four sites, and nothing built a hostile one -----------------
-// gen-data validates `repo` to an https:// URL or null on the way in, which is the primary defence -
-// but app.js interpolated `g.repo` into an href at FOUR independent render sites, so "is it escaped
-// here" was four separate questions, and no test anywhere constructed a gateway with a hostile repo to
-// ask any of them. All four now route through gwLink(), and this covers the helper plus the fact that
-// there is exactly one place left that can get it wrong.
+// gen-data validates `repo` to https:// or null on the way in, but app.js used to interpolate g.repo
+// into an href at four independent render sites, so "is it escaped here" was four separate questions.
+// All four now route through gwLink(), covered here plus the fact only one place can get it wrong.
 test("every repo href escapes, and all FOUR render sites route through the one helper", () => {
   const hostile = { display: 'Ev"il <script>', repo: 'https://example.com/a" onmouseover="alert(1)' };
   const a = app.gwLink(hostile);
-  // The attack is escaping the href's own quote to start a new attribute. An escaped `&quot;` cannot,
-  // so the test is for an UNESCAPED quote followed by an attribute, not for the substring itself.
+  // The attack is escaping the href's own quote to start a new attribute; an escaped &quot; cannot,
+  // so the test is for an unescaped quote followed by an attribute, not the substring itself.
   assert.ok(!/ onmouseover="/.test(a), `the attribute must not break out of the href: ${a}`);
   assert.equal((a.match(/"/g) || []).length, 6, `only the six attribute delimiters may be real quotes: ${a}`);
   assert.match(a, /&quot;/, "the quote is escaped, not passed through");
@@ -5879,10 +5402,8 @@ test("every repo href escapes, and all FOUR render sites route through the one h
   const rawHrefs = src.match(/href="\$\{esc\(g\.repo\)\}"/g) || [];
   assert.equal(rawHrefs.length, 1,
     `exactly one place may interpolate a repo into an href (gwLink); found ${rawHrefs.length}`);
-  // Four call sites, no more and no fewer (comments and the definition line are excluded, so this
-  // counts real callers): the table name column, the drawer head, the protocol-matrix header and the
-  // roster row. A fifth hand-rolled anchor would fail the raw-href count above; a MISSING one would
-  // fail here, which is the direction a refactor breaks it in.
+  // Four call sites, no more and no fewer: table name column, drawer head, protocol-matrix header,
+  // roster row. A fifth hand-rolled anchor would fail the raw-href count above; a missing one fails here.
   const callSites = src.split("\n").filter((ln) => /\bgwLink\(g\)/.test(ln) &&
     !/^\s*(\/\/|\*|\/\*)/.test(ln) && !/^\s*function\b/.test(ln));
   assert.equal(callSites.length, 4, `expected four gwLink call sites, got ${callSites.length}`);
@@ -5919,10 +5440,8 @@ test("#2 OVERCLAIM: no surface claims a MAXIMUM ACROSS CELLS, because nothing co
   assert.match(app.MODE_TIPS.peak, /cannot change which cell/i,
     "including the consequence: the bound cannot move this selection");
 
-  /* THE PHRASE ITSELF, hunted across every string the board can put in front of a reader. This is a
-     CLASS guard, not a spot fix: it fails on any future surface that revives the wording, which is how the
-     retired "p99 < 1 s" caption survived for as long as it did. "each gateway carried" is the exact shape of
-     the claim - a rate attributed to the GATEWAY rather than to the one cell it was measured on. */
+  /* A class guard, not a spot fix: fails on any future surface reviving this wording ("each gateway
+     carried" - a rate attributed to the gateway rather than the one cell it was measured on). */
   const surfaces = [
     app.captionText(app.chooserCaption("performance", st, board)),
     app.captionText(app.chooserCaption("streaming", st, board)),
@@ -5935,32 +5454,24 @@ test("#2 OVERCLAIM: no surface claims a MAXIMUM ACROSS CELLS, because nothing co
   for (const s of surfaces)
     assert.ok(!/most\s+req(uests)?\/?s?e?c?[^.]*each gateway carried/i.test(s),
       `a surface attributes a rate to the GATEWAY rather than to the cell it was measured on: ${s}`);
-  // A reading IS the top qualifying rung of ONE cell's sweep, so "the most ... the chosen cell carried" is
-  // exact and must stay - the fix was the scope of the claim, not the strength of it.
+  // A reading is the top qualifying rung of one cell's sweep, so "the most ... the chosen cell carried"
+  // is exact and must stay - the fix was the scope of the claim, not its strength.
   const rps = app.COLUMN_SETS.performance.find((c) => c.id === "rps");
   assert.match(txtOf(rps.title), /the chosen cell carried/, "the per-CELL maximum is real and still claimed");
 
-  // AND THE DELTA'S REFERENCE CELL IS NOT CALLED A PEAK EITHER: a positive req/s delta against it is
-  // ordinary (it was chosen on latency), and "peak" made that read as impossible.
+  // The delta's reference cell is also never called a peak: a positive req/s delta against it is
+  // ordinary (chosen on latency), and "peak" made that read as impossible.
   const src = readFileSync(join(HERE, "app.js"), "utf8");
   assert.ok(!/vs peak \(/.test(src), "no surface labels the reference cell 'vs peak'");
 });
 
 test("#4 OVERCLAIM: the shape column states a SHARE OF FULL RATE and names the bound it was read at", () => {
-  /* WHY IT IS A PERCENTAGE AND NOT A GAIN FACTOR. The column shipped twice as a ratio - first as a bare
-     "×1.3" ("i dont know what 1.3x or whatever means"), then as "×1.0 from 1 ms" - and the owner still could
-     not read his own column: "its just not clear what this means, even I know and i cant figure it out". A
-     factor makes the reader assemble one sentence out of three scattered pieces: the multiplier (of WHAT?),
-     "from 1 ms" (to what?), and the missing half of that stranded in the column header. And ×1.0 was the BEST
-     possible result while reading like an unfilled default.
-     THE TRAP IT STILL HAS TO SURVIVE, FROM THE LIVE BOARD:
-       litellm-rust  43,876 of 44,363 at 1 ms   (full rate at a 0.56 ms tail)
-       tensorzero    11,875 of 11,936 at 50 ms  (holds NOTHING under 10 ms)
-     Both round to 99%. Rendered without the bound they would be the same four characters, telling a reader
-     those two gateways have the same curve - the exact opposite of the truth and the one claim this metric
-     exists to make. one-api is the same trap the other way: 78% at 50 ms looks better-behaved than kong's 56%
-     at 1 ms, while one-api serves nothing at all under 50 ms. So the bound is ON the cell, and `v` groups the
-     column by that bound before ranking on the share. */
+  /* Why a percentage, not a gain factor: a factor ("×1.0 from 1 ms") makes the reader assemble one
+     sentence from scattered pieces, and ×1.0 read like an unfilled default despite being the best
+     result. The trap it must survive: two gateways can both round to "99% of full rate" while one
+     holds full rate at a 0.56ms tail and the other holds nothing under 10ms - rendered without the
+     bound they'd look identical, the opposite of the truth. So the bound is on the cell, and `v`
+     groups the column by that bound before ranking on the share. */
   const stFor = (g) => ({ ...app.newState(), mode: "peak", data: { gateways: [g] } });
   const gw = (key, frontier) => ({ key, display: key, lang: "Rust", best_cell: bcCell({ dialect: "openai", frontier }) });
 
@@ -5973,29 +5484,26 @@ test("#4 OVERCLAIM: the shape column states a SHARE OF FULL RATE and names the b
   assert.notEqual(tc.text, lc.text, "THE TWO MUST NOT RENDER IDENTICALLY: they are opposite findings");
   assert.match(lc.note, /no rate at all under 10 ms/,
     "and the tooltip states the tighter bound it could not serve, which is the finding");
-  /* NO VERDICT ON THE CELL. A preview rendered tensorzero as "99% - but only at 50 ms"; this board publishes
-     facts, not editorial judgements about whether 50 ms is bad, and the bound already carries that plainly.
-     Every row takes the identical form and the reader draws the conclusion. */
+  /* No verdict on the cell: this board publishes facts, not editorial judgements about whether a
+     bound is bad. Every row takes the identical form and the reader draws the conclusion. */
   assert.ok(!/but only/i.test(lc.text), `the cell states the reading, not a verdict on it: ${lc.text}`);
 
-  /* THE DENOMINATOR IS THE UNBOUNDED READING, not the 100 ms one and not a max across bounds. `loose` is the
-     discriminating case: 11,875 at 50 ms, 11,936 at BOTH 100 ms and unbounded, so the percentage alone cannot
-     tell which was used. The tooltip names both rates, and frontierFullRate names the reading itself. */
+  /* The denominator is the unbounded reading, never the 100ms one or a max across bounds. `loose`
+     discriminates this: 100ms and unbounded happen to be equal, so the percentage alone can't tell
+     which was used - the tooltip names both rates. */
   assert.match(lc.note, /11,875 req\/s .*against 11,936 req\/s/, "the tooltip names numerator and denominator");
   assert.equal(app.frontierFullRate(app.frontierOf(app.chooserCellPerf(loose, stFor(loose)))), 11936,
     "and 'full rate' is the UNBOUNDED reading, read through one named accessor");
 
-  /* NEVER 100% UNLESS THE TWO READINGS ARE THE SAME NUMBER. Rounding 99.6% up to "100% of its full rate"
-     asserts the gateway loses nothing at all to a tight tail when its own readings say otherwise - the exact
-     class of overclaim this column exists to remove. */
+  /* Never 100% unless the two readings are the same number: rounding 99.6% up to 100% would assert
+     the gateway loses nothing to a tight tail when its readings say otherwise. */
   assert.equal(app.heldPct(0.996), 99, "99.6% floors at 99: it is not AT its full rate");
   assert.equal(app.heldPct(0.9999), 99, "and so does anything short of equality, however close");
   assert.equal(app.heldPct(1), 100, "only two identical readings - an exactly flat curve - print 100");
 
-  /* THE RANKING. Ranking on the bare share would sort 99%-at-50ms beside 99%-at-1ms as though they measured
-     one quantity, and would file the gateway that cannot serve under 10 ms beside the one running at full rate
-     at 0.56 ms. Bound-of-origin dominates; the share orders within it. Bigger is better now that the column
-     states a share rather than a gain, so the descending default lands the good shapes on top. */
+  /* Ranking on the bare share would sort 99%-at-50ms beside 99%-at-1ms as one quantity, filing a
+     gateway that can't serve under 10ms beside one running full rate at 0.56ms. Bound-of-origin
+     dominates; the share orders within it. */
   assert.ok(tc.v > lc.v, "a share read at a looser bound ranks below one read at a tighter bound, whatever its size");
   const steepFromTight = gw("steep", { 1: 10697, 5: 19339, 10: 20352, 50: 26000, 100: 26000, none: 26000 });
   const sc = app.frontierShapeCell(steepFromTight, stFor(steepFromTight));
@@ -6007,11 +5515,9 @@ test("#4 OVERCLAIM: the shape column states a SHARE OF FULL RATE and names the b
   assert.equal(app.heldSortKey(0, 1), app.HELD_NOTHING_INDEX * 2 + 1,
     "100% at the tightest bound is the ceiling of the ranking - the good shape");
 
-  /* THE HELD-NOTHING CASE, which is what the owner actually saw: plano carried nothing under ANY published
-     bound and 19 req/s unbounded, so there is no share to state. It rendered a bare "—", which reads as
-     missing data when the truth is a measurement: it SERVED, cleanly, and no concurrency it was offered held
-     even the loosest tail on the board. A dash is the neutral rendering of a damning finding, and it flattered
-     the slowest row. A "0%" would be worse still - it would claim a share at a bound where no rung qualified. */
+  /* The held-nothing case: a gateway that carried nothing under any published bound has no share to
+     state. A bare dash reads as missing data when the truth is a measurement, flattering the slowest
+     row; "0%" would be worse, claiming a share at a bound where no rung qualified. */
   const none = gw("none", { 1: null, 5: null, 10: null, 50: null, 100: null, none: 19 });
   const nc = app.frontierShapeCell(none, stFor(none));
   assert.equal(nc.na, false, "the curve is still a curve");
@@ -6028,10 +5534,9 @@ test("#4 OVERCLAIM: the shape column states a SHARE OF FULL RATE and names the b
   assert.match(td, /reading-none/, "in the same ink a 'no rung held this tail' carries");
   assert.match(td, /frontier-spark/, "with the curve, which is the whole finding");
 
-  /* AND THE MISSING-DENOMINATOR CASE: a bounded reading with no unbounded one. Structurally impossible today
-     (every cell publishes every declared bound plus the unbounded reading), and the point is that if it ever
-     happens we publish NO percentage rather than promoting the 100 ms reading into a denominator it is not -
-     that would rebase one row against a different quantity while looking identical to every other row. */
+  /* The missing-denominator case: a bounded reading with no unbounded one is structurally impossible
+     today, but if it ever happens we publish no percentage rather than promoting the 100ms reading
+     into a denominator it isn't. */
   const noFull = gw("nofull", { 1: 500, 5: 600, 10: 700, 50: 800, 100: 900 });
   const nf = app.frontierShapeCell(noFull, stFor(noFull));
   assert.ok(!/%/.test(nf.text), `no unbounded reading means no share, not a share of the 100 ms reading: ${nf.text}`);
@@ -6042,11 +5547,9 @@ test("#4 OVERCLAIM: the shape column states a SHARE OF FULL RATE and names the b
   assert.equal(app.frontierShapeCell(bare, stFor(bare)).na, true,
     "no frontier at all stays n/a, distinct from 'served nothing'");
 
-  /* THE COLUMN NAMES ITS OWN QUANTITY. Asserted on the REQUIREMENT, not on one vocabulary: the header has been
-     through "Curve across bounds" (the owner: "i dont know what 1.3x or whatever means"), then a named gain
-     factor, and the wording may move again. What must hold is that the header is not a bare "Curve" with an
-     unexplained number under it, that it names no ratio the reader has to decode, and that the tooltip says
-     what the figure is measured AGAINST - the tightest bound the cell holds any rate at, in whatever words. */
+  /* Asserted on the requirement, not one vocabulary, since the header's exact wording may move again:
+     it must name its quantity (not a bare "Curve"), name no ratio the reader has to decode, and the
+     tooltip must say what the figure is measured against. */
   for (const set of ["performance", "frontier"]) {
     const col = app.COLUMN_SETS[set].find((c) => c.id === "shape");
     const label = txtOf(col.label);
@@ -6068,11 +5571,9 @@ test("#4 OVERCLAIM: the shape column states a SHARE OF FULL RATE and names the b
 });
 
 test("#1 PROSE: one or two sentences above the table, everything else below it as reference", () => {
-  /* THE OWNER'S INSTRUCTION, VERBATIM: "way too much text on each tab", "1-2 sentence english, definitions go
-     below data table like references". The Frontier tab had SIX paragraphs before its first number. Nothing
-     was deleted - the notes carry findings, and the "0 · no rung held this tail" distinction in particular is
-     the difference between a damning measurement and a shrug - so this asserts BOTH halves: the lead is short,
-     and every relocated claim is still reachable on the tab. */
+  /* Instruction: short lead prose, definitions below the table like references. The Frontier tab had
+     six paragraphs before its first number; nothing was deleted, so this asserts both halves - the
+     lead is short, and every relocated claim is still reachable on the tab. */
   const board = { gateways: [], definitions: {} };
   const st = { ...app.newState(), view: "frontier", mode: "peak", bound: 10, data: board };
   for (const view of ["performance", "streaming", "frontier", "memory"]) {
@@ -6112,8 +5613,8 @@ test("#1 PROSE: one or two sentences above the table, everything else below it a
 });
 
 test("#3 HEADERS: the six per-bound columns share ONE spanning group instead of repeating five words", () => {
-  /* "make Req/s 99% a header that spans all columns vs repeating?" - the owner. Six headers each read
-     "Req/s · 99% under N ms": the same five words six times across the widest table on the board. */
+  // Six headers each read "Req/s · 99% under N ms" - the same five words six times across the widest
+  // table on the board.
   const cols = app.COLUMN_SETS.frontier;
   const bound = cols.filter((c) => c.group === app.BOUND_GROUP_LABEL);
   assert.equal(bound.length, app.BOUND_CHOICES.length, "every published reading is under the one group");
@@ -6129,9 +5630,9 @@ test("#3 HEADERS: the six per-bound columns share ONE spanning group instead of 
   const ungrouped = cols.filter((c) => !c.group).length;
   assert.equal((head.match(/rowspan="2"/g) || []).length, ungrouped,
     "every ungrouped column spans both header rows");
-  /* THE SELECTED BOUND'S SORT AFFORDANCE SURVIVES THE SPLIT. The group cell must NOT be sortable (it is not
-     a column), and the marker + direction arrow must stay on the reader's own column in the second row -
-     otherwise switching the bound would re-rank the board with nothing on screen saying so. */
+  /* The selected bound's sort affordance survives the split: the group cell must not be sortable,
+     and the marker + direction arrow must stay on the reader's own column in the second row - else
+     switching the bound would re-rank the board with nothing on screen saying so. */
   assert.ok(!/<th class="colgroup nosort"[^>]*data-col=/.test(head), "the group header is not a sortable column");
   const sub = head.slice(head.indexOf('class="subhead"'));
   assert.match(sub, new RegExp(`data-col="${app.boundColId(10)}" class="sorted"`), "the selected column is marked");
@@ -6159,7 +5660,7 @@ test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat"
   const ramp = app.rssSparkline(rampSeries, null, 217.0, "idle");
   const load = app.rssSparkline(rampSeries, 60, 217.0);
 
-  // 1. THE WORD "RECOVERED" IS A LOAD-WINDOW WORD and must not appear on an idle panel, nor "peak".
+  // 1. "Recovered" is a load-window word and must not appear on an idle panel, nor "peak".
   for (const [name, svg] of [["flat", flat], ["ramp", ramp]]) {
     assert.ok(!/recovered/i.test(svg), `${name}: nothing is recovered in a window taken before any load`);
     assert.ok(!/\bpeak\b/i.test(svg), `${name}: the highest sample at rest is not a peak under load`);
@@ -6170,10 +5671,8 @@ test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat"
   assert.match(loadMarked, /peak .* → .* recovery mark/, "the LOAD panel names the recovery mark it read at");
   assert.match(load, /peak .* → .* at the last sample/, "and without that scalar it names the point it does have");
 
-  /* 2. A FLAT WINDOW RENDERS FLAT. This is the trap a bare auto-scale walks into, and it is the same bug the
-     load axis was already fixed for: RSS is sampled in whole pages, so a static process still reports one or
-     two pages of jitter, and scaled to its own range that one page becomes a full-height cliff - a panel
-     claiming a memory event where the truth is "this process did not move". The span is floored at
+  /* 2. A flat window renders flat: a bare auto-scale would turn a static process's one-page RSS jitter
+     into a full-height cliff, claiming a memory event that isn't one. The span is floored at
      IDLE_AXIS_MIN_SPAN of the published idle figure. */
   const ys = (svg) => [...svg.matchAll(/[ML]([\d.]+),([\d.]+)/g)].map((m) => Number(m[2]));
   const height = (svg) => Math.max(...ys(svg)) - Math.min(...ys(svg));
@@ -6184,9 +5683,8 @@ test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat"
   assert.ok(0.0078125 / 252.265625 < app.IDLE_AXIS_MIN_SPAN, "the flat case sits under the floor by construction");
   assert.ok(85 / 217 > app.IDLE_AXIS_MIN_SPAN, "and the ramp above it");
 
-  /* 3. THE MAGNITUDE IS STATED IN NUMBERS, so it never has to be read off a floored axis - which is what
-     keeps 0.008 MiB and 85 MiB distinguishable however they are drawn. fmt1 would round the first to "0.0",
-     a flat zero, which is exactly the "nothing happened" claim the span exists to distinguish from. */
+  /* 3. The magnitude is stated in numbers, so it never has to be read off a floored axis. fmt1 would
+     round a tiny movement to "0.0", exactly the "nothing happened" claim the span exists to distinguish from. */
   assert.match(flat, /0\.00781 MiB/, "the exact movement is published, not rounded away to 0.0");
   assert.match(ramp, /spanned 152\.3–237\.3 MiB/, "and the climb states its band");
   const stampOfSvg = (svg) => svg.match(/class="stamp muted">([^<]*)</)[1];
@@ -6199,8 +5697,8 @@ test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat"
   assert.match(flat, /held 252\.3 MiB/, "a window that never moved a tenth of a MiB says it held its level");
   assert.match(ramp, /spanned 152\.3–237\.3 MiB/, "a window that moved states the band");
 
-  /* 4. THE MEDIAN IS ANNOTATED, because idle_rss_mib IS the median of this very window: drawing it is what
-     makes the sparkline and the scalar in the column beside it visibly agree instead of merely coexisting. */
+  /* 4. The median is annotated, since idle_rss_mib is the median of this window: drawing it makes
+     the sparkline and the scalar beside it visibly agree instead of merely coexisting. */
   assert.match(ramp, /median 217\.0 MiB/, "the published figure is named in the stamp");
   assert.match(ramp, /<title>median 217\.0 MiB - the published idle figure/, "and ruled on the chart");
   assert.ok(!/<title>median/.test(load), "the load panel's dashed rule is still the idle BASELINE, not a median");
@@ -6216,10 +5714,9 @@ test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat"
 });
 
 test("#6 VERSION: a build path is not a version, and the column never dresses one up as one", () => {
-  /* THE LIVE BOARD showed Helicone's Version as "target/release/ai-gat…" and LiteLLM · Rust's as
-     "litellm-ai-gateway". Those are a compiler output path and a binary name. fmtBuild's four recognisers all
-     declined them and its fallback then printed the raw stamp anyway, so the column asserted a version it had
-     explicitly failed to find. */
+  // A compiler output path and a bare binary name are not versions; fmtBuild's four recognisers
+  // decline them, but its fallback used to print the raw stamp anyway, asserting a version it had
+  // explicitly failed to find.
   assert.equal(app.parseBuildVersion("target/release/ai-gateway"), null, "a build path names no version");
   assert.equal(app.parseBuildVersion("litellm-ai-gateway"), null, "nor does a bare binary name");
   assert.equal(app.parseBuildVersion("apache/apisix:3.17.0-debian"), "3.17.0-debian", "an image tag does");
@@ -6227,8 +5724,8 @@ test("#6 VERSION: a build path is not a version, and the column never dresses on
   assert.equal(app.parseBuildVersion("repo@9649b27abcdef"), "@9649b27");
   assert.equal(app.parseBuildVersion("somegateway 1.4.1"), "1.4.1");
 
-  // A SOURCE BUILD falls back to the manifest pin, which for these two IS the version (the commit built),
-  // marked with "@" so a bare hex string cannot read as a release name.
+  // A source build falls back to the manifest pin (the commit built), marked with "@" so a bare hex
+  // string can't read as a release name.
   const helicone = { key: "helicone", display: "Helicone", lang: "Rust", version: "9649b27",
     matrix: { build: "target/release/ai-gateway" } };
   assert.equal(app.versionToken(helicone), "@9649b27");
@@ -6242,9 +5739,9 @@ test("#6 VERSION: a build path is not a version, and the column never dresses on
   assert.equal(app.versionToken(kong), "3.9.3");
   assert.match(app.versionBasis(kong), /Measured running: kong:3\.9\.3/);
 
-  /* AN UNMEASURED GATEWAY IS NOT A SOURCE BUILD. gatewayBuild deliberately falls back to the manifest pin, so
-     a caller that cannot tell the two apart captions a never-run row as though its pin were a launch stamp
-     ("Launched as: v0.5.0"). measuredBuild is the stamp of what RAN, and only that. */
+  // An unmeasured gateway is not a source build: gatewayBuild falls back to the manifest pin, so a
+  // caller unable to tell the two apart could caption a never-run row as if its pin were a launch
+  // stamp. measuredBuild is the stamp of what ran, and only that.
   const unrun = { key: "aisix", display: "AISIX", lang: "Go", version: "v0.5.0" };
   assert.equal(app.measuredBuild(unrun), null, "nothing ran, so there is no launch stamp");
   assert.equal(app.versionToken(unrun), "v0.5.0", "but the manifest pin is what we would measure, so it shows");
@@ -6261,10 +5758,9 @@ test("#6 VERSION: a build path is not a version, and the column never dresses on
 });
 
 test("#7 TITLE: every view titles itself, from the URL, without waiting on the data fetch", () => {
-  /* Playwright saw the generic site title on views that should have named themselves. The cause was ordering:
-     the title was only ever written from showView, which runs inside renderAll, which runs after data.json
-     resolves - three quarters of a megabyte. Until then every deep link reported index.html's static <title>,
-     and on the fetch-failure path it stayed generic forever. */
+  // Playwright saw the generic site title on views that should have named themselves: the title was
+  // only ever written from showView, which runs after data.json resolves, so every deep link reported
+  // the static <title> until then, and stayed generic forever on the fetch-failure path.
   const src = readFileSync(join(HERE, "app.js"), "utf8");
   const boot = src.slice(src.indexOf("function boot()"), src.indexOf("if (NODE) {"));
   const decode = boot.indexOf("applyState(decodeUrl");
@@ -6274,7 +5770,7 @@ test("#7 TITLE: every view titles itself, from the URL, without waiting on the d
   assert.ok(boot.slice(boot.indexOf(".catch(")).includes("updateTitle()"),
     "and the failure path still names the view the reader asked for");
 
-  // EVERY VIEW GETS ITS OWN TITLE, and they are all distinct - a browser tab strip is the use case.
+  // Every view gets its own title, all distinct - a browser tab strip is the use case.
   const titles = new Map();
   for (const view of app.VIEWS) {
     const t = app.pageTitle({ ...app.newState(), category: app.DEFAULT_CATEGORY, view });
@@ -6282,9 +5778,8 @@ test("#7 TITLE: every view titles itself, from the URL, without waiting on the d
     assert.ok(!titles.has(t), `${view} must not share a title with ${titles.get(t)}`);
     titles.set(t, view);
   }
-  // THE VIEW LEADS, because it is the only part that differs between two open tabs or two shared links. The
-  // old form was "${category} ${view}" - two nouns, no separator ("Gateways Frontier"), truncating in a tab
-  // strip to the one word every view shares.
+  // The view leads, since it's the only part differing between two open tabs. The old form
+  // "${category} ${view}" (two nouns, no separator) truncated in a tab strip to the word every view shares.
   assert.ok(app.pageTitle({ ...app.newState(), view: "frontier" }).startsWith(`${app.VIEW_LABELS.frontier} · `),
     "the view's own name comes first, separated");
   // The default view is the category itself, so it does not repeat its own label.
@@ -6295,37 +5790,31 @@ test("#7 TITLE: every view titles itself, from the URL, without waiting on the d
 });
 
 test("#8 FOOTER: 'measured on an older version' and 'not yet measured' are two facts, counted apart", () => {
-  /* WHAT SHIPPED. The footer read "Benchmark version: 4c45e0b (7 rows measured on an older version)". There
-     were ZERO rows on an older engine. The seven were gateways carrying `engine: {sha: null}` - never
-     measured on this benchmark at all, several of them mid-run. The count was `!engine.current`, which is
-     true for both:
-       a DIFFERENT sha  -> the row has numbers, and they are not comparable with the rest;
-       NO sha at all    -> the row has no numbers.
-     So the board asserted "we are showing you stale results for half the field" when the truth was "we have
-     none for it yet" - a false statement about the board's own trustworthiness, in the one line a reader
-     consults to decide whether to trust it. The null stamp is deliberate upstream (a row with no stamp must
-     not imply it matches the board's engine); the defect was reading absence as a version. */
+  /* Formerly the footer counted `!engine.current`, true for both "a different sha" (numbers not
+     comparable) and "no sha at all" (no numbers), so a board with zero stale rows could claim "N rows
+     measured on an older version" when the truth was "we have none for it yet" - a false statement
+     about the board's own trustworthiness in the one line a reader consults to decide whether to trust it. */
   const cur = (sha) => ({ engine: { sha, short: sha.slice(0, 7), current: true } });
   const old = (sha) => ({ engine: { sha, short: sha.slice(0, 7), current: false } });
   const none = () => ({ engine: { sha: null, short: null, current: false } });
   const stamp = (gateways) => app.benchmarkVersionStamp({ benchmark_version: "4c45e0b4fa92", gateways });
 
-  // THE LIVE SHAPE: seven current, seven never measured, none behind. It must not mention an older version.
+  // Seven current, seven never measured, none behind: must not mention an older version.
   const live = stamp([...Array(7)].map(() => cur("4c45e0b4fa92")).concat([...Array(7)].map(none)));
   assert.ok(!/older version/.test(live), `no row is behind, so nothing may say one is: ${live}`);
   assert.match(live, /7 not yet measured on it/, "and the seven unmeasured rows are counted as what they are");
 
-  // A GENUINELY BEHIND ROW still gets the original sentence - that fact is real and worth flagging.
+  // A genuinely behind row still gets the original sentence - that fact is real and worth flagging.
   const behind = stamp([cur("4c45e0b4fa92"), old("beefcafe1234")]);
   assert.match(behind, /1 row measured on an older version/, "singular, and named as an older version");
   assert.ok(!/not yet measured/.test(behind), "and a clause for an empty set is not rendered");
 
-  // BOTH NON-EMPTY: both are stated, because they are different facts about different rows.
+  // Both non-empty: both are stated, since they're different facts about different rows.
   const mixed = stamp([cur("4c45e0b4fa92"), old("beefcafe1234"), old("d00dfeed5678"), none(), none(), none()]);
   assert.match(mixed, /2 rows measured on an older version/);
   assert.match(mixed, /3 not yet measured on it/);
 
-  // A CLEAN BOARD reads as one bare version, with no parenthesis at all.
+  // A clean board reads as one bare version, with no parenthesis at all.
   assert.equal(stamp([cur("4c45e0b4fa92"), cur("4c45e0b4fa92")]), "Benchmark version: 4c45e0b");
   // And a bundle with no version stamped contributes nothing rather than the word "unknown".
   assert.equal(app.benchmarkVersionStamp({ gateways: [none()] }), "");
@@ -6334,9 +5823,9 @@ test("#8 FOOTER: 'measured on an older version' and 'not yet measured' are two f
 
 /* ============================================================================================
    THE MEMORY TAB REVIEW: correct numbers placed so as to look contradictory.
-   Not one of these is a data bug. Every figure checked out. The defect in each case is a LABEL that
-   does not name the scope, the window, or the shape it belongs to - so a reader comparing two correct
-   numbers on one row concludes one of them is wrong.
+   Not a data bug in any of these - every figure checked out. The defect in each case is a label
+   that doesn't name the scope, window, or shape it belongs to, so two correct numbers on one row
+   look like a contradiction.
    ============================================================================================ */
 
 // A synthetic memory record, from raw intent. Sealed through the real sealMetric like every other fixture.
@@ -6358,12 +5847,10 @@ function memWin(o = {}) {
 const seriesOf = (n, secs, f) => Array.from({ length: n }, (_, i) => ({ t_s: Math.round((i / (n - 1)) * secs), rss_mib: f(i, n) }));
 
 test("MEMORY #4: the idle caption describes the SHAPE, never an implied rate across the window", () => {
-  /* WHAT SHIPPED, AND WHY IT MISLED THE PERSON WHO WROTE THE AUDIT. The caption read
-     "median 178.1 MiB · spanned 171.5–178.1 MiB (6.59 MiB over 59 s at rest)". "6.59 MiB over 59 s" reads as
-     6.59 MiB of drift accumulating across the window. apisix does nothing of the kind: it sits at 178.1 for
-     127 of its 130 samples and then steps DOWN 6.594 MiB at 98% through and holds - one late release, visible
-     in the sparkline as a cliff at the right edge. "over 59 s" was the window LENGTH, not a duration over
-     which anything moved, and the template applied it to all four real shapes on the board identically. */
+  /* The caption used to read "... (6.59 MiB over 59 s at rest)", which reads as drift accumulating
+     across the window. A real case (apisix) does nothing of the kind: it sits flat for 127 of 130
+     samples then steps down once and holds - a late release, not a gradual drift. "over 59 s" was the
+     window length, not a duration over which anything moved. */
   const at = (v) => () => v;
   // The four real shapes, from the board's own series (verified against data.json).
   const flat = seriesOf(123, 59, (i) => 42.8203125 + (i > 60 ? 0.0859375 : 0));          // helicone
@@ -6399,24 +5886,20 @@ test("MEMORY #4: the idle caption describes the SHAPE, never an implied rate acr
 });
 
 test("MEMORY #2: two medians on one row are labelled by SCOPE, so neither reads as wrong", () => {
-  /* THE ROW THAT MISLED. apisix: the `Idle RSS (MiB)` column reads 177.9 and the sparkline caption six
-     inches to its right reads "median 178.1 MiB". Both correct. The column is the median ACROSS CELLS (idle
-     is sampled cold before any request, so no cell is involved - which is exactly what the column's own
-     tooltip says); the sparkline is the SELECTED CELL's own window. The tooltip explained it; the row did
-     not, and a reader comparing the two concludes one is broken. It is six rows on the live board, not one,
-     and bifrost's pair differs by 21.7 MiB (244.3 vs 222.6). */
+  /* A column showing the median across cells and a sparkline caption showing one cell's own window can
+     both be correct yet read as contradictory to a reader comparing the two numbers on one row. */
   const cellMedian = 178.078125;
   const series = seriesOf(130, 59, (i) => (i < 127 ? cellMedian : 171.484375));
   const svg = app.rssSparkline(series, null, cellMedian, "idle");
-  // THE CAPTION SAYS WHOSE MEDIAN IT IS. Not "median X" - "this cell's median X".
+  // The caption says whose median it is: not "median X" but "this cell's median X".
   assert.match(svg, /this cell: median/i, `the sparkline's median must name its scope: ${svg.match(/class="stamp muted">([^<]*)</)[1]}`);
   const idleStamp = svg.match(/class="stamp muted">([^<]*)</)[1];
-  // EXACTLY ONE "median" on the caption, and it is the scoped one: an unqualified second occurrence would
-  // re-create the ambiguity the scope was added to remove.
+  // Exactly one "median" on the caption, scoped: an unqualified second occurrence would re-create
+  // the ambiguity the scope was added to remove.
   assert.equal((idleStamp.match(/median/g) || []).length, 1, `one median, scoped: ${idleStamp}`);
   assert.match(idleStamp, /this cell: median/, "and the scope is attached to it, not stated elsewhere");
   assert.ok(!/&#3\d;/.test(idleStamp), "and the caption carries no HTML entity - it is read, not parsed");
-  // AND THE COLUMN SAYS WHOSE ITS OWN IS, in the header, without hovering.
+  // And the column says whose its own is, in the header, without hovering.
   const st = { ...app.newState(), view: "memory", mode: "min" };
   const g = { key: "a", display: "A", lang: "Lua", matrix: { upstreams: {
     openai: { cells: { openai: { served: true, memory: memWin({ idle: cellMedian, idleSeries: series, series, steady: 200, peak: 208, recovered: 207.8 }) } } },
@@ -6435,20 +5918,17 @@ test("MEMORY #2: two medians on one row are labelled by SCOPE, so neither reads 
 });
 
 test("MEMORY #3: two 'recovered' figures on one row are separated by the WINDOW each belongs to", () => {
-  /* One-API: the column `Recovered @30 s` reads 139.1 and the caption reads "recovered 129.6 MiB (365 s)".
-     Both true - it kept releasing after the 30 s mark - but two numbers under one word reads as an
-     inconsistency. The column already names its window; the caption named none, so the difference looked
-     like a difference of fact rather than of when it was read. */
+  // Two true "recovered" figures reading different values (the gateway kept releasing after the mark)
+  // used to look like an inconsistency because the caption named no window.
   const series = seriesOf(200, 365, (i, n) => (i < n * 0.9 ? 144.4 : 129.6));
   const svg = app.rssSparkline(series, null, 82.3, "load", { recoveredAt: 139.140625, recoveryWindowS: 30 });
   const stamp = svg.match(/class="stamp muted">([^<]*)</)[1];
-  // BOTH POINTS, IN ORDER, EACH WITH ITS OWN WINDOW: the difference becomes legible as a timeline.
+  // Both points, in order, each with its own window: the difference becomes legible as a timeline.
   assert.match(stamp, /139\.1/, `the column's own figure appears, so the row cannot look self-contradictory: ${stamp}`);
   assert.match(stamp, /129\.6/, "and so does the end of the observation");
   assert.match(stamp, /30 s/, "the recovery mark is named");
   assert.ok(!/recovered 129\.6/.test(stamp), "the last sample is no longer called 'recovered' - that word is the column's");
-  // WHEN THE TWO AGREE (apisix: 207.8 at the mark and at the end) it collapses to one figure, not a
-  // pointless restatement of the same number twice.
+  // When the two agree, it collapses to one figure, not a pointless restatement of the same number twice.
   const flatTail = seriesOf(200, 360, (i, n) => (i < n * 0.85 ? 178.1 + (i / (n * 0.85)) * 37 : 207.8203125));
   const same = app.rssSparkline(flatTail, null, 178.1, "load", { recoveredAt: 207.8203125, recoveryWindowS: 30 });
   const s2 = same.match(/class="stamp muted">([^<]*)</)[1];
@@ -6459,11 +5939,9 @@ test("MEMORY #3: two 'recovered' figures on one row are separated by the WINDOW 
 });
 
 test("MEMORY #5: releasing nothing and releasing most of it do not render with identical emphasis", () => {
-  /* From the board: TensorZero peaks at 65.8 and recovers to 65.8 - it releases NOTHING of the ~19 MiB it
-     gained. Bifrost peaks at 870.0 and comes back to 580.3. Those two curves ended up with the same visual
-     weight: a line, a dot, and two numbers in the same grey. No new metric and no verdict is invented here -
-     the drop is drawn from the two levels already plotted, so a curve that gave nothing back has no mark and
-     one that gave a lot back has a tall one. */
+  // A gateway that released nothing and one that released most of what it gained used to render with
+  // the same visual weight. No new metric or verdict here - the drop is drawn from the two levels
+  // already plotted.
   const nothing = seriesOf(200, 362, (i, n) => (i < n / 2 ? 46.7 + (i / (n / 2)) * 19.1 : 65.8));
   const lots = seriesOf(200, 360, (i, n) => (i < n * 0.8 ? 222.6 + (i / (n * 0.8)) * 647 : 580.3));
   const a = app.rssSparkline(nothing, null, 46.7, "load", { recoveredAt: 65.796875, recoveryWindowS: 30 });
@@ -6481,25 +5959,24 @@ test("MEMORY #5: releasing nothing and releasing most of it do not render with i
 });
 
 test("MEMORY #1: the table is not sized by its two widest columns, and no header breaks mid-word", () => {
-  /* Matthew's report: `Recovered @30 s` rendered as "Recovere / d @30 s". `Tested on` was sized by its
-     longest pill (OpenAI→Bedrock Converse) and `RSS curve` took roughly half the table, so the four numeric
-     columns - the content - were crushed into a narrow band in the middle (70/73/93/73 px against 185 and
-     446). Fixed by constraining the two offenders, not by shrinking the numbers. */
+  // `Recovered @30 s` used to render as "Recovere / d @30 s": `Tested on` was sized by its longest pill
+  // and `RSS curve` took roughly half the table, crushing the numeric columns into a narrow band.
+  // Fixed by constraining the two offenders, not shrinking the numbers.
   const css = readFileSync(join(HERE, "style.css"), "utf8");
-  /* THE MID-WORD BREAK. `overflow-wrap: anywhere` on the header is what did it: squeezed to 73px, the header
-     was allowed to break inside "Recovered". A header may wrap between words and must never split one. */
+  // The mid-word break: `overflow-wrap: anywhere` let the squeezed header break inside "Recovered".
+  // A header may wrap between words but must never split one.
   const headRule = css.match(/#results-table thead th \{[^}]*\}/)[0];
   assert.ok(!/overflow-wrap:\s*anywhere/.test(headRule),
     `a header that may break anywhere breaks inside words: ${headRule}`);
   assert.match(headRule, /word-break:\s*keep-all|overflow-wrap:\s*normal/,
     "the header must be pinned to wrapping at spaces only");
-  // THE CURVE COLUMN IS CAPPED. It grew to 446px because the stamp under the sparkline is one long nowrap
-  // line; the svg itself is a fixed 260px and needs no more than that.
+  // The curve column is capped: it grew wide because the stamp under the sparkline was one long
+  // nowrap line, while the svg itself is a fixed size and needs no more than that.
   const curve = css.match(/td\.memcurve \{[^}]*\}/)[0];
   assert.match(curve, /max-width:/, `the curve column must not expand past the sparkline: ${curve}`);
   assert.match(css, /\.rss-spark \.stamp \{[^}]*white-space:\s*normal/,
     "and its caption must wrap rather than widening the column to fit one line");
-  // THE PILL IS CONSTRAINED, with the full value still reachable - it already carries a tooltip.
+  // The pill is constrained, with the full value still reachable via its tooltip.
   assert.match(css, /#results-table td\.tested \{[^}]*max-width:/,
     "the Tested-on column is capped so its longest pill cannot size the table");
   assert.match(css, /\.tested-pill \{[^}]*(text-overflow:\s*ellipsis|overflow-wrap)/,
@@ -6507,12 +5984,9 @@ test("MEMORY #1: the table is not sized by its two widest columns, and no header
 });
 
 test("MEMORY #0: the row is ONE lifecycle curve, short, with the axis break SHOWN", () => {
-  /* THE OWNER: "while i get why, massive rows are not professional". A memory row was ~350px tall - six block
-     elements stacked in one cell (label, sparkline, caption, label, sparkline, caption) - so three gateways
-     filled a screen and a fourteen-row comparison table stopped being comparable.
-     THE RESTRUCTURE: idle and load+recovery are not two experiments, they are ONE process's lifetime in time
-     order. The row draws it as one line. Four of the six stacked elements go away, and the remaining figures
-     move to the control's accessible name and to the drawer - moved, not deleted. */
+  // A memory row was ~350px tall - six block elements stacked in one cell - so three gateways filled a
+  // screen. Restructured: idle and load+recovery are one process's lifetime in time order, drawn as
+  // one line; the remaining figures move to the control's accessible name and to the drawer, not deleted.
   const idleSeries = seriesOf(120, 59, () => 46.7);
   const series = seriesOf(200, 360, (i, n) => (i < n * 0.8 ? 46.7 + (i / (n * 0.8)) * 19.1 : 55.0));
   const mem = memWin({ idle: 46.7, idleSeries, series, steady: 65.8, peak: 65.8, recovered: 55.0 });
@@ -6534,12 +6008,11 @@ test("MEMORY #0: the row is ONE lifecycle curve, short, with the axis break SHOW
   assert.ok(h <= 40, `the inline curve must be short, got ${h}px`);
   assert.ok(w <= 200, `and narrow enough to leave the numeric columns room, got ${w}px`);
 
-  /* THE AXIS BREAK IS DRAWN, AND THAT IS THE HONESTY REQUIREMENT. The two windows are wildly different
-     lengths (~59 s at rest against ~360 s under load). On a true shared time axis the at-rest window would be
-     14% of the width and bifrost's whole finding - it allocates ~100 MiB in its first 2 SECONDS - would be
-     under 1% of it, invisible. So the at-rest segment is given more width than its duration earns, and
-     BECAUSE it is, the discontinuity has to be visible: silently smoothing two time scales into one line
-     would be a picture asserting when things happened, wrongly. */
+  /* The axis break is drawn, and that's the honesty requirement: the two windows are wildly different
+     lengths, so on a true shared time axis the at-rest window would be too narrow to read and a fast
+     early finding under load would be invisible. The at-rest segment gets more width than its duration
+     earns, so the discontinuity must be visible - silently smoothing two time scales into one line
+     would misrepresent when things happened. */
   assert.match(compact, /class="rss-break"/, "the time-axis discontinuity is drawn, not assumed away");
   assert.match(compact, /<title>[^<]*not continuous[^<]*<\/title>/, "and says so in words on hover");
   // Two separate paths, so no drawn line crosses the break.
@@ -6550,9 +6023,8 @@ test("MEMORY #0: the row is ONE lifecycle curve, short, with the axis break SHOW
   assert.ok(!/rss-break/.test(loadOnly), "a single-window record draws no break it does not have");
   assert.equal((loadOnly.match(/<path d="M/g) || []).length, 1, "and one path");
 
-  /* NOTHING BECAME UNREACHABLE. Every figure the captions carried is on the control's ACCESSIBLE NAME, not
-     in a hover-only tooltip: hover-only content is invisible to touch and to keyboard users, which is
-     deletion for some readers. */
+  // Nothing became unreachable: every figure the captions carried is on the control's accessible
+  // name, not a hover-only tooltip (invisible to touch and keyboard users).
   const g = { key: "t", display: "T", lang: "Rust", matrix: { upstreams: {
     openai: { cells: { openai: { served: true, memory: mem } } } } } };
   const st = { ...app.newState(), view: "memory", mode: "min", data: { gateways: [g] } };
@@ -6570,16 +6042,15 @@ test("MEMORY #0: the row is ONE lifecycle curve, short, with the axis break SHOW
     // The shape phrasing survived the restructure, and the rate-implying form did not come back with it.
     assert.match(name, /no movement at all/, "the shape note travels into the fold");
     assert.ok(!/MiB over \d+ s/.test(name), "and never as a magnitude paired with the window length");
-    /* "RELEASED NONE" IS SAID OUT LOUD. TensorZero peaks at 65.8 and ends at 65.8, giving back none of the
-       ~19 MiB it gained - the most interesting thing on its row - and silence there reads as an absent
-       measurement rather than as the finding it is. */
+    // "Released none" is said out loud: silence there would read as an absent measurement rather
+    // than the finding it is.
     const held = memWin({ idle: 46.7, idleSeries, steady: 65.8, peak: 65.8, recovered: 65.796875,
       series: seriesOf(200, 362, (i, n) => (i < n / 2 ? 46.7 + (i / (n / 2)) * 19.1 : 65.796875)) });
     assert.match(app.memCurveSummary(held), /Released none of the 19\.1 MiB it gained/,
       "a gateway that released nothing says so, rather than saying nothing");
   } finally { Object.assign(app.state, app.newState()); }
 
-  /* BOARD-LEVEL FACTS ARE STATED ONCE, not fourteen times inside the cell whose height was the complaint. */
+  // Board-level facts are stated once, not fourteen times inside the cell whose height was the complaint.
   assert.ok(!/\(\d{2,3} s\)/.test(compact), "no per-row window length in the curve");
   const cap = app.captionText(app.memoryCaption({ gateways: [g] }, st));
   assert.match(cap, /same for every gateway/, "the caption owns the window lengths");
@@ -6587,24 +6058,16 @@ test("MEMORY #0: the row is ONE lifecycle curve, short, with the axis break SHOW
 });
 
 test("UI: the two filter axes are ONE labelled control block, not two ragged rows of chips", () => {
-  /* THE OWNER, LOOKING AT THE LIVE FRONTIER TAB: "filter formatting is ugly, align them", "generally needs
-     some ui help". Two stacked control rows:
-         Tail-latency bound  [1 ms][5 ms][10 ms][50 ms][100 ms][no bound]  showing the req/s ...
-         [Own cell][Same][Custom]
-     Row 1 had a text label that indented its chips; row 2's chips started flush at the far left, so the two
-     read as ragged. The trailing sentence on row 1 ran to a width nothing else on the page shared.
-     THE FIX IS NOT AN INDENT ON ROW 2. These are TWO DIFFERENT AXES - which tail bound, and which cell -
-     and the second one was never named at all, which is why it looked like loose chips rather than a control.
-     Both axes get a label in a shared max-content gutter, so one left edge falls out of the layout rather
-     than being hand-tuned; the sentence drops to its own line inside the controls column, where it starts at
-     the same left edge as the chips and is capped to a readable measure instead of the page width. */
+  // Two stacked control rows (tail-latency bound, cell selector) used to read as ragged: row 1 had a
+  // label indenting its chips, row 2's chips started flush left, and these are two different axes -
+  // the second was never named. Both axes now get a label in a shared max-content gutter.
   const html = readFileSync(join(HERE, "index.html"), "utf8");
   const css = readFileSync(join(HERE, "style.css"), "utf8");
 
-  // ONE BLOCK, containing both axes, so their alignment is a property of the layout and not a coincidence.
+  // One block, containing both axes, so their alignment is a property of the layout, not a coincidence.
   assert.match(html, /<div class="filters" id="filters">/, "the two axes live in one control block");
-  // Bounded from the block's own start: index.html has an earlier .table-scroll (the roster table), so an
-  // unanchored indexOf for the terminator finds it and slices backwards to nothing.
+  // Bounded from the block's own start: an unanchored indexOf for the terminator would find an
+  // earlier .table-scroll (the roster table) and slice backwards to nothing.
   const from = html.indexOf('id="filters"');
   const block = html.slice(from, html.indexOf('<div class="table-scroll">', from));
   assert.ok(block.includes('id="bound-chooser"'), "the bound axis is inside it");
@@ -6640,10 +6103,8 @@ test("UI: the two filter axes are ONE labelled control block, not two ragged row
   assert.ok(note, "the explanatory sentence has its own rule");
   assert.match(note[0], /grid-column:\s*2/, "it starts at the chips' left edge, not the label's");
   assert.match(note[0], /max-width:/, "and is capped rather than running to whatever width the page happens to be");
-  /* AND IT IS NOT PINNED TO A FIXED ROW. `grid-row: 3` was correct while exactly one axis had a
-     sentence; the concurrency axis added a second, both were placed in the same cell, and they
-     rendered on top of each other. A hardcoded row cannot hold two occupants, and the block now has
-     three axes - so the row is left to auto-placement and each sentence follows the axis it explains. */
+  // Not pinned to a fixed row: `grid-row: 3` worked while only one axis had a sentence, but a second
+  // axis's sentence would land in the same cell and overlap. Left to auto-placement instead.
   assert.doesNotMatch(note[0], /grid-row:/,
     `the note's row must not be hardcoded, or a second axis's sentence overlaps the first: ${note[0]}`);
   // More than one axis carries a sentence now, which is what broke the fixed row.
@@ -6657,23 +6118,11 @@ test("UI: the two filter axes are ONE labelled control block, not two ragged row
 });
 
 test("UI: column geometry is FIXED, so changing a filter never moves a column sideways", () => {
-  /* THE OWNER: "changing filters shouldn't change column widths, just an annoyance." Measured on the live
-     board with getBoundingClientRect across filter combos, every table view drifted at every width. The
-     frontier tab at 1440, first body row, per column:
-         mode=peak   bound=10   36 165  90 118 118 118 118 118  93 165
-         mode=same   bound=10   36 165  84 119 119 119 119 119  93 167
-         mode=custom bound=10   36 165 144 125 125 125  80  80  87 173
-     Nothing about the measurement changed - only which cell each row reads - and the whole grid re-solved.
-
-     THE CAUSE IS AUTO TABLE LAYOUT: widths are derived from the cells that happen to be rendered, so a
-     filter that swaps `20,119` for `20,389`, or a passthrough pill for `OpenAI→Bedrock Converse`, or a
-     number for `no rung held this tail`, re-measures every column. The widest content a column CAN hold is
-     usually not in the current combo, so sizing from what is on screen can only ever be unstable.
-
-     THE FIX IS TO DECLARE THE GEOMETRY: table-layout: fixed plus a colgroup built from the column set, so a
-     column's width is a property of the COLUMN and not of the rows currently passing through it. Excess width
-     is then distributed proportionally over the declared widths, which is also content-independent, so the
-     table still fills its container without any column consulting a cell. */
+  // Every table view used to drift at every filter combo (measured with getBoundingClientRect):
+  // nothing about the measurement changed, only which cell each row reads, yet the whole grid re-solved.
+  // Cause: auto table layout derives widths from whatever cells happen to be rendered, so a filter
+  // swap re-measures every column. Fix: declare the geometry (table-layout: fixed + a colgroup built
+  // from the column set), so width is a property of the column, not the currently-passing-through rows.
   const css = readFileSync(join(HERE, "style.css"), "utf8");
   const rule = css.match(/#results-table \{[^}]*\}/);
   assert.ok(rule, "#results-table has its own rule");
@@ -6682,10 +6131,9 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
 
   // THE WIDTHS ARE DECLARED PER COLUMN, in one place, and every column in every table view has one.
   for (const view of ["performance", "frontier", "streaming", "memory"]) {
-    /* BOTH the declared set and the set actually RENDERED. columnsFor() drops a column the current bundle
-       cannot fill (memory sheds `memgrowth` without per-cell windows), and the <col>-to-column mapping is
-       POSITIONAL: a colgroup built from the superset while the body renders the subset would put every width
-       on the wrong column - stable geometry, wrong geometry. */
+    // Both the declared set and the set actually rendered: columnsFor() drops a column the current
+    // bundle can't fill, and the <col>-to-column mapping is positional, so a mismatch would put every
+    // width on the wrong column.
     for (const set of [app.COLUMN_SETS[view], app.columnsFor(view)])
       assert.equal((app.colgroupHtml(set).match(/<col /g) || []).length, set.length,
         `${view}: the colgroup is built from the columns being rendered, one <col> each`);
@@ -6697,11 +6145,9 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
     for (const c of cols)
       assert.ok(app.colWidth(c) && /rem|px|%/.test(app.colWidth(c)), `${view}.${c.id} declares a width`);
   }
-  /* THE TWO OVER-WIDE COLUMNS ARE THE ONES THAT GIVE. The owner's other complaint - "column widths - Tested
-     on is huge (cos of 1 large openai > cohere)" - is the same defect seen from the other side: the column
-     was sized by its longest pill in one mode and starved the numbers in every mode. Declared geometry fixes
-     both, and the declaration has to keep the identity/annotation columns narrower than the numeric ones or
-     it has bought stability at the cost the owner objected to. */
+  // The two over-wide columns are the ones that give: "Tested on" was sized by its longest pill in
+  // one mode, starving the numbers in every mode. Declared geometry must keep annotation columns
+  // narrower than numeric ones, or it buys stability at the cost of the original complaint.
   const px = (w) => (w.endsWith("rem") ? parseFloat(w) * 16 : parseFloat(w));
   const w = (view, id) => px(app.colWidth(app.COLUMN_SETS[view].find((c) => c.id === id)));
   assert.ok(w("frontier", "tested") < w("frontier", "f10"),
@@ -6709,10 +6155,9 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
   assert.ok(w("memory", "tested") < w("memory", "mempeak") * 1.6,
     "and on memory it must not be sized by OpenAI→Bedrock Converse either");
 
-  /* AND THE FRONTIER'S TEN COLUMNS STILL FIT A NARROW DESKTOP. At 1024 the curve column was cut off by the
-     scroll edge - the sparkline sliced in half, the "no rung held any bound" note clipped mid-word - because
-     the table was 96px wider than its container. The declared geometry has to be narrower than that, and the
-     width it gives back comes from Tested on and the curve, never from the numbers. */
+  // At 1024 the curve column used to be cut off by the scroll edge because the table was wider than
+  // its container; declared geometry must fit, giving back width from Tested-on and the curve, never
+  // from the numbers.
   const sum = app.COLUMN_SETS.frontier.reduce((t, c) => t + px(app.colWidth(c)), 0);
   assert.ok(sum <= 984, `the frontier's declared widths must fit a 1024 viewport's table area, got ${sum}px`);
 
@@ -6723,9 +6168,9 @@ test("UI: column geometry is FIXED, so changing a filter never moves a column si
       `.${cls} must wrap inside its declared column rather than widening it`);
 });
 
-/* SCOPED RE-RUN LAYERING. A 4-cell re-run must not delete 32 measured cells, and a cell it DID
-   measure must win and carry its own provenance. Both directions matter: refuse to layer and the
-   re-run is pointless; layer too eagerly and a genuine re-run that found less is silently discarded. */
+// A scoped re-run must not delete previously measured cells, and a cell it did re-measure must win
+// and carry its own provenance. Both directions matter: refuse to layer and re-runs are pointless;
+// layer too eagerly and a genuine re-run that found less is silently discarded.
 test("a scoped re-run layers over the full run instead of replacing it", () => {
   const cell = (served, tag) => ({ served, stream: { stream_served: true, tag } });
   const mk = (coords) => {
@@ -6765,13 +6210,10 @@ test("a scoped re-run layers over the full run instead of replacing it", () => {
   assert.equal(full.upstreams.openai.cells.openai.stream.tag, "old", "layering must be pure");
 });
 
-/* A DERIVED LANE MAY NOT BE MORE CERTAIN THAN WHAT IT IS DERIVED FROM.
-   The dollar lanes are computed from the frontier rate at the priced bound. When that rate is
-   absent, `rate` used to collapse to 0 and `rps_per_dollar` published {value: 0, certified: true} -
-   the board asserting as a MEASUREMENT that a gateway delivers zero requests per dollar, and
-   ranking it last on a higher-is-better axis for it. It shipped on one-api, plano and tensorzero
-   because neither lane is in seal.mjs's vocabulary, so `isMetricField` is false for them and
-   check-consistency never compared either against the raw artifact. Nothing was watching. */
+// A derived lane may not be more certain than what it's derived from. The dollar lanes are computed
+// from the frontier rate at the priced bound; when absent, `rate` used to collapse to 0 and
+// rps_per_dollar published {value: 0, certified: true} - asserting a measurement that doesn't exist.
+// Shipped because neither lane is in seal.mjs's vocabulary, so check-consistency never compared them.
 test("the dollar lanes are never more certain than the rate they are derived from", () => {
   let checkedAbsent = 0, checkedMeasured = 0;
   for (const g of data.gateways) {
@@ -6788,9 +6230,8 @@ test("the dollar lanes are never more certain than the rate they are derived fro
         assert.equal(env.value, null,
           `${g.key}.${lane} publishes ${env.value} while its rate is absent (${rate.reason})`);
         assert.equal(env.certified, false, `${g.key}.${lane} certifies a value it never measured`);
-        // And it must carry the RATE's reason, not a flattened stand-in: "measured, and it could
-        // not hold the bound" is a different finding from "nothing was measured here", and the
-        // second is the one that flatters the gateway.
+        // Must carry the RATE's own reason, not a flattened stand-in - "could not hold the bound"
+        // is a different finding from "nothing was measured here", and the latter flatters the gateway.
         assert.equal(env.reason, rate.reason,
           `${g.key}.${lane} reports ${env.reason} where the rate says ${rate.reason} - a flattened reason`);
       } else if (rate.value > 0 && lane === "rps_per_dollar") {
@@ -6804,10 +6245,9 @@ test("the dollar lanes are never more certain than the rate they are derived fro
   assert.ok(checkedMeasured > 0, "and a measured one, or it only proves the absent half");
 });
 
-/* A NON-NUMBER MUST NOT BE CERTIFIED. Number("n/a") is NaN, NaN === 0 is false, so a non-numeric
-   raw fell to sealMetric's certified branch and JSON.stringify turned it into null - publishing
-   {value: null, certified: true}, a bare null wearing the certified badge, in a shape none of the
-   three documented envelope forms allow. */
+// A non-number must not be certified. Number("n/a") is NaN, NaN === 0 is false, so a non-numeric raw
+// used to fall to sealMetric's certified branch, publishing {value: null, certified: true} - a shape
+// none of the three documented envelope forms allow.
 test("sealMetric refuses to certify anything that is not a finite number", () => {
   for (const bad of ["n/a", "", NaN, Infinity, -Infinity, {}, [1, 2]]) {
     const env = sealMetric(bad);
@@ -6823,11 +6263,9 @@ test("sealMetric refuses to certify anything that is not a finite number", () =>
   assert.equal(sealMetric("42").value, 42);
 });
 
-/* A v1-SHAPED SNAPSHOT IS NOT AN EMPTY ONE. snapshotCellCoords only walked `upstreams`, so a matrix
-   carrying its cells under the bare v1 `cells` row counted ZERO coords - and an empty set is a
-   strict subset of everything, so such a snapshot could never be the base and layered nothing
-   either. The newest run would vanish from the board with no warning, while normalizeMatrix and
-   app.js both still treat that row as real measured cells. */
+// A v1-shaped snapshot is not an empty one: snapshotCellCoords used to only walk `upstreams`, so a
+// matrix carrying its cells under the bare v1 `cells` row counted zero coords - and an empty set is
+// a strict subset of everything, so the newest run could vanish from the board with no warning.
 test("a v1-shaped matrix contributes coords instead of reading as empty", () => {
   const v1 = { cells: { openai: { served: true }, anthropic: { served: true } } };
   const coords = snapshotCellCoords(v1);
@@ -6840,9 +6278,8 @@ test("a v1-shaped matrix contributes coords instead of reading as empty", () => 
   assert.equal(both.size, 1);
 });
 
-/* __layered IS THE SUMMARY A READER LOOKS AT, and it was rebuilt from scratch on every pass - so
-   with two scoped re-runs it disclosed only the most recent, and the earlier run's cells read as if
-   they came from the base. The per-cell __run stamps survived, which bounded the damage. */
+// __layered is the summary a reader looks at, and it used to be rebuilt from scratch on every pass -
+// with two scoped re-runs it disclosed only the most recent. Per-cell __run stamps survived, bounding the damage.
 test("layering two scoped runs discloses both, not just the last", () => {
   const cell = (tag) => ({ served: true, stream: { stream_served: true, tag } });
   const mk = (coords) => {

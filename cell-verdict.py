@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """Per-cell live verdict: compare a running gateway's partial snapshot to a baseline, cell by cell.
 
-Emits one verdict line per NEWLY-measured cell (throughput headline = frontier RPS at the 10ms p99
-bound, higher-is-better), so an operator watching a 36-cell grid gets "cell N: same/better/worse
-(was X now Y) - proceeding" the moment each cell lands, instead of waiting out the whole grid.
+Emits one verdict line per newly-measured cell (throughput headline = frontier RPS at the 10ms p99
+bound), so an operator watching a 36-cell grid sees each result as it lands.
 
-Numbering is append-only and persisted in --state (a JSON list of reported "ingress>egress" keys):
-a cell is numbered the first time it is seen measured, and never renumbered, so cell 1/2/3 are stable
-even as later cells complete out of matrix order. Re-run against the same --state to get only what is
-new since last call.
+Numbering is append-only, persisted in --state as reported "ingress>egress" keys: a cell is
+numbered once, on first sight, and never renumbered even if later cells complete out of order.
+Re-run against the same --state to get only what's new.
 
   cell-verdict.py --baseline <snap.json> --new <partial.json> --state <state.json> [--count-only]
 
-A cell counts as "measured" once it has a frontier RPS at the 10ms p99 bound; latency (added p50/p99,
-c=1 p99, cpu us/req) rides along as corroboration. Absences print their own reason rather than a zero.
+A cell counts as "measured" once it has a frontier RPS at the 10ms p99 bound; latency rides along
+as corroboration.
 """
 import argparse
 import json

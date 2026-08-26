@@ -4,19 +4,10 @@
 #
 # EVERY AUDIT CHECK MUST BE ABLE TO FAIL.
 #
-# This file exists because the first draft of `bench-audit.py` shipped a check that could not. Its
-# regression guard for the exact defect that forced a full 14-gateway rerun - throughput windows
-# published without the p99 they measured - read `cell["sweep_max_proxy"]` when the sweep lives at
-# `cell["perf"]["sweep_max_proxy"]`. It found nothing, returned early, and reported PASS on data that
-# violates it on all 64 cells. It was written, run against a real board, and it agreed with the board.
-#
-# That is the same species as `transient_budget()` called by nothing, `box_qualify` always seeding,
-# and 27 site tests asserting against an empty board. An audit made of checks like that is worse than
-# no audit, because it converts "nobody looked" into "it passed".
-#
-# So each check gets a cell it MUST reject and a cell it MUST accept. A check that cannot be made to
-# fire is not protecting anything, and this file is what makes that a red test rather than a quiet
-# green board.
+# A check that can't fire guards nothing: bench-audit's first draft had one that read
+# `cell["sweep_max_proxy"]` where the sweep actually lives at `cell["perf"]["sweep_max_proxy"]`, so it
+# returned early and reported PASS on data that violated it everywhere. So each check here gets a cell
+# it MUST reject and a cell it MUST accept.
 #
 #   python3 bench-audit_test.py
 import contextlib
@@ -35,14 +26,9 @@ _SPEC.loader.exec_module(audit)
 
 
 # A rung ladder built so every one of the six frontier readings is a distinct, checkable answer: each
-# doubling of concurrency both raises the rate and pushes the tail into the next bound's territory, so
-# every bound's winning rung, its boundary rung above it, and the final lower-bound reading are all
-# exercised by one small ladder rather than asserted in isolation.
-#
-# `ok` carries a positive count on every rung (arbitrarily set equal to `rps`, since the exact value
-# does not matter to any check here - only `ok > 0` does) so this ladder reads as `ok_known=True` and
-# every rung is PROVABLY clean under the exact `rung_served_cleanly` rule, not merely clean by the
-# `fail: 0` that used to be the whole story.
+# doubling of concurrency both raises the rate and pushes the tail into the next bound. `ok` is set
+# positive on every rung (value arbitrary; only `ok > 0` matters) so every rung is provably clean
+# under `rung_served_cleanly`, not merely clean by `fail: 0`.
 #
 #   conc   rps    p99_us   qualifies under (strict <)
 #   8      500      800    1ms, 5ms, 10ms, 50ms, 100ms, unbounded
@@ -60,10 +46,8 @@ _BASE_RUNGS = [
     {"conc": 8_192, "rps": 6_500, "p99_us": 200_000, "fail": 0, "ok": 6_500},
 ]
 
-# The frontier re-derived from `_BASE_RUNGS` by hand, per `frontier::read_at`: the max rps among
-# qualifying rungs, the concurrency it was observed at, that rung's own p99, the lowest concurrency
-# above it that stopped qualifying, and whether the winner is the top of the ladder. Only the last
-# reading (unbounded) wins at the ladder's top rung, so it is the only one with `lower_bound: True`.
+# The frontier re-derived from `_BASE_RUNGS` by hand, per `frontier::read_at`. Only the unbounded
+# reading wins at the ladder's top rung, so it is the only one with `lower_bound: True`.
 _BASE_FRONTIER = [
     {"p99_bound_us": 1_000, "rps": 500, "concurrency": 8, "p99_us": 800,
      "first_disqualified_conc": 32, "lower_bound": False},
@@ -104,8 +88,8 @@ def cell(**over):
 
 
 def frontier_with(i, **field_over):
-    """A deep copy of `_BASE_FRONTIER` with reading `i` mutated - the standard shape for a red fixture
-    that must trip exactly one frontier check without disturbing the five readings around it."""
+    """A deep copy of `_BASE_FRONTIER` with reading `i` mutated - a red fixture that trips exactly one
+    frontier check without disturbing the readings around it."""
     fr = json.loads(json.dumps(_BASE_FRONTIER))
     fr[i].update(field_over)
     return fr
@@ -113,25 +97,15 @@ def frontier_with(i, **field_over):
 
 # Each entry: the check, a cell it must REJECT, and what the violation is about.
 #
-# REMOVED: check_sustained_not_above_peak compared `perf.rps_sustained_20ms` against
-# `perf.rps_max_proxy` and allowed C6_GROSS_PCT of window noise between them. BOTH FIELDS ARE DELETED
-# from `CellPerf` - see `frontier.rs`'s module header, reason #3: the two scalars came off two
-# different algorithms over the same rungs (a plateau search vs. a gate bisection) and could disagree,
-# which is exactly the state this check policed. The frontier is one algorithm - `max(rps)` over a
-# qualifying set that only grows as the bound relaxes - so the inversion is structural nonsense now,
-# not merely unchecked, and its successor `check_frontier_rates_are_monotone_in_the_bound` asserts the
-# ordering over all six readings instead of two. Tested below.
-#
-# REMOVED: check_peak_came_from_its_own_sweep held `perf.rps_max_proxy` to `max(sweep_max_proxy)` -
-# one direction of one comparison against a deleted scalar. Its strictly stronger successor,
-# `check_frontier_is_rederivable_from_its_sweep`, recomputes all four fields of every reading (rate,
-# concurrency, tail, boundary rung) from the rungs and demands equality both ways. Tested below.
+# REMOVED: check_sustained_not_above_peak and check_peak_came_from_its_own_sweep compared the deleted
+# `rps_sustained_20ms`/`rps_max_proxy` scalars. Their successors (tested below) are strictly stronger:
+# check_frontier_rates_are_monotone_in_the_bound asserts ordering across all six readings, and
+# check_frontier_is_rederivable_from_its_sweep recomputes every reading from the rungs both ways.
 
 # ── traces, for the SEARCH-TRACE checks ───────────────────────────────────────────────────────────
 #
-# `cell()` carries no `sweep_streams`, so every trace check returns early on it - which makes it a
-# valid accept-side fixture but a weak one: a check that never runs accepts everything. These build
-# real ladders so both sides are proven against a trace the check actually reads.
+# `cell()` carries no `sweep_streams`, so every trace check returns early on it - a valid but weak
+# accept fixture. These build real ladders so both sides are proven against a trace the check reads.
 def rung(conc, passed=True, **over):
     r = {"conc": conc, "passed": passed, "streams": conc, "stream_errors": 0 if passed else conc,
          "frames": 64 * conc, "frames_expected": 64 * conc, "stalls": 0}
@@ -155,9 +129,8 @@ CLEAN_TRACE = [rung(1), rung(2), rung(4), rung(8), rung(16, passed=False),
 REJECTS = [
     # ── the SEARCH TRACE's own reject cases ───────────────────────────────────────────────────────
     #
-    # These five are why this board could return PASS ten times while eight cells had silently given
-    # up: every other check reads the published NUMBER, and a number that was never produced has
-    # nothing to check. Each of these reads what the search DID.
+    # Every other check reads the published NUMBER; a number never produced has nothing to check.
+    # These five read what the search actually DID, catching a cell that silently gave up.
     (audit.check_search_spent_its_budget,
      trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16, passed=False), rung(15, passed=False)],
                 sustained=None, absence_detail="the stepped-down rung failed its first window"),
@@ -186,27 +159,21 @@ REJECTS = [
     (audit.check_no_bare_absence, cell(stream__added_gap_p50_us=None),
      "a null metric with no reason in absences (a bare hole)"),
     # The other half of the hole: `check_no_bare_absence` reads `f in blk and blk[f] is None`, so a
-    # field DROPPED from the block is invisible to it. The clean baseline cell already omits most of
-    # the declared field list, which is why this fixture rejects while the accept-side pairs below
-    # supply a fully-carried cell rather than reusing cell().
+    # field DROPPED from the block is invisible to it. cell() already omits most declared fields, so it
+    # rejects here while the accept-side pairs below supply a fully-carried cell.
     (audit.check_declared_fields_are_carried, cell(),
      "a served cell whose blocks omit declared fields entirely"),
     (audit.check_stream_capacity_is_a_number,
      cell(stream__stream_served=True, stream__streams_sustained=None),
      "a served streaming cell whose capacity metric is a hole with nothing explaining it"),
-    # REMOVED: check_frames_have_a_stream_behind_them fired when `stream.cpu_fps` was published beside
-    # a MEASURED `streams_sustained` of 0 - a frames/sec rate over a population of zero streams.
-    # `cpu_fps`, `cpu_fps_concurrency` and `sweep_cpu_fps` are deleted from `CellStream` with nothing
-    # taking their place: `streams_sustained_fps` is the frame rate OF `streams_sustained` itself,
-    # measured in the SAME window rather than by a separate climb, so it can no longer be a rate over a
-    # population it was not measured against. There is no frame rate left in the artifact this check
-    # could still be pointed at.
+    # REMOVED: check_frames_have_a_stream_behind_them watched for a frames/sec rate over zero streams.
+    # `cpu_fps`/`cpu_fps_concurrency`/`sweep_cpu_fps` are deleted from `CellStream`; the replacement
+    # `streams_sustained_fps` is the frame rate OF `streams_sustained`, measured in the same window, so
+    # it can no longer be a rate over an unmeasured population.
     # ── the frontier's own REJECTS entries ────────────────────────────────────────────────────────
     #
-    # `check_frontier_is_complete` and `check_every_absent_frontier_reading_has_a_reason`'s reject
-    # cases live in dedicated blocks below rather than here, because the first needs the
-    # `frontier_known` kwarg exercised in both states and the second's mangle table has more than one
-    # shape worth pinning individually. The five here each have exactly one failure mode to prove.
+    # check_frontier_is_complete and check_every_absent_frontier_reading_has_a_reason's rejects live in
+    # dedicated blocks below (they need more shapes exercised). The five here each prove one failure mode.
     (audit.check_frontier_rates_are_monotone_in_the_bound,
      cell(perf__frontier=frontier_with(1, rps=100)),  # 5ms now reads 100, BELOW 1ms's own 500
      "a looser bound reading a lower rate than a tighter one"),
@@ -229,19 +196,10 @@ REJECTS = [
 def isolated(failures, section):
     """PER-BLOCK EXCEPTION ISOLATION (round-2 audit finding).
 
-    Every REJECTS entry calls a check function DIRECTLY (`list(check("t", bad))`) and expects it to
-    return violations, not raise. Before this, a check mutated to raise instead of returning the
-    wrong thing - the exact failure mode the round-2 audit found - would blow up `list(check(...))`
-    and abort this WHOLE FILE at that line, taking every other REJECTS entry and every check below
-    it (the C6 bar, the absence-fields mirror, the cwd-independence proof, the per-gateway check)
-    down with it, uncounted rather than failed. `python3 bench-audit_test.py` would exit non-zero
-    either way, so the failure still "worked" in the crudest sense - but it printed a traceback
-    instead of a punch list, and it could not tell you whether ONE check regressed or all of them
-    did, because only one of them ever got the chance to run.
-
-    Wrapping each independent block in this context manager makes a raise a recorded entry in
-    `failures` for THAT block only; every block after it still runs, same as `site/test.mjs`'s
-    runner documents for the same reason: "ordering must not decide coverage" (test.mjs:35-39).
+    A check that raises (rather than returning violations) would otherwise abort the whole file at
+    that line, taking every later block down uncounted. This records the raise as a failure for THAT
+    block only so every subsequent block still runs - "ordering must not decide coverage"
+    (site/test.mjs:35-39).
     """
     try:
         yield
@@ -258,14 +216,9 @@ def main():
             if not got:
                 failures.append(f"{check.__name__} accepted {what} - it cannot fail, so it guards nothing")
 
-    # And the other half: a check that rejects everything is equally useless, because a board that
-    # can never pass gets the gate switched off.
-    #
-    # `check_declared_fields_are_carried` is the one check the minimal baseline cell cannot satisfy -
-    # its whole subject is the FULL declared field list, and cell() deliberately carries only the
-    # handful of fields the other checks read. Its accept side is proven below against a cell built
-    # from ABSENCE_CARRYING_FIELDS itself, which is a stronger statement anyway: the accepting fixture
-    # is derived from the very list the check enforces, so the two cannot drift apart.
+    # The other half: a check that rejects everything is equally useless. cell() cannot satisfy
+    # check_declared_fields_are_carried (its subject is the FULL field list, cell() carries only a few),
+    # so that one's accept side is proven below against a cell built from ABSENCE_CARRYING_FIELDS itself.
     clean = cell()
     for check, _bad, _what in REJECTS:
         if check is audit.check_declared_fields_are_carried:
@@ -282,11 +235,8 @@ def main():
                            absences={"stream.added_gap_p50_us": {"reason": "below_resolution", "detail": "x"}})
         if list(audit.check_no_bare_absence("t", with_reason)):
             failures.append("check_no_bare_absence rejected a null that carries its reason")
-        # `cpu_fps` IS GONE FROM `check_stream_capacity_is_a_number` (it is deleted from `CellStream`
-        # entirely, see the REMOVED note at `check_frames_have_a_stream_behind_them`'s old site in
-        # bench-audit.py) - the check's field list below it is just `("streams_sustained",)` now, so
-        # every fixture here is about that one field rather than the cpu_fps/cpu_fps_concurrency pair
-        # the pre-frontier version of this test exercised.
+        # `cpu_fps` is gone from check_stream_capacity_is_a_number (deleted from `CellStream`); its
+        # field list is just `("streams_sustained",)` now, so these fixtures are about that one field.
         zeroed = cell(stream__stream_served=True, stream__streams_sustained=0)
         if list(audit.check_stream_capacity_is_a_number("t", zeroed)):
             failures.append("check_stream_capacity_is_a_number rejected a measured 0")
@@ -294,9 +244,8 @@ def main():
                        absences={"stream.streams_sustained": {"reason": "untestable"}})
         if list(audit.check_stream_capacity_is_a_number("t", excused)):
             failures.append("check_stream_capacity_is_a_number rejected a rig-class absence")
-        # A search that RAN, failed to establish a ceiling, and said WHY is not a silent yield.
-        # Demanding a measured 0 there fabricates an answer to a question that was never settled.
-        # This is the real shape from the 2026-07-29 field run.
+        # A search that RAN, failed to establish a ceiling, and said WHY is not a silent yield;
+        # demanding a measured 0 there fabricates an answer to a question that was never settled.
         explained = cell(stream__stream_served=True, stream__streams_sustained=None,
                          absences={"stream.streams_sustained": {
                              "reason": "not_measured",
@@ -308,20 +257,17 @@ def main():
 
     # ── the omitted-field check, both ways (ledger TOOL-04) ───────────────────────────────────────
     #
-    # ACCEPT: a cell that carries every declared field passes, whether the field holds a number or an
-    # explicit null. The fixture is generated FROM ABSENCE_CARRYING_FIELDS, so if the engine's field
-    # list grows and the audit's list grows with it, this accept-side fixture grows too and keeps
-    # proving the same property instead of pinning a snapshot of yesterday's schema.
+    # ACCEPT: a cell carrying every declared field passes, number or explicit null. Generated FROM
+    # ABSENCE_CARRYING_FIELDS so it tracks the list the check enforces instead of pinning a schema snapshot.
     carried = {"served": True}
     with isolated(failures, "omitted-field check (ledger TOOL-04)"):
         for _b, _fs in audit.ABSENCE_CARRYING_FIELDS.items():
             carried[_b] = {_f: 1.0 for _f in _fs}
         if list(audit.check_declared_fields_are_carried("t", carried)):
             failures.append("check_declared_fields_are_carried rejected a cell that carries every field")
-        # A field to null out / drop below, picked off the LIVE list rather than hardcoded - a field
-        # this audit used to name here (`perf.conc_at_peak`) is exactly the kind of thing that gets
-        # deleted out from under a fixture, which is what made this test start raising KeyError
-        # instead of testing anything.
+        # A field to null out / drop, picked off the LIVE list rather than hardcoded: a hardcoded name
+        # (this used to name `perf.conc_at_peak`) gets deleted out from under the fixture and it raises
+        # KeyError instead of testing anything.
         _perf_field = audit.ABSENCE_CARRYING_FIELDS["perf"][0]
         carried_with_null = json.loads(json.dumps(carried))
         carried_with_null["perf"][_perf_field] = None
@@ -329,9 +275,8 @@ def main():
             failures.append("check_declared_fields_are_carried rejected an explicit null - it polices "
                             "OMISSION, and a null-with-reason is the honest shape it exists to require")
 
-        # REJECT, precisely: dropping ONE key from an otherwise complete cell must yield exactly one
-        # violation naming that key. The blanket reject above (a sparse cell) would still fire if the
-        # check degenerated into "the block is small"; this pins that it is the missing KEY it sees.
+        # REJECT, precisely: dropping ONE key must yield exactly one violation naming that key - pins
+        # that the check sees the missing KEY, not merely a small block.
         one_short = json.loads(json.dumps(carried))
         del one_short["perf"][_perf_field]
         fired = list(audit.check_declared_fields_are_carried("t", one_short))
@@ -376,14 +321,10 @@ def main():
 
         # ── WITHHELD IS NOT DROPPED ───────────────────────────────────────────────────────────────
         #
-        # The live case this carve-out exists for: aisix openai-responses>openai answers 200 (so
-        # `served` is True and its siblings all carry frontiers - the exact shape the RED case above
-        # calls a drop), but egress re-verification proved the gateway never translated. The request
-        # arrived on the mock's openai-responses endpoint and nothing arrived on openai, so it
-        # forwarded the ingress request unchanged. Every number taken there describes a different wire,
-        # so the engine withheld the whole perf group and published `egress_reverified: false`. An
-        # empty frontier is the CORRECT artifact; demanding one would demand a throughput figure for a
-        # translation that did not happen.
+        # When egress re-verification proves a served cell never translated, the engine withholds the
+        # whole perf group and publishes `egress_reverified: false`. An empty frontier is the CORRECT
+        # artifact there - demanding one would demand a throughput figure for a translation that never
+        # happened - even though the cell otherwise looks exactly like the dropped-frontier RED case.
         withheld = cell(perf__frontier=[], perf__egress_reverified=False)
         if list(audit.check_frontier_is_complete("t", withheld, frontier_known=True)):
             failures.append("check_frontier_is_complete flagged a cell whose perf was WITHHELD because "
@@ -391,9 +332,9 @@ def main():
                             "frontier is correct there, and calling it a drop cries wolf on the one "
                             "case where the harness behaved best")
 
-        # RED, and this is the half that matters: the exemption is keyed on the DISCLOSURE, not on
-        # trusting the producer. A cell that merely lost its frontier has no `egress_reverified: false`
-        # and must still fail, in both the reverified-true and field-absent shapes.
+        # RED (the half that matters): the exemption is keyed on the DISCLOSURE, not trust in the
+        # producer. A cell that merely lost its frontier has no `egress_reverified: false` and must
+        # still fail, in both the reverified-true and field-absent shapes.
         if not list(audit.check_frontier_is_complete(
                 "t", cell(perf__frontier=[], perf__egress_reverified=True), frontier_known=True)):
             failures.append("the withheld-cell exemption swallowed a REAL dropped frontier on a cell "
@@ -438,9 +379,8 @@ def main():
 
     # ── check_frontier_rates_are_monotone_in_the_bound: the degenerate form ───────────────────────
     #
-    # A looser bound publishing NO rate while a tighter one published one is the same violation with
-    # the rate missing rather than merely low - the looser bound's qualifying set contains the
-    # tighter's, so it cannot be empty when the tighter one was not.
+    # A looser bound with NO rate beside a tighter one that has a rate is the same violation: the
+    # looser's qualifying set contains the tighter's, so it cannot be empty when the tighter's was not.
     with isolated(failures, "frontier: monotonicity degenerate form (absent looser, present tighter)"):
         absent_looser = frontier_with(1, rps=None, concurrency=None, p99_us=None,
                                        first_disqualified_conc=None)
@@ -452,8 +392,8 @@ def main():
 
     # ── check_frontier_is_rederivable_from_its_sweep: the re-derivation must check EVERY field ─────
     #
-    # The REJECTS entry above already proves a wrong RATE is caught; these two prove the concurrency
-    # and the boundary proof are independently re-derived rather than trusted once the rate matches.
+    # The REJECTS entry proves a wrong RATE is caught; these two prove the concurrency and the boundary
+    # proof are independently re-derived, not trusted once the rate matches.
     with isolated(failures, "frontier: re-derivation catches bad concurrency / bad boundary proof"):
         bad_conc = frontier_with(2, concurrency=99_999)  # no rung at c=99999 carries the 10ms rate
         fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
@@ -471,28 +411,21 @@ def main():
 
     # ── rung_served_cleanly: exact now, `ok` is read directly off the rung ───────────────────────────
     #
-    # This is the property `ok` exists to make provable at all - see its docstring's plano paragraph.
-    # "0 of 0 looks clean" is the defect `ok > 0` guards against, and it was UNVERIFIABLE before this
-    # field was published: `fail == 0` alone cannot tell a window that completed nothing from one that
-    # completed everything it accepted, and the file's old approximation (`rps > 0` or a p99) could not
-    # see a window with `ok: 0` at all - it had no signal to read. Now it does.
+    # `ok > 0` guards against "0 of 0 looks clean": `fail == 0` alone can't tell a window that completed
+    # nothing from one that completed everything it accepted. Unverifiable before `ok` was published.
     with isolated(failures, "rung_served_cleanly: exact ok/fail rule"):
         # ACCEPT: the ordinary clean rung - ok > 0, fail == 0.
         if not audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "fail": 0, "ok": 500}):
             failures.append("rung_served_cleanly rejected an ordinary clean rung (ok=500, fail=0)")
-        # RED: `ok: 0` alongside `fail: 0` - a window that completed NOTHING. "0 of 0 looks clean" is
-        # exactly the ambiguity `ok > 0` exists to break, and it was unreachable by this file before
-        # `ok` was published - there was no field to hold a real 0 apart from an absence.
+        # RED: `ok: 0` alongside `fail: 0` - a window that completed NOTHING. The ambiguity `ok > 0`
+        # exists to break, unreachable before `ok` was published.
         if audit.rung_served_cleanly({"conc": 999, "rps": None, "p99_us": None, "fail": 0, "ok": 0}):
             failures.append("rung_served_cleanly accepted ok=0, fail=0 as clean - a window that "
                             "completed nothing must not count as having served cleanly")
-        # GREEN, and this one INVERTED: `ok` absent entirely (every snapshot measured before the field
-        # existed). It first refused these, on the reasoning that unverifiable must not read as clean -
-        # but refusing meant the re-derivation had to skip whole boards, and a skipped check is weaker
-        # than an approximate one. So an absent `ok` FALLS BACK: a positive rate or a p99 is proof the
-        # window completed something, which is WIDER than the engine's `ok > 0` (a completion always
-        # leaves a latency sample, while a rate can round away through `as i64`), so the residual error
-        # is a missed catch rather than a false alarm.
+        # GREEN: `ok` absent entirely (snapshots predating the field) FALLS BACK to a positive rate or
+        # a p99 as proof the window completed something. Wider than the engine's `ok > 0` (a completion
+        # always leaves a latency sample), so its residual error is a missed catch, not a false alarm.
+        # Refusing instead would force the re-derivation to skip whole boards, weaker than approximating.
         if not audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "fail": 0}):
             failures.append("rung_served_cleanly refused a rung with no `ok` but a real rate and tail - "
                             "it must fall back rather than refuse, or the re-derivation skips whole "
@@ -501,19 +434,15 @@ def main():
         if audit.rung_served_cleanly({"conc": 8, "rps": None, "p99_us": None, "fail": 0}):
             failures.append("rung_served_cleanly accepted a rung with no ok, no rate and no tail - "
                             "nothing there evidences a completion, so the fallback must still refuse")
-        # RED, the sibling: `fail` absent with `ok` present must not read as clean either - unchanged
-        # from before `ok` existed, pinned again here so the exact rewrite did not quietly drop it.
+        # RED, the sibling: `fail` absent with `ok` present must not read as clean either.
         if audit.rung_served_cleanly({"conc": 8, "rps": 500, "p99_us": 800, "ok": 500}):
             failures.append("rung_served_cleanly accepted a rung with no `fail` field as clean")
 
     # ── the ok:0/fail:0 and ok-absent defects must not let a rung WIN a reading ──────────────────────
     #
-    # A unit-level pass on `rung_served_cleanly` is necessary but not sufficient - the actual bar is
-    # that a rung which cannot prove it served cleanly must not be the rung a published frontier
-    # reading is built on. Rung index 2 (c=128) is the winner of the 10ms reading in `_BASE_FRONTIER`
-    # (3,000 rps at p99=8,000us); knocking out ITS cleanliness must knock its reading's re-derivation
-    # loose, because the true winner drops to rung index 1 (c=32, 1,500 rps) and the published 3,000
-    # no longer matches anything the sweep can back.
+    # The real bar is that a rung which can't prove it served cleanly must not be the rung a frontier
+    # reading is built on. Rung 2 (c=128) wins the 10ms reading; knocking out its cleanliness must drop
+    # the winner to rung 1 (c=32, 1,500 rps), leaving the published 3,000 unbacked.
     with isolated(failures, "ok:0/fail:0 and ok-absent rungs must not win a frontier reading"):
         ok_zero_rungs = json.loads(json.dumps(_BASE_RUNGS))
         ok_zero_rungs[2]["ok"] = 0  # was 3_000; the rung still publishes fail: 0 and a real rate/p99
@@ -524,11 +453,9 @@ def main():
                             f"fail=0 win the 10ms reading - re-derived from the rungs that can PROVE "
                             f"they served cleanly the answer is 1500, got {fired!r}")
 
-        # THE ABSENT-`ok` SIBLING INVERTED for the same reason as the unit case above: with the fallback
-        # in place, a rung missing `ok` but carrying a real rate and tail is proven clean by that rate, so
-        # it legitimately KEEPS the reading and nothing should fire. Asserting silence here is the
-        # non-vacuous half - it proves the fallback re-derives rather than merely declining to look, and
-        # the `ok: 0` case just above proves it still catches a rung that truly completed nothing.
+        # The absent-`ok` sibling: with the fallback, a rung missing `ok` but carrying a real rate and
+        # tail is proven clean by that rate, so it legitimately KEEPS the reading - asserting silence
+        # here proves the fallback re-derives rather than merely declining to look.
         ok_absent_rungs = json.loads(json.dumps(_BASE_RUNGS))
         del ok_absent_rungs[2]["ok"]
         fired = list(audit.check_frontier_is_rederivable_from_its_sweep(
@@ -539,23 +466,10 @@ def main():
 
     # ── a snapshot that predates `ok` is RE-DERIVED ANYWAY, via the wider fallback ────────────────────
     #
-    # THIS TEST WAS INVERTED, and the inversion is the finding. It used to assert that `ok_known=False`
-    # SKIPPED the re-derivation entirely, on the reasoning that without `ok` every rung fails
-    # `rung_served_cleanly` for lack of proof, every qualifying set empties, and every honestly published
-    # rate gets flagged as having no rung behind it - the whole board at once, for a field its engine
-    # never had.
-    #
-    # That reasoning was sound and the remedy was wrong. Skipping meant the STRONGEST check in the file
-    # went unrun on all 26 cells of the board that was about to ship, and a skipped check is weaker than
-    # an approximate one. `rung_served_cleanly` now falls back to treating a positive rate OR a p99 as
-    # proof of completion when `ok` is absent - wider than the engine's rule, since a completion always
-    # leaves a latency sample while a rate can round away through `as i64` - so the residual error is a
-    # missed catch rather than a false alarm, which is the only direction an approximation may err in a
-    # tool whose warnings have to be trusted.
-    #
-    # So: a pre-`ok` cell whose readings genuinely match its rungs must now PASS, not be skipped. That is
-    # a stronger property than the old one - it proves the fallback actually re-derives correctly rather
-    # than merely declining to look.
+    # `ok_known=False` no longer skips the re-derivation: skipping meant the strongest check in the file
+    # went unrun on a whole board, weaker than approximating. With `rung_served_cleanly`'s fallback
+    # (rate-or-p99 as proof of completion), a pre-`ok` cell whose readings match its rungs must PASS -
+    # a stronger property, since it proves the fallback re-derives correctly rather than declining to look.
     with isolated(failures, "re-derivation runs on a pre-`ok` snapshot instead of skipping it"):
         no_ok_rungs = [{k: v for k, v in r.items() if k != "ok"} for r in json.loads(json.dumps(_BASE_RUNGS))]
         preok_cell = cell(perf__sweep_max_proxy=no_ok_rungs)
@@ -563,8 +477,8 @@ def main():
         if fired:
             failures.append(f"a pre-`ok` cell whose frontier matches its own rungs must re-derive clean "
                             f"through the fallback, not be flagged: got {fired!r}")
-        # AND THE FALLBACK MUST STILL CATCH A REAL DEFECT. An approximation that accepts everything is
-        # not a check; this is what distinguishes "wider than the engine's rule" from "switched off".
+        # And the fallback must still catch a real defect - what distinguishes "wider than the engine's
+        # rule" from "switched off".
         broken = cell(perf__sweep_max_proxy=no_ok_rungs,
                       perf__frontier=frontier_with(2, rps=_BASE_FRONTIER[2]["rps"] + 37))
         if not list(audit.check_frontier_is_rederivable_from_its_sweep("t", broken)):
@@ -593,10 +507,8 @@ def main():
 
     # ── check_frontier_p99_is_the_observed_tail: the bound-copied-into-the-answer signature ────────
     #
-    # The REJECTS entry above proves a p99 ABOVE its own bound is caught; this proves the check reports
-    # p99 EXACTLY EQUAL to the bound as its OWN, distinct finding - "qualification is strictly under
-    # the bound" - because that shape is the specific defect worth naming (the bound restated as the
-    # answer), not just another instance of the inequality.
+    # The REJECTS entry proves a p99 ABOVE its bound is caught; this proves p99 EXACTLY EQUAL to the
+    # bound is reported as its own distinct finding (the bound restated as the answer).
     with isolated(failures, "frontier: p99 exactly equal to its own bound"):
         on_the_nose = frontier_with(2, p99_us=10_000)  # the 10ms reading's own bound, verbatim
         fired = list(audit.check_frontier_p99_is_the_observed_tail(
@@ -634,8 +546,8 @@ def main():
 
     # ── board-level: check_frontier_bounds_agree_with_the_engine (ledger TOOL-02 shape) ────────────
     #
-    # ACCEPT: the real engine/src/frontier.rs, as it stands on disk, must agree with python's
-    # P99_BOUNDS_US. This is the assertion that actually runs in CI.
+    # ACCEPT: the real engine/src/frontier.rs on disk must agree with python's P99_BOUNDS_US - the
+    # assertion that runs in CI.
     with isolated(failures, "frontier bounds mirror the engine"):
         live = list(audit.check_frontier_bounds_agree_with_the_engine())
         if live:
@@ -649,9 +561,8 @@ def main():
                             "array - a cross-check that returns its own side's value agrees with "
                             "everything")
 
-        # RED (the mangle from the brief): the engine GAINS a bound the python mirror does not have -
-        # a sixth column the board would publish that this audit would never check for completeness,
-        # monotonicity or re-derivation, because it does not know the column exists.
+        # RED: the engine GAINS a bound the python mirror lacks - a column the board would publish but
+        # this audit would never check, because it doesn't know the column exists.
         tmp4 = tempfile.mkdtemp()
         os.makedirs(os.path.join(tmp4, "engine", "src"))
         with open(os.path.join(tmp4, "engine", "src", "frontier.rs"), "w") as fh:
@@ -682,18 +593,9 @@ def main():
         finally:
             audit.HERE = old_here
 
-    # REMOVED: the C6 cross-language bar test (ledger TOOL-02).
-    #
-    # It asserted that bench-audit's `C6_GROSS_PCT` and site/check-consistency.mjs's own
-    # `export const C6_GROSS_PCT = 5;` were the same number, by parsing the JS literal. Both the
-    # constant and the gate are gone: the ceiling capped how much window noise could excuse a
-    # sustained figure sitting above the maximum it was meant to sit under, and BOTH of those fields
-    # are deleted. The frontier makes that inversion unrepresentable rather than merely bounded - six
-    # maxima over sets that only grow as the bound relaxes - so a gate policing agreement between two
-    # dead literals would have been decoration of exactly the kind this file exists to catch.
-    #
-    # What covers the invariant now, both halves, above: monotonicity across all six readings, and
-    # re-derivation of every reading from the raw rungs.
+    # REMOVED: the C6 cross-language bar test (ledger TOOL-02). It pinned bench-audit's `C6_GROSS_PCT`
+    # to check-consistency.mjs's copy; both the constant and the gate are gone (the frontier makes the
+    # inversion they policed unrepresentable). Monotonicity and re-derivation, above, cover it now.
     # ── ABSENCE_CARRYING_FIELDS must mirror record.rs's absences_of!() lists, field for field ───────
     #
     # ACCEPT: the real engine/src/record.rs, as it stands on disk, must agree with the python lists.
@@ -704,8 +606,8 @@ def main():
             failures.append(f"ABSENCE_CARRYING_FIELDS has drifted from the live engine/src/record.rs: "
                             f"{live_fields}")
 
-        # REJECT #1: the parser must read the ENGINE'S fields, not echo python's own list back. Feed it a
-        # synthetic absences_of!() call and it must report exactly those identifiers, comments and all.
+        # REJECT #1: the parser must read the ENGINE'S fields, not echo python's list. Fed a synthetic
+        # absences_of!() call it must report exactly those identifiers (skipping the comment between them).
         _fixture_rs = (
             "impl CellPerf {\n"
             "    pub fn absences(&self) -> BTreeMap<String, AbsentEntry> {\n"
@@ -724,11 +626,8 @@ def main():
             failures.append(f"parse_rust_absences does not actually read the engine's field list - got "
                             f"{parsed!r}")
 
-    # REJECT #2 (the round-2 audit's own scenario): drop a field from the PYTHON list while the engine
-    # keeps carrying it. This is exactly "delete cpu_fps_concurrency from the stream list", the move
-    # that used to leave bench-audit_test.py green because the accept-side fixture up above is
-    # generated FROM ABSENCE_CARRYING_FIELDS and shrinks right along with it. This check must fire
-    # from the ENGINE's side, which never shrank.
+    # REJECT #2: drop a field from the PYTHON list while the engine keeps carrying it. The accept-side
+    # fixture above shrinks with the list, so this must fire from the ENGINE's side, which never shrank.
     with isolated(failures, "ABSENCE_CARRYING_FIELDS mirrors record.rs: REJECT #2-4"):
         tmp3 = tempfile.mkdtemp()
         os.makedirs(os.path.join(tmp3, "engine", "src"))
@@ -742,9 +641,8 @@ def main():
         old_fields = audit.ABSENCE_CARRYING_FIELDS
         try:
             audit.HERE = tmp3
-            # First pin that the fixture, with the field lists left untouched apart from being narrowed
-            # to match the fixture's smaller engine, agrees - so the failure proven next is caused by the
-            # ONE deletion below and nothing else about the fixture.
+            # First pin that the narrowed-to-fixture lists agree, so the failure proven next is caused
+            # by the ONE deletion below and nothing else.
             audit.ABSENCE_CARRYING_FIELDS = {
                 "perf": ["added_latency_p99_us"],
                 "stream": ["added_ttft_p99_us", "cpu_fps_concurrency"],
@@ -774,8 +672,8 @@ def main():
             if not any("a_field_the_engine_dropped" in v for v in overclaimed):
                 failures.append(f"check_absence_fields_mirror_the_engine did not catch python claiming a "
                                 f"field the engine's absences() no longer carries, got {overclaimed!r}")
-            # REJECT #3: going BLIND is a violation, not a pass - record.rs restated in a shape this
-            # cannot recognise (struct renamed) must fail rather than let the audit quietly agree.
+            # REJECT #3: going BLIND is a violation, not a pass - record.rs restated in an unrecognised
+            # shape (struct renamed) must fail rather than let the audit quietly agree.
             audit.ABSENCE_CARRYING_FIELDS = old_fields
             with open(os.path.join(tmp3, "engine", "src", "record.rs"), "w") as fh:
                 fh.write("impl CellPerfRenamed {\n    fn absences(&self) -> X {\n        absences_of!(self, x,)\n    }\n}\n")
@@ -795,10 +693,8 @@ def main():
 
     # ── paths are anchored to the script, not the cwd (ledger TOOL-03) ────────────────────────────
     #
-    # RED: from a different cwd the loader must still find this repo's snapshots. Before the fix
-    # `glob.glob("results/snapshots/…")` resolved against the caller's shell and returned nothing, so
-    # the audit reported an empty board about a populated one. Asserting "same answer from /" is the
-    # only form of this assertion that cannot pass by accident.
+    # RED: the loader must find snapshots from any cwd. A relative glob resolved against the caller's
+    # shell and returned nothing; asserting "same answer from /" is the only form that can't pass by accident.
     with isolated(failures, "snapshot_paths is cwd-independent (ledger TOOL-03)"):
         from_root = None
         old_cwd = os.getcwd()
@@ -814,12 +710,9 @@ def main():
         if from_here and not all(os.path.isabs(p) for p in from_here):
             failures.append("snapshot_paths() returned a relative path - it will re-resolve against cwd")
 
-    # The per-gateway invariant is driven off real definitions rather than a fixture, because its
-    # whole subject is what the repo actually declares.
-    #
-    # Pre-declared (not just assigned inside the block below) so the final summary's reference to
-    # `declared_and_untestable` still has a name to read even if this block's isolated() catches a
-    # raise partway through - a raise here must not also crash the report at the bottom of the file.
+    # The per-gateway invariant is driven off real definitions, since its subject is what the repo
+    # actually declares. Pre-declared so the final summary can still read `declared_and_untestable`
+    # even if this block's isolated() catches a raise partway through.
     declared_and_untestable = []
     bifrost_clean = []
     with isolated(failures, "per-gateway: declaration vs. untestable"):
@@ -828,15 +721,10 @@ def main():
         if bifrost_clean:
             failures.append(f"bifrost declares nothing it marks untestable, but the check fired: {bifrost_clean}")
 
-    # And its RED half. The real tree's declared/untestable intersection is currently empty, so the
-    # accept-side assertions above cannot prove the check still fires: if its field names or matrix
-    # orientation drifted, it would go silently inert - the exact defect class this file exists for.
-    # A fabricated gateway that both declares openai/openai in its matrix AND marks it untestable
-    # must yield exactly one violation.
-    #
-    # Pointed at the fixture tree by moving audit.HERE, not by chdir: the audit's paths are now
-    # anchored to its own file (TOOL-03), so chdir would no longer redirect it - it would read the
-    # real gateways/ directory, find nothing, and this RED proof would go green by doing nothing.
+    # RED half: the real tree's declared/untestable intersection is empty, so the accept side above
+    # can't prove the check still fires. A fabricated gateway that declares openai/openai AND marks it
+    # untestable must yield exactly one violation. Pointed at the fixture by moving audit.HERE, not
+    # chdir: paths are anchored to the file now (TOOL-03), so chdir would read the real gateways/ dir.
     with isolated(failures, "per-gateway: RED half (fabricated declared+untestable gateway)"):
         tmp = tempfile.mkdtemp()
         old_here = audit.HERE
@@ -857,11 +745,8 @@ def main():
         finally:
             audit.HERE = old_here
 
-    # A malformed definition.json must not crash the whole audit before any gateway's PASS/FAIL is
-    # printed. load() (see its own docstring), newest_engine(), and the skipped-gateway loop all wrap
-    # json.load and degrade gracefully on a bad file; check_declaration_matches_what_we_measured()
-    # does not, so one truncated definition.json for ANY gateway takes every other gateway's report
-    # down with it.
+    # A malformed definition.json must not crash the whole audit: one truncated file for any gateway
+    # must not take every other gateway's report down with it.
     with isolated(failures, "per-gateway: malformed definition.json must not crash the audit"):
         tmp = tempfile.mkdtemp()
         old_here = audit.HERE

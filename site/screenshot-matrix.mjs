@@ -1,31 +1,19 @@
 #!/usr/bin/env node
 /* screenshot-matrix.mjs — every page × every control combination × three widths, as full-page PNGs.
-
-   WHY THIS EXISTS: the board's layout defects are combinatorial, not per-page. "Tested on is huge"
-   is true only in the modes whose pill renders a TRANSLATION path (`OpenAI→Bedrock Converse`), and
-   the header-wrap and column-crush problems appear at one width and not another. Reviewing the four
-   pages a human happens to open cannot find those; enumerating the product can.
+   Layout defects here are combinatorial, not per-page (e.g. a translation-path pill only overflows in
+   some modes), so enumerating the product finds what spot-checking a few pages can't.
 
    RUN:
      cd site && python3 -m http.server 8899 &
      NODE_PATH="$(npm root -g)" node site/screenshot-matrix.mjs
-   Playwright is not a repo dependency (this script is a development tool, not part of the deployed
-   site, and the site ships zero runtime dependencies on purpose), so it resolves from wherever it is
-   installed via NODE_PATH. If `npm root -g` does not hold it, point NODE_PATH at the directory that
-   does (e.g. NODE_PATH=/private/tmp/node_modules).
+   Playwright isn't a repo dependency (dev tool only; the site ships zero runtime deps), so it resolves
+   via NODE_PATH - point it at wherever playwright is installed if `npm root -g` doesn't hold it.
+   Loaded through createRequire rather than a bare `import`: NODE_PATH is a CommonJS-only resolution
+   mechanism, and playwright ships a CJS entry point, so a bare ESM import can't find it.
 
-   PLAYWRIGHT IS LOADED THROUGH createRequire, NOT A BARE `import`. NODE_PATH is consulted by CommonJS
-   resolution only - ESM ignores it entirely - so `import { chromium } from "playwright"` fails with
-   "Cannot find package" even when NODE_PATH is set correctly. createRequire gets the CJS resolver,
-   which honours it, and playwright ships a CJS entry point.
-
-   IT TARGETS localhost, NOT PRODUCTION, so it photographs the working tree's CSS. Screenshotting the
-   deployed board would silently review the previous release.
-
-   URLS USE THE ?view= QUERY FORM, not the clean /gateways/<view> path form. python3 -m http.server has
-   no SPA fallback, so a clean path 404s; decodeUrl() accepts `view` as a query param for exactly this
-   reason (it is the pre-path-routing link form the app still honours), and boot() then rewrites the
-   address bar to path form without reloading. The rendered state is identical either way. */
+   Targets localhost, not production, so it photographs the working tree's CSS.
+   URLs use the ?view= query form (python3's http.server has no SPA fallback for clean paths);
+   decodeUrl() accepts that form and boot() rewrites the address bar to path form without reloading. */
 import { createRequire } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -45,9 +33,8 @@ const BOUND_VIEWS = new Set(["performance", "frontier"]);
 const PERF_MODES = ["peak", "same", "custom"];
 const MEM_MODES = ["min", "max", "same", "custom"];
 const BOUNDS = ["1", "5", "10", "50", "100", "none"];
-/* 1440 desktop / 1024 narrow desktop / 768 tablet. 1024 is the width that matters most here: it is
-   wide enough that the table does not collapse to its mobile treatment, and narrow enough that a
-   column sized by its widest pill starves the numeric columns. */
+// 1440 desktop / 1024 narrow desktop / 768 tablet. 1024 matters most: wide enough to avoid the
+// mobile table treatment, narrow enough that a column sized by its widest pill starves the others.
 const WIDTHS = [1440, 1024, 768];
 
 function modesFor(view) { return view === "memory" ? MEM_MODES : PERF_MODES; }
@@ -76,15 +63,10 @@ function urlFor({ view, mode, bound }) {
 const name = ({ view, mode, bound }, w) => `shot-${view}-${mode || "na"}-${bound || "na"}-${w}.png`;
 
 /* geometryAudit(page, view): does this view's column geometry depend on its CONTENT?
-
-   The owner's complaint was "changing filters shouldn't change column widths", and the obvious check - measure
-   under two filter combos, compare - only fires when the board HAS data wide enough to differ. This measures
-   the underlying property instead: take the widths, replace every body cell's text with a string far wider
-   than any real value, take them again. Under auto table layout the second measurement is different by
-   construction; under declared geometry (table-layout: fixed + the colgroup renderTable emits) it is
-   identical, and no filter, no future value and no thin data.json can move a column sideways.
-   It is deliberately destructive to the DOM, so it runs on its own page load and nothing is screenshotted
-   after it. */
+   Rather than comparing widths across filter combos (which only differs when data happens to vary
+   enough), stuff every cell with an oversized string and re-measure: under `table-layout: fixed` the
+   widths are unchanged, under auto layout they shift. Destructive to the DOM, so it runs on its own
+   page load with nothing screenshotted after. */
 async function geometryAudit(page, view) {
   return page.evaluate(() => {
     const table = document.querySelector("#results-table");
