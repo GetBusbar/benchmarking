@@ -265,6 +265,7 @@ jobs:
       - name: Upload to Codecov (tokenless; never fails the build)
         uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           slug: GetBusbar/benchmarking
           fail_ci_if_error: false
