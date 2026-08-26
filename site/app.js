@@ -1202,7 +1202,13 @@ const CHART_METRICS = [
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).rps_per_dollar) },
   { id: "permillion", label: "Cost per million requests", unit: "USD", log: true, desc: false,
     note: "Instance cost to serve a million requests at the selected bound. Lower is better.",
-    get: (g, st) => mval((chooserCellPerf(g, st) || {}).cost_per_million_usd) },
+    // Cost is instance $/hr ÷ throughput, so a below_resolution cell (no rate the rig could weigh)
+    // makes cost UNDEFINED, not zero: coercing mval's below_resolution→0 here renders $0.0000, which
+    // reads as the CHEAPEST gateway on the board when in truth it sustained no measurable throughput -
+    // the exact inverse of the metric. Drop it like any unmeasured cell (it shows in the "not shown"
+    // note) instead. This is why cost cannot share mval's magnitude coercion with added-latency/CPU.
+    get: (g, st) => { const e = (chooserCellPerf(g, st) || {}).cost_per_million_usd;
+      return (isEnvelope(e) && e.reason === "below_resolution") ? null : mval(e); } },
   { id: "lat", label: "Added latency (p99)", unit: "µs", log: true, desc: false,
     note: "Gateway p99 minus direct-to-mock p99 at concurrency 1. Lower is better.",
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).added_latency_p99_us) },
@@ -1211,7 +1217,7 @@ const CHART_METRICS = [
     get: (g, st) => { const r = frontierAt(frontierOf(chooserCellPerf(g, st)), selectedBound(st)); return r ? mval(r.rps) : null; } },
   { id: "rss", label: "Peak memory", unit: "MiB", log: false, desc: false,
     note: "Highest resident memory observed while the fixed load ran on the chosen cell. Lower is better.",
-    get: (g, st) => mval((chooserCellMemory(g, st) || {}).peak_rss_mib) },
+    get: (g, st) => mval((memoryFor(g, st) || {}).peak_rss_mib) },
 ];
 
 /* LOG SCALE IS NOT A PREFERENCE ON SOME OF THESE, IT IS THE ONLY HONEST AXIS.
@@ -4838,7 +4844,9 @@ const ROSTER_KEY = {
   lastrun: (g) => { const d = gatewayLastRun(g); return d ? d.getTime() : null; }, // newer = larger ms
   age: (g) => (g.first_commit ? new Date(g.first_commit).getTime() : null), // older = smaller ms
   stars: (g) => (g.stars == null ? null : g.stars),
-  cls: (g) => (g.cls || "Gateway").toLowerCase(),
+  // First-party rows (no contributor) sort LAST in either direction, so the outside contributors -
+  // the whole point of the column - cluster at the top when a reader sorts by it.
+  contrib: (g) => { const cs = g.contributed_by || []; return cs.length ? cs[0].handle.toLowerCase() : null; },
 };
 const rosterRows = (gateways) => {
   const key = ROSTER_KEY[rosterSort.col] || ROSTER_KEY.name;
@@ -4858,6 +4866,22 @@ const rosterRows = (gateways) => {
 /* Star counts render compact: 12345 -> "12.3k", below 1000 the full int. Null (no
    snapshot entry) stays null; the cell renders it muted. */
 const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)));
+/* The Contributors cell: the outside people who submitted or maintain this entrant, each a
+   `@handle` chip linking to their GitHub profile (url pre-validated to https-only in gen-data, so
+   it is safe raw in href; a null url renders the chip as plain text). A first-party entrant has no
+   contributor and renders a muted dash - the column exists to show that several rows do, so the
+   bench is visibly not all first-party. */
+function contribCell(g) {
+  const cs = g.contributed_by || [];
+  if (!cs.length) return `<span class="muted" title="first-party entrant">&mdash;</span>`;
+  return cs.map((c) => {
+    const chip = `@${esc(c.handle)}`;
+    const title = esc(`${c.name || c.handle} contributed this entrant`);
+    return c.url
+      ? `<a class="contrib-link" href="${c.url}" target="_blank" rel="noopener noreferrer" title="${title}">${chip}</a>`
+      : `<span class="contrib-link" title="${title}">${chip}</span>`;
+  }).join(" ");
+}
 /* Project age from the repo's first-commit date, in ONE simple floored unit: "11+ years",
    "7+ months", "3+ weeks". Context for the star counts and scores - a decade-old project and a
    three-week-old one earn them differently. Null (no snapshot) renders muted. */
@@ -5055,7 +5079,7 @@ function renderGateways() {
       <td class="lastrun">${lastRunTxt ? `${runModeCell(g)}<span title="last benchmarked ${esc(lastRun.toISOString().slice(0, 16).replace("T", " "))} UTC">${esc(lastRunTxt)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="age">${age ? `<span title="first commit ${esc(g.first_commit)}">${esc(age)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
-      <td class="cls">${esc(g.cls || "Gateway")}</td>
+      <td class="contrib">${contribCell(g)}</td>
     </tr>`;
   }).join("");
   // Row click opens the per-gateway drawer (same as the perf tabs) — /gateways rows are clickable too.

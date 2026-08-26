@@ -1,0 +1,11 @@
+{
+  "apisix": [
+    { "handle": "moonming", "name": "Ming Wen", "url": "https://github.com/moonming" }
+  ],
+  "aisix": [
+    { "handle": "moonming", "name": "Ming Wen", "url": "https://github.com/moonming" }
+  ],
+  "higress": [
+    { "handle": "geekspeng", "name": "geekspeng", "url": "https://github.com/geekspeng" }
+  ]
+}
