@@ -1,5 +1,8 @@
 # AI gateway benchmarks
 
+[![CI](https://github.com/GetBusbar/benchmarking/actions/workflows/bench-tests.yml/badge.svg)](https://github.com/GetBusbar/benchmarking/actions/workflows/bench-tests.yml)
+[![codecov](https://codecov.io/gh/GetBusbar/benchmarking/branch/main/graph/badge.svg)](https://codecov.io/gh/GetBusbar/benchmarking)
+
 > **Browse the results:** [onthebench.ai](https://onthebench.ai) - sortable tables, protocol matrix, charts, methodology.
 
 A fair, reproducible benchmark for self-hostable AI gateways - **LiteLLM (Rust & Python), Bifrost,
