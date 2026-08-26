@@ -589,13 +589,15 @@ const wasMeasured = (g) => Boolean(g.matrix || g.snapshot_file || g.perf || g.st
 // the site suite itself depends on gen-data emitting it rather than throwing (a clean clone commits
 // no snapshots, so this file would otherwise die at its own gen-data call before its first
 // assertion - a suite that gates nothing while reading as an unrelated failure).
-const gateways = allGateways.some(wasMeasured)
-  ? allGateways.filter((g) => {
-      if (wasMeasured(g)) return true;
-      console.log(`gen-data: skipping ${g.key} - no snapshot, no suite result, nothing measured yet`);
-      return false;
-    })
-  : allGateways;
+// POLICY (owner decision, 2026-08-26): a DECLARED entrant appears the moment its definition lands,
+// even before its first measurement - it renders with n/a on every lane and a version/contributor
+// from its manifest, so the roster shows what is ON the bench, not only what has finished running.
+// This deliberately accepts the "empty row" tradeoff the older rule guarded against: a freshly-added
+// gateway (e.g. higress between merge and its first field run) is a real, disclosed pending entrant,
+// not a misleading absence. The moment a snapshot lands the same row fills with numbers. wasMeasured
+// is retained for the lane-freshness and audit paths that still ask "does this row carry data yet".
+void wasMeasured;
+const gateways = allGateways;
 
 // Matrix v1 results carry one upstream shape (fixed openai) as top-level `cells`; v2 carries the
 // full 6x6 under `upstreams.<egress>.cells` plus the same top-level compat row. Normalize v1 into

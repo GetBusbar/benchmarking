@@ -1,4 +1,7 @@
 {
+  "busbar": [
+    { "handle": "MattJackson", "name": "Matthew Jackson", "url": "https://github.com/MattJackson" }
+  ],
   "apisix": [
     { "handle": "moonming", "name": "Ming Wen", "url": "https://github.com/moonming" }
   ],
