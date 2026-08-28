@@ -12,7 +12,7 @@
       "template": "config.gen.yaml.tmpl"
     }
   ],
-  "display": "Busbar 1.6.0 TPC stages 0-3",
+  "display": "Busbar 1.6.0 TPC full stack",
   "egress": [
     "openai",
     "openai-responses",
@@ -32,7 +32,7 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "image": "getbusbar/busbar:qa-160-tpc3-c131ea06",
+    "image": "getbusbar/busbar:qa-160-tpc4-388fcc91",
     "kind": "docker",
     "mounts": [
       {
@@ -55,12 +55,12 @@
   ],
   "matrix_note": "busbar declares full 6x6 translation support",
   "model": "gpt-4o-mini",
-  "name": "busbar-160-tpc3",
+  "name": "busbar-160-tpc4",
   "path": "/v1/chat/completions",
   "port": 8080,
   "repo": "https://github.com/GetBusbar/busbar",
   "runtime": {
-    "container": "busbar-160-tpc3-bench",
+    "container": "busbar-160-tpc4-bench",
     "kind": "docker"
   }
 }
