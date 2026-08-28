@@ -32,7 +32,7 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "image": "getbusbar/busbar:qa-160-tpc6-46819a8b",
+    "image": "getbusbar/busbar:qa-160-tpc6-8d13104e",
     "kind": "docker",
     "mounts": [
       {
