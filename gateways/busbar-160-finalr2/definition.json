@@ -1,0 +1,66 @@
+{
+  "auth": "bench-token",
+  "class": "Control plane",
+  "config": [],
+  "config_files": [
+    {
+      "output": "providers.gen.yaml",
+      "template": "providers.gen.yaml.tmpl"
+    },
+    {
+      "output": "config.gen.yaml",
+      "template": "config.gen.yaml.tmpl"
+    }
+  ],
+  "display": "Busbar 1.6.0 FINAL rebuild",
+  "egress": [
+    "openai",
+    "openai-responses",
+    "anthropic",
+    "gemini",
+    "cohere",
+    "bedrock"
+  ],
+  "egress_models": {
+    "anthropic": "gpt-4o-mini-anthropic",
+    "bedrock": "gpt-4o-mini-bedrock",
+    "cohere": "gpt-4o-mini-cohere",
+    "gemini": "gpt-4o-mini-gemini",
+    "openai": "gpt-4o-mini",
+    "openai-responses": "gpt-4o-mini-responses"
+  },
+  "lang": "Rust",
+  "launch": {
+    "args": [],
+    "image": "getbusbar/busbar:qa-160-final-r2-c89001a2",
+    "kind": "docker",
+    "mounts": [
+      {
+        "container_path": "/etc/busbar/config.yaml",
+        "host_path": "config.gen.yaml"
+      },
+      {
+        "container_path": "/etc/busbar/providers.yaml",
+        "host_path": "providers.gen.yaml"
+      }
+    ]
+  },
+  "matrix": [
+    "111111",
+    "111111",
+    "111111",
+    "111111",
+    "111111",
+    "111111"
+  ],
+  "matrix_note": "busbar declares full 6x6 translation support",
+  "model": "gpt-4o-mini",
+  "name": "busbar-160-finalr2",
+  "path": "/v1/chat/completions",
+  "port": 8080,
+  "repo": "https://github.com/GetBusbar/busbar",
+  "runtime": {
+    "container": "busbar-160-finalr2-bench",
+    "kind": "docker"
+  }
+}
