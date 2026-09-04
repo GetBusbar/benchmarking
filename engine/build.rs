@@ -21,7 +21,9 @@
 //! could be mistaken for a real commit.
 
 fn main() {
-    let commit = std::env::var("OTB_BUILD_COMMIT").ok().filter(|s| !s.trim().is_empty());
+    let commit = std::env::var("OTB_BUILD_COMMIT")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     let commit = commit.unwrap_or_else(|| {
         std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
