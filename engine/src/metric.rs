@@ -1064,10 +1064,7 @@ impl Metric for Memory {
                 ("memory_hwm_mib", hwm),
                 ("memory_recovered_mib", recovered),
                 ("memory_growth_rate_mib_per_min", growth),
-                (
-                    "memory_load_s",
-                    Measurement::Measured(load_s as f64),
-                ),
+                ("memory_load_s", Measurement::Measured(load_s as f64)),
                 (
                     "memory_plateaued",
                     match plateaued {
@@ -1095,7 +1092,11 @@ impl Metric for Memory {
                     },
                 ),
             ],
-            series: Series { rss, idle_rss: idle_rss_samples, ..Series::default() },
+            series: Series {
+                rss,
+                idle_rss: idle_rss_samples,
+                ..Series::default()
+            },
         }
     }
 }
@@ -1951,12 +1952,12 @@ impl Metric for Cost {
 #[cfg(test)]
 mod tests {
     /* A GATEWAY HANDING MEMORY BACK MUST NEVER READ LIKE ONE LEAKING IT.
-    
-       39 cells on the 2026-08-03 board carry no time-to-plateau, and they got one sentence between
-       them: "memory reached no steady state inside the load cap". busbar has the most (11), and its
-       openai>openai cell ends the window at -0.43 MiB/min - RELEASING memory - which is the opposite
-       of the reading that sentence invites. `Shape` already separated these three cases; the string
-       a reader actually sees did not. */
+
+    39 cells on the 2026-08-03 board carry no time-to-plateau, and they got one sentence between
+    them: "memory reached no steady state inside the load cap". busbar has the most (11), and its
+    openai>openai cell ends the window at -0.43 MiB/min - RELEASING memory - which is the opposite
+    of the reading that sentence invites. `Shape` already separated these three cases; the string
+    a reader actually sees did not. */
     #[test]
     fn the_no_plateau_reason_says_which_way_memory_was_moving() {
         use crate::stats::{Shape, Verdict};
@@ -1966,14 +1967,20 @@ mod tests {
             shape: Shape::Falling,
         });
         assert!(falling.contains("falling"), "{falling}");
-        assert!(falling.contains("not leaking it"), "a falling gateway must be told apart from a leak: {falling}");
+        assert!(
+            falling.contains("not leaking it"),
+            "a falling gateway must be told apart from a leak: {falling}"
+        );
 
         let climbing = no_plateau_detail(&Verdict::NotSteady {
             growth_rate_mib_per_min: rate.clone(),
             shape: Shape::Climbing,
         });
         assert!(climbing.contains("climbing"), "{climbing}");
-        assert!(!climbing.contains("not leaking"), "a climbing gateway must NOT be excused: {climbing}");
+        assert!(
+            !climbing.contains("not leaking"),
+            "a climbing gateway must NOT be excused: {climbing}"
+        );
 
         let osc = no_plateau_detail(&Verdict::NotSteady {
             growth_rate_mib_per_min: rate,
@@ -1993,7 +2000,10 @@ mod tests {
             crate::stats::Undecidable::WindowTooShort,
         ));
         assert!(undecidable.contains("no steady state"), "{undecidable}");
-        assert!(!undecidable.contains("climbing") && !undecidable.contains("falling"), "{undecidable}");
+        assert!(
+            !undecidable.contains("climbing") && !undecidable.contains("falling"),
+            "{undecidable}"
+        );
     }
 
     // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.

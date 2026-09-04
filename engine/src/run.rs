@@ -1025,7 +1025,9 @@ thread_local! {
 
 /// Record what "quiet" means for the cell about to be measured. Called once, before its ladder.
 pub fn arm_stream_settle_baseline() {
-    let tw = HostState::sample().tw.map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
+    let tw = HostState::sample()
+        .tw
+        .map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
     STREAM_SETTLE_TW_BASELINE.with(|b| *b.borrow_mut() = tw);
 }
 const MAX_CEILING_STEPDOWNS: usize = 4;
@@ -1735,7 +1737,9 @@ fn settle_after_streams(concurrency: u32) {
         // proportional sleep: an unobservable host still needs SOME pause, and the old behaviour is
         // the honest default when the condition cannot be evaluated.
         let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
-        std::thread::sleep(std::time::Duration::from_millis(ms.min(STREAM_SETTLE_MAX_MS)));
+        std::thread::sleep(std::time::Duration::from_millis(
+            ms.min(STREAM_SETTLE_MAX_MS),
+        ));
         return;
     };
     let started = std::time::Instant::now();
@@ -2507,12 +2511,74 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             winner = Some((proven_clean, fps));
                         }
                     } else {
-                        // The floor did not hold either, so the absence stands and keeps the reason
-                        // the search already had. A rung that cannot be reconfirmed is not a ceiling.
+                        /* THE FLOOR DID NOT HOLD, AND THAT IS ITSELF A FINDING, NOT A KEPT SILENCE.
+                           `proven_clean` is a rung THIS CELL drove cleanly on its own ascent; a full
+                           window set failing at it now means the cell can no longer carry a
+                           concurrency it already carried. That is the same wedge signature the in-loop
+                           step-down watches for - except the budget converged ABOVE `proven_clean` and
+                           never landed on it, so this fallback is the first time it was re-tested. The
+                           reason the search already had (SteppedRungFailed / FloorReached) describes
+                           ordinary non-convergence, which this is not, so agentgateway and busbar cells
+                           published a stepped-rung sentence for a gateway that had stopped serving.
+
+                           Attribution is the same experiment as the in-loop path: a restart is the only
+                           thing that separates a wedged gateway from a rig that never drained. Cleared
+                           by a restart -> the GATEWAY did not recover. Not cleared, or no relaunch to
+                           try -> the honest reading stays the rig-side one. Either way the reason now
+                           NAMES what happened at a rung this cell already carried, rather than leaving
+                           the pre-fallback silence in place. */
                         eprintln!(
                             "streams: floor c={proven_clean} held {held} of {total} windows - not \
-                             confirmed, so the cell keeps its absence"
+                             confirmed; the cell can no longer carry a rung it already carried"
                         );
+                        let restart_cleared = match cfg.relaunch.as_ref() {
+                            Some(spec) => {
+                                eprintln!(
+                                    "streams: floor c={proven_clean} failed although this cell carried \
+                                     it cleanly - restarting the gateway to find out whether it stopped \
+                                     serving or the rig is still dirty"
+                                );
+                                match restart_to_rest(
+                                    spec,
+                                    &cfg.relaunch_launcher,
+                                    &cfg.relaunch_commands,
+                                ) {
+                                    Ok(()) => stream_window(
+                                        cfg.gateway_addr,
+                                        &p.path,
+                                        &p.body,
+                                        &p.headers,
+                                        p.dialect,
+                                        proven_clean,
+                                    )
+                                    .map(|w| {
+                                        let passed = streams_gate_passes(&w);
+                                        p.points.push(point_of(&w, passed));
+                                        passed
+                                    })
+                                    .unwrap_or(false),
+                                    Err(e) => {
+                                        eprintln!("streams: the gateway could not be restarted: {e}");
+                                        false
+                                    }
+                                }
+                            }
+                            // No declared relaunch means the harness does not own this process and must
+                            // not bounce it; the honest reading stays the rig-side one it already had.
+                            None => false,
+                        };
+                        stop = if restart_cleared {
+                            StreamStop::GatewayDidNotRecover {
+                                at: proven_clean,
+                                proven: proven_clean,
+                                restart_cleared,
+                            }
+                        } else {
+                            StreamStop::RigContaminated {
+                                at: proven_clean,
+                                proven: proven_clean,
+                            }
+                        };
                     }
                 }
                 match winner {
@@ -3057,49 +3123,68 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 #[cfg(test)]
 mod tests {
     /* THE DRAIN WAITS ON A CONDITION, AND THE CONDITION HAS TO BE REACHABLE.
-    
-       A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
-       above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
-       is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
+
+    A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
+    above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
+    is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
     #[test]
     fn the_drain_target_is_reachable_on_a_box_that_is_never_perfectly_idle() {
         // The baseline is the cell's own starting count, scaled - not a number chosen here. A box
         // that starts with 200 sockets in TIME_WAIT must not be asked to return to 0.
         let quiet = 200u64;
         let target = quiet * STREAM_SETTLE_TW_TOLERANCE + 64;
-        assert!(target > quiet, "the target must sit ABOVE the level the cell started at");
+        assert!(
+            target > quiet,
+            "the target must sit ABOVE the level the cell started at"
+        );
         // The mock and the load generator hold their own sockets throughout, so a window that closes
         // cleanly still leaves the box above where it began. That has to read as drained.
-        assert!(quiet + 100 <= target, "ordinary residue still counts as drained");
+        assert!(
+            quiet + 100 <= target,
+            "ordinary residue still counts as drained"
+        );
         // And a box still holding thousands of dying sockets from a c=8,192 window does NOT.
-        assert!(quiet + 8_000 > target, "a real backlog is not mistaken for quiet");
+        assert!(
+            quiet + 8_000 > target,
+            "a real backlog is not mistaken for quiet"
+        );
 
         // An idle box reads 0 and must still get a usable target rather than an impossible one.
-        assert_eq!(0 * STREAM_SETTLE_TW_TOLERANCE + 64, 64, "an idle box still has headroom");
+        let idle = 0u64;
+        assert_eq!(
+            idle * STREAM_SETTLE_TW_TOLERANCE + 64,
+            64,
+            "an idle box still has headroom"
+        );
     }
 
     /* AND THE BACKSTOP IS ONE TIME_WAIT GENERATION, which is the point of the number. It was 10s,
-       deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
-       after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
-       broken rather than busy. */
+    deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
+    after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
+    broken rather than busy. */
     #[test]
     fn the_settle_backstop_covers_a_full_time_wait_generation() {
+        // Read through bindings so the assertions test the shipped values at runtime rather than
+        // folding to a compile-time constant (which clippy's assertions_on_constants rejects, and
+        // which would let the check pass without ever exercising the numbers the field run uses).
+        let backstop_ms = STREAM_SETTLE_MAX_MS;
+        let poll_ms = STREAM_SETTLE_POLL_MS;
         assert!(
-            STREAM_SETTLE_MAX_MS >= 60_000,
+            backstop_ms >= 60_000,
             "a backstop under one TIME_WAIT generation cannot absorb the residue it exists for"
         );
         // The poll has to be fine enough that a small rung's wait is milliseconds, not seconds: the
         // whole gain over the old fixed sleep is that a rung which drains at once stops paying.
         assert!(
-            STREAM_SETTLE_POLL_MS <= 100,
+            poll_ms <= 100,
             "a coarse poll would reintroduce the fixed cost this replaced"
         );
     }
 
     /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
-       absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
-       only meaningful when the host was not the suspect - and the flattering direction of this error
-       (publishing a figure where honesty published none) is the one nobody would catch. */
+    absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
+    only meaningful when the host was not the suspect - and the flattering direction of this error
+    (publishing a figure where honesty published none) is the one nobody would catch. */
     #[test]
     fn floor_fallback_only_where_the_host_is_not_the_suspect() {
         // The search ran out of room or budget: the gateway and the rig are both innocent so far, and
@@ -3110,29 +3195,96 @@ mod tests {
 
         // OUR instrument is the variable. A number taken on a host we have just accused would be
         // exactly the attribution error the enum exists to prevent.
-        assert!(!StreamStop::RigRanShort { measured: 1, wanted: 3 }.floor_fallback_ok());
+        assert!(!StreamStop::RigRanShort {
+            measured: 1,
+            wanted: 3
+        }
+        .floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
-        assert!(!StreamStop::RigContaminated { at: 4096, proven: 4096 }.floor_fallback_ok());
+        assert!(!StreamStop::RigContaminated {
+            at: 4096,
+            proven: 4096
+        }
+        .floor_fallback_ok());
 
         // And a gateway that had to be restarted is no longer the process the sweep measured, so
         // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
         // finding and must not be overwritten by a number.
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: true }
-            .floor_fallback_ok());
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: false }
-            .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover {
+            at: 8192,
+            proven: 4096,
+            restart_cleared: true
+        }
+        .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover {
+            at: 8192,
+            proven: 4096,
+            restart_cleared: false
+        }
+        .floor_fallback_ok());
     }
 
     /* AND THE FLOOR STILL HAS TO EARN IT. The fallback publishes only what the same majority rule
-       every other repeated measurement uses would publish, so a floor that wins one window of three -
-       the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
+    every other repeated measurement uses would publish, so a floor that wins one window of three -
+    the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
     #[test]
     fn the_floor_is_published_only_on_the_same_majority_every_other_rate_needs() {
         assert!(stream_ceiling_confirmed(3, 3), "three of three holds");
         assert!(stream_ceiling_confirmed(3, 2), "two of three is a majority");
-        assert!(!stream_ceiling_confirmed(3, 1), "one of three is the busbar c=5,652 shape");
-        assert!(!stream_ceiling_confirmed(3, 0), "none of three publishes nothing");
-        assert!(!stream_ceiling_confirmed(2, 2), "a short window set is not a confirmation");
+        assert!(
+            !stream_ceiling_confirmed(3, 1),
+            "one of three is the busbar c=5,652 shape"
+        );
+        assert!(
+            !stream_ceiling_confirmed(3, 0),
+            "none of three publishes nothing"
+        );
+        assert!(
+            !stream_ceiling_confirmed(2, 2),
+            "a short window set is not a confirmation"
+        );
+    }
+
+    /* A FLOOR THAT FAILS ITS OWN CONFIRMATION IS A WEDGE, AND ITS ABSENCE MUST SAY SO.
+    When the step-down budget converges above `proven_clean`, the floor fallback is the first thing
+    to re-test the rung the cell already carried. If it fails a full window set there, the cell can
+    no longer carry a concurrency it carried on its ascent - the wedge - and the reason that travels
+    is upgraded from the pre-fallback SteppedRungFailed / FloorReached (ordinary non-convergence) to
+    one that names it. Both wedge reasons carry the "already carried" language the external audit
+    (`check_a_wedged_gateway_is_named_as_one`) requires; a stepped-rung sentence does not, which is
+    why agentgateway anthropic>openai and busbar openai>openai published a bare absence for a gateway
+    that had stopped serving. */
+    #[test]
+    fn a_failed_floor_confirmation_names_the_wedge_it_found() {
+        // No relaunch to prove a restart clears it: the honest reading is the rig-side one, and its
+        // sentence still names the rung the cell already carried.
+        let rig_side = StreamStop::RigContaminated {
+            at: 2048,
+            proven: 2048,
+        }
+        .describe(2768, MAX_CEILING_STEPDOWNS);
+        assert!(
+            rig_side.contains("already carried"),
+            "a floor that fails at a rung the cell already carried must say so: {rig_side}"
+        );
+        // A restart that clears it moves the finding onto the gateway, and that sentence names it too.
+        let gateway = StreamStop::GatewayDidNotRecover {
+            at: 2048,
+            proven: 2048,
+            restart_cleared: true,
+        }
+        .describe(2768, MAX_CEILING_STEPDOWNS);
+        assert!(
+            gateway.contains("recover") && gateway.contains("already carried"),
+            "a wedge cleared only by a restart is the gateway not recovering: {gateway}"
+        );
+        // The reason it REPLACES is exactly the one the audit rejects, so the upgrade is load-bearing.
+        let stepped =
+            StreamStop::SteppedRungFailed { at: 2093 }.describe(2768, MAX_CEILING_STEPDOWNS);
+        assert!(
+            !stepped.contains("already carried") && !stepped.contains("recover"),
+            "the pre-fallback reason names no wedge - that is why it must not survive one: {stepped}"
+        );
     }
 
     #[test]
