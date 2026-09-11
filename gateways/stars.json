@@ -1,77 +1,77 @@
 {
  "agentgateway": {
-  "stars": 4556,
+  "stars": 4799,
   "first_commit": "2025-03-18",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "aisix": {
-  "stars": 121,
+  "stars": 149,
   "first_commit": "2026-04-17",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "apisix": {
-  "stars": 17037,
+  "stars": 17109,
   "first_commit": "2019-04-10",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "bifrost": {
-  "stars": 7583,
+  "stars": 7958,
   "first_commit": "2025-03-19",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "busbar": {
-  "stars": 116,
+  "stars": 139,
   "first_commit": "2026-05-29",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "gomodel": {
-  "stars": 1083,
+  "stars": 1142,
   "first_commit": "2025-12-13",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "helicone": {
-  "stars": 624,
+  "stars": 628,
   "first_commit": "2025-04-01",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "higress": {
-  "stars": 9195,
+  "stars": 9347,
   "first_commit": "2022-10-27",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "kong": {
-  "stars": 44043,
+  "stars": 44120,
   "first_commit": "2014-11-17",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "litellm-python": {
-  "stars": 57322,
+  "stars": 58467,
   "first_commit": "2023-07-27",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "litellm-rust": {
-  "stars": 57322,
+  "stars": 58467,
   "first_commit": "2023-07-27",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "one-api": {
-  "stars": 36590,
+  "stars": 36840,
   "first_commit": "2023-04-22",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "plano": {
-  "stars": 7016,
+  "stars": 7047,
   "first_commit": "2024-07-09",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "portkey": {
-  "stars": 12837,
+  "stars": 12959,
   "first_commit": "2023-08-23",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  },
  "tensorzero": {
   "stars": 11719,
   "first_commit": "2024-07-16",
-  "as_of": "2026-08-26"
+  "as_of": "2026-09-11"
  }
 }
