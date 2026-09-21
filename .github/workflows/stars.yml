@@ -29,7 +29,7 @@ jobs:
   redeploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Trigger a site redeploy (refreshes stars live at build)
         env:
           GH_TOKEN: ${{ github.token }}
