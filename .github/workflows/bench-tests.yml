@@ -104,7 +104,7 @@ jobs:
     # types are, so CI runs them here - an untested test suite is decoration.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -143,7 +143,7 @@ jobs:
     # and accept a clean one, or it is guarding nothing.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Every audit check can fail (and does not fail a clean cell)
         run: python3 bench-audit_test.py
       # The dashboard's test ran NOWHERE until this line - a test nothing executes reads as covered
@@ -185,7 +185,7 @@ jobs:
     # decoration. A test nothing executes is worse than no test: it reads as covered.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: The fetch lands files with the mode the commit recorded
         run: bash lib/fetch_modes_test.sh
 
@@ -195,7 +195,7 @@ jobs:
     # tightening (R3-M6 — reject an unconverted OpenAI body) can never silently regress.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: mock unit tests (request_shape_ok per dialect + routing)
         run: cargo test --manifest-path mock/Cargo.toml --tests
@@ -226,8 +226,8 @@ jobs:
     env:
       OTB_SINGLE_ENGINE: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       # No bundle required: enumerated URL-codec fixed points + one-envelope-one-story across
