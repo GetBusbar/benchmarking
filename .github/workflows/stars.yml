@@ -1,15 +1,15 @@
-# Weekly refresh of the committed GitHub star snapshot (gateways/stars.json).
+# Weekly refresh of the gateway star counts shown on onthebench.ai/gateways.
 #
-# The Gateways overview shows a star count per gateway, sourced from the committed
-# snapshot gateways/stars.json (see gateways/fetch-stars.mjs). cf-pages.yml also
-# refreshes stars live at build time, so the DEPLOYED board is already exact on every
-# deploy - but the committed snapshot (the fallback used when the GitHub API is
-# rate-limited at build) only moves when someone runs the script and commits.
+# The Gateways overview's star count is refreshed LIVE AT BUILD TIME by cf-pages.yml
+# (it runs gateways/fetch-stars.mjs before generating the bundle; the committed
+# gateways/stars.json is only the rate-limited fallback). So the deployed board is
+# exact on every deploy - but the site only deploys when results/**, gateways/** or
+# site/** changes on main. If no results land for a while, the live star counts sit
+# still.
 #
-# This job keeps that snapshot current on its own cadence: run fetch-stars.mjs weekly,
-# and commit stars.json only if it changed. The resulting gateways/** push trips
-# cf-pages.yml, so the live board redeploys too. On an API failure the script throws
-# BEFORE writing, leaving the last-good snapshot in place and this job commits nothing.
+# This job closes that gap without touching git: once a week it dispatches cf-pages,
+# which redeploys the site and re-fetches the stars live. No commit, so it does not
+# collide with main's branch protection (which requires PRs).
 name: stars
 
 on:
@@ -19,32 +19,18 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  actions: write
 
 concurrency:
   group: stars
   cancel-in-progress: false
 
 jobs:
-  refresh:
+  redeploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Refresh star snapshot
+      - name: Trigger a site redeploy (refreshes stars live at build)
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node gateways/fetch-stars.mjs
-      - name: Commit if the snapshot changed
-        run: |
-          if git diff --quiet -- gateways/stars.json; then
-            echo "stars.json unchanged; nothing to commit"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add gateways/stars.json
-          git commit -m "results: refresh gateway star snapshot (weekly)"
-          git push
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cf-pages.yml --ref main
