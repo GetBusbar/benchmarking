@@ -1,0 +1,102 @@
+# Imported from .github/workflows/bench-tests.yml by `modernci import github`.
+to: dev
+on:
+  move:
+  - audit
+  - coverage
+  - engine
+  - mock-shape
+  - rig-delivery
+  - site
+  push:
+  - audit
+  - coverage
+  - engine
+  - mock-shape
+  - rig-delivery
+  - site
+  landed:
+  - audit
+  - coverage
+  - engine
+  - mock-shape
+  - rig-delivery
+  - site
+  manual:
+  - audit
+  - coverage
+  - engine
+  - mock-shape
+  - rig-delivery
+  - site
+checks:
+  audit:
+    run: |
+      set -e
+      # Every audit check can fail (and does not fail a clean cell)
+      python3 bench-audit_test.py </dev/null
+      # Dashboard self-test
+      python3 bench-dashboard_test.py </dev/null
+      # Dashboard coverage siblings (served counter, ETA clocks, fanout filter)
+      python3 bench-dashboard_coverage_test.py </dev/null
+      # Cost-report snapshot selection (newest-per-gateway, gateway + engine filters)
+      python3 bench-cost_test.py </dev/null
+      # Published board holds every cross-metric invariant
+      python3 bench-audit.py </dev/null
+      # Auditor red fixtures (all four external auditors)
+      python3 verify_tools_test.py </dev/null
+  coverage:
+    run: |
+      set -e
+      # Collect coverage (workspace)
+      rustup component add llvm-tools-preview </dev/null
+      command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked </dev/null
+      cargo llvm-cov --workspace --locked --ignore-run-fail --lcov --output-path lcov.info </dev/null
+    requires:
+    - cargo
+  engine:
+    run: |
+      set -e
+      # Formatting
+      cargo fmt --all --check </dev/null
+      # Build
+      cargo build --workspace --all-targets </dev/null
+      # Clippy (denies unwrap/expect/panic outside tests)
+      cargo clippy --workspace --all-targets -- -D warnings </dev/null
+      # Unit and property tests
+      cargo test --workspace </dev/null
+      # Cross-compile the shipped arm64 binary
+      ( bash -e /dev/fd/3 3<<'MODERNCI_STEP' </dev/null
+      rustup target add aarch64-unknown-linux-musl
+      cargo build --release --target aarch64-unknown-linux-musl --bin otb
+      file target/aarch64-unknown-linux-musl/release/otb
+      MODERNCI_STEP
+      )
+    requires:
+    - cargo
+    - cargo-clippy
+    - cargo-fmt
+  mock-shape:
+    run: |
+      set -e
+      # mock unit tests (request_shape_ok per dialect + routing)
+      cargo test --manifest-path mock/Cargo.toml --tests </dev/null
+    requires:
+    - cargo
+  rig-delivery:
+    run: |
+      set -e
+      # The fetch lands files with the mode the commit recorded
+      bash lib/fetch_modes_test.sh </dev/null
+  site:
+    run: |
+      export OTB_SINGLE_ENGINE="1"
+      set -e
+      # Site coverage siblings (URL codec fixed points, one envelope one story)
+      node site/test-coverage.mjs </dev/null
+      # Consistency guard (table == drawer == compare == charts)
+      node site/test.mjs </dev/null
+    requires:
+    - node22
+env:
+  CI: 'true'
