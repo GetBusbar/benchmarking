@@ -1,4 +1,4 @@
-# Imported from .github/workflows/bench-tests.yml by .
+# Imported from .github/workflows/bench-tests.yml by `modernci import github`.
 to: main
 on:
   move:
