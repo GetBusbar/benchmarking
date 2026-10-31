@@ -9,14 +9,12 @@ on:
   - rig-delivery
   - site
   push:
-  - audit
   - coverage
   - engine
   - mock-shape
   - rig-delivery
   - site
   landed:
-  - audit
   - coverage
   - engine
   - mock-shape
