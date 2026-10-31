@@ -46,6 +46,29 @@ HARVEST_GRACE_MIN="${HARVEST_GRACE_MIN:-120}"
 # cannot be cloned, and that failure is loud rather than silently measuring something else.
 BENCH_REPO="${BENCH_REPO:-https://github.com/GetBusbar/benchmarking.git}"
 BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD 2>/dev/null)}"
+BENCH_SAME_HOST_PAIR="${BENCH_SAME_HOST_PAIR:-0}"
+BENCH_PAIR_CANDIDATE_COMMIT="${BENCH_PAIR_CANDIDATE_COMMIT:-}"
+BENCH_PAIR_CANDIDATE_GATEWAY="${BENCH_PAIR_CANDIDATE_GATEWAY:-}"
+BENCH_PAIR_BASELINE_IMAGE="${BENCH_PAIR_BASELINE_IMAGE:-getbusbar/busbar@sha256:1582c076d25483457c2c8d06e064f1171a0469337a41bf38ef36d29d4d05615d}"
+PAIR_DIR="$HERE/results/pairs/$RUN_ID"
+case "$BENCH_SAME_HOST_PAIR" in 0|1) ;; *) echo "BENCH_SAME_HOST_PAIR must be 0 or 1" >&2; exit 2;; esac
+if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then
+  if [[ $# -ne 1 || "${1:-}" != busbar || "${PUBLISH:-1}" != 0 || "${BENCH_NO_PUBLISH:-}" != 1 ||
+        "${OTB_DIALECTS:-}" != openai || -n "${SUITES:-}" || -n "${OTB_MIN_CONC:-}" ||
+        -n "${OTB_MAX_CONC:-}" || -n "${OTB_GATEWAY_ADDR:-}" || -n "${BENCH_SKIP_PREFLIGHT:-}" ||
+        "${ARCH:-arm64}" != arm64 || "${ITYPE:-m7g.4xlarge}" != m7g.4xlarge ]]; then
+    echo "Pair mode requires private ARM64 busbar OpenAI runs with the original workload and preflight." >&2
+    exit 2
+  fi
+  if [[ "$BENCH_COMMIT" != 2d209e76ba336c3478d3754e2bcd245b663459a3 ||
+        "${BENCH_ENGINE_COMMIT:-}" != "$BENCH_COMMIT" ]]; then
+    echo "Pair mode requires the documented 2d209 baseline source and engine pins." >&2
+    exit 2
+  fi
+  python3 "$HERE/lib/same_host_pair.py" preflight "$HERE" "$BENCH_COMMIT" \
+    "$BENCH_PAIR_CANDIDATE_COMMIT" "$BENCH_PAIR_CANDIDATE_GATEWAY" "$RUN_ID" \
+    "$BENCH_PAIR_BASELINE_IMAGE" || exit 2
+fi
 # The archive GitHub serves wraps everything in <repo>-<sha>/, so the box needs the repo's own name
 # to name the members it wants. Derived from the clone URL rather than hardcoded.
 _REPO_NAME="$(basename "${BENCH_REPO%.git}")"
@@ -420,6 +443,7 @@ if [[ ! -s "$KEYFILE" && -s "${TMPDIR:-/tmp}/${KEYNAME}.pem" ]]; then
   mv "${TMPDIR:-/tmp}/${KEYNAME}.pem" "$KEYFILE" && chmod 600 "$KEYFILE"
 fi
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=12 -i $KEYFILE"
+SSHOPT="$SSHOPT -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
 
 # NOTE ON PLACEMENT: `harvest` sits HERE, below KEYFILE/SSHOPT, not up with `kill` - it needs the ssh
 # identity to reach a box, while `kill` only needs the AWS API.
@@ -437,13 +461,13 @@ if [[ "${1:-}" == "harvest" ]]; then
   echo "harvest: looking for gateway-bench boxes in $AWS_DEFAULT_REGION ..."
   rows=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
     "Name=instance-state-name,Values=running" \
-    --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' \
+    --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress,Tags[?Key==`run`]|[0].Value]' \
     --output text 2>/dev/null | grep -E '^gateway-bench-' || true)
   if [ -z "$rows" ]; then echo "harvest: no running boxes found"; exit 0; fi
 
   mkdir -p "$HERE/results/snapshots" "$HERE/results/config" "$HERE/results/history"
   found=0
-  while read -r tag ip; do
+  while read -r tag ip pair_run_id; do
     [ -n "$ip" ] || continue
     gw="${tag#gateway-bench-}"
     # An explicit gateway list narrows it; no list means every box that is up.
@@ -451,6 +475,18 @@ if [[ "${1:-}" == "harvest" ]]; then
       case " ${want[*]} " in *" $gw "*) ;; *) continue ;; esac
     fi
     echo "harvest: $gw at $ip"
+    if [[ "$pair_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] &&
+        ssh $SSHOPT ubuntu@"$ip" 'test -d ~/benchmarking/results/pair' 2>/dev/null; then
+      mkdir -p "$HERE/results/pairs/$pair_run_id"
+      rsync -az --timeout=60 -e "ssh $SSHOPT" \
+        "ubuntu@$ip:~/benchmarking/results/pair/" \
+        "$HERE/results/pairs/$pair_run_id/" 2>/dev/null; pair_pull_rc=$?
+      if [ "$pair_pull_rc" != 0 ]; then
+        echo "harvest: $pair_run_id pair collection failed rc=$pair_pull_rc; retained evidence may be partial"
+      elif ! python3 "$HERE/lib/same_host_pair.py" verify "$HERE/results/pairs/$pair_run_id"; then
+        echo "harvest: $pair_run_id pair remains partial or unverifiable; retained without a success claim"
+      fi
+    fi
     # `|| true` on each: one unreachable box must not stop the others being rescued, which is the whole
     # point of running this at all. rc=23 is rsync's "source absent" - a box with nothing written yet.
     rsync -az --timeout=60 -e "ssh $SSHOPT" \
@@ -809,11 +845,16 @@ qualify_box() {
 bench_gateway() {
   local gw="$1" attempt rc
   local glog="$HERE/results/fanout-$gw.log"
+  [ "$BENCH_SAME_HOST_PAIR" = 1 ] && glog="$PAIR_DIR/fanout-$gw.log"
   # One log per gateway run holds everything: glog_echo writes the orchestrator narration here and the
   # box's own .run.log is appended before teardown. This subshell also runs with stderr teed into the
   # same file, so bash's own errors (a quoting mistake, an unbound variable, a failed command) land
   # beside the narration instead of going only to the orchestrator's terminal.
   exec 2> >(tee -a "$glog" >&2)
+  if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then
+    bench_gateway_once "$gw" 1
+    return $?
+  fi
   for attempt in $(seq 1 "$BENCH_QUALIFY_ATTEMPTS"); do
     bench_gateway_once "$gw" "$attempt"; rc=$?
     [ "$rc" = "$BQ_RC_REPLACE" ] || return "$rc"
@@ -848,6 +889,7 @@ bench_gateway_once() {
   local gw="$1" attempt="${2:-1}" iid="" ip=""
   local tag="gateway-bench-$gw"
   local glog="$HERE/results/fanout-$gw.log"
+  [ "$BENCH_SAME_HOST_PAIR" = 1 ] && glog="$PAIR_DIR/fanout-$gw.log"
   [ "$attempt" = 1 ] && : > "$glog"
   glog_echo(){ echo "[$(date +%H:%M:%S)] [$gw] $*" | tee -a "$glog"; }
 
@@ -1083,6 +1125,18 @@ bench_gateway_once() {
   # SPLIT ON THE TAB, NOT ON WHITESPACE. `git ls-tree` emits "<mode> <type> <sha>\t<path>", so the path
   # is everything after the TAB - splitting on whitespace instead would truncate any gateway file whose
   # name contains a space, 404ing the fetch and publishing the gateway INCOMPLETE.
+  if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then
+    ssh $SSHOPT ubuntu@"$ip" 'rm -rf ~/benchmarking && mkdir -p ~/benchmarking' >>"$glog" 2>&1 || return 1
+    rsync -az --timeout=60 -e "ssh $SSHOPT" "$PAIR_DIR/baseline.tar" "$PAIR_DIR/candidate.tar" \
+      "$PAIR_DIR/preflight.json" "$HERE/lib/same_host_pair.py" "ubuntu@$ip:~/benchmarking/" >>"$glog" 2>&1 || return 1
+    ssh $SSHOPT ubuntu@"$ip" 'set -e
+      cd ~/benchmarking
+      tar -xf baseline.tar
+      tar -xf candidate.tar
+      mkdir -p results/pair
+      mv preflight.json results/pair/preflight.json
+    ' >>"$glog" 2>&1 || return 1
+  else
   _files="$(git -C "$HERE" ls-tree -r "$BENCH_COMMIT" -- "gateways/$gw" lib/rig.sh 2>/dev/null \
     | awk -F'\t' '{split($1, a, " "); print a[1]"\t"$2}')"
   if [ -z "$_files" ]; then
@@ -1118,6 +1172,7 @@ FILELIST
   fi
   local _n; _n="$(printf '%s\n' "$_files" | grep -c .)"
   glog_echo "fetched $_n file(s) in $((SECONDS-_t0))s"
+  fi
 
   # ── BOX QUALIFICATION, right here: the harness is on the box, nothing has been built or launched
   # yet, and the 6x6 has not started. This is the last moment at which rejecting the box is cheap.
@@ -1221,6 +1276,11 @@ FILELIST
     return 1
   }
 
+  pull_pair() {
+    rsync -az --timeout=60 -e "ssh $SSHOPT" \
+      "ubuntu@$ip:~/benchmarking/results/pair/" "$PAIR_DIR/" >>"$glog" 2>&1
+  }
+
   # The snapshot is the artifact; there are no per-suite JSONs any more. The engine writes only
   # results/snapshots/<gw>.json and the timestamped result_<gw>_<measured_at>.json. No legacy suite is
   # pulled by default, and freshness is judged on the snapshot alone (below). An explicit SUITES=... still
@@ -1264,6 +1324,9 @@ FILELIST
     # gw is the orchestrator's loop variable and is not otherwise exported to the box, so it must be
     # written literally here (not `\$gw`, which would reach the box as an unset name).
     printf 'gw=%q\n' "$gw"
+    printf 'export BENCH_SAME_HOST_PAIR=%q RUN_ID=%q BENCH_PAIR_CANDIDATE_GATEWAY=%q\n' \
+      "$BENCH_SAME_HOST_PAIR" "$RUN_ID" "$BENCH_PAIR_CANDIDATE_GATEWAY"
+    printf 'export BENCH_PAIR_INSTANCE_ID=%q BENCH_PAIR_AMI=%q\n' "$iid" "$AMI"
     cat <<'REMOTE'
 # Every relative path below is relative to the repo, so anchor it rather than inheriting a cwd from
 # the login shell that starts this script.
@@ -1409,10 +1472,39 @@ for i in $(seq 1 30); do
 done
 # Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that will
 # not boot after the box-hours are already spent.
-./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
-OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
-  ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
-echo $? > .run-done
+if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then
+  pair_run() {
+    python3 same_host_pair.py prepare || return 126
+    ./otb validate gateways/busbar || return 127
+    ./otb validate "gateways/$BENCH_PAIR_CANDIDATE_GATEWAY" || return 127
+    local leg directory result rc
+    for leg in baseline candidate; do
+      directory=busbar
+      [ "$leg" = candidate ] && directory="$BENCH_PAIR_CANDIDATE_GATEWAY"
+      result="results/pair/$leg"
+      mkdir -p "$result/snapshots"
+      python3 same_host_pair.py begin "$leg" || return 126
+      OTB_RUN_ID="$RUN_ID-$leg" OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
+        ./otb run "gateways/$directory" 127.0.0.1:8000 "$result/snapshots" 2>&1 | tee "$result/engine.log"
+      local pipeline_status=("${PIPESTATUS[@]}")
+      rc=${pipeline_status[0]}
+      [ "${pipeline_status[1]}" = 0 ] || rc=125
+      echo "$rc" > "$result/exit.status"
+      [ "$rc" = 0 ] || return "$rc"
+      python3 same_host_pair.py finish "$leg" || return 126
+    done
+  }
+  pair_run
+  pair_rc=$?
+  echo "$pair_rc" > results/pair/run.status
+  echo "$pair_rc" > .run-done.tmp
+  mv .run-done.tmp .run-done
+else
+  ./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
+  OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
+    ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
+  echo $? > .run-done
+fi
 
 # A FINISHED BOX MUST NOT BE DESTROYED BY A TIMER SIZED FOR THE WORK. The boot-time backstop
 # (`shutdown -h +BENCH_MAX_MIN`) is right for a wedged box and wrong for a finished one: a gateway
@@ -1463,7 +1555,7 @@ REMOTE
   # mid-run (self-terminate, spot reclaim) then still leaves us every suite that had written its JSON.
   # Cap the total wait at the box's own self-terminate ceiling + a margin so a wedged box can never hang
   # the orchestrator forever; the box timer (BENCH_MAX_MIN) is the ultimate cost backstop underneath.
-  local sentinel="" reachable=1 waited=0
+  local sentinel="" reachable=1 waited=0 wait_started=$SECONDS
   local max_wait_s=$(( (BENCH_MAX_MIN + 30) * 60 ))
   # The engine already prints "[cell N/M] ingress>egress: verdict" to its own stdout as it works the
   # grid (see run.rs's grid walk); that stream lands in .run.log on the box but, until now, nothing
@@ -1480,6 +1572,7 @@ REMOTE
       # (terminated/spot reclaim) - stop polling and salvage whatever was already pulled. A lone
       # transient failure on a healthy box must not abandon a run that may still finish.
       if ! box_reachable "$ip"; then reachable=0; break; fi
+      if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then pull_pair || true; fi
       # opportunistic incremental pull of any suite not yet captured.
       for suite in $ALL_SUITES; do
         [ "${_pull_state[$suite]}" = ok ] && continue
@@ -1489,7 +1582,7 @@ REMOTE
       _cell="$(ssh $SSHOPT ubuntu@"$ip" "grep -o '\[cell [0-9]*/[0-9]*\][^\$]*' ~/benchmarking/.run.log 2>/dev/null | tail -1" 2>/dev/null)"
       if [ -n "$_cell" ] && [ "$_cell" != "$_last_cell" ]; then glog_echo "$_cell"; _last_cell="$_cell"; fi
       [ "$waited" -ge "$max_wait_s" ] && { glog_echo "incremental pull loop hit max wait (${max_wait_s}s) - giving up on the run"; reachable=0; break; }
-      sleep 30; waited=$((waited+30))
+      sleep 30; waited=$((SECONDS-wait_started))
     done
   fi
 
@@ -1511,6 +1604,25 @@ REMOTE
   # debugging even though the run was detached rather than streamed over the blocking ssh.
   if [ "$reachable" -eq 1 ]; then
     ssh $SSHOPT ubuntu@"$ip" 'cat ~/benchmarking/.run.log 2>/dev/null' >>"$glog" 2>/dev/null || true
+  fi
+
+  if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then
+    local pair_pulled=0 pair_attempt
+    if [ "$reachable" -eq 1 ]; then
+      for pair_attempt in 1 2 3 4; do
+        if pull_pair; then pair_pulled=1; break; fi
+        glog_echo "pair harvest attempt $pair_attempt failed; retrying in 10s"
+        sleep 10
+      done
+    fi
+    [ "$pair_pulled" = 1 ] || glog_echo "final transport failed; checking evidence already retained incrementally"
+    if [[ -z "$sentinel" || "$sentinel" = 0 ]] &&
+        python3 "$HERE/lib/same_host_pair.py" verify "$PAIR_DIR" >>"$glog" 2>&1; then
+      glog_echo "DONE: both same-host legs retained privately in $PAIR_DIR"
+      return 0
+    fi
+    glog_echo "INCOMPLETE: preserve partial pair evidence in $PAIR_DIR"
+    return 1
   fi
 
   # ── final pull pass: catch any suite written just before completion (and re-attempt any still-missing
@@ -1602,6 +1714,10 @@ done
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
 log "all boxes done ($fail job(s) reported an issue - check results/fanout-*.log)"
+if [ "$BENCH_SAME_HOST_PAIR" = 1 ]; then
+  log "Private same-host results: $PAIR_DIR; history and publication are unchanged."
+  exit "$fail"
+fi
 
 # ── gateways that never got a sound box ───────────────────────────────────────────────────────────
 # Say it LOUDLY and by name. A gateway skipped for box qualification is not a silent gap: its committed
