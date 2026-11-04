@@ -44,7 +44,11 @@ const USER_HZ: f64 = 100.0;
 /// two of these are ever published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {
-    /// utime+stime in jiffies, summed across the tree.
+    /// utime+stime in jiffies, summed across the tree, PLUS each member's cutime+cstime: the CPU of
+    /// its children that have already exited and been reaped. Without that, a worker that exits
+    /// mid-window takes its whole lifetime of CPU out of the end sample (it moves into its parent's
+    /// cutime, which was not read), and a gateway that recycles workers published a cost too low by
+    /// exactly the work those workers did.
     pub cpu_jiffies: u64,
     /// Major faults: a page that had to come from disk. NON-ZERO INVALIDATES THE WINDOW - the box
     /// was swapping, and what was measured is the disk, not the gateway.
@@ -59,6 +63,24 @@ pub struct Counters {
     /// gateway copies rather than only what reached a device.
     pub rchar: u64,
     pub wchar: u64,
+    /// Which of the counters above NO process in the tree yielded. Such a counter is a 0 in this
+    /// struct only because nothing was added to it, and `cost` must publish it as an absence, not as
+    /// a measured zero. `Default` is "everything was read", so a sample built by hand states what it
+    /// could not read rather than having it assumed.
+    pub unread: Unread,
+}
+
+/// Which counter families could not be read from any process in the tree. See `Counters::unread`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Unread {
+    /// `majflt` from `/proc/<pid>/stat`.
+    pub majflt: bool,
+    /// `num_threads` from `/proc/<pid>/stat`.
+    pub threads: bool,
+    /// The context-switch lines of `/proc/<pid>/status`.
+    pub ctxt: bool,
+    /// `rchar`/`wchar` from `/proc/<pid>/io`, unreadable without matching credentials on some kernels.
+    pub io: bool,
 }
 
 /// What a window cost, derived from two `Counters` readings and the window's own completed request
@@ -132,13 +154,24 @@ pub fn cpu_busy_total<S: SystemStatSource>(source: &S, cores: &[u32]) -> Option<
         if !cores.contains(&idx) {
             continue;
         }
-        let f: Vec<u64> = it.filter_map(|v| v.parse::<u64>().ok()).collect();
-        // user nice system idle iowait irq softirq steal ...
+        // EVERY TOKEN MUST PARSE. Dropping one that does not would shift the columns after it, so
+        // `idle` and `iowait` below would be read from the wrong place.
+        let Some(f) = it
+            .map(|v| v.parse::<u64>().ok())
+            .collect::<Option<Vec<u64>>>()
+        else {
+            continue;
+        };
+        // user nice system idle iowait irq softirq steal guest guest_nice
         if f.len() < 5 {
             continue;
         }
         seen = true;
-        let sum: u64 = f.iter().sum();
+        // GUEST AND GUEST_NICE ARE ALREADY INSIDE USER AND NICE (the kernel accounts guest time in
+        // both), so only the first eight columns are summed. Summing all ten counted a core's guest
+        // time twice in both busy and total. Steal stays in, as it always was: whether hypervisor
+        // steal is "busy" for a pinned-core ceiling is a methodology question, not a parse one.
+        let sum: u64 = f.iter().take(8).sum();
         // IDLE AND IOWAIT ARE BOTH NOT-BUSY. iowait is a core with nothing to run while a request is
         // outstanding; counting it as busy would report a blocked gateway as a saturated one, which
         // is the opposite of what this measurement exists to distinguish.
@@ -187,33 +220,42 @@ pub fn utilisation(start: Option<(u64, u64)>, end: Option<(u64, u64)>) -> Measur
     Measurement::Measured(db as f64 / dt as f64)
 }
 
+/// The highest core index a CPU list may name. Far beyond any box this runs on, and low enough that a
+/// typo like `0-4294967295` cannot expand into billions of entries and take the engine down mid-run.
+const MAX_CORE_INDEX: u32 = 4095;
+
 /// Parse a taskset-style CPU list ("4-7", "0,2,4", "4-5,8") into core indices.
 ///
 /// The gateway's pinning is declared as exactly this string, so utilisation must read the SAME
 /// declaration rather than a second list that could disagree with what taskset was actually given.
+///
+/// ALL OR NOTHING. A list with any part that does not parse (`4-7,x9`), or that names a core past
+/// `MAX_CORE_INDEX`, yields NO cores - which the caller reports as utilisation it could not read -
+/// rather than the parts that happened to parse, which would compute utilisation over fewer cores
+/// than the gateway is pinned to and publish it as the whole set's.
 pub fn parse_cores(spec: &str) -> Vec<u32> {
+    let core = |t: &str| {
+        t.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|c| *c <= MAX_CORE_INDEX)
+    };
     let mut out = Vec::new();
     for part in spec.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        match part.split_once('-') {
-            Some((a, b)) => {
-                if let (Ok(a), Ok(b)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
-                    // An inverted range is a typo in a manifest, not a request for zero cores; taking
-                    // min..=max keeps it meaning what it plainly says.
-                    for c in a.min(b)..=a.max(b) {
-                        out.push(c);
-                    }
-                }
-            }
-            None => {
-                if let Ok(c) = part.parse::<u32>() {
-                    out.push(c);
-                }
-            }
-        }
+        let range = match part.split_once('-') {
+            Some((a, b)) => core(a).zip(core(b)),
+            None => core(part).map(|c| (c, c)),
+        };
+        let Some((a, b)) = range else {
+            return Vec::new();
+        };
+        // An inverted range is a typo in a manifest, not a request for zero cores; taking min..=max
+        // keeps it meaning what it plainly says.
+        out.extend(a.min(b)..=a.max(b));
     }
     out.sort_unstable();
     out.dedup();
@@ -234,7 +276,7 @@ pub fn sample_live(root_pid: u32) -> Measurement<Counters> {
 ///
 /// Offsets (stat is 1-based, this index is 0-based over the post-`)` tail):
 ///   idx 0 = state (f3), 1 = ppid (f4), 9 = majflt (f12), 11 = utime (f14), 12 = stime (f15),
-///   17 = num_threads (f20).
+///   13 = cutime (f16), 14 = cstime (f17), 17 = num_threads (f20).
 fn stat_field(stat: &str, idx: usize) -> Option<u64> {
     let rparen = stat.rfind(')')?;
     stat[rparen + 1..].split_whitespace().nth(idx)?.parse().ok()
@@ -264,38 +306,54 @@ pub fn sample<S: CounterSource>(source: &S, root_pid: u32) -> Measurement<Counte
     let ppid_map: BTreeMap<u32, u32> = source.ppid_map();
     let mut acc = Counters::default();
     let mut read_any = false;
+    // Per counter family: did ANY process in the tree yield it? One that none did is recorded in
+    // `unread`, so it publishes as an absence instead of the 0 it was never added to.
+    let (mut got_majflt, mut got_threads, mut got_ctxt, mut got_io) = (false, false, false, false);
 
     for pid in tree_pids(root_pid, &ppid_map) {
         if let Some(stat) = source.stat(pid) {
             // utime+stime are the metric; a stat line we cannot parse contributes nothing.
             if let (Some(u), Some(s)) = (stat_field(&stat, 11), stat_field(&stat, 12)) {
-                acc.cpu_jiffies += u + s;
+                // Reaped children's CPU (cutime+cstime) rides along; see `Counters::cpu_jiffies`.
+                let reaped =
+                    stat_field(&stat, 13).unwrap_or(0) + stat_field(&stat, 14).unwrap_or(0);
+                acc.cpu_jiffies += u + s + reaped;
                 read_any = true;
             }
             if let Some(m) = stat_field(&stat, 9) {
                 acc.majflt += m;
+                got_majflt = true;
             }
             if let Some(t) = stat_field(&stat, 17) {
                 acc.threads += t;
+                got_threads = true;
             }
         }
         if let Some(status) = source.status(pid) {
-            if let Some(v) = labelled_field(&status, "voluntary_ctxt_switches") {
+            if let (Some(v), Some(n)) = (
+                labelled_field(&status, "voluntary_ctxt_switches"),
+                labelled_field(&status, "nonvoluntary_ctxt_switches"),
+            ) {
                 acc.vol_ctxt += v;
-            }
-            if let Some(v) = labelled_field(&status, "nonvoluntary_ctxt_switches") {
-                acc.nonvol_ctxt += v;
+                acc.nonvol_ctxt += n;
+                got_ctxt = true;
             }
         }
         if let Some(io) = source.io(pid) {
-            if let Some(v) = labelled_field(&io, "rchar") {
-                acc.rchar += v;
-            }
-            if let Some(v) = labelled_field(&io, "wchar") {
-                acc.wchar += v;
+            if let (Some(r), Some(w)) = (labelled_field(&io, "rchar"), labelled_field(&io, "wchar"))
+            {
+                acc.rchar += r;
+                acc.wchar += w;
+                got_io = true;
             }
         }
     }
+    acc.unread = Unread {
+        majflt: !got_majflt,
+        threads: !got_threads,
+        ctxt: !got_ctxt,
+        io: !got_io,
+    };
 
     if !read_any {
         return Measurement::absent_because(
@@ -348,6 +406,18 @@ pub fn cost(
 
     // A backwards counter is a HARNESS failure, not a gateway property: the tree changed identity
     // under us. HarnessError, never a number.
+    // A counter neither sample could read is absent for that reason, before any arithmetic: its 0 is
+    // the absence of a reading, and a delta of two such zeros is not a measured "none".
+    let unread = |a_missing: bool, b_missing: bool, what: &str| -> Option<Measurement<f64>> {
+        (a_missing || b_missing).then(|| {
+            Measurement::absent_because(
+                Absent::NotMeasured,
+                format!(
+                    "{what} could not be read from /proc for any process in the gateway's tree"
+                ),
+            )
+        })
+    };
     let per = |d: Result<u64, String>, what: &str| -> Measurement<f64> {
         match d {
             Err(e) => Measurement::absent_because(Absent::HarnessError, e),
@@ -364,14 +434,10 @@ pub fn cost(
         Err(e) => Measurement::absent_because(Absent::HarnessError, e.clone()),
         Ok(j) => Measurement::Measured(*j as f64 / USER_HZ * 1_000_000.0),
     };
-    let cpu_us_per_request = match (&cpu_j, requests) {
-        (Err(e), _) => Measurement::absent_because(Absent::HarnessError, e.clone()),
-        (Ok(_), 0) => absent(
-            Absent::NotMeasured,
-            "cpu cannot be charged per request: the window completed 0 requests",
-        ),
-        (Ok(j), n) => Measurement::Measured(*j as f64 / USER_HZ * 1_000_000.0 / n as f64),
-    };
+    // Through `per`, the same rule every other per-request figure uses, then scaled from jiffies to
+    // microseconds.
+    let cpu_us_per_request = per(cpu_j.clone(), "cpu")
+        .map(|jiffies_per_request| jiffies_per_request / USER_HZ * 1_000_000.0);
     // rps per CPU-second is how an operator sizes a box: requests served per second of CPU burned.
     let rps_per_cpu_second = match (&cpu_j, window_s > 0.0) {
         (Err(e), _) => Measurement::absent_because(Absent::HarnessError, e.clone()),
@@ -384,330 +450,50 @@ pub fn cost(
     };
 
     let majflt_d = delta(a.majflt, b.majflt, "major faults");
-    let swapped = matches!(majflt_d, Ok(n) if n > 0);
+    // Unread faults are not "no faults": `swapped` stays false (nothing was observed), and `majflt`
+    // itself says it was not measured.
+    let majflt_unread = unread(a.unread.majflt, b.unread.majflt, "major faults");
+    let swapped = majflt_unread.is_none() && matches!(majflt_d, Ok(n) if n > 0);
+    let ctxt_unread = unread(a.unread.ctxt, b.unread.ctxt, "context switches");
+    let io_unread = unread(a.unread.io, b.unread.io, "rchar/wchar");
 
     WindowCost {
         cpu_us,
         cpu_us_per_request,
         rps_per_cpu_second,
-        majflt: match &majflt_d {
+        majflt: majflt_unread.unwrap_or_else(|| match &majflt_d {
             Err(e) => Measurement::absent_because(Absent::HarnessError, e.clone()),
             Ok(n) => Measurement::Measured(*n as f64),
-        },
+        }),
         // Threads is a LEVEL, not a delta: the question is how many the gateway ran with, not how
         // many it gained. Taken at the end, when the tree is at its most populated.
-        threads_end: Measurement::Measured(b.threads as f64),
-        nonvol_ctxt_per_request: per(
-            delta(
-                a.nonvol_ctxt,
-                b.nonvol_ctxt,
+        threads_end: unread(false, b.unread.threads, "the thread count")
+            .unwrap_or(Measurement::Measured(b.threads as f64)),
+        nonvol_ctxt_per_request: ctxt_unread.clone().unwrap_or_else(|| {
+            per(
+                delta(
+                    a.nonvol_ctxt,
+                    b.nonvol_ctxt,
+                    "nonvoluntary context switches",
+                ),
                 "nonvoluntary context switches",
-            ),
-            "nonvoluntary context switches",
-        ),
-        vol_ctxt_per_request: per(
-            delta(a.vol_ctxt, b.vol_ctxt, "voluntary context switches"),
-            "voluntary context switches",
-        ),
-        rchar_per_request: per(delta(a.rchar, b.rchar, "rchar"), "rchar"),
-        wchar_per_request: per(delta(a.wchar, b.wchar, "wchar"), "wchar"),
+            )
+        }),
+        vol_ctxt_per_request: ctxt_unread.unwrap_or_else(|| {
+            per(
+                delta(a.vol_ctxt, b.vol_ctxt, "voluntary context switches"),
+                "voluntary context switches",
+            )
+        }),
+        rchar_per_request: io_unread
+            .clone()
+            .unwrap_or_else(|| per(delta(a.rchar, b.rchar, "rchar"), "rchar")),
+        wchar_per_request: io_unread
+            .unwrap_or_else(|| per(delta(a.wchar, b.wchar, "wchar"), "wchar")),
         swapped,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeMap;
-
-    #[derive(Default)]
-    struct Fixture {
-        ppids: BTreeMap<u32, u32>,
-        stats: BTreeMap<u32, String>,
-        statuses: BTreeMap<u32, String>,
-        ios: BTreeMap<u32, String>,
-    }
-    impl ProcSource for Fixture {
-        fn ppid_map(&self) -> BTreeMap<u32, u32> {
-            self.ppids.clone()
-        }
-        fn status(&self, pid: u32) -> Option<String> {
-            self.statuses.get(&pid).cloned()
-        }
-    }
-    impl CounterSource for Fixture {
-        fn stat(&self, pid: u32) -> Option<String> {
-            self.stats.get(&pid).cloned()
-        }
-        fn io(&self, pid: u32) -> Option<String> {
-            self.ios.get(&pid).cloned()
-        }
-    }
-
-    /// A stat line with the real field layout, including a comm containing `)` and a space so the
-    /// parser is exercised against the shape that breaks naive splitting.
-    fn stat_line(majflt: u64, utime: u64, stime: u64, threads: u64) -> String {
-        let mut f = vec!["0".to_string(); 20];
-        f[0] = "S".into(); // state
-        f[1] = "1".into(); // ppid
-        f[9] = majflt.to_string();
-        f[11] = utime.to_string();
-        f[12] = stime.to_string();
-        f[17] = threads.to_string();
-        format!("42 (gate way (x)) {}", f.join(" "))
-    }
-
-    #[test]
-    fn a_comm_containing_parens_and_spaces_does_not_shift_the_fields() {
-        let s = stat_line(3, 100, 50, 7);
-        assert_eq!(stat_field(&s, 9), Some(3), "majflt");
-        assert_eq!(stat_field(&s, 11), Some(100), "utime");
-        assert_eq!(stat_field(&s, 12), Some(50), "stime");
-        assert_eq!(stat_field(&s, 17), Some(7), "num_threads");
-    }
-
-    #[test]
-    fn cpu_is_summed_over_the_whole_tree_including_a_child_that_holds_it() {
-        // THE CASE A PARENT-ONLY READING GETS WRONG: the parent burns nothing, the worker burns it
-        // all, and a parent-only sampler would report a busy gateway as idle.
-        let mut f = Fixture::default();
-        f.ppids.insert(200, 100);
-        f.stats.insert(100, stat_line(0, 0, 0, 1));
-        f.stats.insert(200, stat_line(0, 600, 400, 8));
-        let Measurement::Measured(c) = sample(&f, 100) else {
-            panic!("expected a sample")
-        };
-        assert_eq!(c.cpu_jiffies, 1000);
-        assert_eq!(c.threads, 9);
-    }
-
-    #[test]
-    fn a_vanished_pid_contributes_nothing_but_does_not_void_the_window() {
-        let mut f = Fixture::default();
-        f.ppids.insert(200, 100); // 200 is in the tree but its stat is gone (exited mid-scan)
-        f.stats.insert(100, stat_line(0, 700, 300, 2));
-        let Measurement::Measured(c) = sample(&f, 100) else {
-            panic!("a readable root must still yield a sample")
-        };
-        assert_eq!(c.cpu_jiffies, 1000);
-    }
-
-    #[test]
-    fn a_tree_with_nothing_readable_is_absent_not_zero() {
-        let f = Fixture::default();
-        // Assert on the TYPE, not on the debug string: `Absent::NotMeasured` contains the substring
-        // "Measured", so a `!contains("Measured")` check fails on a correctly-absent value. That is
-        // a test that reports a defect where there is none, which is worse than no test.
-        match sample(&f, 100) {
-            Measurement::Absent { reason, .. } => assert_eq!(reason, Absent::NotMeasured),
-            other => panic!("a live tree cannot consume no CPU; expected absence, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pid_zero_is_absent() {
-        let f = Fixture::default();
-        assert!(matches!(sample(&f, 0), Measurement::Absent { .. }));
-    }
-
-    #[test]
-    fn cost_divides_by_the_windows_own_request_count() {
-        let a = Measurement::Measured(Counters {
-            cpu_jiffies: 100,
-            ..Default::default()
-        });
-        let b = Measurement::Measured(Counters {
-            cpu_jiffies: 1100,
-            ..Default::default()
-        });
-        // 1000 jiffies = 10 CPU-seconds = 10_000_000 us over 10_000 requests = 1000 us/req
-        let c = cost(&a, &b, 10_000, 10.0);
-        assert_eq!(c.cpu_us, Measurement::Measured(10_000_000.0));
-        assert_eq!(c.cpu_us_per_request, Measurement::Measured(1000.0));
-        assert_eq!(c.rps_per_cpu_second, Measurement::Measured(1000.0));
-        assert!(!c.swapped);
-    }
-
-    #[test]
-    fn a_counter_that_goes_backwards_is_a_harness_error_never_a_negative() {
-        // PID REUSE. The natural implementation subtracts and publishes a negative CPU time, which is
-        // an impossible number - and an impossible number is an engine bug, so it must not ship.
-        let a = Measurement::Measured(Counters {
-            cpu_jiffies: 5000,
-            ..Default::default()
-        });
-        let b = Measurement::Measured(Counters {
-            cpu_jiffies: 10,
-            ..Default::default()
-        });
-        let c = cost(&a, &b, 100, 10.0);
-        for m in [&c.cpu_us, &c.cpu_us_per_request, &c.rps_per_cpu_second] {
-            match m {
-                Measurement::Absent { reason, .. } => {
-                    assert_eq!(
-                        *reason,
-                        Absent::HarnessError,
-                        "the rig changed, not the gateway"
-                    )
-                }
-                other => panic!("a backwards counter must not produce a number: {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn a_window_with_major_faults_publishes_its_numbers_with_the_flag_set() {
-        // The row is DISCLOSED, not dropped: a reader must see why it looks wrong.
-        let a = Measurement::Measured(Counters {
-            cpu_jiffies: 0,
-            majflt: 0,
-            ..Default::default()
-        });
-        let b = Measurement::Measured(Counters {
-            cpu_jiffies: 100,
-            majflt: 12,
-            ..Default::default()
-        });
-        let c = cost(&a, &b, 1000, 1.0);
-        assert!(c.swapped, "major faults must raise the flag");
-        assert_eq!(c.majflt, Measurement::Measured(12.0));
-        assert!(
-            matches!(c.cpu_us_per_request, Measurement::Measured(_)),
-            "numbers still published"
-        );
-    }
-
-    #[test]
-    fn zero_requests_cannot_be_divided_by_and_is_absent_not_infinite() {
-        let a = Measurement::Measured(Counters {
-            cpu_jiffies: 0,
-            ..Default::default()
-        });
-        let b = Measurement::Measured(Counters {
-            cpu_jiffies: 500,
-            ..Default::default()
-        });
-        let c = cost(&a, &b, 0, 5.0);
-        assert!(matches!(c.cpu_us_per_request, Measurement::Absent { .. }));
-        assert!(
-            matches!(c.cpu_us, Measurement::Measured(_)),
-            "the window still burned CPU"
-        );
-    }
-
-    #[test]
-    fn an_absent_sample_makes_every_derived_field_absent_rather_than_zero() {
-        let a: Measurement<Counters> = Measurement::absent_because(Absent::NotMeasured, "gone");
-        let b = Measurement::Measured(Counters::default());
-        let c = cost(&a, &b, 100, 1.0);
-        for m in [&c.cpu_us, &c.cpu_us_per_request, &c.rps_per_cpu_second] {
-            assert!(matches!(m, Measurement::Absent { .. }), "got {m:?}");
-        }
-    }
-
-    #[test]
-    fn context_switches_and_byte_counters_are_per_request_deltas() {
-        let a = Measurement::Measured(Counters {
-            cpu_jiffies: 0,
-            nonvol_ctxt: 100,
-            vol_ctxt: 200,
-            rchar: 1000,
-            wchar: 2000,
-            ..Default::default()
-        });
-        let b = Measurement::Measured(Counters {
-            cpu_jiffies: 10,
-            nonvol_ctxt: 600,
-            vol_ctxt: 1200,
-            rchar: 11_000,
-            wchar: 22_000,
-            ..Default::default()
-        });
-        let c = cost(&a, &b, 100, 1.0);
-        assert_eq!(c.nonvol_ctxt_per_request, Measurement::Measured(5.0));
-        assert_eq!(c.vol_ctxt_per_request, Measurement::Measured(10.0));
-        assert_eq!(c.rchar_per_request, Measurement::Measured(100.0));
-        assert_eq!(c.wchar_per_request, Measurement::Measured(200.0));
-    }
-
-    struct Stat(String);
-    impl SystemStatSource for Stat {
-        fn system_stat(&self) -> Option<String> {
-            Some(self.0.clone())
-        }
-    }
-
-    #[test]
-    fn only_the_pinned_cores_are_summed_and_the_aggregate_line_is_ignored() {
-        // The `cpu` line with no index already CONTAINS every core; summing it beside the per-core
-        // lines would double-count the whole machine. The box also runs the mock and the load
-        // generator on their own cores, so a machine-wide figure would describe none of the three.
-        let s = Stat(
-            "cpu  9999 0 9999 9999 0 0 0 0 0 0\n             cpu0 100 0 0 900 0 0 0 0 0 0\n             cpu4 300 0 0 700 0 0 0 0 0 0\n             cpu5 500 0 0 500 0 0 0 0 0 0\n"
-                .to_string(),
-        );
-        // cpu4+cpu5 only: busy 300+500=800, total 1000+1000=2000
-        assert_eq!(cpu_busy_total(&s, &[4, 5]), Some((800, 2000)));
-    }
-
-    #[test]
-    fn iowait_counts_as_not_busy() {
-        // A core with nothing to run while a request is outstanding is not a saturated core.
-        // Counting iowait as busy would report a BLOCKED gateway as a maxed-out one - the exact
-        // opposite of the distinction this measurement exists to make.
-        let s = Stat("cpu4 100 0 0 100 800 0 0 0 0 0\n".to_string());
-        let (busy, total) = cpu_busy_total(&s, &[4]).expect("readable");
-        assert_eq!(total, 1000);
-        assert_eq!(busy, 100, "800 jiffies of iowait are idle, not work");
-    }
-
-    #[test]
-    fn utilisation_is_a_fraction_of_the_pinned_set() {
-        // 900 busy of 1000 total across the window = 90% of the pinned cores.
-        assert_eq!(
-            utilisation(Some((100, 1000)), Some((1000, 2000))),
-            Measurement::Measured(0.9)
-        );
-    }
-
-    #[test]
-    fn an_unreadable_or_backwards_or_empty_window_is_absent_not_zero() {
-        // Absent, never 0: reporting 0% would claim the cores were idle when nothing was observed.
-        assert!(matches!(
-            utilisation(None, Some((1, 2))),
-            Measurement::Absent { .. }
-        ));
-        match utilisation(Some((500, 1000)), Some((10, 20))) {
-            Measurement::Absent { reason, .. } => assert_eq!(reason, Absent::HarnessError),
-            other => panic!("a backwards counter must not produce a number: {other:?}"),
-        }
-        // A window that advanced no jiffies has no utilisation to report.
-        assert!(matches!(
-            utilisation(Some((5, 10)), Some((5, 10))),
-            Measurement::Absent { .. }
-        ));
-    }
-
-    #[test]
-    fn a_taskset_cpu_list_parses_the_way_taskset_reads_it() {
-        assert_eq!(parse_cores("4-7"), vec![4, 5, 6, 7]);
-        assert_eq!(parse_cores("0,2,4"), vec![0, 2, 4]);
-        assert_eq!(parse_cores("4-5,8"), vec![4, 5, 8]);
-        // An inverted range is a manifest typo, not a request for zero cores.
-        assert_eq!(parse_cores("7-4"), vec![4, 5, 6, 7]);
-        assert_eq!(parse_cores(""), Vec::<u32>::new());
-    }
-
-    #[test]
-    fn io_is_best_effort_and_its_absence_does_not_take_cpu_down_with_it() {
-        // /proc/<pid>/io is unreadable without matching credentials on some kernels. That must cost
-        // the byte counters and nothing else.
-        let mut f = Fixture::default();
-        f.stats.insert(100, stat_line(0, 500, 500, 4));
-        let Measurement::Measured(c) = sample(&f, 100) else {
-            panic!("cpu must survive")
-        };
-        assert_eq!(c.cpu_jiffies, 1000);
-        assert_eq!(c.rchar, 0);
-    }
-}
+#[path = "tests/procsample_tests.rs"]
+mod tests;

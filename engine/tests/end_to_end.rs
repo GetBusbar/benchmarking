@@ -406,7 +406,14 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     );
     // MONOTONICITY ON A REAL RUN. `frontier.rs` proves it over synthetic rungs; this holds it over
     // numbers a live gateway and a live mock actually produced.
+    //
+    // Absent readings drop out of the comparison, but the UNBOUNDED (failure-only) reading of a
+    // served cell is always measured, so the check can never run over nothing.
     let rates: Vec<f64> = frontier.iter().filter_map(|r| r["rps"].as_f64()).collect();
+    assert!(
+        frontier.last().and_then(|r| r["rps"].as_f64()).is_some(),
+        "the unbounded reading of a served cell must be measured: {perf:#}"
+    );
     for w in rates.windows(2) {
         assert!(
             w[1] >= w[0],
@@ -422,9 +429,9 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
     //
     // Every streaming number the board publishes is a difference between the stream through the
     // gateway and the same stream taken straight to the mock. Asserted as keys for the same reason as
-    // memory: what this proves is that the group RAN and published what it declared. The fixture
-    // answers with plain JSON rather than SSE frames, so the honest result here is an absence, and
-    // the block must still say so rather than being missing.
+    // memory: what this proves is that the group RAN and published what it declared, measured or
+    // absent. (The fixture DOES stream - see the TTFT assertion below - so this is the key check and
+    // that one is the value check.)
     let stream = &cell["stream"];
     assert!(
         !stream.is_null(),
@@ -592,15 +599,6 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         );
     }
 
-    // --- NOT YET WIRED: these are the holes this test exists to make visible ----------------------
-    //
-    // Each of these modules is complete and unit-tested and has ZERO callers. The assertions are
-    // written as the artifact field they must fill, and are checked negatively FOR NOW so that this
-    // test tells the truth about the engine as it stands today rather than pretending.
-    //
-    // When you wire a module, flip its assertion to the positive form on the right and delete it
-    // from this block. If you wire it and forget, the negative assertion fails and tells you.
-
     // --- rss.rs: WIRED -----------------------------------------------------------------------------
     //
     // site/gen-data.mjs takes memory SOLELY from this per-cell window - "No fallback, and NO
@@ -625,24 +623,23 @@ fn every_module_the_artifact_needs_is_reachable_from_a_real_run() {
         );
     }
 
-    // record.rs config artifact: suite::flush builds the snapshot with ..Default::default(), so the
-    // config every gw_config() exists to publish never lands. record.rs calls this "the whole point
-    // (kills the class of bug where a chart is read against a config that was since overwritten)".
+    // THE CONFIG AND BUILD FIELDS FOR A FIXTURE THAT DECLARES NEITHER. `suite::rendered_config`
+    // publishes every declared config file and `suite::gateway_build` names the launched image
+    // (both pinned by suite.rs's unit tests); this fixture declares no `config_files` and no
+    // `launch`, so the honest artifact is an empty config and the documented engine-string
+    // fallback. An end-to-end check that population works needs a fixture that launches something.
     assert!(
         snap["config"]["files"]
             .as_object()
             .is_none_or(|m| m.is_empty()),
-        "the published config is now populated: assert it is non-empty instead"
+        "the fixture declares no config_files, so no config may be published: {:?}",
+        snap["config"]
     );
-
-    // The build string names the ENGINE's version, not the gateway's. gw_version() exists in all 13
-    // manifests to fill this, and nothing calls it: the board's reproducibility claim currently
-    // identifies the wrong artifact.
     assert!(
         snap["build"]
             .as_str()
             .is_some_and(|b| b.starts_with("otb-engine")),
-        "build still names the engine rather than the gateway under test: {:?}",
+        "with no launch declared the build falls back to the engine string: {:?}",
         snap["build"]
     );
 
@@ -780,12 +777,13 @@ fn a_manifest_that_fails_the_config_standard_is_refused_before_anything_is_measu
     let _ = std::fs::remove_dir_all(&results);
 }
 
-/// The upstream flags are asserted, not measured. `suite.rs` hardcodes `configurable: true,
-/// served: true` on every egress row, and `record.rs` names defaulting-to-true as claiming a
-/// capability by omission. Held here so that wiring the launcher's typed failure into the record
-/// has a test waiting for it.
+/// The upstream row for the fixture's one egress. `configurable` is derived from the manifest's
+/// declared `egress` (suite.rs) and the fixture declares exactly the upstream it serves, so it is
+/// true here under both the derivation and the old hardcoded `true` - this checks the row is
+/// published healthy, not that the derivation discriminates (that needs a fixture whose grid walks
+/// an undeclared egress).
 #[test]
-fn the_upstream_row_currently_asserts_health_it_never_measured() {
+fn the_upstream_row_for_the_declared_egress_is_published_healthy() {
     let stop = Arc::new(AtomicBool::new(false));
     let addr = serve(Arc::clone(&stop));
     let results = unique_dir("upstream");
@@ -794,8 +792,6 @@ fn the_upstream_row_currently_asserts_health_it_never_measured() {
     let snap = run_engine(&results, &manifest, addr);
     let up = &snap["matrix"]["upstreams"]["openai"];
 
-    // True here only because the fixture really did serve. The defect is that it would be true
-    // regardless: nothing sets it from an observation.
     assert_eq!(up["served"], true);
     assert_eq!(up["configurable"], true);
     assert!(
