@@ -60,21 +60,8 @@ def snapshot_paths():
 # Named, not inlined, because a reader deciding whether to trust a violation needs to see what it was
 # measured against. Each carries the reasoning that set it where it is.
 
-# How far the sustained figure may sit above the peak before it is a defect rather than window noise.
-#
-# NO PER-CELL CONSUMER ANY MORE. `check_sustained_not_above_peak` read this bar; the pair it policed
-# (`rps_max_proxy` vs `rps_sustained_20ms`) is deleted, so the bar's only remaining job in this file is
-# the retired drift gate (see the block below), which was about two literals in two
-# languages and not about any cell's data. It stays declared, with its reasoning intact, because the
-# site still declares its own copy and a gate that stops being able to compare is the defect class this
-# file exists to prevent. See the removal note at `check_sustained_not_above_peak`'s old site.
-#
-# The two numbers now come out of ONE climb over ONE state of the gateway (`run::sweep_cell`), so a
-# genuine inversion means the throughput curve spiked between two doublings - which gateways do not
-# do. Before that change they were two searches separated by a gateway restart, and three cells of
-# the 2026-07-28 board published a "sustained" rate up to 7% above the "maximum" it was meant to sit
-# under. This stays at 5% rather than 0 because the ceiling is refined BETWEEN rungs and its rate is
-# a median of three windows there, so a point or two of disagreement is measurement, not a bug.
+# (The C6 sustained-vs-peak bar that used to open this section is gone with the two fields it policed;
+# the note below records why, and what replaced it. No C6 constant is declared in this file any more.)
 #
 # THE GROSS-INVERSION CEILING IS RETIRED, and with it the cross-language drift gate that policed it.
 #
@@ -94,10 +81,9 @@ def snapshot_paths():
 # over all six readings, and `check_frontier_is_rederivable_from_its_sweep` recomputes every one of them
 # from the raw rungs - which catches a mis-ordered pair and much more besides, with no tolerance to tune.
 
-# The engine's own declaration of the field list ABSENCE_CARRYING_FIELDS claims to mirror. Same
-# reasoning as SITE_C6_PATH/SITE_C6_RE just above: this is python parsing a sibling in another
-# language rather than importing it, because there is no build step to share the list through
-# either. See check_absence_fields_mirror_the_engine() for what happens when the two disagree.
+# The engine's own declaration of the field list ABSENCE_CARRYING_FIELDS claims to mirror. This is
+# python parsing a sibling in another language rather than importing it, because there is no build
+# step to share the list through. See check_absence_fields_mirror_the_engine() for what happens when the two disagree.
 RECORD_RS_PATH = os.path.join("engine", "src", "record.rs")
 RECORD_RS_STRUCTS = {"perf": "CellPerf", "stream": "CellStream", "memory": "CellMemory"}
 _RUST_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -119,6 +105,20 @@ P99_BOUNDS_US = [1_000, 5_000, 10_000, 50_000, 100_000]
 FRONTIER_RS_PATH = os.path.join("engine", "src", "frontier.rs")
 FRONTIER_RS_RE = re.compile(r"pub const P99_BOUNDS_US:\s*\[u64;\s*\d+\]\s*=\s*\[([^\]]*)\]\s*;")
 
+# ── the dialect axis ──────────────────────────────────────────────────────────────────────────────
+#
+# The order a definition.json `matrix` is read in: row = ingress, column = egress, both in the engine's
+# `Dialect::ALL` order (`manifest::matrix_declared_capable`). Restated here for the same reason as
+# P99_BOUNDS_US and CROSS-CHECKED for the same reason - `check_dialect_order_agrees_with_the_engine`
+# parses ingress.rs and fails on drift. A python copy that fell out of order would not crash anything:
+# it would silently name every declared cell after the wrong dialect, so the declared-vs-untestable
+# check would compare the wrong pairs and go quiet on a real collision.
+DIALECTS = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]
+INGRESS_RS_PATH = os.path.join("engine", "src", "ingress.rs")
+INGRESS_ALL_RE = re.compile(r"pub const ALL:\s*\[Dialect;\s*\d+\]\s*=\s*\[([^\]]*)\]\s*;")
+INGRESS_AS_STR_RE = re.compile(r"pub fn as_str\(&self\)\s*->\s*&'static str\s*\{(.*?)\n    \}", re.S)
+INGRESS_ARM_RE = re.compile(r"Dialect::(\w+)\s*=>\s*\"([^\"]+)\"")
+
 # A rate this far above its own concurrency is not a proxy measurement.
 #
 # One connection cannot issue 20000 requests per second against a real socket; a number that says so
@@ -139,8 +139,18 @@ def _instrument_map():
     p = os.path.join(HERE, "site", "instrument-equivalence.json")
     out = {}
     try:
-        doc = json.load(open(p))
-    except Exception:
+        with open(p) as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return out
+    except Exception as e:
+        # NOT SILENT. An unreadable equivalence file narrows every instrument to its raw commit, so
+        # gateways measured by a byte-identical binary drop out of the audited set into NOT AUDITED -
+        # the reader must be told the pinning lost its evidence, not left to guess why.
+        print(f"  unreadable {p}: {e} - pinning to raw engine commits only", file=sys.stderr)
+        return out
+    if not isinstance(doc, dict):
+        print(f"  {p} is not a JSON object - pinning to raw engine commits only", file=sys.stderr)
         return out
     for inst in doc.get("instruments") or []:
         commits = inst.get("commits") or []
@@ -195,9 +205,11 @@ def newest_engine():
     """The engine commit of the snapshot with the newest `measured_at`, so the default audits the
     current board. Recency is the snapshot's own timestamp, not filename order - the files sort
     alphabetically by gateway, so "last file" is just "last gateway in the alphabet". A snapshot
-    whose `measured_at` is missing or unparseable falls back to its file mtime.
+    whose `measured_at` is missing or unparseable falls back to its file mtime - but ranks BELOW every
+    snapshot that carries a real stamp, because after a git checkout the mtime is the checkout time and
+    would otherwise beat every honest timestamp on the board.
     """
-    best = None  # (when, sha)
+    best = None  # ((has_stamp, when), sha)
     for f in snapshot_paths():
         try:
             d = json.load(open(f))
@@ -213,13 +225,15 @@ def newest_engine():
                 when = datetime.datetime.fromisoformat(raw.rstrip("Zz"))
             except ValueError:
                 when = None
+        stamped = when is not None
         if when is None:
             when = datetime.datetime.fromtimestamp(os.path.getmtime(f), datetime.timezone.utc)
         # Normalise to naive UTC so a mix of offset-carrying stamps and mtime fallbacks compares.
         if when.tzinfo is not None:
             when = when.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-        if best is None or when > best[0]:
-            best = (when, sha)
+        key = (stamped, when)
+        if best is None or key > best[0]:
+            best = (key, sha)
     return best[1] if best else None
 
 
@@ -451,13 +465,13 @@ def check_declared_fields_are_carried(name, c, known=None):
         for f in fields:
             if f not in blk:
                 # A field the PRODUCING ENGINE never had is a different thing from one it dropped.
-                # `known` is computed per snapshot from that snapshot's own cells: a field no cell in
-                # it carries was not in the engine that wrote it, and demanding it would be demanding
-                # that yesterday's artifact contain tomorrow's field. Crucially this is all-or-
-                # nothing per snapshot, so the defect this check exists for - a serializer that
-                # started dropping a key on SOME cells - still fails loudly, because those cells sit
-                # beside cells that carry it. A snapshot that omits a field everywhere is DISCLOSED
-                # at the end of the run instead, never silently forgiven.
+                # main() computes `known` POOLED across every snapshot of the audited instrument: a
+                # field no cell on that board carries was not in the engine that wrote it, and
+                # demanding it would be demanding that yesterday's artifact contain tomorrow's field.
+                # Pooled rather than per snapshot, so a serializer that dropped a key on SOME cells -
+                # or on EVERY cell of one gateway - still fails loudly, because other cells from the
+                # same producer carry it. A board that omits a field everywhere is DISCLOSED at the
+                # end of the run instead, never silently forgiven.
                 if known is not None and f not in known.get(block, ()):
                     continue
                 yield (f"{name}: {block}.{f} is OMITTED from the block (not null-with-reason, "
@@ -549,6 +563,30 @@ def proven_clean_top(rungs):
 MAX_CEILING_STEPDOWNS = 4
 
 
+def step_downs_taken(rungs, clean):
+    """How many step-downs the confirmation loop actually spent, as the trace records it.
+
+    The trace is ascending sweep, then bisection probes, then the bisected ceiling's confirmation
+    windows (its SECOND appearance - a bisection never probes one concurrency twice), then one seed
+    window per step-down, each strictly below the ceiling (`run::sweep_streams_cell`). The ceiling is
+    the highest concurrency above the clean prefix that passed a window.
+
+    NOT every distinct concurrency above the clean prefix: that counted the ascending failure and every
+    bisection probe as spent budget, so any real bisection over a bracket wider than ~16 rungs read as
+    "budget exhausted" and the check exempted itself on every cell it was written for.
+    """
+    passed_above = [r.get("conc") or 0 for r in rungs
+                    if r.get("passed") is True and (r.get("conc") or 0) > clean]
+    if not passed_above:
+        return 0
+    ceiling = max(passed_above)
+    seen = [i for i, r in enumerate(rungs) if (r.get("conc") or 0) == ceiling]
+    if len(seen) < 2:
+        return 0  # no confirmation window was recorded, so no step-down can follow one
+    after = rungs[seen[1] + 1:]
+    return len({r.get("conc") for r in after if clean < (r.get("conc") or 0) < ceiling})
+
+
 def check_search_spent_its_budget(name, c):
     """A search that publishes nothing must have RUN OUT, not stopped early.
 
@@ -586,12 +624,10 @@ def check_search_spent_its_budget(name, c):
     # rung and the carried one, so it read a fully-spent budget as an abandoned one and would have
     # stopped a 14-box run for it.
     #
-    # Counting distinct concurrencies probed BELOW the bisected ceiling is the budget as the trace
-    # shows it. At the cap the honest reading is "our search range was too small for this cell",
-    # which belongs in the run's write-up, not in a defect report.
-    stepped = {r.get("conc") for r in rungs if clean < (r.get("conc") or 0)}
-    walked_down = len([c for c in stepped if c < max(stepped)])
-    if walked_down >= MAX_CEILING_STEPDOWNS:
+    # Counting distinct concurrencies probed BELOW the bisected ceiling, AFTER its confirmation began,
+    # is the budget as the trace shows it. At the cap the honest reading is "our search range was too
+    # small for this cell", which belongs in the run's write-up, not in a defect report.
+    if step_downs_taken(rungs, clean) >= MAX_CEILING_STEPDOWNS:
         return
     between = [r for r in rungs if clean < (r.get("conc") or 0) < lowest]
     if not between:
@@ -629,9 +665,11 @@ def check_no_rung_fails_below_one_already_carried(name, c):
         return
     absences = c.get("absences") or {}
     detail = ((absences.get("stream.streams_sustained") or {}).get("detail") or "").lower()
-    named = any(k in detail for k in ("already carried", "did not recover", "drain", "rig", "restart"))
+    # WORDS, NOT SUBSTRINGS: a bare `"rig" in detail` matched "original", "trigger" and "bridge", so an
+    # absence that named nothing at all could still excuse the impossible signature.
+    named = re.search(r"already carried|did not recover|\bdrain|\brig\b|\brestart", detail) is not None
     if not named:
-        yield (f"{name}: rung(s) {sorted(set(below))} failed at or below c={clean}, which this cell had "
+        yield (f"{name}: rung(s) {sorted(set(below))} failed below c={clean}, which this cell had "
                f"already carried cleanly - impossible for the gateway alone, and the absence does not "
                f"name what else changed")
 
@@ -985,6 +1023,15 @@ def check_frontier_is_rederivable_from_its_sweep(name, c, ok_known=True):
             continue
         bound, key = r.get("p99_bound_us"), bound_key(r.get("p99_bound_us"))
         quals = [q for q in rungs if rung_qualifies(q, bound)]
+        # A rung can qualify (ok > 0, or the p99 fallback) without publishing a numeric rate. The
+        # engine's own `Rung::rps` is never absent, so that is a malformed artifact: say so, rather
+        # than crash the whole audit on `max()` over a None or a missing key.
+        rateless = [q.get("conc") for q in quals if not isinstance(q.get("rps"), (int, float))]
+        if rateless:
+            yield (f"{name}: frontier.{key} cannot be re-derived - rung(s) at "
+                   f"c={sorted(set(map(str, rateless)))} qualify at that bound but publish no "
+                   f"numeric rps")
+            continue
         best = max((q["rps"] for q in quals), default=None)
         pub_rps, pub_conc, pub_p99 = r.get("rps"), r.get("concurrency"), r.get("p99_us")
         if best is None:
@@ -1196,9 +1243,9 @@ def producer_knew_ok(d):
     True when any rung on any served cell carries the key at all - `isinstance` is deliberately not
     checked here, an `ok` of the wrong TYPE is a shape violation for something else to catch, this
     function only asks whether the field exists in this snapshot's vocabulary. False means every rung
-    in the snapshot predates `ok`, so `rung_served_cleanly` cannot be proven true OR false for any of
-    them, and `check_frontier_is_rederivable_from_its_sweep` stays silent on that cell instead of
-    flagging every honest published rate as unbacked by a qualifying set it can never fill. Every
+    in the snapshot predates `ok`, so `rung_served_cleanly` falls back to its approximate p99 rule for
+    every one of them. `check_frontier_is_rederivable_from_its_sweep` still RUNS on such a cell (its
+    `ok_known` argument is disclosure only); main() reports those cells as AUDITED APPROXIMATELY. Every
     snapshot on disk as of 2026-07-29 is in this bucket, the same as every snapshot was pre-frontier
     before that metric shipped - and it clears the same way, cell by cell, as engines re-measure.
     """
@@ -1208,7 +1255,7 @@ def producer_knew_ok(d):
 def parse_rust_frontier_bounds(text):
     """The engine's own `P99_BOUNDS_US`, read out of frontier.rs. None when the declaration is not in
     the shape this expects - which the caller must treat as a failure, never as agreement, the same rule
-    parse_site_c6 and parse_rust_absences follow."""
+    parse_rust_absences follows."""
     m = FRONTIER_RS_RE.search(text or "")
     if not m:
         return None
@@ -1226,9 +1273,9 @@ def parse_rust_frontier_bounds(text):
 def check_frontier_bounds_agree_with_the_engine():
     """`P99_BOUNDS_US` here must be exactly the engine's `frontier::P99_BOUNDS_US` (ledger TOOL-02 shape).
 
-    The third instance of this file's cross-language pattern, after the site's C6 bar and record.rs's
-    absence field lists, and it exists for the sharpest version of the reason: the bounds decide how many
-    columns a board HAS. If the engine added a 500ms bound and this list stayed at five, every cell would
+    One of this file's cross-language drift gates (with record.rs's absence field lists and ingress.rs's
+    dialect order; the site's C6 bar was the first, now retired), and it exists for the sharpest version
+    of the reason: the bounds decide how many columns a board HAS. If the engine added a 500ms bound and this list stayed at five, every cell would
     trip `check_frontier_is_complete` (loud, fine); if the engine DROPPED one and this list kept it, the
     completeness check would fail the whole board for a column nobody publishes any more - and if someone
     then "fixed" it by trimming the python list, the audit would stop noticing a shrinking board, which
@@ -1299,13 +1346,16 @@ def parse_rust_absences(text, struct_name):
     `absences_of!(self, ...)` invocation. None when the shape this expects - one
     `impl <struct_name> { ... absences_of!(self, a, b, c, ...) ... }` block, fields separated by
     commas, comments allowed between them - is not found. The caller must treat None as a failure,
-    never as agreement: the same rule parse_site_c6's caller follows, and for the same reason. The
+    never as agreement: the same rule parse_rust_frontier_bounds's caller follows. The
     macro's own argument list has no parentheses in it (only field identifiers and `//` comments), so
     a non-greedy match up to the first `)` after `absences_of!(self,` is exactly the call's closing
     paren, not a premature one hiding inside a comment.
     """
-    m = re.search(rf"impl\s+{re.escape(struct_name)}\s*\{{.*?absences_of!\(\s*self\s*,(.*?)\)",
-                  text or "", re.S)
+    # The lazy span may not cross into the NEXT column-0 `impl`: if this struct's impl stopped calling
+    # the macro, an unbounded `.*?` ran on into another struct's impl and returned THAT field list,
+    # which reads as a confusing drift (or, if the lists matched, as agreement) instead of going blind.
+    m = re.search(rf"impl\s+{re.escape(struct_name)}\s*\{{(?:(?!\nimpl\b).)*?"
+                  rf"absences_of!\(\s*self\s*,(.*?)\)", text or "", re.S)
     if not m:
         return None
     body = re.sub(r"//[^\n]*", "", m.group(1))  # strip line comments before splitting on commas
@@ -1373,7 +1423,7 @@ def check_absence_fields_mirror_the_engine():
 UNREADABLE_DECLARATIONS: dict = {}
 
 
-def check_the_cost_window_obeys_its_own_arithmetic():
+def check_the_cost_window_obeys_its_own_arithmetic(snaps=None):
     """Every cell's cost fields must cross-check to the SAME core count the rig pinned.
 
     THIS IS THE ONE INVARIANT THAT MAKES A THROUGHPUT NUMBER ANSWERABLE. The board publishes a peak
@@ -1406,7 +1456,15 @@ def check_the_cost_window_obeys_its_own_arithmetic():
         the error shrinking as the count grows, which is the signature of rounding and not of a
         gateway. A 94-request window cannot check a one-percent identity, and pretending otherwise
         would mean tuning the tolerance until the arithmetic stopped complaining.
+
+    `snaps` IS THE AUDITED BOARD - main()'s engine-pinned, --gateway-narrowed set. This used to call
+    `load(engine=None)` itself, which pins nothing: it took the newest snapshot of every gateway across
+    EVERY engine, ignored --engine and --gateway, and could fail (or pass) this board on the strength of
+    a gateway main() had just reported as NOT AUDITED on another instrument. None keeps the old
+    whole-disk behaviour for a direct caller.
     """
+    if snaps is None:
+        snaps = load(engine=None)
     UTIL_FLOOR = 0.20
     # Half a request per second of rounding is under a tenth of a percent by here, which is an order
     # of magnitude inside the tolerance below.
@@ -1414,7 +1472,8 @@ def check_the_cost_window_obeys_its_own_arithmetic():
     TOLERANCE = 0.08
     implied = []
     skipped = 0
-    for gw, (f, d, sha) in load(engine=None).items():
+    fieldless = 0
+    for gw, (_f, d, _sha) in sorted(snaps.items()):
         ups = ((d.get("matrix") or {}).get("upstreams")) or {}
         for eg, u in ups.items():
             for ing, c in (u.get("cells") or {}).items():
@@ -1424,6 +1483,7 @@ def check_the_cost_window_obeys_its_own_arithmetic():
                 rps, cpu, util = (p.get("cost_window_rps"), p.get("cpu_us_per_request"),
                                   p.get("cost_core_utilisation"))
                 if not all(isinstance(x, (int, float)) for x in (rps, cpu, util)):
+                    fieldless += 1
                     continue
                 ok = p.get("cost_window_ok")
                 if util < UTIL_FLOOR or rps <= 0 or not isinstance(ok, (int, float)) or ok < MIN_WINDOW_REQUESTS:
@@ -1431,8 +1491,18 @@ def check_the_cost_window_obeys_its_own_arithmetic():
                     continue
                 implied.append((f"{gw} {ing}>{eg}", rps * cpu / 1e6 / util))
     if len(implied) < 2:
+        # DISCLOSED, NOT A SILENT PASS: with fewer than two checkable cells there is no board-wide
+        # figure to agree with, so this invariant did not run - and the run must say so.
+        print(f"NOT AUDITED: the cost window's arithmetic - only {len(implied)} checkable cell(s) "
+              f"({skipped} excluded as under {UTIL_FLOOR:.0%} utilisation or under "
+              f"{MIN_WINDOW_REQUESTS} requests, {fieldless} without the three cost fields)")
         return
     med = sorted(x for _, x in implied)[len(implied) // 2]
+    if med <= 0:
+        yield (f"the cost window's arithmetic implies a median of {med:.2f} cores across "
+               f"{len(implied)} cell(s) - a loaded window cannot cost zero CPU, so at least one of the "
+               f"three fields is wrong on most of the board")
+        return
     off = [(name, v) for name, v in implied if abs(v - med) / med > TOLERANCE]
     if off:
         worst = sorted(off, key=lambda x: -abs(x[1] - med))[:4]
@@ -1442,6 +1512,56 @@ def check_the_cost_window_obeys_its_own_arithmetic():
                f" - three independently measured fields that cannot all be right"
                + (f" ({skipped} cell(s) excluded as uncheckable: under {UTIL_FLOOR:.0%} utilisation or "
                   f"under {MIN_WINDOW_REQUESTS} requests in the window)" if skipped else ""))
+
+
+def parse_rust_dialect_order(text):
+    """The engine's `Dialect::ALL`, as wire names in axis order, read out of ingress.rs: the variant list
+    of `pub const ALL` mapped through `as_str`'s match arms. None when either declaration is not in the
+    shape this expects, or a listed variant has no `as_str` arm - which the caller treats as drift,
+    never as agreement (the rule parse_rust_frontier_bounds and parse_rust_absences follow)."""
+    m = INGRESS_ALL_RE.search(text or "")
+    a = INGRESS_AS_STR_RE.search(text or "")
+    if not m or not a:
+        return None
+    names = dict(INGRESS_ARM_RE.findall(a.group(1)))
+    out = []
+    for tok in m.group(1).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if not tok.startswith("Dialect::") or tok[len("Dialect::"):] not in names:
+            return None  # not a plain variant with a wire name - the shape drifted, go blind
+        out.append(names[tok[len("Dialect::"):]])
+    return out or None
+
+
+def check_dialect_order_agrees_with_the_engine():
+    """`DIALECTS` here must be exactly the engine's `Dialect::ALL` order, by wire name.
+
+    The matrix in every definition.json is positional - six rows of six characters, axis order
+    `Dialect::ALL` both ways - so this list is the only thing that turns a '1' at (row, column) into a
+    cell NAME. A reordered engine axis with this copy left behind would not fail anything: every declared
+    cell would be named after the wrong dialects, and `check_declaration_matches_what_we_measured` would
+    intersect the wrong pairs with `untestable` and pass a gateway that both declares and disowns a cell.
+    Parse the sibling, fail on drift, and treat "cannot find the declaration" as drift.
+    """
+    p = os.path.join(HERE, INGRESS_RS_PATH)
+    try:
+        with open(p) as fh:
+            text = fh.read()
+    except OSError as e:
+        yield (f"dialect order: cannot read the engine's declaration at {INGRESS_RS_PATH} ({e}) - the "
+               f"python order is {DIALECTS}, and an unverifiable twin is not an agreeing one")
+        return
+    engine = parse_rust_dialect_order(text)
+    if engine is None:
+        yield (f"dialect order: {INGRESS_RS_PATH} no longer declares `pub const ALL: [Dialect; N] = "
+               f"[...];` with an `as_str` arm per variant where this can read it - the cross-check went "
+               f"blind, which is a drift, not a pass")
+        return
+    if engine != DIALECTS:
+        yield (f"dialect order: python DIALECTS={DIALECTS} but {INGRESS_RS_PATH} Dialect::ALL is "
+               f"{engine} - every definition.json matrix cell is being named after the wrong dialects")
 
 
 def check_every_declaration_is_readable():
@@ -1491,7 +1611,9 @@ def check_declaration_matches_what_we_measured(gw):
         print(f"  unreadable {gw} definition.json {p}: {e}", file=sys.stderr)
         UNREADABLE_DECLARATIONS[gw] = str(e)
         return
-    dialects = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"]
+    # The engine's axis order, cross-checked by `check_dialect_order_agrees_with_the_engine`. Cells
+    # beyond the sixth row/column are ignored exactly as `manifest::matrix_declared_capable` ignores them.
+    dialects = DIALECTS
     declared = set()
     for ri, row in enumerate(d.get("matrix") or []):
         for ci, ch in enumerate(row):
@@ -1503,10 +1625,17 @@ def check_declaration_matches_what_we_measured(gw):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    # The file header is a comment block, not a docstring, so `__doc__` is None and --help printed
+    # no description at all.
+    ap = argparse.ArgumentParser(
+        description="Every cross-metric invariant a published board must hold; exits non-zero on any "
+                    "violation.")
     ap.add_argument("--engine", help="audit the board produced by this engine (default: the newest)")
     ap.add_argument("--gateway", help="narrow to one gateway while investigating")
     args = ap.parse_args()
+    # Module state from a previous call in this process (a test, or a second main()) must not leak
+    # into this run's verdict: a stale entry here is a violation about a gateway this run never read.
+    UNREADABLE_DECLARATIONS.clear()
 
     # AN EMPTY BOARD IS A CLEAN SKIP; A BROKEN BOARD IS A FAILURE. With zero snapshot files on disk
     # nothing is published and there is nothing to lie, so exiting non-zero here only blocks CI on
@@ -1537,6 +1666,11 @@ def main():
     # mixed-engine for as long as the run takes.
     skipped = {}
     unreadable = {}
+    imap = _instrument_map()
+    # The newest file per gateway on disk, regardless of engine - the same last-in-sorted-order rule
+    # load() uses - so a gateway whose NEWER snapshot is on another instrument is named below even
+    # though an older same-instrument snapshot of it was audited.
+    newest_on_disk = {}
     for f in snapshot_paths():
         try:
             d = json.load(open(f))
@@ -1556,14 +1690,29 @@ def main():
             # results/snapshots/ is itself a defect worth someone's attention.
             base = os.path.basename(f)
             gw = base[len("result_"):].rsplit("_", 1)[0] if base.startswith("result_") else base
+            if args.gateway and gw != args.gateway:
+                continue
             unreadable[gw] = f"{base}: {e}"
             continue
-        gw = d.get("gateway")
-        sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
-        if not gw or (args.gateway and gw != args.gateway) or gw in snaps:
+        base = os.path.basename(f)
+        fname_gw = base[len("result_"):].rsplit("_", 1)[0] if base.startswith("result_") else base
+        gw = d.get("gateway") if isinstance(d, dict) else None
+        if not gw:
+            # Readable but unnamed: load() drops it, so without this it appeared in neither the
+            # audited set nor the NOT AUDITED list - the same vanishing act as an unparseable file.
+            if not args.gateway or fname_gw == args.gateway:
+                unreadable[fname_gw] = f"{base}: no `gateway` field, so it cannot be attributed"
             continue
-        if not _same_instrument(sha, engine, _instrument_map()):
-            skipped[gw] = sha[:7] or "no engine stamp"
+        if args.gateway and gw != args.gateway:
+            continue
+        sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
+        newest_on_disk[gw] = (f, sha)
+    for gw, (f, sha) in sorted(newest_on_disk.items()):
+        if gw in snaps and snaps[gw][0] == f:
+            continue
+        if not _same_instrument(sha, engine, imap):
+            stamp = sha[:7] or "no engine stamp"
+            skipped[gw] = (f"{stamp}, newer than the audited snapshot" if gw in snaps else stamp)
 
     violations = collections.defaultdict(list)
     cells = 0
@@ -1583,8 +1732,17 @@ def main():
     # hide that the strongest check in the file is not actually running yet.
     preok_cells = 0
     preok_gws = []
+    # WHICH DECLARED FIELDS THIS ENGINE SERIALIZES, POOLED ACROSS THE WHOLE AUDITED BOARD. Every snapshot
+    # in `snaps` was written by one instrument (load() pins it), so a field ANY of them carries is one
+    # the producer knew. Scoped per gateway, as this used to be, a serializer that dropped a field on
+    # EVERY cell of one gateway made that gateway's own `known` omit it - and the drop was forgiven as
+    # "predates the field" and printed only as NOT AUDITED, while the gateway beside it, same engine,
+    # proved the field was being written.
+    known = {b: set() for b in ABSENCE_CARRYING_FIELDS}
+    for _gw, (_path, d, _sha) in snaps.items():
+        for block, fs in fields_the_producer_knew(d).items():
+            known[block] |= fs
     for gw, (_path, d, _sha) in sorted(snaps.items()):
-        known = fields_the_producer_knew(d)
         frontier_known = producer_knew_the_frontier(d)
         if not frontier_known:
             prefrontier_gws.append(gw)
@@ -1621,17 +1779,20 @@ def main():
         )
 
     # BOARD-LEVEL, NOT PER-CELL. Each of these is a property of this file's agreement with a sibling in
-    # another language (the site's C6 bar, record.rs's absence field lists, frontier.rs's declared
-    # bounds), or of which of this run's inputs could be read at all - never of any one cell's numbers.
+    # another language (record.rs's absence field lists, frontier.rs's declared bounds, ingress.rs's
+    # dialect order), of which of this run's inputs could be read at all, or of the cost window's
+    # arithmetic across the audited board - never of any one cell's numbers.
     # They run AFTER the per-gateway loop because `check_every_declaration_is_readable` reports what that
     # loop populated.
     board_checks = (
                     check_absence_fields_mirror_the_engine,
                     check_frontier_bounds_agree_with_the_engine,
+                    check_dialect_order_agrees_with_the_engine,
                     check_every_declaration_is_readable,
                     check_the_cost_window_obeys_its_own_arithmetic)
     for check in board_checks:
-        for v in check():
+        kw = {"snaps": snaps} if check is check_the_cost_window_obeys_its_own_arithmetic else {}
+        for v in check(**kw):
             violations[check.__name__].append(v)
 
     print(f"engine {engine[:7]}  {len(snaps)} gateways  {cells} served cells")
@@ -1645,9 +1806,9 @@ def main():
         n = len(unknown_fields)
         every = sorted({f for fs in unknown_fields.values() for f in fs})
         print(f"NOT AUDITED: {n} snapshot(s) predate {len(every)} declared field(s): {', '.join(every)}")
-        print("  No cell in those snapshots carries them, so the engine that wrote them did not have")
-        print("  them yet and this run could not check them. They are checked the moment a snapshot")
-        print("  from an engine that DOES publish them lands - re-measure to audit them.")
+        print("  No cell in ANY audited snapshot carries them, so the engine that wrote this board did")
+        print("  not have them yet and this run could not check them. They are checked the moment a")
+        print("  snapshot from an engine that DOES publish them lands - re-measure to audit them.")
     if prefrontier_cells:
         print(f"NOT AUDITED: the frontier on {prefrontier_cells} served cell(s) across "
               f"{len(prefrontier_gws)} snapshot(s) that predate it: {', '.join(prefrontier_gws)}")
@@ -1672,8 +1833,9 @@ def main():
         print("  `ok > 0` half exactly, so it treated a positive rate or a p99 as proof that the window")
         print("  completed something - wider than the engine's rule, so a missed catch rather than a")
         print("  false alarm. An engine that publishes `ok` makes these exact; nothing here is skipped.")
+    # +1 board-level: the unreadable-snapshot violation recorded above is an invariant too.
     print(f"{len(CELL_CHECKS)} per-cell invariants ({len(FRONTIER_CHECKS)} of them the frontier's) + 1 "
-          f"per-gateway + {len(board_checks)} board-level invariants\n")
+          f"per-gateway + {len(board_checks) + 1} board-level invariants\n")
 
     if not violations:
         print("PASS: every invariant held.")

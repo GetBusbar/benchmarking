@@ -451,6 +451,8 @@ tbody tr { cursor: pointer; }
 .matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
 .matrix-legend .lg-unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
 .matrix-legend .lg-untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
+.matrix-legend .lg-unprobed { background: var(--grey); }
+.matrix-legend .lg-failed { background: var(--red); }
 .matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
@@ -584,12 +586,14 @@ td.failcell {
    line of 0.76rem text run to 1440px is not a sentence anyone reads.
    The bound must be legible as WORDS and not only as a highlighted button: the defect this whole surface
    exists to prevent is a reader inferring a bar the test never enforced. */
-/* Explicitly the THIRD row, so it sits BELOW both axes rather than between them. In DOM order it belongs to
-   the bound axis (it explains the bound), but auto-placed it split the two axis rows apart and they stopped
-   reading as a pair - which is the one thing this block exists to make legible. Explicit placement does not
-   advance the auto cursor, so the cell axis still lands on row 2, and when the bound axis is hidden this
-   element is hidden with it and the row simply does not exist. */
-.filters .fnote { grid-column: 2; grid-row: 3; font-size: .76rem; max-width: 46rem; margin: 0; }
+/* IN THE CONTROLS COLUMN, ON THE ROW AFTER ITS OWN AXIS - not pinned to a fixed row.
+   This was `grid-row: 3`, correct while exactly ONE axis had a sentence: it put the note below both axes
+   so they read as a pair. A second axis with a sentence (concurrency) then landed in the SAME cell and the
+   two rendered on top of each other, illegibly - a hardcoded row cannot hold more than one occupant.
+   Column 2 keeps every sentence starting at its chips' left edge; the row is left to auto-placement so
+   each note follows the axis it explains, which is also what makes it obvious WHICH control it describes
+   once there is more than one. A hidden axis still takes its own note with it. */
+.filters .fnote { grid-column: 2; font-size: .76rem; max-width: 46rem; margin: 0; }
 .filters .fnote:empty { display: none; }
 /* CONSISTENT CHIP GEOMETRY WITHIN AN AXIS. "1 ms" and "no bound" are the same kind of choice, so they are
    the same size of target; six chips of six different widths was the other half of "ugly". Centred, because
@@ -819,7 +823,7 @@ td.memcurve.na { color: var(--fg-mute); }
   padding: 0 .35rem;
   border-radius: 3px;
   font: 500 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--muted, #6b7280);
+  color: var(--fg-mute);
   background: rgba(127, 127, 127, .12);
   vertical-align: baseline;
 }
@@ -856,3 +860,10 @@ tbody tr.tied-above > td {
 .chart-metric select { margin-left: .4rem; padding: .25rem .4rem; font: inherit; }
 #chart-panel canvas { width: 100%; height: auto; max-width: 900px; }
 #chart-note { margin-top: .6rem; font-size: .82rem; line-height: 1.5; }
+
+/* Visually hidden, still read by screen readers: the data tables behind the canvas charts (app.js
+   chartDataTable). Takes no space and draws nothing, so the page looks exactly as it did. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}

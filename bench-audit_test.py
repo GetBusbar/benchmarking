@@ -21,6 +21,7 @@
 #   python3 bench-audit_test.py
 import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -163,11 +164,27 @@ REJECTS = [
                 sustained=None, absence_detail="the stepped-down rung failed its first window"),
      "a search that published nothing but stopped at c=15 having already carried c=8, probing "
      "nothing in between - plano anthropic>anthropic"),
+    # The same give-up AFTER A REAL BISECTION. The budget exemption used to count every distinct
+    # concurrency above the clean prefix - the ascending failure and all six bisection probes - as
+    # spent step-downs, so this read as "budget exhausted" and the check exempted itself. Only ONE
+    # step-down (c=68) was taken after c=73's confirmation failed.
+    (audit.check_search_spent_its_budget,
+     trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16), rung(32), rung(64),
+                 rung(128, passed=False), rung(96, passed=False), rung(80, passed=False), rung(72),
+                 rung(76, passed=False), rung(74, passed=False), rung(73),
+                 rung(73, passed=False), rung(73, passed=False), rung(68, passed=False)],
+                sustained=None, absence_detail="the stepped-down rung failed its first window"),
+     "a search that gave up after ONE step-down, its bisection probes miscounted as spent budget"),
     (audit.check_no_rung_fails_below_one_already_carried,
      trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16, passed=False), rung(6, passed=False)],
                 sustained=None, absence_detail="it did not hold on re-measurement"),
      "a rung failing BELOW one the same cell already carried, with the absence naming nothing else "
      "that changed - impossible for the gateway alone"),
+    # 'rig' is a WORD: "original" names nothing that changed, so it must not excuse the signature.
+    (audit.check_no_rung_fails_below_one_already_carried,
+     trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16, passed=False), rung(6, passed=False)],
+                sustained=None, absence_detail="the original ceiling did not hold on re-measurement"),
+     "an impossible failure excused by the substring 'rig' inside the word 'original'"),
     (audit.check_published_rung_held_a_majority,
      trace_cell([rung(1), rung(2), rung(4), rung(4, passed=False), rung(4, passed=False)], sustained=4),
      "a published rung that LOST its own windows - the summary disagreeing with its evidence"),
@@ -213,6 +230,10 @@ REJECTS = [
     (audit.check_frontier_is_rederivable_from_its_sweep,
      cell(perf__frontier=frontier_with(2, rps=3_037)),  # +37 off the 3,000 its qualifying rungs carry
      "a reading whose rate its own rungs do not carry"),
+    # A clean rung (ok > 0, fail 0) with NO rate: reported, not a TypeError out of max().
+    (audit.check_frontier_is_rederivable_from_its_sweep,
+     cell(perf__sweep_max_proxy=[dict(r, rps=None) if r["conc"] == 8 else r for r in _BASE_RUNGS]),
+     "a qualifying rung that publishes no rate"),
     (audit.check_frontier_disclosure_agrees_with_the_ladder,
      cell(perf__frontier=frontier_with(5, lower_bound=False)),  # winner IS the top rung; flipped false
      "lower_bound flipped false at the reading whose winner IS the top of the ladder"),
@@ -247,6 +268,238 @@ def isolated(failures, section):
         yield
     except Exception as e:  # noqa: BLE001 - a check raising IS the finding, not a bug in the test
         failures.append(f"[{section}] RAISED instead of completing: {e!r} - isolated, run continues")
+
+
+# ── main()-level fixtures: a whole board in a temp tree ───────────────────────────────────────────
+#
+# Several gates are properties of main()'s WIRING (which snapshots it audits, what it pools, what it
+# names as NOT AUDITED), not of any one check function, so they are proven by running main() over a
+# fabricated board. The tree carries copies of the real engine sources the drift gates read, so those
+# gates stay quiet unless a test deliberately perturbs one - every assertion below is about one
+# specific line of output, never about the bare exit code, which any unrelated violation would flip.
+ENGINE_SHA = "abc123def4567890abc123def4567890abc1234"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+ENGINE_SOURCES = ("record.rs", "frontier.rs", "ingress.rs")
+
+
+def snapshot(gw, cells, sha=ENGINE_SHA, measured_at="2026-07-29T00:00:00Z"):
+    return {"gateway": gw, "measured_at": measured_at, "rig": {"engine": {"commit": sha}},
+            "matrix": {"upstreams": {"openai": {"cells": cells}}}}
+
+
+def run_main(files, argv=(), engine_overrides=None, definitions=None):
+    """main() over a temp tree holding `files` ({filename: doc-or-raw-text}) as its snapshots.
+    Returns (exit code, stdout + stderr). Restores every piece of module state it touches."""
+    old_here, old_argv = audit.HERE, sys.argv
+    with tempfile.TemporaryDirectory() as tmp:
+        snapdir = os.path.join(tmp, "results", "snapshots")
+        srcdir = os.path.join(tmp, "engine", "src")
+        os.makedirs(snapdir)
+        os.makedirs(srcdir)
+        for src in ENGINE_SOURCES:
+            with open(os.path.join(HERE, "engine", "src", src)) as fh:
+                text = fh.read()
+            text = (engine_overrides or {}).get(src, lambda t: t)(text)
+            with open(os.path.join(srcdir, src), "w") as fh:
+                fh.write(text)
+        for gw, doc in (definitions or {}).items():
+            os.makedirs(os.path.join(tmp, "gateways", gw))
+            with open(os.path.join(tmp, "gateways", gw, "definition.json"), "w") as fh:
+                json.dump(doc, fh)
+        for name, doc in files.items():
+            with open(os.path.join(snapdir, name), "w") as fh:
+                fh.write(doc if isinstance(doc, str) else json.dumps(doc))
+        out = io.StringIO()
+        try:
+            audit.HERE = tmp
+            sys.argv = ["bench-audit.py", *argv]
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = audit.main()
+        finally:
+            audit.HERE, sys.argv = old_here, old_argv
+            audit.UNREADABLE_DECLARATIONS.clear()
+    return rc, out.getvalue()
+
+
+def cost_cell(cpu, rps=1_000, util=0.5, ok=4_000):
+    c = cell(memory={})
+    c["perf"].update({"cpu_us_per_request": cpu, "cost_window_rps": rps,
+                      "cost_core_utilisation": util, "cost_window_ok": ok})
+    return c
+
+
+def board_level_tests(failures):
+    # ── the budget exemption still lets a search that really spent it go ────────────────────────────
+    with isolated(failures, "check_search_spent_its_budget accepts a fully-spent step-down budget"):
+        # plano anthropic>anthropic, 2026-08-01: bisected to c=224, confirmation failed, four
+        # step-downs 176 -> 152 -> 140 -> 134, exactly MAX_CEILING_STEPDOWNS.
+        spent = trace_cell([rung(1), rung(2), rung(4), rung(8), rung(16), rung(32), rung(64), rung(128),
+                            rung(256, passed=False), rung(192), rung(224), rung(240, passed=False),
+                            rung(232, passed=False), rung(228, passed=False), rung(226, passed=False),
+                            rung(225, passed=False), rung(224, passed=False), rung(224, passed=False),
+                            rung(176, passed=False), rung(152, passed=False), rung(140, passed=False),
+                            rung(134, passed=False)],
+                           sustained=None, absence_detail="budget exhausted")
+        got = list(audit.check_search_spent_its_budget("t", spent))
+        if got:
+            failures.append(f"check_search_spent_its_budget flagged a search that spent all four "
+                            f"step-downs: {got}")
+
+    # ── parse_rust_absences does not wander into the next struct's impl ─────────────────────────────
+    with isolated(failures, "parse_rust_absences stays inside its own impl"):
+        text = ("impl CellPerf {\n    fn absences(&self) {}\n}\n"
+                "impl CellStream {\n    fn absences(&self) { absences_of!(self, a, b) }\n}\n")
+        got = audit.parse_rust_absences(text, "CellPerf")
+        if got is not None:
+            failures.append(f"parse_rust_absences returned CellStream's list {got!r} for a CellPerf impl "
+                            f"that no longer calls the macro - it must go blind (None) instead")
+
+    # ── C0: `known` is pooled across one engine's gateways, not scoped per gateway ──────────────────
+    #
+    # gw-a carries stream.streams_sustained_fps on every cell; gw-b - SAME engine commit - drops it on
+    # every cell. Scoped per gateway, gw-b's own `known` lacked the field, so the drop was forgiven as
+    # "predates the field" and printed only as NOT AUDITED. gw-a proves the producer wrote it.
+    with isolated(failures, "C0: declared-field gate pooled across one engine's gateways"):
+        a = cell(memory={}, stream__streams_sustained_fps=128.0)
+        b = cell(memory={})
+        _rc, out = run_main({"result_gw-a_2026-07-29T00-00-00Z.json": snapshot("gw-a", {"openai": a}),
+                             "result_gw-b_2026-07-29T00-00-00Z.json": snapshot("gw-b", {"openai": b})})
+        if "gw-b openai>openai: stream.streams_sustained_fps is OMITTED" not in out:
+            failures.append("main() did not report gw-b dropping stream.streams_sustained_fps while gw-a, "
+                            "on the SAME engine, carries it - the declared-field gate is scoped per "
+                            "gateway and cannot fail for a whole-gateway drop:\n" + out)
+        # Accept side: both carry it, so nothing about that field may fire.
+        _rc, out = run_main({"result_gw-a_2026-07-29T00-00-00Z.json": snapshot("gw-a", {"openai": a}),
+                             "result_gw-b_2026-07-29T00-00-00Z.json": snapshot("gw-b", {"openai": a})})
+        if "streams_sustained_fps is OMITTED" in out:
+            failures.append("main() flagged streams_sustained_fps although every gateway carries it")
+
+    # ── main() starts from clean module state ───────────────────────────────────────────────────────
+    with isolated(failures, "main() does not report a stale UNREADABLE_DECLARATIONS entry"):
+        audit.UNREADABLE_DECLARATIONS["ghost-gateway"] = "left over from an earlier call"
+        _rc, out = run_main({"result_gw-a_2026-07-29T00-00-00Z.json":
+                             snapshot("gw-a", {"openai": cell(memory={})})})
+        if "ghost-gateway" in out:
+            failures.append("main() reported a declaration it never read this run - module state leaked "
+                            "from an earlier call into its verdict")
+
+    # ── C1: the matrix's dialect axis is cross-checked against the engine's Dialect::ALL ─────────────
+    #
+    # RED is a REORDERED engine axis with the engine source PRESENT (an earlier design passed because
+    # its fixture had no engine source at all, i.e. for the missing-file reason). Anthropic moves to
+    # position 0, so a definition declaring (0,0) and marking anthropic/anthropic untestable is a real
+    # declared+untestable collision that the hardcoded python order names "openai/openai" and misses.
+    def anthropic_first(text):
+        head, sep, rest = text.partition("pub const ALL: [Dialect; 6] = [")
+        body, end, tail = rest.partition("];")
+        if not sep or "Dialect::Anthropic," not in body:
+            raise AssertionError("ingress.rs no longer has the Dialect::ALL shape this fixture edits")
+        body = body.replace("        Dialect::Anthropic,\n", "")
+        body = body.replace("        Dialect::Openai,\n", "        Dialect::Anthropic,\n        Dialect::Openai,\n", 1)
+        return head + sep + body + end + tail
+
+    with isolated(failures, "C1: a reordered engine dialect axis is caught"):
+        defs = {"gw-a": {"matrix": ["100000", "000000", "000000", "000000", "000000", "000000"],
+                         "untestable": ["anthropic/anthropic"]}}
+        board = {"result_gw-a_2026-07-29T00-00-00Z.json": snapshot("gw-a", {"openai": cell(memory={})})}
+        _rc, out = run_main(board, engine_overrides={"ingress.rs": anthropic_first}, definitions=defs)
+        if "dialect order: python DIALECTS=" not in out or "Dialect::ALL is ['anthropic'," not in out:
+            failures.append("main() was silent about the engine's Dialect::ALL putting anthropic first - "
+                            "every definition.json matrix cell is being named after the wrong dialect:\n"
+                            + out)
+        # Accept side: the real ingress.rs agrees with the python order.
+        _rc, out = run_main(board, definitions=defs)
+        if "dialect order:" in out:
+            failures.append(f"the dialect-order gate fired against the engine's real ingress.rs:\n{out}")
+        # Blind is drift: an unparseable declaration must not read as agreement.
+        _rc, out = run_main(board, engine_overrides={"ingress.rs": lambda t: t.replace("pub const ALL", "const ALL")})
+        if "dialect order:" not in out or "went blind" not in out:
+            failures.append("an ingress.rs whose Dialect::ALL cannot be parsed read as agreement")
+
+    # ── the cost window audits the AUDITED board, not every engine on disk ───────────────────────────
+    with isolated(failures, "cost-window arithmetic is pinned to the audited engine"):
+        fine = {f"i{i}": cost_cell(cpu=1_000) for i in range(3)}      # 1000*1000/1e6/0.5 = 2.0 cores
+        wild = {"openai": cost_cell(cpu=9_000)}                        # 18 cores, on ANOTHER engine
+        board = {"result_gw-a_2026-07-29T00-00-00Z.json": snapshot("gw-a", fine),
+                 "result_gw-z_2026-07-29T00-00-00Z.json": snapshot("gw-z", wild, sha=OTHER_SHA,
+                                                                   measured_at="2026-07-01T00:00:00Z")}
+        _rc, out = run_main(board, argv=["--engine", ENGINE_SHA[:7]])
+        if "the cost window's own arithmetic disagrees" in out:
+            failures.append("the cost-window check failed engine abc123d's board on a gateway measured by "
+                            "a different engine, one main() reports as NOT AUDITED:\n" + out)
+        # Still able to fail on its own board.
+        board["result_gw-a_2026-07-29T00-00-00Z.json"] = snapshot(
+            "gw-a", dict(fine, bad=cost_cell(cpu=9_000)) | {"i3": cost_cell(cpu=1_000)})
+        _rc, out = run_main(board, argv=["--engine", ENGINE_SHA[:7]])
+        if "the cost window's own arithmetic disagrees on 1 of 5" not in out:
+            failures.append("the cost-window check no longer fires on its own board:\n" + out)
+        # Fewer than two checkable cells is disclosed, not a silent pass.
+        _rc, out = run_main({"result_gw-a_2026-07-29T00-00-00Z.json":
+                             snapshot("gw-a", {"openai": cost_cell(cpu=1_000)})})
+        if "NOT AUDITED: the cost window's arithmetic" not in out:
+            failures.append("a cost-window check with one checkable cell passed in silence")
+        # A median of zero is a violation, not a ZeroDivisionError.
+        got = list(audit.check_the_cost_window_obeys_its_own_arithmetic(
+            {"gw-a": ("f", snapshot("gw-a", {f"i{i}": cost_cell(cpu=0) for i in range(3)}), ENGINE_SHA)}))
+        if not any("median of 0.00 cores" in g for g in got):
+            failures.append(f"a board whose cost windows all imply 0 cores was not reported: {got!r}")
+
+    # ── NOT AUDITED names a gateway whose NEWER snapshot is on another engine ────────────────────────
+    with isolated(failures, "NOT AUDITED names a newer other-engine snapshot of an audited gateway"):
+        board = {"result_gw-a_2026-07-29T00-00-00Z.json": snapshot("gw-a", {"openai": cell(memory={})}),
+                 "result_gw-a_2026-08-01T00-00-00Z.json": snapshot("gw-a", {"openai": cell(memory={})},
+                                                                   sha=OTHER_SHA,
+                                                                   measured_at="2026-08-01T00:00:00Z")}
+        _rc, out = run_main(board, argv=["--engine", ENGINE_SHA[:7]])
+        if "gw-a (engine fedcba9, newer than the audited snapshot)" not in out:
+            failures.append("gw-a's newer snapshot on engine fedcba9 was neither audited nor named as NOT "
+                            "AUDITED - the run reported an older snapshot as the gateway:\n" + out)
+
+    # ── unreadable / unattributable snapshots ───────────────────────────────────────────────────────
+    with isolated(failures, "unreadable snapshots respect --gateway; unnamed ones are reported"):
+        board = {"result_gw-a_2026-07-29T00-00-00Z.json": snapshot("gw-a", {"openai": cell(memory={})}),
+                 "result_gw-b_2026-07-29T00-00-00Z.json": "{truncated"}
+        _rc, out = run_main(board, argv=["--gateway", "gw-a"])
+        if "gw-b: snapshot could not be parsed" in out:
+            failures.append("--gateway gw-a still failed the run on gw-b's unreadable snapshot")
+        _rc, out = run_main(board)
+        if "gw-b: snapshot could not be parsed" not in out:
+            failures.append("an unreadable snapshot was not reported without --gateway")
+        unnamed = snapshot("gw-c", {"openai": cell(memory={})})
+        del unnamed["gateway"]
+        board["result_gw-c_2026-07-29T00-00-00Z.json"] = unnamed
+        _rc, out = run_main(board)
+        if "gw-c: snapshot could not be parsed" not in out or "no `gateway` field" not in out:
+            failures.append("a readable snapshot with no `gateway` field vanished from both the audited "
+                            "set and the NOT AUDITED list:\n" + out)
+
+    # ── newest_engine: an unstamped snapshot does not outrank stamped ones ──────────────────────────
+    with isolated(failures, "newest_engine prefers a real measured_at over a file mtime"):
+        stamped = snapshot("gw-a", {"openai": cell(memory={})})
+        unstamped = snapshot("gw-b", {"openai": cell(memory={})}, sha=OTHER_SHA)
+        del unstamped["measured_at"]          # its mtime (now) is newer than 2026-07-29
+        _rc, out = run_main({"result_gw-a_2026-07-29T00-00-00Z.json": stamped,
+                             "result_gw-b_2026-07-29T00-00-00Z.json": unstamped})
+        if not any(ln.startswith("engine abc123d ") for ln in out.splitlines()):
+            failures.append("an unstamped snapshot's checkout-time mtime outranked a real measured_at "
+                            "and chose the audited engine:\n" + out)
+
+    # ── a corrupt instrument-equivalence.json is said out loud ──────────────────────────────────────
+    with isolated(failures, "a corrupt instrument-equivalence.json is reported"):
+        old_here = audit.HERE
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "site"))
+            with open(os.path.join(tmp, "site", "instrument-equivalence.json"), "w") as fh:
+                fh.write("{not json")
+            err = io.StringIO()
+            try:
+                audit.HERE = tmp
+                with contextlib.redirect_stderr(err):
+                    got = audit._instrument_map()
+            finally:
+                audit.HERE = old_here
+        if got != {} or "unreadable" not in err.getvalue():
+            failures.append(f"a corrupt instrument-equivalence.json was swallowed silently ({got!r})")
 
 
 def main():
@@ -875,8 +1128,17 @@ def main():
                 failures.append(
                     f"check_declaration_matches_what_we_measured must not fabricate violations for "
                     f"an unreadable definition.json, got {fired!r}")
+            if "broken" not in audit.UNREADABLE_DECLARATIONS:
+                failures.append("an unreadable definition.json was not recorded for "
+                                "check_every_declaration_is_readable - it vanished silently")
         finally:
             audit.HERE = old_here
+            # The check records into a MODULE GLOBAL. Left populated, every later main() in this
+            # process exits 1 on 'broken' regardless of what it was handed - which is how a test of
+            # an unrelated gate once passed for the wrong reason.
+            audit.UNREADABLE_DECLARATIONS.clear()
+
+    board_level_tests(failures)
 
     for f in failures:
         print(f"FAIL: {f}")

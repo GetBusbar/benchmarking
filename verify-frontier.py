@@ -20,28 +20,33 @@
 # one reading with no latency bound at all. Monotone non-decreasing across the bounds, because
 # relaxing a bound only ADDS rungs to the set the maximum is taken over.
 #
-# WHERE THIS IS DELIBERATELY LESS PRECISE THAN THE ENGINE, and why that is safe: a published
-# `SweepPoint` carries no `ok` count, so "served cleanly" cannot be spelled `ok > 0 and fail == 0` as
-# the engine spells it. It is approximated as `rps > 0 and fail == 0`. The approximation can only ever
-# be WIDER than the engine's (a window with ok == 0 also has rps == 0), so a reading this file accepts
-# and the engine rejected would be reported here as a disagreement to investigate, never hidden.
+# WHERE THIS IS LESS PRECISE THAN THE ENGINE, and why that is safe: `SweepPoint` publishes `ok` now,
+# and where a rung carries it "served cleanly" is spelled exactly as the engine spells it, `ok > 0 and
+# fail == 0`. Snapshots measured before the field existed have no `ok`, and there it is approximated
+# (see `clean`). The approximation can only ever be WIDER than the engine's, so a reading this file
+# accepts and the engine rejected would be reported here as a disagreement to investigate, never hidden.
 
 import glob
 import os
 import json
 import sys
 
+# Every path is anchored to this file, not the caller's cwd (bench-audit.py's ledger TOOL-03): run
+# from anywhere but the repo root, a cwd-relative glob found nothing and the tool printed PASS.
+HERE = os.path.dirname(os.path.abspath(__file__))
+
 # Mirrors frontier::P99_BOUNDS_US. Parsed from the engine rather than hardcoded, so this cannot
 # quietly police a different axis than the one that ran - the same anti-drift reasoning bench-audit.py
 # uses for its own mirrors, and going blind counts as a failure rather than a pass.
-ENGINE_FRONTIER = "engine/src/frontier.rs"
+ENGINE_FRONTIER = os.path.join(HERE, "engine", "src", "frontier.rs")
 
 
 def declared_bounds_us():
     import re
 
     try:
-        src = open(ENGINE_FRONTIER).read()
+        with open(ENGINE_FRONTIER) as fh:
+            src = fh.read()
     except OSError as e:
         raise SystemExit(f"cannot read {ENGINE_FRONTIER} to learn the declared bounds: {e}")
     m = re.search(r"pub const P99_BOUNDS_US:\s*\[u64;\s*\d+\]\s*=\s*\[([^\]]+)\]", src)
@@ -62,10 +67,11 @@ def _rate(v):
 
 
 def num(v):
-    """A published Measurement is either a bare number or null. Absence is None, never 0."""
+    """A published Measurement is either a bare number or null. Absence is None, never 0. A JSON bool
+    is not a number (Python's `True` is an int, and would otherwise read as 1)."""
     if isinstance(v, dict):
         v = v.get("value")
-    return v if isinstance(v, (int, float)) else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 def rungs_of(perf):
@@ -74,6 +80,7 @@ def rungs_of(perf):
         out.append(
             {
                 "conc": num(p.get("conc")),
+                "ok": num(p.get("ok")),
                 "rps": num(p.get("rps")),
                 "p99_us": num(p.get("p99_us")),
                 "fail": num(p.get("fail")),
@@ -83,7 +90,8 @@ def rungs_of(perf):
 
 
 def clean(r):
-    """Did this rung serve everything it accepted? Approximates the engine's `ok > 0 and fail == 0`.
+    """Did this rung serve everything it accepted? The engine's `ok > 0 and fail == 0` - EXACT when the
+    rung publishes `ok`, approximated (below) on a snapshot that predates the field.
 
     A P99 COUNTS AS PROOF OF COMPLETION. `rps > 0` alone was wrong, and it cost a real catch: plano at
     c=256 published `rps: 0, p99_us: 3398432, fail: 0`, which `rps > 0` reads as dirty - but a percentile
@@ -91,12 +99,13 @@ def clean(r):
     the engine's `as i64` (one request over four seconds is 0.25 rps). Treating it as dirty makes this
     tool disagree with a correct engine.
 
-    `ok` is the one input `SweepPoint` does not publish, so this stays an approximation - but a wider one
-    than the engine's rule rather than a narrower one, which means its residual error is a missed catch
-    rather than a false alarm.
+    Without `ok` this stays an approximation - but a wider one than the engine's rule rather than a
+    narrower one, which means its residual error is a missed catch rather than a false alarm.
     """
     if r["fail"] != 0:
         return False
+    if r["ok"] is not None:
+        return r["ok"] > 0
     return (r["rps"] is not None and r["rps"] > 0) or r["p99_us"] is not None
 
 
@@ -151,10 +160,11 @@ def derive(rungs, bound_us):
 def check(path, bounds_us, verbose):
     d = json.load(open(path))
     gw = d.get("gateway", "?")
-    eng = ((d.get("rig") or {}).get("engine") or {}).get("commit", "?")[:7]
+    eng = (((d.get("rig") or {}).get("engine") or {}).get("commit") or "?")[:7]
     problems = []
     cells = 0
     curves = []
+    frontierless = []
     for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():
         for ing, cell in (up.get("cells") or {}).items():
             if cell.get("served") is not True:
@@ -164,9 +174,23 @@ def check(path, bounds_us, verbose):
             at = f"{gw} {ing}>{eg}"
             if not fr:
                 # A cell with no frontier is only honest if NO cell in this snapshot has one (the
-                # artifact predates the metric). Mixed is a dropped reading.
+                # artifact predates the metric), or if the engine WITHHELD it and said so (egress
+                # re-verification proved the gateway did not translate). Mixed is a dropped reading -
+                # judged after the walk, once we know whether any cell here carries one.
+                if perf.get("egress_reverified") is not False:
+                    frontierless.append(at)
                 continue
             cells += 1
+            if perf.get("sweep_max_proxy_interrupted") is True:
+                # An interrupted rig supplies partial observations, not a finished
+                # boundary. It must withhold every headline and explain the absence.
+                if any(r.get(k) is not None for r in fr for k in ["rps", "concurrency", "p99_us", "first_disqualified_conc"]):
+                    problems.append(f"{at}: interrupted sweep publishes a completed frontier reading")
+                if any(r.get("lower_bound") is not False for r in fr):
+                    problems.append(f"{at}: interrupted sweep claims a lower-bound result")
+                if [r.get("p99_bound_us") for r in fr] != list(bounds_us) + [None]:
+                    problems.append(f"{at}: interrupted sweep dropped declared frontier bounds")
+                continue
             rungs = rungs_of(perf)
             if not rungs:
                 problems.append(f"{at}: publishes a frontier but no sweep - nothing can be re-derived")
@@ -223,8 +247,19 @@ def check(path, bounds_us, verbose):
                         f"{at} {label}: first_disqualified_conc={pub_disq}, re-derived {mine['disq']}"
                         " - this is the half of the reading's proof that says it really is the boundary"
                     )
-                if b is not None and mine["p99_us"] is not None and mine["p99_us"] >= b:
-                    problems.append(f"{at} {label}: winning rung's tail {mine['p99_us']}us is not under its own bound")
+                # THE PUBLISHED TAIL, not the re-derived one: the re-derived winner qualified, so its own
+                # p99 is under the bound by construction and testing it could never fire. What can be
+                # wrong is the reading's `p99_us` - it must be the tail a qualifying rung at the
+                # published concurrency, carrying the winning rate, actually measured (a set, because a
+                # concurrency appears once per window).
+                pub_p99 = num(r.get("p99_us"))
+                tails = {w["p99_us"] for w in rungs
+                         if w["conc"] == mine["conc"] and w["rps"] == mine["rps"] and qualifies(w, b)}
+                if pub_p99 not in tails:
+                    problems.append(f"{at} {label}: published p99 {pub_p99}us, but the winning rung(s) at "
+                                    f"c={mine['conc']} measured {sorted(t for t in tails if t is not None)}")
+                if b is not None and (pub_p99 is None or pub_p99 >= b):
+                    problems.append(f"{at} {label}: published tail {pub_p99}us is not under its own bound")
             present = [x for x in rates if x is not None]
             for a, bb in zip(present, present[1:]):
                 if bb < a:
@@ -232,6 +267,10 @@ def check(path, bounds_us, verbose):
                     break
             spread = (max(present) / min(present)) if present and min(present) else None
             curves.append((at, row, spread, max((r["conc"] for r in rungs), default=0), len(rungs)))
+    if cells and frontierless:
+        for at in frontierless:
+            problems.append(f"{at}: served cell publishes NO frontier while {cells} other cell(s) in the "
+                            f"same snapshot do - a dropped reading, not one never measured")
     if verbose:
         for at, row, spread, top, nrungs in curves:
             print(f"\n--- {at}   ({nrungs} rungs, top c={top}"
@@ -244,8 +283,12 @@ def check(path, bounds_us, verbose):
 
 
 def equivalent_instrument(engines):
-    """True when every engine seen is attested to the SAME built binary in instrument-equivalence.json."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site", "instrument-equivalence.json")
+    """True when every engine seen is attested to the SAME built binary in instrument-equivalence.json.
+
+    Honoured only with the artifact evidence the file itself demands - an `otb_release_sha256` per
+    commit, all equal - the same rule bench-audit.py's `_instrument_map` applies. A group listing
+    commits with no hashes behind them proves nothing."""
+    path = os.path.join(HERE, "site", "instrument-equivalence.json")
     try:
         with open(path) as f:
             doc = json.load(f)
@@ -255,6 +298,9 @@ def equivalent_instrument(engines):
     for grp in (groups.values() if isinstance(groups, dict) else groups):
         commits = grp.get("commits") if isinstance(grp, dict) else None
         if not commits:
+            continue
+        hashes = list((((grp.get("evidence") or {}).get("otb_release_sha256")) or {}).values())
+        if len(hashes) < len(commits) or len(set(hashes)) != 1:
             continue
         short = {c[:7] for c in commits}
         if all(e[:7] in short for e in engines):
@@ -276,38 +322,49 @@ def published_paths():
     Superseded files are not deleted and not silently skipped - the count is printed, and any path
     passed explicitly on the command line is still checked, so the old run stays auditable on demand.
     """
-    board = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site", "data.json")
-    every = sorted(glob.glob("results/snapshots/*.json"))
+    board = os.path.join(HERE, "site", "data.json")
+    every = sorted(glob.glob(os.path.join(HERE, "results", "snapshots", "*.json")))
     try:
         with open(board) as f:
             want = {os.path.basename(g["snapshot_file"])
                     for g in json.load(f).get("gateways", []) if g.get("snapshot_file")}
     except Exception:
-        return every
+        return every, []
     if not want:
-        return every
+        return every, []
     keep = [p for p in every if os.path.basename(p) in want]
+    # A snapshot the board publishes that is not on disk cannot be re-derived by anyone - named, and a
+    # FAIL, rather than dropped from the count.
+    missing = sorted(want - {os.path.basename(p) for p in every})
     skipped = len(every) - len(keep)
     if skipped:
         print(f"checking the {len(keep)} snapshot(s) the board publishes "
               f"({skipped} superseded file(s) on disk not checked - pass a path to check one)")
-    return keep
+    return keep, missing
 
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     verbose = "-v" in sys.argv or "--verbose" in sys.argv
-    paths = args or published_paths()
+    missing = []
+    if args:
+        paths = args
+    else:
+        paths, missing = published_paths()
     bounds = declared_bounds_us()
-    print(f"declared bounds (from {ENGINE_FRONTIER}): {[b//1000 for b in bounds]} ms + unbounded")
+    print(f"declared bounds (from {os.path.relpath(ENGINE_FRONTIER, HERE)}): {[b//1000 for b in bounds]} ms + unbounded")
     total_cells = 0
     all_problems = []
     engines = {}
+    skipped = []
     for p in paths:
         try:
             gw, eng, cells, problems = check(p, bounds, verbose)
-        except Exception as e:  # a snapshot mid-write during a live run is not a defect
+        except Exception as e:
+            # A snapshot mid-write during a live run is not a defect in the DATA - but it was not
+            # checked, so it can never be part of a PASS. Re-run once the write lands.
             print(f"  SKIP {p}: {e}")
+            skipped.append(p)
             continue
         if cells == 0:
             continue
@@ -327,6 +384,10 @@ def main():
             print(f"engines {sorted(engines)} - one instrument by attested identical binary (C8)")
         else:
             print(f"MIXED ENGINES: {dict((k, len(v)) for k, v in engines.items())} - not comparable")
+    for x in missing:
+        all_problems.append(f"site/data.json publishes {x} but it is not in results/snapshots - not re-derived")
+    for x in skipped:
+        all_problems.append(f"{x} could not be checked at all (see SKIP above) - a PASS cannot cover it")
     for x in all_problems:
         print(f"  PROBLEM: {x}")
     if all_problems:

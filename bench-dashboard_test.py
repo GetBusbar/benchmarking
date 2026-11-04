@@ -28,6 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _SPEC = importlib.util.spec_from_file_location("bench_dashboard", os.path.join(HERE, "bench-dashboard.py"))
 bd = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bd)
+# Kept before any block below stubs it out, so the fetch itself can be tested.
+_REAL_REMOTE_TAIL = bd.remote_tail
 
 _fail = 0
 
@@ -219,6 +221,47 @@ check("a cell position of 0 prints the position, not '-'", row["cells"], "0/36")
 
 bd.parse_progress = _orig_parse
 
+# ── remote_tail: a failed fetch is not "nothing logged yet" ──────────────────────────────────────────
+#
+# remote_tail used to turn every ssh failure - a timeout, a refused connection, ssh's own exit 255 -
+# into "", the same string a box that has logged nothing returns. parse_progress("") is complete with
+# no cells, so row_for rendered a box hours into its run that stopped answering as "booting/building",
+# served 0/N with no floor mark: the reading of a healthy fresh box.
+import subprocess  # noqa: E402 - kept beside the block that uses it, like the render test below
+
+_orig_run = bd.subprocess.run
+
+
+def _timeout(*_a, **_k):
+    raise subprocess.TimeoutExpired(cmd="ssh", timeout=15)
+
+
+bd.remote_tail = _REAL_REMOTE_TAIL
+try:
+    bd.subprocess.run = _timeout
+    check("remote_tail: an ssh timeout is a failed fetch (None), not an empty log",
+          bd.remote_tail("1.2.3.4"), None)
+    bd.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 255, stdout="", stderr="refused")
+    check("remote_tail: ssh exiting 255 is a failed fetch (None), not an empty log",
+          bd.remote_tail("1.2.3.4"), None)
+    bd.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+    check("remote_tail: a reachable box with nothing logged yet is an empty log", bd.remote_tail("1.2.3.4"), "")
+
+    # The whole row, through the REAL fetch with ssh timing out.
+    bd.subprocess.run = _timeout
+    bd.declared_served = lambda gw: 8
+    bd.local_state = lambda path: {"ip": "1.2.3.4", "start": 0, "measuring": 60, "terminal": None}
+    row = bd.row_for("fakegw", "/tmp/fake", 3 * 3600)
+    check("row_for: a box measuring for hours that stops answering ssh is UNREACHABLE, not booting",
+          row["phase"], "UNREACHABLE (ssh failed)")
+    check("...and shows no served count or ETA it did not read", (row["served"], row["eta"]), ("?/8", "-"))
+    bd.local_state = lambda path: {"ip": "1.2.3.4", "start": 0, "measuring": None, "terminal": None}
+    row = bd.row_for("fakegw", "/tmp/fake", 60)
+    check("row_for: before measurement starts, a refused ssh is a box still booting",
+          row["phase"], "booting (no ssh yet)")
+finally:
+    bd.subprocess.run = _orig_run
+
 # ── render() must survive a stdout codec that cannot encode its glyphs ──────────────────────────────
 #
 # `render()` prints "·" (U+00B7) unconditionally on its summary line, with no stdout.reconfigure()
@@ -226,8 +269,6 @@ bd.parse_progress = _orig_parse
 # cron job, a minimal container, or a plain `> log.txt` redirection under LANG=C/LC_ALL=C/
 # PYTHONIOENCODING=ascii gives Python an ASCII stdout encoder, and the very first refresh cycle raises
 # UnicodeEncodeError and kills the live monitor mid-run.
-import subprocess
-
 _render_script = (
     "import importlib.util\n"
     f"spec = importlib.util.spec_from_file_location('bd', {os.path.join(HERE, 'bench-dashboard.py')!r})\n"

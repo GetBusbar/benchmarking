@@ -7,8 +7,8 @@
    pages a human happens to open cannot find those; enumerating the product can.
 
    RUN:
-     cd site && python3 -m http.server 8899 &
-     NODE_PATH="$(npm root -g)" node site/screenshot-matrix.mjs
+     python3 -m http.server 8899 --directory site &
+     NODE_PATH="$(npm root -g)" node site/screenshot-matrix.mjs     (both from the repo root)
    Playwright is not a repo dependency (this script is a development tool, not part of the deployed
    site, and the site ships zero runtime dependencies on purpose), so it resolves from wherever it is
    installed via NODE_PATH. If `npm root -g` does not hold it, point NODE_PATH at the directory that
@@ -28,6 +28,7 @@
    address bar to path form without reloading. The rendered state is identical either way. */
 import { createRequire } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 const { chromium } = createRequire(import.meta.url)("playwright");
 
@@ -35,12 +36,27 @@ const BASE = process.env.BASE_URL || "http://localhost:8899";
 const OUT = process.env.OUT_DIR || path.resolve(import.meta.dirname, "../results/screenshots");
 
 /* Mirrors of app.js's own constants. Kept as literals rather than imported because app.js is a
-   browser script with top-level side effects; the assertion below is what keeps them honest. */
-const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"];
+   browser script with top-level side effects; assertMirrors() below is what keeps them honest (it did
+   not exist, and the mirror had already drifted: no `charts` in VIEWS or BOUND_VIEWS). */
+const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"];
 const TABLE_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
-// The bound selector renders on these two ONLY (app.js BOUND_VIEWS): nothing on Streaming or Memory
-// is read at a tail-latency bound, so a bound combo there would photograph a control that is not there.
-const BOUND_VIEWS = new Set(["performance", "frontier"]);
+// The bound selector renders on these ONLY (app.js BOUND_VIEWS): nothing on Streaming or Memory is read
+// at a tail-latency bound, so a bound combo there would photograph a control that is not there.
+const BOUND_VIEWS = new Set(["performance", "frontier", "charts"]);
+function assertMirrors() {
+  const src = readFileSync(path.join(import.meta.dirname, "app.js"), "utf8");
+  const list = (re) => { const m = src.match(re); if (!m) throw new Error(`screenshot-matrix: cannot find ${re} in app.js`); return JSON.parse(m[1]); };
+  const want = {
+    VIEWS: list(/^const VIEWS = (\[[^\]]*\]);/m),
+    TABLE_VIEWS: list(/^const TABLE_VIEWS = new Set\((\[[^\]]*\])\);/m),
+    BOUND_VIEWS: list(/^const BOUND_VIEWS = new Set\((\[[^\]]*\])\);/m),
+  };
+  const have = { VIEWS, TABLE_VIEWS: [...TABLE_VIEWS], BOUND_VIEWS: [...BOUND_VIEWS] };
+  for (const k of Object.keys(want))
+    if (JSON.stringify(have[k]) !== JSON.stringify(want[k]))
+      throw new Error(`screenshot-matrix: ${k} mirror ${JSON.stringify(have[k])} has drifted from app.js ${JSON.stringify(want[k])}`);
+}
+assertMirrors();
 // `peak` is a URL CONTRACT whose control now reads "Own cell". The token must stay `peak` in these URLs.
 const PERF_MODES = ["peak", "same", "custom"];
 const MEM_MODES = ["min", "max", "same", "custom"];
@@ -148,6 +164,8 @@ async function main() {
     JSON.stringify({ base: BASE, widths: WIDTHS, geometry, shots: combos().flatMap((c) => WIDTHS.map((w) => ({ file: name(c, w), width: w, url: urlFor(c) }))), problems }, null, 2));
   console.log(`${shots.length} screenshots -> ${OUT}`);
   for (const p of problems) console.log(`PROBLEM ${p}`);
+  // Screenshots of broken or empty pages are not a review: say so in the exit status.
+  if (problems.length) process.exitCode = 1;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

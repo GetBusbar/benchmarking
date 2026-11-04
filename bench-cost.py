@@ -17,7 +17,6 @@
 # the notes on `_audit` and on the default `engine` in main().
 import collections
 import importlib.util
-import json
 import os
 import sys
 
@@ -34,21 +33,12 @@ _SPEC.loader.exec_module(_audit)
 
 
 def newest_snapshots(gw_filter=None, engine=None):
-    """The newest snapshot per gateway, optionally pinned to an engine prefix."""
-    by_gw = {}
-    for f in _audit.snapshot_paths():
-        try:
-            d = json.load(open(f))
-        except Exception:
-            continue
-        gw = d.get("gateway")
-        if not gw or (gw_filter and gw != gw_filter):
-            continue
-        sha = ((d.get("rig") or {}).get("engine") or {}).get("commit") or ""
-        if engine and not sha.startswith(engine):
-            continue
-        by_gw[gw] = (f, d, sha)
-    return by_gw
+    """The newest snapshot per gateway, optionally pinned to an engine - by INSTRUMENT, exactly as
+    bench-audit pins it, because this IS bench-audit's `load`. A raw sha-prefix match (what this used
+    to do while its header claimed bench-audit's pinning) dropped every gateway measured by a commit
+    `site/instrument-equivalence.json` attests builds the identical binary. `load` also names an
+    unreadable snapshot on stderr rather than leaving it silently out of every total below."""
+    return _audit.load(engine, gw_filter)
 
 
 def main():
@@ -97,7 +87,9 @@ def main():
                     continue
                 n += 1
                 for group, secs in t.items():
-                    totals[group] += secs
+                    # A null or non-numeric timing is not 0 seconds; it is not counted at all.
+                    if isinstance(secs, (int, float)) and not isinstance(secs, bool):
+                        totals[group] += secs
         if n:
             per_gw[gw] = (totals, n, sha)
             grand.update(totals)
@@ -117,6 +109,9 @@ def main():
     print()
     print(f"ACROSS {cells_seen} MEASURED CELLS")
     total = sum(grand.values())
+    if total <= 0:
+        print("every recorded timing is zero - there is no cost profile to report")
+        return 1
     print(f"{'group':22s} {'total':>10s} {'share':>7s} {'per cell':>10s}")
     for group, secs in grand.most_common():
         print(f"{group:22s} {secs/60:9.1f}m {secs/total*100:6.1f}% {secs/cells_seen:9.1f}s")
@@ -131,7 +126,9 @@ def main():
         print(f"  halving it saves {secs/2/60:.1f}m over these {cells_seen} cells "
               f"({secs/2/cells_seen:.1f}s per cell)")
         print(f"  removing it saves {secs/60:.1f}m ({secs/cells_seen:.1f}s per cell)")
-        print(f"  a 36-cell gateway would save {secs/cells_seen*36/60:.1f}m by halving it")
+        # 36 is the full 6x6 grid. Halving is HALF the per-cell cost; this printed the removal saving
+        # (the whole per-cell cost) under the "by halving it" label.
+        print(f"  a 36-cell gateway would save {secs/cells_seen*36/2/60:.1f}m by halving it")
     return 0
 
 

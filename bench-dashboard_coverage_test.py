@@ -10,6 +10,7 @@
 #
 #   python3 bench-dashboard_coverage_test.py
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -78,10 +79,17 @@ log = "\n".join([
 # test breaks loudly if the tuple changes again rather than silently reading the wrong field.
 cells, total, served_done, phase, complete = bd.parse_progress(log)
 check("parse_progress: latest cell position wins", (cells, total), (5, 36))
-check("parse_progress: ONLY measured verdicts count as served (2 of 6 lines)", served_done, 2)
+# `failed (HTTP ...)` is Served::No: the probe answered an error and the engine measured nothing
+# (`Served::is_measurable()` is Served::Yes only), so it is not a served cell either.
+check("parse_progress: ONLY the engine's `served` verdict counts (1 of 6 lines)", served_done, 1)
+# The regression line shape on its own, so the fail-closed rule is pinned independently of the count
+# above: a `[cell N/M] id: cost ...` line must add nothing.
 check("parse_progress: an unrecognised same-prefix line is ignored, never believed",
-      served_done <= 5, True)
+      bd.parse_progress("[cell 1/36] openai>openai: cost throughput=120s memory=200s")[2], 0)
 check("parse_progress: the latest phase is reported with its cell id", phase, "memory openai>bedrock")
+# A verdict line closes its cell: the phase seen before it must not be credited to the next cell.
+check("parse_progress: a cell's verdict clears the phase it finished in",
+      bd.parse_progress("[phase] openai>openai cost\n[cell 1/36] openai>openai: served")[3], None)
 # An empty tail reports complete=True, which reads like vacuous truth and is not: `complete` only
 # ever qualifies a COUNT, and with no cell line there is no count (cells is None, so the caller
 # renders "-"). Saying "incomplete" here would attach a bound to a number that does not exist. The
@@ -141,6 +149,21 @@ with tempfile.TemporaryDirectory() as td:
     check("fanout_logs: orchestration logs never become phantom gateway rows",
           sorted(logs), ["realgw"])
 
+# ── declared_served: an empty matrix is UNDECLARED, not "declares zero" ──────────────────────────
+with tempfile.TemporaryDirectory() as td:
+    _old_here = bd.HERE
+    try:
+        bd.HERE = td
+        for _gw, _matrix in (("undeclared", []), ("declared", ["110000", "010000"])):
+            os.makedirs(os.path.join(td, "gateways", _gw))
+            with open(os.path.join(td, "gateways", _gw, "definition.json"), "w") as f:
+                json.dump({"matrix": _matrix}, f)
+        check("declared_served: an empty matrix has no denominator (None), not 0",
+              bd.declared_served("undeclared"), None)
+        check("declared_served: a declared matrix counts its '1's", bd.declared_served("declared"), 3)
+    finally:
+        bd.HERE = _old_here
+
 # ── row_for: the assembled row, with the remote leg stubbed ──────────────────────────────────────
 bd.remote_tail = lambda ip: ""
 bd.declared_served = lambda gw: 8
@@ -182,6 +205,24 @@ with tempfile.TemporaryDirectory() as td:
     bd.remote_tail = lambda ip: ""
     row = bd.row_for("gw", p4, 10 * 3600 + 10 * 60)
     check("row_for: with nothing measured and no phase, the ETA is the honest '~'", row["eta"], "~")
+
+# ── main(): an INCOMPLETE box is not a clean exit ────────────────────────────────────────────────
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+_saved = (bd.fanout_logs, bd.row_for, sys.argv)
+try:
+    bd.fanout_logs = lambda: {"gw": "/nonexistent"}
+    sys.argv = ["bench-dashboard.py"]
+    for _bad, _want in ((True, 1), (False, 0)):
+        bd.row_for = lambda gw, path, now_s, _b=_bad: dict(
+            gw=gw, phase="INCOMPLETE" if _b else "DONE", cells="-", served="-", elapsed="-", eta="-",
+            done=not _b, bad=_b)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _rc = bd.main()
+        check(f"main: exit {_want} when the board ends {'INCOMPLETE' if _bad else 'DONE'}", _rc, _want)
+finally:
+    bd.fanout_logs, bd.row_for, sys.argv = _saved
 
 if _fail == 0:
     print("all bench-dashboard coverage tests passed")

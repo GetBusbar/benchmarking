@@ -4,7 +4,7 @@
 
    A re-run narrowed with OTB_DIALECTS walks a SUBSET of the 6x6 grid, so its snapshot carries only the
    upstreams it was told to walk. Recency alone would let those 4 cells replace a 36-cell run and delete
-   32 measured cells from the board - the same failure the degraded-mode guard above exists to stop, and
+   32 measured cells from the board - the same failure gen-data.mjs's degraded-mode guard exists to stop, and
    for the same reason: the producer was TOLD NOT TO MEASURE the rest, so its silence about them is not
    a finding.
 
@@ -42,16 +42,30 @@ export function isStrictSubset(a, b) {
   for (const k of a) if (!b.has(k)) return false;
   return true;
 }
+/* isScopedRelativeTo(a, b): is the run with coords `a` a SCOPED RE-RUN of the grid `b`? It walked fewer
+   cells than `b` and re-measured at least one of them. NOT "a strict subset of b": a re-run that also
+   touched a coordinate `b` never had (a 7th dialect, OTB_DIALECTS=openai,vertex) is still a 4-cell scoped
+   run, and the subset test classified it as a FULL run that then became the base by recency and deleted
+   every other measured cell from the board. A set sharing no coordinate at all (a v1-shaped run beside a
+   v2 one) is not alignable cell-for-cell and is never treated as scoped. */
+export function isScopedRelativeTo(a, b) {
+  if (a.size >= b.size) return false;
+  for (const k of a) if (b.has(k)) return true;
+  return false;
+}
 /* Layer `scoped` over `base`, returning a new matrix. Both are snapshot matrices. */
 export function layerScopedMatrix(base, scoped, scopedSnap) {
   const merged = structuredClone(base);
   const stamp = { build: scopedSnap.build ?? null, measured_at: scopedSnap.measured_at ?? null,
                   file: scopedSnap.__file ?? null };
   const layered = [];
+  const dropped = [];
   for (const [egress, up] of Object.entries(scoped.upstreams || {})) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       const target = merged.upstreams?.[egress]?.cells;
-      if (!target) continue;                       // an upstream the base never had: nothing to layer onto
+      // An upstream the base never had: nothing to layer onto. RECORDED, never silently discarded, so the
+      // provenance says measured cells exist that the board does not show.
+      if (!target) { dropped.push(`${ingress}>${egress}`); continue; }
       const c = structuredClone(cell);
       // THE CELL CARRIES THE RUN THAT PRODUCED IT. Without this the board dates a spliced cell by its
       // neighbours' run, which is exactly the provenance lie the snapshot format exists to prevent.
@@ -78,7 +92,7 @@ export function layerScopedMatrix(base, scoped, scopedSnap) {
   merged.__layered = {
     from: stamp,
     cells: layered.sort(),
-    runs: [...prior, { from: stamp, cells: layered.sort() }],
+    runs: [...prior, { from: stamp, cells: layered.sort(), ...(dropped.length ? { dropped: dropped.sort() } : {}) }],
   };
   return merged;
 }
