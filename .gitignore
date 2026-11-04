@@ -17,6 +17,9 @@ perf/ugen
 gateways/*/*.gen.yaml
 gateways/*/*.gen.yml
 gateways/*/venv/
+# the upstream source tree a source-built gateway's build.sh clones (gateways/<gw>/src). Untracked, it
+# made a local build leave the harness tree "dirty" for the PREFLIGHT and the engine stamp.
+gateways/*/src/
 # transient EC2 driver logs (the results JSON + charts are the durable evidence)
 results/*.log
 # per-run gateway launch log (each docker manifest writes gateways/<gw>/launch.log at gw_launch)
@@ -36,20 +39,21 @@ __pycache__/
 # orchestrator ships back onto the box. The DURABLE record is rig.box_qualify inside each snapshot
 # (results/snapshots/), which is committed — these are the working files that produced it.
 results/box-qualify/
+# snapshots an INCOMPLETE run pulled, set aside by run-on-ec2.sh so history/append.py and the publish
+# never treat them as a measurement. Kept locally for inspection only.
+results/incomplete/
 target/
 
-# Rendered gateway config. The TEMPLATE (*.tmpl) is the source and is tracked; what the harness
-# renders from it at launch is output, and a stale rendered file in the tree is a config someone
-# could read as authoritative when the template beside it says something else.
-gateways/*/*.gen.yaml
-gateways/*/*.gen.yml
+# Rendered gateway config (the *.gen.yaml / *.gen.yml rules are at the top of this file). The TEMPLATE
+# (*.tmpl) is the source and is tracked; what the harness renders from it at launch is output, and a
+# stale rendered file in the tree is a config someone could read as authoritative when the template
+# beside it says something else.
 # Ignore the CONTENTS of the runtime data dir, not the dir itself: a template that lives inside it is
 # still source. Excluding the directory outright would make the negation below unreachable, because
 # git never descends into an excluded directory to reconsider a file in it.
 gateways/*/bfdata/*
 !gateways/*/bfdata/*.tmpl
 gateways/*/config/*.toml
-gateways/*/launch.log
 
 # Layout-review screenshots from site/screenshot-matrix.mjs: ~138 full-page PNGs of every page x
 # every control combination x three widths. Regenerable from the working tree in one command, and a
@@ -58,3 +62,6 @@ results/screenshots/
 
 # Internal working notes - never published to the public board repo.
 KICKOFF.md
+
+# Built gateway identity is captured in each new snapshot, never checked in as current state.
+gateways/*/.build-provenance.json

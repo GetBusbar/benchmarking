@@ -1,8 +1,8 @@
-# Enforced gate for the sweep engine (lib/sweep.sh) — the component that produces EVERY published
-# throughput number. Runs lib/sweep_peak_test.sh on push, so a change that re-quantises fast gateways
-# onto doubling rungs (the exact off-by-one class the test guards, incl. the H5 relative-TOL fix) or
-# regresses the adaptive/prior-seeded path (M5) or the sweep_c1 honesty gate (M6) fails CI instead of
-# shipping silently (audit H6). Fast (stubbed loadgen/rig, no network, seconds).
+# The enforced gate for everything that produces or publishes a number: the Rust engine and mock
+# (`engine`, `mock-shape`), the cross-metric auditors (`audit`), the orchestrator's shell pieces and
+# the python guards it calls (`rig-delivery`), and the site suites (`site`). `coverage` is
+# informational only. (The shell sweep engine this header used to describe, lib/sweep.sh and its
+# lib/sweep_peak_test.sh, no longer exists; the Rust engine replaced it.)
 name: bench-tests
 
 on:
@@ -15,6 +15,7 @@ on:
       - "mock/**"
       - "gateways/**"
       - "lib/**"
+      - "history/**"
       - "run-on-ec2.sh"
       # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
       # wrong-key-path class its header describes) or a results push that violated every invariant
@@ -51,6 +52,13 @@ on:
       - "site/gen-data.mjs"
       - "site/test.mjs"
       - "site/test-coverage.mjs"
+      # Imported by gen-data.mjs and test.mjs (cell coordinates), and read by gen-data and C8 (which
+      # engine commits count as one instrument): both change what the suites check.
+      - "site/snapshots.mjs"
+      - "site/instrument-equivalence.json"
+      # Read by site/test.mjs (the page's static text and the stylesheet it asserts against).
+      - "site/index.html"
+      - "site/style.css"
       - ".github/workflows/bench-tests.yml"
   pull_request:
     paths:
@@ -61,6 +69,7 @@ on:
       - "mock/**"
       - "gateways/**"
       - "lib/**"
+      - "history/**"
       - "run-on-ec2.sh"
       # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
       # wrong-key-path class its header describes) or a results push that violated every invariant
@@ -91,6 +100,13 @@ on:
       - "site/gen-data.mjs"
       - "site/test.mjs"
       - "site/test-coverage.mjs"
+      # Imported by gen-data.mjs and test.mjs (cell coordinates), and read by gen-data and C8 (which
+      # engine commits count as one instrument): both change what the suites check.
+      - "site/snapshots.mjs"
+      - "site/instrument-equivalence.json"
+      # Read by site/test.mjs (the page's static text and the stylesheet it asserts against).
+      - "site/index.html"
+      - "site/style.css"
       - ".github/workflows/bench-tests.yml"
   workflow_dispatch:
 
@@ -104,9 +120,10 @@ jobs:
     # types are, so CI runs them here - an untested test suite is decoration.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: clippy, rustfmt
       # rustfmt has been INSTALLED here since this job was written and never run, so the workspace
       # drifted out of shape and the drift only surfaced when someone ran `cargo fmt` and watched it
@@ -119,10 +136,23 @@ jobs:
       - name: Clippy (denies unwrap/expect/panic outside tests)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Unit and property tests
-        run: cargo test --workspace
-      # Cross-compiling to the arm64 boxes is part of the contract: the engine ships as a prebuilt
-      # static binary rather than being built on a box, so a break here is a shipping break.
-      - name: Cross-compile the shipped arm64 binary
+        run: |
+          cargo build --workspace --locked
+          cargo test --workspace --locked
+      # THE BUILD STAMP THE BOXES CHECK. bench-rig.yml ships a native `cargo build --release --bin otb`
+      # with OTB_BUILD_COMMIT set, and every box refuses to measure unless `otb engine-commit` returns
+      # the pinned commit. A break in build.rs's stamp would otherwise surface only after merge, as a
+      # stale rig and ENGINE MISMATCH on every run.
+      - name: The otb binary reports the commit it was built from
+        env:
+          OTB_BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          cargo build --bin otb
+          got="$(./target/debug/otb engine-commit)"
+          [ "$got" = "$GITHUB_SHA" ] || { echo "otb engine-commit reported '$got', expected '$GITHUB_SHA'" >&2; exit 1; }
+      # Cross-compiling to the arm64 musl target is kept as a portability check (static link). It is
+      # NOT the artifact the boxes download - bench-rig.yml builds that natively on an arm64 runner.
+      - name: Cross-compile the arm64 musl binary
         run: |
           rustup target add aarch64-unknown-linux-musl
           cargo build --release --target aarch64-unknown-linux-musl --bin otb
@@ -143,7 +173,7 @@ jobs:
     # and accept a clean one, or it is guarding nothing.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
       - name: Every audit check can fail (and does not fail a clean cell)
         run: python3 bench-audit_test.py
       # The dashboard's test ran NOWHERE until this line - a test nothing executes reads as covered
@@ -185,9 +215,21 @@ jobs:
     # decoration. A test nothing executes is worse than no test: it reads as covered.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
       - name: The fetch lands files with the mode the commit recorded
         run: bash lib/fetch_modes_test.sh
+      # The other orchestrator guards with tests in the tree. Each ran nowhere, which this job's own
+      # header calls worse than no test.
+      - name: Publish lock ownership (per-subshell token, non-owner release)
+        run: bash lib/publish_lock_test.sh
+      - name: A publish stages only the snapshots this run pulled (never a held-back one)
+        run: bash lib/publish_paths_test.sh
+      - name: Liveness probe retries before declaring a box gone
+        run: bash lib/box_reachable_test.sh
+      - name: Promote guard (a boot failure never overwrites a served result)
+        run: python3 lib/promote_guard_test.py
+      - name: Append-only history
+        run: python3 history/append_test.py
 
   mock-shape:
     # The mock must never bottleneck and must serve every dialect identically; its per-dialect
@@ -195,8 +237,10 @@ jobs:
     # tightening (R3-M6 — reject an unconverted OpenAI body) can never silently regress.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
       - name: mock unit tests (request_shape_ok per dialect + routing)
         run: cargo test --manifest-path mock/Cargo.toml --tests
 
@@ -226,8 +270,8 @@ jobs:
     env:
       OTB_SINGLE_ENGINE: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # actions/setup-node@v4
         with:
           node-version: 22
       # No bundle required: enumerated URL-codec fixed points + one-envelope-one-story across
@@ -238,3 +282,35 @@ jobs:
       # and the C1-C5 structural invariants with their RED-before proofs.
       - name: Consistency guard (table == drawer == compare == charts)
         run: node site/test.mjs
+
+  coverage:
+    # INFORMATIONAL COVERAGE, NEVER A GATE. This job collects line coverage for the Rust workspace
+    # (engine + mock) with cargo-llvm-cov and uploads lcov to Codecov. It is deliberately ADDITIVE
+    # and NON-REQUIRED: it is not in any needs: list, it does not block a PR, and the upload uses
+    # fail_ci_if_error: false so a flaky Codecov endpoint can never turn this workflow red. The
+    # correctness gate remains the `engine`/`audit`/`site` jobs above; coverage is an observation
+    # surfaced on the README badge and as per-PR context (see codecov.yml — statuses are
+    # informational and comments are off). The workspace tests run with no service containers and no
+    # special env (mirroring the `engine` job's `cargo test --workspace`), so nothing is wired here.
+    name: coverage (llvm-cov · codecov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@7ba3421b00d46a29aaedcfe59124f4574e23e73e # taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage (workspace)
+        run: cargo llvm-cov --workspace --locked --ignore-run-fail --lcov --output-path lcov.info
+      - name: Upload to Codecov (tokenless; never fails the build)
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          slug: GetBusbar/benchmarking
+          fail_ci_if_error: false

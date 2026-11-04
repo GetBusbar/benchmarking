@@ -7,11 +7,18 @@ name: bench-rig
 on:
   push:
     branches: [main]
-    paths: ["mock/**", "engine/**", ".github/workflows/bench-rig.yml"]
+    paths: ["mock/**", "engine/**", "Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml", "ENGINE_PIN", ".github/workflows/bench-rig.yml"]
   workflow_dispatch:
 
 permissions:
   contents: write   # to upload release assets
+
+# ONE PUBLISH AT A TIME, NEWEST LAST. Each leg clobbers its two assets separately on a rolling
+# release, so two runs in flight could finish in either order and leave otb from one commit beside a
+# mock from another (both binary stamps must agree). Queued, never cancelled mid-upload.
+concurrency:
+  group: bench-rig
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -25,42 +32,54 @@ jobs:
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # actions/checkout@v4
+
+        with:
+          fetch-depth: 0
+
+      - name: Select verified instrument identity
+        run: |
+          pin="$(awk 'NR == 1 { print $1 }' ENGINE_PIN)"
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git cat-file -e "$pin^{commit}"
+          # Repository-only edits may rebuild the same instrument. Dependency/compiler inputs
+          # count as instrument changes too; a changed instrument must be explicitly re-pinned.
+          git diff --exit-code "$pin" HEAD -- engine mock Cargo.toml Cargo.lock .cargo rust-toolchain.toml
+          echo "OTB_BUILD_COMMIT=$pin" >> "$GITHUB_ENV"
 
       - name: Install Rust
-        run: |
-          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # pinned action implementation
+        with:
+          toolchain: "1.98.0"
 
       - name: Build mock (Rust, native ${{ matrix.arch }})
         run: |
           # The mock is a WORKSPACE MEMBER, so its binary lands in the workspace target dir, not in
           # mock/target. It moved there when the engine joined the workspace, and the copy kept
           # looking where it used to be - the build succeeded and the step failed on the copy.
-          cargo build --release --manifest-path mock/Cargo.toml
+          # --locked: the shipped binary must contain exactly the dependency set in the committed
+          # Cargo.lock; a stale lock fails the build instead of resolving fresh crates silently.
+          cargo build --release --locked --manifest-path mock/Cargo.toml
           cp target/release/mock "mock-${{ matrix.arch }}"
 
       - name: Build the engine (Rust, native ${{ matrix.arch }})
-        env:
-          # THE BINARY CARRIES THE COMMIT IT WAS BUILT FROM, so a bench box can ask it rather than
-          # trust the label the orchestrator passes. The boxes DOWNLOAD this artifact; without this
-          # the only record of which engine measured a board was an env var set from someone else's
-          # checkout - and on 2026-08-03 that stamped a snapshot 0ce7a907 while the binary was the
-          # previous release, because the fixes were on a branch and this workflow only rebuilds on
-          # a push to main. run-on-ec2.sh now refuses to measure when the two disagree.
-          OTB_BUILD_COMMIT: ${{ github.sha }}
         run: |
           # Native, on a runner of the target arch, for the same reason the mock is: a bench box
           # then needs no toolchain, which is what keeps every box identical.
-          cargo build --release --bin otb
+          cargo build --release --locked --bin otb
           cp target/release/otb "otb-${{ matrix.arch }}"
           # The artifact must be able to answer for itself before it is published.
           built_from="$(./otb-${{ matrix.arch }} engine-commit 2>/dev/null || true)"
-          if [ "$built_from" != "${{ github.sha }}" ]; then
-            echo "refusing to publish: otb reports '$built_from', expected '${{ github.sha }}'" >&2
+          if [ "$built_from" != "$OTB_BUILD_COMMIT" ]; then
+            echo "refusing to publish: otb reports '$built_from', expected '$OTB_BUILD_COMMIT'" >&2
             exit 1
           fi
           echo "otb-${{ matrix.arch }} reports its build commit: $built_from"
+          mock_from="$(./mock-${{ matrix.arch }} engine-commit)"
+          [ "$mock_from" = "$OTB_BUILD_COMMIT" ] || { echo "refusing mixed mock/engine instrument" >&2; exit 1; }
+          for binary in "./otb-${{ matrix.arch }}" "./mock-${{ matrix.arch }}"; do
+            [ "$("$binary" build-commit)" = "$(git rev-parse HEAD)" ] || exit 1
+          done
 
       - name: Publish to the rolling `rig` release
         env:
