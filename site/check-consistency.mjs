@@ -43,6 +43,7 @@ const ROOT = join(HERE, "..");
 // whitelist here can never lag the producer: one shared list plus a shape rule (any *_rss_mib) means a
 // new producer field is checked the day it appears.
 import { displayedValue, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { snapshotCellCoords, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
 // The origins a projected cell's source.kind may honestly carry: the single end-state "matrix" path plus
 // the LIVE deferred fallbacks (kept until the field run; sealed honestly, never mislabelled as matrix).
 const SOURCE_KINDS = new Set(["matrix", "perf-fallback", "xlate-fallback", "stream-fallback"]);
@@ -122,27 +123,6 @@ export function c7HwmBelowPeak(gwKey, rawMatrix) {
 // between the two copies - a sound mechanism for a live constant, and pure decoration once the constant
 // governed nothing, so it went too. C6 above now checks the frontier's ordering and its disclosure.
 
-// sweepSpreadPct(sweep, winner): the rung-to-rung scatter of a sweep, as a percentage of the winning
-// rps. This is the cell's OWN measured noise: same box, same phase, same gateway, several samples of
-// the same ceiling. Null when there is nothing to measure it from (fewer than two rungs), which is the
-// honest answer - a sweep that probed once has not measured its own variability, and the caller must
-// NOT then treat an inversion as excusable.
-function sweepSpreadPct(sweep, winner) {
-  if (!Array.isArray(sweep) || sweep.length < 2 || !(winner > 0)) return null;
-  const vals = sweep.map((r) => (r && typeof r.rps === "number" ? r.rps : null)).filter((v) => v != null);
-  if (vals.length < 2) return null;
-  return ((Math.max(...vals) - Math.min(...vals)) / winner) * 100;
-}
-// peakRanOutOfLadder(sweep, winnerConc): did the peak sweep WIN at the highest concurrency it probed?
-// Then it never observed a fall-off, so it never established a ceiling - the true peak may be past the
-// end of the ladder. This is the defect the old warning masked, and it is a hard error at any
-// magnitude, inversion or not.
-function peakRanOutOfLadder(sweep, winnerConc) {
-  if (!Array.isArray(sweep) || sweep.length < 2 || winnerConc == null) return false;
-  const concs = sweep.map((r) => (r && typeof r.conc === "number" ? r.conc : null)).filter((v) => v != null);
-  if (concs.length < 2) return false;
-  return Number(winnerConc) === Math.max(...concs);
-}
 // C6: THE FRONTIER MUST NOT INVERT, AND A READING MUST NOT CLAIM MORE THAN IT PROVED.
 //
 // C6 used to compare `rps_sustained_20ms` against `rps_max_proxy` and fail the build when the
@@ -268,15 +248,22 @@ export function instrumentOf(fileText) {
     // An entry with no artifact evidence is INERT, not trusted: the file's own rule is that identical
     // binaries are what admits an entry, and a rule nothing enforces is a comment.
     const ev = inst.evidence && inst.evidence.otb_release_sha256;
-    const hashes = ev ? Object.values(ev) : [];
-    const proven = hashes.length >= inst.commits.length && new Set(hashes).size === 1;
+    // EVERY LISTED COMMIT MUST CARRY ITS OWN HASH, and they must all be one hash. Counting the hash
+    // VALUES admitted an entry whose evidence was keyed by other commits (or by a typo), so a commit
+    // with no recorded build at all could be merged into an instrument.
+    const hashes = ev && typeof ev === "object" ? inst.commits.map((c) => ev[c]) : [];
+    const proven = hashes.length > 0 && hashes.every((h) => typeof h === "string" && h.length > 0)
+      && new Set(hashes).size === 1;
     if (!proven) continue;
     for (const c of inst.commits) map.set(c, inst.id);
   }
   return map;
 }
 
-export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k), opts = {}) {
+// The default resolver reads EVERY run gen-data publishes cells from (the base plus each layered scoped
+// re-run, or the per-suite matrix when that won), not merely the newest snapshot on disk: a scoped re-run
+// on another engine splices that engine's cells into a board C8 would otherwise call single-engine.
+export function engineAgreement(gwKeys, resolve = (k) => { const r = rawMatrixFor(k); return r ? r.runs : null; }, opts = {}) {
   const errors = [];
   const seen = new Map();   // instrument id -> [gwKey]
   const commitsOf = new Map();  // instrument id -> Set(commit)
@@ -286,21 +273,27 @@ export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)
     ? opts.equivalence
     : instrumentOf(readFileSync(join(ROOT, "site", "instrument-equivalence.json"), "utf8"));
   for (const k of gwKeys) {
-    const found = resolve(k);
-    const eng = found && found.snap && found.snap.rig && found.snap.rig.engine;
-    if (!eng || !eng.commit) { unstamped.push(k); continue; }
-    checked += 1;
-    if (eng.dirty === true)
-      errors.push(`C8: ${k} was measured by a DIRTY harness tree (engine.commit=${eng.commit.slice(0, 12)} with uncommitted edits) - the commit does not identify what ran, so this run is not reproducible and must be re-measured on a clean tree`);
-    // The instrument, not the commit. Two commits that build the same binaries measured the same way,
-    // and failing that costs a whole field re-run to change nothing.
-    const inst = equiv.get(eng.commit) || eng.commit;
-    if (!seen.has(inst)) { seen.set(inst, []); commitsOf.set(inst, new Set()); }
-    seen.get(inst).push(k);
-    commitsOf.get(inst).add(eng.commit);
+    const resolved = resolve(k);
+    // A resolver may return one {snap} or every contributing run as an array; each run is judged.
+    const runs = Array.isArray(resolved) ? resolved : [resolved];
+    let stampedAll = runs.length > 0;
+    for (const found of runs) {
+      const eng = found && found.snap && found.snap.rig && found.snap.rig.engine;
+      if (!eng || !eng.commit) { stampedAll = false; continue; }
+      checked += 1;
+      if (eng.dirty === true)
+        errors.push(`C8: ${k} was measured by a DIRTY harness tree (engine.commit=${eng.commit.slice(0, 12)} with uncommitted edits) - the commit does not identify what ran, so this run is not reproducible and must be re-measured on a clean tree`);
+      // The instrument, not the commit. Two commits that build the same binaries measured the same way,
+      // and failing that costs a whole field re-run to change nothing.
+      const inst = equiv.get(eng.commit) || eng.commit;
+      if (!seen.has(inst)) { seen.set(inst, []); commitsOf.set(inst, new Set()); }
+      if (!seen.get(inst).includes(k)) seen.get(inst).push(k);
+      commitsOf.get(inst).add(eng.commit);
+    }
+    if (!stampedAll) unstamped.push(k);
   }
   if (checked > 0 && unstamped.length > 0)
-    errors.push(`C8: ${unstamped.length} gateway(s) carry no engine stamp (${unstamped.join(", ")}) while ${checked} do - the board would be mixing pre-stamp data with stamped data and cannot show they came from the same harness; re-measure the unstamped gateways`);
+    errors.push(`C8: ${unstamped.length} gateway(s) carry a run with no engine stamp (${unstamped.join(", ")}) while ${checked} published run(s) do - the board would be mixing pre-stamp data with stamped data and cannot show they came from the same harness; re-measure the unstamped gateways`);
   if (seen.size > 1) {
     const groups = [...seen.entries()].map(([c, ks]) => `${c.slice(0, 12)}: ${ks.join(", ")}`).join(" | ");
     const msg = `C8: the board mixes ${seen.size} harness engines (${groups}) - columns measured by different instruments are not comparable, so a defect fixed between those commits applies to only part of the field; re-run the lagging gateways on the newest engine`;
@@ -331,9 +324,14 @@ export function engineAgreement(gwKeys, resolve = (k) => newestSnapshotOnDisk(k)
 // AGREES with the stamp the bundle shipped, so a selection bug is caught rather than silently mirrored.
 const SNAP_DIR = join(ROOT, "results", "snapshots");
 
+// Absent is null. A file that exists and does not parse degrades the same way gen-data's does (null-safe
+// by design), but is REPORTED: silently swallowing it meant nobody could notice a corrupt artifact.
 function readJsonOrNull(p) {
   if (!existsSync(p)) return null;
-  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; }
+  try { return JSON.parse(readFileSync(p, "utf8")); } catch (e) {
+    console.warn(`check-consistency: WARNING: ${p} exists but is not valid JSON (${e.message}) - skipped as if absent`);
+    return null;
+  }
 }
 
 // The newest snapshot for a gateway, by its own measured_at. Returns {snap, file} or null.
@@ -350,17 +348,46 @@ export function newestSnapshotOnDisk(gwKey, dir = SNAP_DIR) {
   return best ? { snap: best, file: bestFile } : null;
 }
 
-// rawMatrixFor(gwKey) -> { matrix, origin, file } | null. `origin` is "snapshot" | "suite".
+/* resolvedSnapshotOnDisk(gwKey) -> {snap, file, runs} | null: THE RUN GEN-DATA ACTUALLY PUBLISHES.
+   gen-data does not publish the newest snapshot; it publishes the newest FULL run with every strictly-
+   scoped newer re-run layered over it (resolvedSnapshot). Resolving only the newest file made the oracle
+   verify a 4-cell scoped re-run (or trip R3 on the base's stamp) instead of the 36-cell grid on the board,
+   and made C8 read the scoped run's engine while the base run's cells were the ones shown. The SELECTION
+   rule is re-derived here independently; the layering itself is the pure, directly-tested snapshots.mjs.
+   `runs` lists every snapshot that contributed cells (base first), so C8 can check each one's engine. */
+export function resolvedSnapshotOnDisk(gwKey, dir = SNAP_DIR) {
+  if (!existsSync(dir)) return null;
+  const snaps = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.startsWith(`result_${gwKey}_`) || !f.endsWith(".json")) continue;
+    const snap = readJsonOrNull(join(dir, f));
+    if (!snap) continue;
+    const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
+    snaps.push({ snap, file: f, ms: Number.isFinite(ms) ? ms : 0, coords: snapshotCellCoords(snap.matrix) });
+  }
+  if (!snaps.length) return null;
+  snaps.sort((a, b) => a.ms - b.ms);
+  const widest = snaps.reduce((m, x) => (x.coords.size > m.coords.size ? x : m), snaps[0]);
+  const fulls = snaps.filter((x) => !isScopedRelativeTo(x.coords, widest.coords));
+  const base = fulls[fulls.length - 1];
+  const scoped = snaps.filter((x) => isScopedRelativeTo(x.coords, base.coords) && x.ms >= base.ms);
+  if (!scoped.length || !base.snap.matrix) return { snap: base.snap, file: base.file, runs: [base] };
+  let m = base.snap.matrix;
+  for (const x of scoped) if (x.snap.matrix) m = layerScopedMatrix(m, x.snap.matrix, { ...x.snap, __file: x.file });
+  return { snap: { ...base.snap, matrix: m }, file: base.file, runs: [base, ...scoped] };
+}
+
+// rawMatrixFor(gwKey) -> { matrix, origin, file, runs } | null. `origin` is "snapshot" | "suite".
 function rawMatrixFor(gwKey) {
   const suite = readJsonOrNull(join(ROOT, "results", "matrix", `${gwKey}.json`));
-  const found = newestSnapshotOnDisk(gwKey);
+  const found = resolvedSnapshotOnDisk(gwKey);
   const snapMs = found && found.snap.matrix && found.snap.measured_at ? Date.parse(found.snap.measured_at) : NaN;
   const suiteMs = suite && suite.measured_at ? Date.parse(suite.measured_at) : NaN;
   const s = Number.isFinite(snapMs) ? snapMs : -1;
   const d = Number.isFinite(suiteMs) ? suiteMs : -1;
   if (found && found.snap.matrix && (!suite || s >= d))
-    return { matrix: found.snap.matrix, origin: "snapshot", file: found.file };
-  if (suite) return { matrix: suite, origin: "suite", file: `results/matrix/${gwKey}.json` };
+    return { matrix: found.snap.matrix, origin: "snapshot", file: found.file, runs: found.runs };
+  if (suite) return { matrix: suite, origin: "suite", file: `results/matrix/${gwKey}.json`, runs: [{ snap: suite, file: `results/matrix/${gwKey}.json` }] };
   return null;
 }
 
@@ -857,7 +884,12 @@ export function checkConsistency(data, app, opts = {}) {
       // an under-built envelope is not an envelope, and it was not a number either, so nothing fired.
       // C1's own claim is "no raw ungated metric field exists in the bundle"; for those shapes it was
       // not being checked at all, and this file is the deploy gate.
-      if (!isEnvelope(v) && v !== null && v !== undefined) {
+      // A BARE null IS NOT AN ABSENCE EITHER: seal.mjs's three envelope forms all carry `certified`, and a
+      // not-measured value carries its reason. A bare null in a metric field is an unsealed hole with no
+      // reason, which this branch used to wave through.
+      if (v === null)
+        errors.push(`C1: ${path}.${k} is a bare null, not a sealed envelope (an absence must carry its reason)`);
+      else if (!isEnvelope(v) && v !== undefined) {
           // The message names WHAT was found, because the fix for a bare number and the fix for a
           // half-built envelope are different, and `${v}` renders an object as "[object Object]".
           const shape = Array.isArray(v) ? "an array"
@@ -976,7 +1008,10 @@ export function checkConsistency(data, app, opts = {}) {
       const shownAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : NaN;
       const rawAt = m.measured_at ? Date.parse(m.measured_at) : NaN;
       covered("R3.selection");
-      if (Number.isFinite(shownAt) && Number.isFinite(rawAt) && shownAt !== rawAt)
+      // An undatable stamp on EITHER side means the selection cannot be confirmed; it is not a pass.
+      if (!Number.isFinite(shownAt) || !Number.isFinite(rawAt))
+        errors.push(`R3: ${g.key}: cannot confirm the bundle renders the run on disk - measured_at is unparseable or missing (bundle ${JSON.stringify(g.matrix && g.matrix.measured_at)}, artifact ${resolved.file} ${JSON.stringify(m.measured_at)})`);
+      else if (shownAt !== rawAt)
         errors.push(`R3: ${g.key}: the bundle published matrix measured_at=${g.matrix.measured_at} but the newest raw artifact on disk (${resolved.origin}: ${resolved.file}) is measured_at=${m.measured_at} - the board is rendering from a stale/mis-selected run`);
       const claimsSnapshot = g.matrix_from_snapshot === true;
       if (claimsSnapshot !== (resolved.origin === "snapshot"))
@@ -1096,7 +1131,15 @@ export function checkConsistency(data, app, opts = {}) {
         ["streaming", g.streaming, (() => { const p = g.streaming && g.streaming.path; return (p && p.dialect && cellAt(p.dialect, p.dialect)) || null; })(), "stream"],
       ]) {
         const raw = rawCellSel && rawCellSel[prefix];
-        if (!rec || !raw || !rec.source || rec.source.kind !== "matrix") continue;
+        if (!rec || !rec.source || rec.source.kind !== "matrix") continue;
+        // A MATRIX-SOURCED RECORD WITH NO RAW CELL AT ITS CLAIMED PATH IS UNVERIFIABLE, not verified: the
+        // old `!raw -> continue` let it count toward this gateway's oracle coverage while none of its
+        // numbers were compared against anything.
+        if (!raw) {
+          errors.push(`R1: ${g.key}.${name} claims the ${JSON.stringify(rec.path || null)} cell of the matrix, but the raw artifact has no ${prefix} block there - its numbers cannot be verified`);
+          unverified.add(g.key);
+          continue;
+        }
         for (const k of Object.keys(rec)) {
           if (!isMetricField(k)) continue;
           cmp(`${name}.${k}`, shownOf(rec[k]), expectOf(raw, rawCellSel.absences, prefix, k));
@@ -1109,7 +1152,10 @@ export function checkConsistency(data, app, opts = {}) {
       if (g.best_cell && g.best_cell.source && g.best_cell.source.kind === "matrix") {
         covered("R4.selection");
         const want = oracleBestDialect(m);
-        if (want && bestDialect !== want)
+        // The oracle deriving NO cell while the bundle published one is a disagreement, not a pass.
+        if (!want)
+          errors.push(`R4: ${g.key}.best_cell is published (the ${bestDialect} diagonal) but re-deriving the selection from the raw artifact finds no eligible diagonal at all`);
+        else if (bestDialect !== want)
           errors.push(`R4: ${g.key}.best_cell is published as the ${bestDialect} diagonal, but re-deriving the ` +
             `selection from the raw artifact picks ${want} - the values under that name may all verify while the ` +
             `board still names the wrong cell as this gateway's best`);
@@ -1118,7 +1164,9 @@ export function checkConsistency(data, app, opts = {}) {
         covered("R4.selection");
         const want = oracleTranslationPath(m);
         const p = g.translation_cell.path || {};
-        if (want && (p.ingress !== want.ingress || p.egress !== want.egress))
+        if (!want)
+          errors.push(`R4: ${g.key}.translation_cell is published as ${p.ingress}->${p.egress} but re-deriving the selection from the raw artifact finds no eligible translation cell at all`);
+        else if (p.ingress !== want.ingress || p.egress !== want.egress)
           errors.push(`R4: ${g.key}.translation_cell is published as ${p.ingress}->${p.egress}, but re-deriving the ` +
             `selection from the raw artifact picks ${want.ingress}->${want.egress} (the fair openai-ingress tier ` +
             `first, then lowest added-latency p99) - correct numbers under the wrong path`);

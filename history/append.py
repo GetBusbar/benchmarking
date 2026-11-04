@@ -7,6 +7,11 @@
 # an existing (suite, measured_at) pair for that gateway is skipped, never rewritten, so
 # re-running after a partial field run only adds the new rows. History lives in git, so the
 # file's own commit log is a second, tamper-evident record.
+#
+#   append.py                    every result on disk (manual backfill, e.g. after `harvest`)
+#   append.py <snapshot.json>... ONLY these snapshot files - what run-on-ec2.sh passes, so a run's
+#                                history holds exactly the snapshots its clean boxes pulled, never a
+#                                harvested, held-back or set-aside file that happened to be on disk.
 import json, os, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,11 +50,15 @@ MEM_KEEP = ["served", "load_cell", "idle_rss_mib", "peak_rss_mib", "peak_rss_hwm
 CELL_MEM_KEEP = ["served", "idle_rss_mib", "steady_state_rss_mib", "recovered_rss_mib", "peak_rss_mib",
                  "peak_rss_hwm_mib", "plateaued", "time_to_plateau_s", "growth_rate_mib_per_min",
                  "load_s", "idle_window_s", "recovery_window_s"]
-CELL_PERF_KEEP = ["rps_sustained_20ms", "rps_sustained_20ms_mock_bound", "rps_max_proxy",
-                  "rps_max_proxy_mock_bound", "added_latency_p50_us", "added_latency_p99_us",
-                  "egress_reverified"]
-CELL_STREAM_KEEP = ["stream_served", "added_ttft_p99_us", "added_gap_p99_us", "streams_sustained",
-                    "streams_sustained_mock_bound", "cpu_fps", "cpu_fps_mock_bound"]
+# THE FIELDS THE ENGINE WRITES NOW (engine/src/record.rs CellPerf / CellStream). These lists used to
+# name rps_sustained_20ms / rps_max_proxy / cpu_fps / *_mock_bound - all deleted from the engine - and
+# omitted `frontier`, the board's throughput metric, so even a correctly-located cell yielded no
+# throughput row at all.
+CELL_PERF_KEEP = ["frontier", "added_latency_p50_us", "added_latency_p99_us", "gateway_c1_p99_us",
+                  "direct_c1_p99_us", "cpu_us_per_request", "rps_per_cpu_second", "egress_reverified"]
+CELL_STREAM_KEEP = ["stream_served", "added_ttft_p50_us", "added_ttft_p99_us", "added_gap_p50_us",
+                    "added_gap_p99_us", "streams_sustained", "streams_sustained_fps",
+                    "streams_sustained_mock_ceiling", "streams_sustained_headroom"]
 
 
 def _matrix_extra(data):
@@ -105,11 +114,36 @@ def _matrix_extra(data):
         out["diagonal_memory"] = mem_cells
     return out
 
+def matrix_of(snapshot):
+    """The matrix-shaped result inside an engine snapshot.
+
+    THE ENGINE NESTS IT. A snapshot (`record::ResultSnapshot`) carries `upstreams`, `cells`, `served`,
+    `matrix_version` and the sweep settings under `snapshot["matrix"]`, beside top-level metadata.
+    Reading those keys off the TOP level - what this collector did since the per-suite directories were
+    retired - found none of them, so every history row written from results/snapshots carried build,
+    arch and hardware and NOT ONE MEASUREMENT. The top-level `measured_at`/`build`/`arch`/`hardware`
+    win where both exist, so the (suite, measured_at) key matches the rows already recorded.
+    """
+    m = snapshot.get("matrix")
+    if not isinstance(m, dict):
+        return snapshot  # an un-nested (legacy results/matrix/<gw>.json) result is already the matrix
+    out = dict(m)
+    for k in ("measured_at", "build", "arch", "hardware"):
+        if snapshot.get(k) is not None:
+            out[k] = snapshot[k]
+    return out
+
+
+# What _write_record reports, so main() can tell a row it could not record from one already present.
+WRITTEN, ALREADY_RECORDED, NO_TIMESTAMP, HISTORY_UNREADABLE = "written", "already", "no_ts", "bad_hist"
+
+
 def _write_record(suite, gw, data):
-    """Build one history row from a result JSON and append it if new. Returns True if written."""
+    """Build one history row from a result JSON and append it if new. Returns one of the outcomes
+    above: only WRITTEN appended anything; NO_TIMESTAMP and HISTORY_UNREADABLE are LOST rows."""
     measured = data.get("measured_at")
     if not measured:
-        return False
+        return NO_TIMESTAMP
     rec = {"suite": suite, "measured_at": measured,
            "arch": data.get("arch"), "hardware": data.get("hardware")}
     for k in KEEP[suite]:
@@ -117,28 +151,76 @@ def _write_record(suite, gw, data):
             rec[k] = data[k]
     if suite == "matrix":
         if isinstance(data.get("cells"), dict):
-            rec["cells"] = {k: v.get("served") for k, v in data["cells"].items()}
+            rec["cells"] = {k: (v.get("served") if isinstance(v, dict) else None)
+                            for k, v in data["cells"].items()}
         rec.update(_matrix_extra(data))
     hist_path = os.path.join(HIST, gw + ".jsonl")
     seen = set()
     if os.path.exists(hist_path):
-        for line in open(hist_path):
-            try:
-                j = json.loads(line)
-                seen.add((j.get("suite"), j.get("measured_at")))
-            except Exception:
-                pass
+        with open(hist_path) as fh:
+            for n, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    j = json.loads(line)
+                    seen.add((j.get("suite"), j.get("measured_at")))
+                except Exception as e:
+                    # A damaged line hides which (suite, measured_at) it held, so appending now could
+                    # duplicate it in an append-only record. Refuse, loudly, and let main() fail.
+                    print(f"history: {hist_path} line {n} is unreadable ({e}) - refusing to append "
+                          f"to it", file=sys.stderr)
+                    return HISTORY_UNREADABLE
     if (suite, measured) in seen:
-        return False
+        return ALREADY_RECORDED
     with open(hist_path, "a") as f:
         f.write(json.dumps(rec, separators=(",", ":")) + "\n")
-    return True
+    return WRITTEN
 
 
-def main():
+def _ingest_snapshot(src, label, skipped):
+    """Append the history row for one engine snapshot file. Returns 1 if a row was written; records a
+    LOST row in `skipped` when the file cannot be read, names no gateway, or cannot be recorded."""
+    try:
+        with open(src) as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"history: SKIPPED corrupt {label}: {e}", file=sys.stderr)
+        skipped.append(label)
+        return 0
+    gw = data.get("gateway") if isinstance(data, dict) else None
+    if not gw or not isinstance(gw, str) or "/" in gw or gw.startswith("."):
+        print(f"history: SKIPPED {label}: no `gateway` field to file it under (or not a plain name)",
+              file=sys.stderr)
+        skipped.append(label)
+        return 0
+    got = _write_record("matrix", gw, matrix_of(data))
+    if got == WRITTEN:
+        return 1
+    if got != ALREADY_RECORDED:
+        print(f"history: NOT RECORDED {label}: {got}", file=sys.stderr)
+        skipped.append(label)
+    return 0
+
+
+def _finish(added, skipped):
+    print(f"history: appended {added} record(s)")
+    if skipped:
+        print(f"history: WARNING {len(skipped)} result file(s) could not be recorded - "
+              f"their history row(s) were LOST: {', '.join(skipped)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     os.makedirs(HIST, exist_ok=True)
     added = 0
     skipped = []   # result files that failed to parse (corrupt/truncated) - each is a LOST history row
+    if argv:
+        # NAMED SNAPSHOTS ONLY. A named file that is missing is a lost row, not an empty run.
+        for src in argv:
+            added += _ingest_snapshot(src, src, skipped)
+        return _finish(added, skipped)
     for suite in SUITES:
         d = os.path.join(RES, suite)
         if not os.path.isdir(d):
@@ -160,8 +242,12 @@ def main():
                 print(f"history: SKIPPED corrupt {suite}/{fn}: {e}", file=sys.stderr)
                 skipped.append(f"{suite}/{fn}")
                 continue
-            if _write_record(suite, gw, data):
+            got = _write_record(suite, gw, data)
+            if got == WRITTEN:
                 added += 1
+            elif got != ALREADY_RECORDED:
+                print(f"history: NOT RECORDED {suite}/{fn}: {got}", file=sys.stderr)
+                skipped.append(f"{suite}/{fn}")
     # THE ENGINE NO LONGER WRITES THE PER-SUITE DIRECTORIES ABOVE: it writes only
     # results/snapshots/<gw>.json (current) and results/snapshots/result_<gw>_<measured_at>.json
     # (timestamped). Both hold the matrix-shaped result, so ingest them the same way, keyed by the
@@ -171,25 +257,8 @@ def main():
         for fn in sorted(os.listdir(snap_d)):
             if not fn.endswith(".json"):
                 continue
-            src = os.path.join(snap_d, fn)
-            try:
-                with open(src) as f:
-                    data = json.load(f)
-            except Exception as e:
-                print(f"history: SKIPPED corrupt snapshots/{fn}: {e}", file=sys.stderr)
-                skipped.append(f"snapshots/{fn}")
-                continue
-            gw = data.get("gateway")
-            if not gw:
-                continue
-            if _write_record("matrix", gw, data):
-                added += 1
-    print(f"history: appended {added} record(s)")
-    if skipped:
-        print(f"history: WARNING {len(skipped)} corrupt result file(s) skipped - "
-              f"their history row(s) were LOST: {', '.join(skipped)}", file=sys.stderr)
-        return 1
-    return 0
+            added += _ingest_snapshot(os.path.join(snap_d, fn), f"snapshots/{fn}", skipped)
+    return _finish(added, skipped)
 
 if __name__ == "__main__":
     sys.exit(main())

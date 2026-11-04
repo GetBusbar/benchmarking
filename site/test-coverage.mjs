@@ -190,7 +190,8 @@ test("compare/drawer/search/caps state survives alongside the chooser on one URL
   st.drawer = "bravo";
   const { url, back, again } = roundTrip(st);
   assert.equal(back.q, st.q, url);
-  assert.equal(back.needStream, true, url);
+  // ?cap= is no longer encoded (its checkbox is gone; an invisible filter would hide gateways).
+  assert.equal(back.needStream, false, url);
   assert.deepEqual(back.cmp, st.cmp, url);
   assert.equal(back.cmpOpen, true, url);
   assert.equal(back.drawer, "bravo", url);
@@ -377,7 +378,12 @@ test("the popup reads the SAME chosen-cell values the table reads, at the SAME b
     ["added_latency_p50_us", "Added latency p50"],
   ]) {
     assert.ok(pop.includes(label), `the popup shows ${label}`);
-    assert.ok(app.chooserPerfCell(STORY_GW, key, String, CUSTOM), `${key} is read by the same accessor`);
+    // The cell object is always truthy, so asserting on it proved nothing. Assert the VALUE: the table's
+    // own text for this cell, formatted as the popup formats it, appears in the popup.
+    const c = app.chooserPerfCell(STORY_GW, key, app.fmtAdded, CUSTOM);
+    // A plain absence is dropped from the popup; a value or a MEASURED FAILURE must appear verbatim.
+    assert.ok(!c.na || c.failed, `${key}: the fixture must carry a value or a measured failure`);
+    assert.ok(pop.includes(c.text), `${key}: the popup shows the table's own text ${c.text}`);
   }
   /* THE THROUGHPUT ROW IS LABELLED WITH ITS BOUND, AND FOLLOWS THE SELECTOR. This replaces the old
      "the popup shows Sustained @20ms" check, whose column is deleted - and it is a strictly stronger

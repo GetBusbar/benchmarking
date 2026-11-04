@@ -84,6 +84,20 @@ with tempfile.TemporaryDirectory() as td:
               pinned["alpha"][1]["measured_at"], "2026-07-01T00-00-00Z")
         check("a non-matching engine prefix yields nothing rather than a fallback",
               bc.newest_snapshots(engine="zzz"), {})
+
+        # PINNED BY INSTRUMENT, as bench-audit pins: charlie was measured by ccc3333, which
+        # instrument-equivalence.json attests builds the same binary as aaa1111 (equal sha256 per
+        # commit). A raw prefix match dropped it from an `--engine aaa` cost report.
+        name, body = snap("charlie", "2026-07-11T00-00-00Z", "ccc3333")
+        with open(os.path.join(d, name), "w") as f:
+            json.dump(body, f)
+        os.makedirs(os.path.join(td, "site"))
+        with open(os.path.join(td, "site", "instrument-equivalence.json"), "w") as f:
+            json.dump({"instruments": [{"id": "inst-1", "commits": ["aaa1111", "ccc3333"],
+                                        "evidence": {"otb_release_sha256": {"aaa1111": "h", "ccc3333": "h"}}}]},
+                      f)
+        check("an attested-identical commit is the same engine",
+              sorted(bc.newest_snapshots(engine="aaa")), ["alpha", "bravo", "charlie"])
     finally:
         audit_mod.HERE = old_here
         os.chdir(old_cwd)

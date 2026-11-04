@@ -25,9 +25,9 @@ import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSyn
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
+import { snapshotCellCoords, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
 import { instrumentOf } from "./check-consistency.mjs";
-import { sealMetric, sealFrontier, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -101,7 +101,14 @@ function costLanes(cell) {
     cost_per_million_usd: sealMetric(
       rate > 0 ? (GATEWAY_HOURLY_USD / (rate * 3600)) * 1e6 : null,
       {
-        absent: rateAbsent
+        /* EXCEPT below_resolution, which every reader ranks as 0 ("≈0", equal-best). On the rate that is
+           the frontier's "no rung held this tail"; inherited by a lower-is-better DOLLAR lane it read as
+           "$0 per million", the cheapest gateway on the board, for a gateway that carried nothing under
+           the bound. A cost with no rate is undefined, exactly like the measured-zero case below. */
+        absent: (rateAbsent && rateAbsent.reason === "below_resolution"
+          ? { reason: "not_applicable",
+              detail: `${rateAbsent.detail} - so cost per request at the ${DEFAULT_BOUND_MS} ms bound is undefined, not $0` }
+          : rateAbsent)
           || (rate === 0
             ? { reason: "not_applicable", detail: "the gateway carried zero throughput at this bound, so cost per request is undefined rather than infinite" }
             : null),
@@ -154,7 +161,9 @@ function parseManifest(text) {
   // gateway", "API gateway", ...), never our editorial classification. Missing/unknown falls back
   // to the neutral "Gateway".
   let d = {};
-  try { d = JSON.parse(text); } catch { return { display: null, lang: null, repo: null, cls: null, version: null }; }
+  // A manifest that does not parse is not a gateway with no metadata: publishing it under its directory
+  // name with "Other"/"Gateway" and no repo or version would mislabel a real entrant. Fail loudly.
+  try { d = JSON.parse(text); } catch (e) { throw new Error(`gen-data: a gateway definition.json is not valid JSON (${e.message})`); }
   return {
     display: d.display ?? null,
     lang: d.lang ?? null,
@@ -191,25 +200,19 @@ function snapshotDegradedMode(m) {
   return off.length ? off.join("=false, ") + "=false" : "";
 }
 
+// A CORRUPT FILE STILL DEGRADES TO null (the snapshot ingest is deliberately null-safe: a corrupt sibling
+// must not blank a row that has a good artifact - test.mjs #25(d)), BUT IT IS SAID OUT LOUD. It used to be
+// indistinguishable from "never measured", so a gateway's newest run could vanish from the board, or an
+// older one take its place, with nothing in the build log.
 function readJson(path) {
-  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+  if (!existsSync(path)) return null;
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch (e) {
+    console.warn(`gen-data: WARNING: ${path} exists but is not valid JSON (${e.message}) - skipped as if absent; fix or remove it`);
+    return null;
+  }
 }
 
-// newestSnapshot(key): the newest results/snapshots/result_<key>_<ts>.json by its own measured_at (an
-// on-disk archive of every run; the newest wins). Returns the parsed snapshot or null (no snapshot yet).
 const SNAP_DIR = join(ROOT, "results", "snapshots");
-function newestSnapshot(key) {
-  if (!existsSync(SNAP_DIR)) return null;
-  let best = null, bestMs = -1;
-  for (const f of readdirSync(SNAP_DIR)) {
-    if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
-    const snap = readJson(join(SNAP_DIR, f));
-    if (!snap) continue;
-    const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
-    if (ms > bestMs) { bestMs = ms; best = snap; best.__file = f; }
-  }
-  return best;
-}
 
 /* The snapshot the board should render for `key`: the newest FULL run, with every strictly-scoped
    newer run layered over it oldest-first (so the newest measurement of any cell wins). */
@@ -222,6 +225,10 @@ function resolvedSnapshot(key) {
     if (!snap) continue;
     snap.__file = f;
     snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
+    // An unparseable stamp cannot be ordered: NaN compares false against everything, so a scoped re-run
+    // carrying one was silently never layered and the sort below became order-dependent. Refuse it.
+    if (!Number.isFinite(snap.__ms))
+      throw new Error(`gen-data: ${f} has an unparseable measured_at (${JSON.stringify(snap.measured_at)}); a snapshot that cannot be dated cannot be ordered against the others. Fix or remove it.`);
     snap.__coords = snapshotCellCoords(snap.matrix);
     snaps.push(snap);
   }
@@ -229,7 +236,8 @@ function resolvedSnapshot(key) {
   snaps.sort((a, b) => a.__ms - b.__ms);
   const widest = snaps.reduce((m, s) => (s.__coords.size > m.__coords.size ? s : m), snaps[0]);
   // The base is the newest run that is NOT a strict subset of the widest - i.e. a full run.
-  const fulls = snaps.filter((s) => !isStrictSubset(s.__coords, widest.__coords));
+  // The base is the newest run that is not a SCOPED re-run of the widest grid (isScopedRelativeTo).
+  const fulls = snaps.filter((s) => !isScopedRelativeTo(s.__coords, widest.__coords));
   const base = fulls[fulls.length - 1];
   /* SUBSET OF THE BASE, NOT OF THE WIDEST. Subset-ness only means anything relative to the run being
      layered ONTO: a scoped re-run is a subset of the GRID, not necessarily of some historical
@@ -239,7 +247,7 @@ function resolvedSnapshot(key) {
      `fulls`, became the base by recency, and 33 measured cells vanished from the board. That is the
      exact failure this module was written to prevent, arriving through the door next to the one it
      was watching. */
-  const scopedNewer = snaps.filter((s) => isStrictSubset(s.__coords, base.__coords) && s.__ms >= base.__ms);
+  const scopedNewer = snaps.filter((s) => isScopedRelativeTo(s.__coords, base.__coords) && s.__ms >= base.__ms);
   if (!scopedNewer.length) return base;
   const out = structuredClone(base);
   out.__file = base.__file;
@@ -359,7 +367,12 @@ const allGateways = gatewayKeys.map((key) => {
       // Older snapshots predate the field entirely; absent here just means absent (handled below).
       if (snap.definitions && typeof snap.definitions === "object") snapshotDefinitionsByKey.set(key, snap.definitions);
     }
-    const files = snap.config && snap.config.files;
+    // THE CONFIG BELONGS TO THE RUN THAT BECAME THE MATRIX, exactly like the definitions above. When the
+    // per-suite results/matrix/<gw>.json was newer and won, the snapshot's config is an OLDER run's: shown
+    // beside the newer numbers it is a config the measured process did not boot on. Fall through to the
+    // sidecar path below instead. (A snapshot with NO matrix still supplies its config: nothing lost to it.)
+    const lostToNewerMatrix = !!snap.matrix && g.matrix_from_snapshot !== true;
+    const files = !lostToNewerMatrix && snap.config && snap.config.files;
     if (files && typeof files === "object") {
       const parts = Object.entries(files).map(([name, body]) =>
         Object.keys(files).length > 1 ? `# ${name}\n${body}` : String(body));
@@ -413,9 +426,17 @@ const allGateways = gatewayKeys.map((key) => {
     // three chart subtitles said "best same-dialect passthrough", and for apisix, agentgateway and
     // plano the openai diagonal is not their best one (apisix's openai-responses cell sustains 5.7%
     // more), so the word "best" was false on the board even though the number beside it was right.
+    /* A LAYERED CELL IS STAMPED WITH THE RUN THAT MEASURED IT. On a board with a scoped re-run layered
+       over the base, g.matrix carries the BASE run's build/measured_at while the cell itself came from
+       the re-run (layerScopedMatrix stamps it `__run`); dating the projected record by the base claimed
+       a measurement from a run that never took it. */
+    const stampOf = (egress, ingress) => {
+      const r = g.matrix.upstreams?.[egress]?.cells?.[ingress]?.__run;
+      return r ? [r.build ?? null, r.measured_at ?? null] : [build, at];
+    };
     const bc = bestCell(g.matrix);
     if (bc) g.best_cell = sealPerfCell(bc, { ingress: bc.dialect, egress: bc.dialect, dialect: bc.dialect },
-      makeSource("matrix", SWEEP.DIAGONAL, build, at), bc.absences);
+      makeSource("matrix", SWEEP.DIAGONAL, ...stampOf(bc.dialect, bc.dialect)), bc.absences);
     // THE DOLLAR LANES RIDE ON THE CANONICAL CELL, derived from its frontier reading at the default
     // bound - the same cell and the same operating point the throughput column ranks, so the two can
     // never describe different runs of the same gateway.
@@ -423,7 +444,7 @@ const allGateways = gatewayKeys.map((key) => {
     // The gateway's TRANSLATION cell (openai in -> best non-openai egress).
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = sealPerfCell(tc, { ingress: tc.ingress, egress: tc.egress },
-      makeSource("matrix", SWEEP.TRANSLATION, build, at), tc.absences);
+      makeSource("matrix", SWEEP.TRANSLATION, ...stampOf(tc.egress, tc.ingress)), tc.absences);
     // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming - the SAME
     // (ingress==egress) cell the headline perf is projected from (one source of truth). Only when the
     // diagonal ACTUALLY STREAMED (stream_served===true); a non-streaming cell leaves g.streaming absent.
@@ -431,7 +452,7 @@ const allGateways = gatewayKeys.map((key) => {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
       if (cell && cell.stream && cell.stream.stream_served === true) {
         g.streaming = sealStreaming(cell.stream, bc.dialect,
-          makeSource("matrix", SWEEP.STREAM_DIAGONAL, build, at), cell.absences);
+          makeSource("matrix", SWEEP.STREAM_DIAGONAL, ...stampOf(bc.dialect, bc.dialect)), cell.absences);
       }
     }
     // MEMORY: NOT projected. Memory is measured per cell (its own cold-started, plateau-terminated
@@ -624,8 +645,13 @@ function sealPerfCellPerf(perf, absences = null) {
   rec.frontier = sealFrontier(perf.frontier, absences);
   // The rungs every reading was taken from, so a reader can re-derive the whole frontier rather than
   // taking it on trust. It rides as a plain field: it is evidence, not a metric.
-  if (Array.isArray(perf.sweep_max_proxy) && perf.sweep_max_proxy.length)
+  if (Array.isArray(perf.sweep_max_proxy) && perf.sweep_max_proxy.length) {
     rec.sweep = perf.sweep_max_proxy;
+    // AND THE SAME RUNGS AS A SEALED READING, so the board can be compared at ONE concurrency rather
+    // than at each gateway's own peak. `sweep` above is evidence; this is the metric, median of the
+    // clean windows at each rung, and it is what the concurrency selector ranks on.
+    rec.rungs = sealRungs(perf.sweep_max_proxy);
+  }
   if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
   // The verdict without its evidence is an assertion. egress_reverified is the fairness guard's boolean
   // (did this gateway actually TRANSLATE to the egress dialect, or just proxy the ingress request
@@ -635,6 +661,10 @@ function sealPerfCellPerf(perf, absences = null) {
   // publishing it with no stated basis is exactly what this codebase refuses to do elsewhere.
   // Neither is a sealed metric - they are provenance about a metric, so they ride as plain fields.
   if (perf.reverify_note != null) rec.reverify_note = perf.reverify_note;
+  // THE SAMPLE WEIGHT BEHIND THE c=1 PERCENTILES (record.rs CellPerf.c1_note: "taken over 148 successful
+  // gateway round trips and 254967 direct-to-mock round trips"). The stream rebuild already carries its
+  // twin (stream_c1_note); dropping this one published a thin percentile indistinguishable from a solid one.
+  if (perf.c1_note != null) rec.c1_note = perf.c1_note;
   return rec;
 }
 // sealPerfCell: a matrix/fallback perf object -> the canonical {path, source, <sealed metrics>} record.
@@ -907,8 +937,17 @@ const latestDisplayedMs = Math.max(...gateways.map(displayedMeasuredMs), 0);
 const latestDisplayed = latestDisplayedMs > 0 ? new Date(latestDisplayedMs).toISOString() : null;
 
 // The newest embedded measurement across a gateway's own suites, in epoch ms (0 when it has none).
+// A stamp that is present but unparseable is a hard error, never a silent 0 or NaN: NaN poisoned the
+// Math.max below into NaN, and every board-wide freshness guard compares false against NaN, so one
+// garbage stamp disabled the undatable-board and 180-day checks for the whole board.
+function stampMs(at, where) {
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms)) throw new Error(`gen-data: ${where} has an unparseable measured_at ${JSON.stringify(at)}; a measurement that cannot be dated cannot be aged`);
+  return ms;
+}
 function newestMeasuredMs(g) {
-  return Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
+  return Math.max(...SUITES.map((s) => g[s] && g[s].measured_at ? stampMs(g[s].measured_at, `${g.key}.${s}`) : null)
+    .filter((v) => v != null).concat([0]));
 }
 
 // MED-1 / MED-2: the stamp that actually drives what the board DISPLAYS, in epoch ms (0 when none).
@@ -919,7 +958,7 @@ function newestMeasuredMs(g) {
 // Folding retired legacy suite timestamps in (newestMeasuredMs) let a never-displayed ad-hoc SUITES=perf
 // re-run make a wholesale-stale matrix board look fresh (MED-1) or slip past the 180-day floor (MED-2).
 function displayedMeasuredMs(g) {
-  const matrixAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : 0;
+  const matrixAt = g.matrix && g.matrix.measured_at ? stampMs(g.matrix.measured_at, `${g.key}.matrix`) : 0;
   return matrixAt > 0 ? matrixAt : newestMeasuredMs(g);
 }
 

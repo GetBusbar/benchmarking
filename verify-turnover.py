@@ -23,12 +23,27 @@ Here the peak is proved by two clean rungs and any rig limit further up cannot h
 
 So classify every unbounded reading:
   PROVED    - a clean rung above the winner served strictly slower. Turnover is measured.
-  CLIFF     - the winner's next probed rung up failed, with no clean slower rung above it.
+  PLATEAU   - no clean rung above was slower, but the next one up was clean at the SAME rate: the peak
+              does not rest on a failure, though no turnover was measured either.
+  CLIFF     - the winner's next probed rung up was not clean, with no clean slower rung above it.
               NOT necessarily wrong, but the number rests on those failures being the gateway's.
-  TOP       - nothing above was probed (should be zero; the other audit checks this).
+              Split into MOOT (the failing rung was slower anyway) and THAT-MATTERS (it was faster).
+  DISCLOSED FLOOR - nothing above was probed, and `lower_bound` says so.
+  TOP       - nothing above was probed and the artifact does NOT disclose it: the one failing exit.
+
+A rung is CLEAN only if every window at its concurrency served cleanly by the engine's own rule
+(`frontier::Rung::served_cleanly`: `ok > 0 and fail == 0`, mirrored by bench-audit.py's
+`rung_served_cleanly`). An absent `fail` is not zero failures - "measured nothing" and "measured no
+failures" are different facts - and a window that completed nothing (`ok == 0`, rate 0) is not a clean
+rung that "served more slowly", which would otherwise prove a turnover out of an empty window.
 """
 import glob
 import json
+import os
+import sys
+
+# Anchored to this file, not the caller's cwd (bench-audit.py's ledger TOOL-03).
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _rate(v):
@@ -42,22 +57,55 @@ def _rate(v):
 
 
 def num(v):
+    """A bare number or None. A JSON bool is not a number (Python's `True` would read as 1)."""
     if isinstance(v, dict):
         v = v.get("value")
-    return v if isinstance(v, (int, float)) else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-proved, cliff, top, disclosed_floor = [], [], [], []
+def window_clean(s):
+    """The engine's `ok > 0 and fail == 0` for one window; on a snapshot that predates `ok`, the same
+    p99-or-positive-rate fallback bench-audit.py uses (wider than the engine's rule, never narrower)."""
+    fail, ok = num(s.get("fail")), num(s.get("ok"))
+    if fail is None or fail != 0:
+        return False
+    if ok is not None:
+        return ok > 0
+    rps = num(s.get("rps"))
+    return (rps is not None and rps > 0) or num(s.get("p99_us")) is not None
 
-for p in sorted(glob.glob("results/snapshots/*.json")):
+
+def published_paths():
+    """The snapshots the BOARD publishes (site/data.json), as verify-frontier.py does - not every
+    superseded run still on disk, which fails permanently on data no reader can see. Falls back to
+    every snapshot when the board names none."""
+    every = sorted(glob.glob(os.path.join(HERE, "results", "snapshots", "*.json")))
     try:
-        d = json.load(open(p))
+        with open(os.path.join(HERE, "site", "data.json")) as f:
+            want = {os.path.basename(g["snapshot_file"])
+                    for g in json.load(f).get("gateways", []) if g.get("snapshot_file")}
+    except Exception:
+        return every
+    keep = [p for p in every if os.path.basename(p) in want] if want else every
+    if len(keep) != len(every):
+        print(f"checking the {len(keep)} snapshot(s) the board publishes "
+              f"({len(every) - len(keep)} superseded file(s) on disk not checked)")
+    return keep
+
+
+proved, plateau, cliff, top, disclosed_floor = [], [], [], [], []
+unreadable = []
+
+for p in published_paths():
+    try:
+        with open(p) as fh:
+            d = json.load(fh)
     except (OSError, ValueError):
-        # A snapshot being written by a live run is not a defect. Every sibling auditor
-        # (bench-audit.py, verify-frontier.py, verify-latency.py, charts.py) already skips one; these
-        # two were written later and did not, so running them DURING a run - which is exactly when they
-        # are most useful - could kill the whole audit on one half-written file.
+        # A snapshot being written by a live run is not a defect in the DATA - but nothing in it was
+        # examined, so it may not be covered by any "EVERY published maximum" claim below, and the run
+        # exits non-zero. Re-run once the write lands.
         print(f"  SKIP {p}: not readable as JSON yet (a snapshot mid-write is not a defect)")
+        unreadable.append(p)
         continue
     gw = d.get("gateway", "?")
     for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():
@@ -78,14 +126,16 @@ for p in sorted(glob.glob("results/snapshots/*.json")):
             at = f"{gw} {ing}>{eg}"
 
             # Collapse repeated windows at one concurrency: a rung is clean only if EVERY window at
-            # that concurrency failed nothing, and its rate is the best clean window there.
+            # that concurrency served cleanly (see `window_clean`), and its rate is the best window there.
+            # `fails` is the failures counted, for display only - it never decides cleanliness.
             by_c = {}
             for s in sweep:
                 c = num(s.get("conc"))
                 if c is None:
                     continue
-                e = by_c.setdefault(c, {"fails": 0, "best": None})
+                e = by_c.setdefault(c, {"fails": 0, "clean": True, "best": None})
                 e["fails"] += num(s.get("fail")) or 0
+                e["clean"] = e["clean"] and window_clean(s)
                 r = num(s.get("rps"))
                 if r is not None and (e["best"] is None or r > e["best"]):
                     e["best"] = r
@@ -111,22 +161,33 @@ for p in sorted(glob.glob("results/snapshots/*.json")):
             slower_clean = [
                 (c, by_c[c]["best"])
                 for c in above
-                if by_c[c]["fails"] == 0 and by_c[c]["best"] is not None and by_c[c]["best"] < win_rps
+                if by_c[c]["clean"] and by_c[c]["best"] is not None and by_c[c]["best"] < win_rps
             ]
             nxt = above[0]
             if slower_clean:
                 c, r = slower_clean[0]
                 proved.append((at, win_rps, win_c, c, r))
+            elif by_c[nxt]["clean"] and by_c[nxt]["best"] is not None and by_c[nxt]["best"] >= win_rps:
+                # A CLEAN next rung at the winner's rate (a tie the engine breaks toward the lower
+                # concurrency). Nothing failed, so this is no cliff - reporting it as a "cliff that
+                # matters" at +0.0% claimed a failure that never happened.
+                plateau.append((at, win_rps, win_c, nxt, by_c[nxt]["best"]))
             else:
                 cliff.append((at, win_rps, win_c, nxt, by_c[nxt]["fails"], by_c[nxt]["best"]))
 
-tot = len(proved) + len(cliff) + len(top)
+tot = len(proved) + len(plateau) + len(cliff) + len(top) + len(disclosed_floor)
 print("=" * 96)
 print(f"TURNOVER PROOF for {tot} unbounded readings")
 print("=" * 96)
 print(f"\nPROVED ({len(proved)}) - a clean rung above the peak served strictly slower:")
 for at, wr, wc, c, r in proved:
     print(f"  {at[:44]:44s} peak {_rate(wr):>9} @c={wc:<6} then clean {_rate(r):>9} @c={c} (slower, fail=0)")
+
+print(f"\nPLATEAU ({len(plateau)}) - the next rung up was clean at the same rate; no failure, no turnover:")
+if not plateau:
+    print("  NONE.")
+for at, wr, wc, c, r in plateau:
+    print(f"  {at[:44]:44s} peak {_rate(wr):>9} @c={wc:<6} then clean {_rate(r):>9} @c={c} (not slower)")
 
 # THE CLIFFS SPLIT IN TWO, and only one half has anything at stake.
 #
@@ -180,15 +241,22 @@ for at, wr, wc in top:
     print(f"  {at[:44]:44s} peak {_rate(wr):>9} @c={wc} - lower_bound is not set, so this rate is published")
     print(f"  {'':44s}   as a ceiling when nothing above it was ever measured")
 
+# THE "EVERY" CLAIMS ARE ONLY MADE ABOUT WHAT WAS EXAMINED, AND ONLY WHEN TRUE OF ALL OF IT. A
+# disclosed floor established no maximum at all (nothing above it was probed), an unreadable snapshot
+# was not looked at, and with nothing examined "every" is vacuous - each of those suppresses the claims.
+covered = tot > 0 and not unreadable and not disclosed_floor
 print()
-if not live and not top:
+if covered and not live and not top:
     print(f"EVERY published maximum is established without depending on a failure: {len(proved)} by a")
-    print(f"clean slower rung above the peak, {len(moot)} where the failing rung was slower anyway.")
+    print(f"clean slower rung above the peak, {len(plateau)} on a clean plateau, {len(moot)} where the")
+    print("failing rung was slower anyway.")
 print()
-if not cliff and not top:
+if covered and not cliff and not top and not plateau:
     print("EVERY published maximum on this board is a MEASURED TURNOVER: for each one, the rig was")
     print("pushed past the peak and the gateway served cleanly but slower. No published rate depends")
     print("on interpreting a failure, so no published rate can be the rig wearing a gateway's name.")
+if unreadable:
+    print(f"NOT EXAMINED: {len(unreadable)} snapshot(s) could not be read (see SKIP above) - exiting non-zero")
 
 # EXIT CODE: this is a DISCLOSURE tool, not a gate, with one exception.
 #
@@ -198,7 +266,6 @@ if not cliff and not top:
 #
 # TOP is different: a maximum with nothing probed above it has established no boundary at all, and the
 # frontier's own `lower_bound` flag exists to disclose precisely that. If one appears here while the
-# artifact does not flag it, the two disagree and something is wrong - so that alone exits non-zero.
-import sys
-
-sys.exit(1 if top else 0)
+# artifact does not flag it, the two disagree and something is wrong - so that exits non-zero, and so
+# does a snapshot this run could not read, because nothing above may be read as covering it.
+sys.exit(1 if top or unreadable else 0)
