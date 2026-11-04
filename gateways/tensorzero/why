@@ -3,10 +3,11 @@
 # The rule, from the published methodology: a setting may appear only if it is needed to boot the
 # process at all, to point an upstream at the test mock instead of a real provider, to expose an
 # ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
-# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
-# that matches nothing is a stale claim and also a failure.
+# line: <pattern> <boot|upstream|ingress|bind>. Nothing machine-checks this file: the shell lint
+# that read these claims was deleted in 1127cf1, so it is a reviewed disclosure kept in step with
+# the config by hand.
 #
-# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+# Migrated from GW_CONFIG_WHY in the shell-era gateway.sh (deleted in 1127cf1).
 enabled  boot     # gateway.observability: TensorZero requires a ClickHouse URL when this is on, and
 routing  boot     # a model block without a routing list is not a model
 type     boot     # the provider type is required
@@ -15,9 +16,9 @@ endpoint_url upstream # bedrock's own base-URL override -> the mock
 api_type    upstream  # selects the Responses upstream shape on the openai provider
 model_name  upstream  # the model id sent upstream
 model_id    upstream  # bedrock spells the same thing this way
-api_key_location boot # \"none\" is the only way to declare an openai model with no key in the env
+api_key_location boot # "none" is the only way to declare an openai model with no key in the env
 region           boot # the bedrock signer fails without one
 ANTHROPIC_API_KEY     boot  # credentials are validated EAGERLY at boot for EVERY declared model
 AWS_ACCESS_KEY_ID     boot  # (model_table.rs load_credential), and the anthropic provider REJECTS
-AWS_SECRET_ACCESS_KEY boot  # api_key_location=\"none\", so a dummy value here is what lets the
+AWS_SECRET_ACCESS_KEY boot  # api_key_location="none", so a dummy value here is what lets the
 AWS_REGION            boot  # four-model config exist at all

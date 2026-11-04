@@ -3,14 +3,11 @@
 # The rule, from the published methodology: a setting may appear only if it is needed to boot the
 # process at all, to point an upstream at the test mock instead of a real provider, to expose an
 # ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
-# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
-# that matches nothing is a stale claim and also a failure.
+# line: <pattern> <boot|upstream|ingress|bind>. Nothing machine-checks this file: the shell lint
+# that read these claims was deleted in 1127cf1, so it is a reviewed disclosure kept in step with
+# the config by hand.
 #
-# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
-# Claimed because the dead gateway.sh launcher still passes it and the lint reads that file. The
-# LIVE config does not set it: the harness sets it for every gateway from the cores it pinned
-# (manifest.rs's pinned_parallelism), so no entrant states its own.
-GOMAXPROCS bind   # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+# Migrated from GW_CONFIG_WHY in the shell-era gateway.sh (deleted in 1127cf1).
 INITIAL_ROOT_TOKEN boot  # its relay routes serve nothing without a token it issued, and every token its admin API mints is server-chosen; this is the only way the declared auth is a real one
 # This gateway has no config file. It keeps its configuration in a database and is configured
 # through its own admin API after boot, so the deployment its operators run is these calls: log in,

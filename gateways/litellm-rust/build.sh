@@ -13,13 +13,16 @@
 set -euo pipefail
 
 GW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+rm -f "$GW_DIR/.build-provenance.json"
 
 REPO="${LITELLM_RUST_REPO:-https://github.com/BerriAI/litellm}"
 BRANCH="${LITELLM_RUST_BRANCH:-litellm_rust_gateway_v1_messages_route}"
-COMMIT="${LITELLM_RUST_COMMIT:-698072308b}"
-PY_SPEC="${LITELLM_PY_SPEC:-litellm[proxy]==1.93.0}"
+COMMIT="${LITELLM_RUST_COMMIT:-698072308bcd6b56b9455e49e0a69c3680482c12}"
+PY_SPEC="litellm[proxy]==1.93.0"
+[ "${LITELLM_PY_SPEC:-$PY_SPEC}" = "$PY_SPEC" ] || { echo "build: update the hash lock to change the Python package" >&2; exit 1; }
 SRC="$GW_DIR/src"
 VENV="$GW_DIR/venv"
+[[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "build: LITELLM_RUST_COMMIT must be a full immutable commit" >&2; exit 1; }
 
 # Prerequisites. Unconditionally, because apt-get install is already idempotent and already
 # resolves dependencies: there is nothing here for us to be clever about. It used to be wrapped in
@@ -31,7 +34,11 @@ VENV="$GW_DIR/venv"
 # ubuntu user passwordless sudo, which the harness already relies on elsewhere; if that ever stops
 # being true this must fail loudly at the missing package rather than hang the run waiting on a tty
 # that is not there.
-sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev python3-venv python3-pip
+# NEEDRESTART_MODE=l for the same reason the box provisioning passes it: Ubuntu's needrestart hook
+# otherwise restarts polkit/dbus/ssh under this session and passwordless sudo flaps mid-build. The
+# dpkg lock timeout waits out unattended-upgrades instead of failing the entrant on a lock the box
+# itself was holding.
+sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q git build-essential pkg-config libssl-dev python3-venv python3-pip
 
 # THE PYTHON PACKAGE IS NOT OPTIONAL AND ITS FAILURE IS SILENT.
 #
@@ -40,15 +47,18 @@ sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential
 # recorded as a published served=false with zero throughput, which reads as a gateway that does not
 # work rather than a rig that did not finish installing it. So the import is verified, retried, and
 # the build fails loudly rather than handing a broken binary to the measurement.
+PIPLOG="$(mktemp)"
+trap 'rm -f "$PIPLOG"' EXIT
 for attempt in 1 2 3; do
   [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
-  "$VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1 || true
+  "$VENV/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12), "the hash-locked environment requires Python 3.12"'
   rc=0
-  "$VENV/bin/pip" install -q "$PY_SPEC" >/dev/null 2>&1 || rc=$?
-  if [ "$rc" = 0 ] && "$VENV/bin/python" -c 'import litellm' >/dev/null 2>&1; then
+  "$VENV/bin/pip" install -q --require-hashes -r "$GW_DIR/requirements.lock" >"$PIPLOG" 2>&1 || rc=$?
+  if [ "$rc" = 0 ] && "$VENV/bin/python" -c 'import litellm' >>"$PIPLOG" 2>&1; then
     break
   fi
-  echo "build: python config package attempt $attempt failed (pip rc=$rc)" >&2
+  # The reason, not just the code: the resolver/network error is the only thing that says why.
+  echo "build: python config package attempt $attempt failed (pip rc=$rc): $(tail -5 "$PIPLOG" | tr '\n' ' ')" >&2
   [ "$attempt" = 3 ] && { echo "build: the python config package would not import after 3 attempts"; exit 1; }
   rm -rf "$VENV"
   sleep $((attempt * 5))
@@ -73,7 +83,10 @@ if [ ! -d "$SRC" ]; then
   git clone -q -b "$BRANCH" "$REPO" "$SRC"
 fi
 git -C "$SRC" fetch -q origin 2>/dev/null || true
-git -C "$SRC" checkout -q "$COMMIT"
+# Resolve the immutable full commit, never a moving branch or a shadowing reference.
+FULL="$(git -C "$SRC" rev-parse --verify --quiet "$COMMIT^{commit}")" || { echo "build: pin $COMMIT does not resolve to a commit"; exit 1; }
+[ "$FULL" = "$COMMIT" ] || { echo "build: resolved source differs from the pinned commit" >&2; exit 1; }
+git -C "$SRC" checkout -q "$FULL"
 
 ( cd "$SRC/litellm-rust" && cargo build --release -p litellm-ai-gateway --features server,python-config )
 
@@ -89,3 +102,5 @@ for cand in litellm-ai-gateway litellm_ai_gateway server; do
 done
 [ -n "$BIN" ] || { echo "build: finished but none of the declared binary names exist"; exit 1; }
 echo "build: $BIN at $(git -C "$SRC" rev-parse --short HEAD) with $("$VENV/bin/pip" show litellm 2>/dev/null | awk '/^Version:/{print $2}')"
+
+python3 "$GW_DIR/../../lib/gateway_build_provenance.py" "$SRC" "$BIN" "$GW_DIR/.build-provenance.json"

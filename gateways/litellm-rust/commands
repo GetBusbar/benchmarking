@@ -13,5 +13,7 @@
 # 400 here means the config reader did not load config.gen.yaml, not that the gateway lacks the
 # capability. The port, key and model are literal because `commands` gets no placeholder
 # substitution (manifest.rs's loader reads the file verbatim); they are the same values definition.json
-# and env declare.
-curl -s -m 10 -X POST http://127.0.0.1:8101/v1/messages -H 'content-type: application/json' -H 'Authorization: Bearer gwbench' -d '{"model":"azure_ai/mock","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' > /tmp/lr-config-check 2>&1; grep -q 'no deployment registered' /tmp/lr-config-check && { echo "booted into the env fallback router - the python config reader never loaded config.gen.yaml, so PYTHONPATH is not reaching the build venv: $(cat /tmp/lr-config-check)" >&2; exit 1; }; exit 0
+# and env declare, so a change to either must be mirrored here. A check that could not ASK (curl
+# failed outright) refuses too: exiting 0 there passed a boot nobody had verified. The response goes
+# to a private mktemp file, not a fixed /tmp name a stale copy or another user could own.
+f=$(mktemp) || exit 1; curl -s -m 10 -X POST http://127.0.0.1:8101/v1/messages -H 'content-type: application/json' -H 'Authorization: Bearer gwbench' -d '{"model":"azure_ai/mock","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' > "$f" 2>&1; rc=$?; if [ "$rc" != 0 ]; then echo "the config-reader check could not reach the gateway on 127.0.0.1:8101 (curl rc=$rc), so whether it loaded config.gen.yaml is unknown - refusing rather than passing an unchecked boot: $(cat "$f")" >&2; rm -f "$f"; exit 1; fi; grep -q 'no deployment registered' "$f" && { echo "booted into the env fallback router - the python config reader never loaded config.gen.yaml, so PYTHONPATH is not reaching the build venv: $(cat "$f")" >&2; rm -f "$f"; exit 1; }; rm -f "$f"; exit 0
