@@ -36,9 +36,15 @@ KEYFILE="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}/gateway-bench-key.pem"
 SSHCMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=25 -i $KEYFILE"
 PARTIAL="$HERE/results/partial"
 REMOTE_SNAP="/home/ubuntu/benchmarking/results/snapshots/$GW.json"
-CELLS_TOTAL=36
+# 6x6 for a field run; override when the grid is narrowed (OTB_DIALECTS) so the ETA is against the
+# grid that is actually running.
+CELLS_TOTAL="${CELLS_TOTAL:-36}"
+# Give up after this many consecutive polls that could not read the box at all (240 s apart), and
+# after this many polls that saw the run over with no final snapshot to pull.
+MAX_UNREADABLE="${MAX_UNREADABLE:-6}"
+MAX_NO_FINAL="${MAX_NO_FINAL:-3}"
 
-log() { printf '[%s] busbar-watch: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+log() { printf '[%s] %s-watch: %s\n' "$(date -u +%H:%M:%S)" "$GW" "$*"; }
 mkdir -p "$PARTIAL"
 
 count_cells() {  # count measured cells in a snapshot file, on stdin's behalf
@@ -50,12 +56,12 @@ try:
 except Exception: print(0)" "$1" 2>/dev/null || echo 0
 }
 
-t0=0; c0=0
+t0=0; c0=0; unreadable=0; no_final=0
 while :; do
   # ONE ssh, `key=value` lines, parsed BY NAME. Three separate connections per poll produced false
   # "poll unreadable" alarms, and packing three outputs onto one line and reading them positionally
   # produced a false "ENGINE GONE" on a perfectly healthy run.
-  read -r alive cells deadline <<<"$(
+  read -r alive cells deadline rundone <<<"$(
     $SSHCMD "ubuntu@$IP" "
       printf 'alive=%s\n' \"\$(pgrep -c otb || echo 0)\"
       printf 'cells=%s\n' \"\$(python3 -c '
@@ -68,10 +74,24 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
       # the authoritative answer to 'how long does this machine have left', not our own bookkeeping
       # of when we launched it, which is the number nobody checked the night this mattered.
       printf 'deadline=%s\n' \"\$(sed -n 's/^USEC=//p' /run/systemd/shutdown/scheduled 2>/dev/null || echo 0)\"
+      # The run script's own completion sentinel: lets a watcher started AFTER the run ended (or
+      # restarted after a laptop sleep) see that it is over without ever having seen otb alive.
+      printf 'rundone=%s\n' \"\$(cat ~/benchmarking/.run-done 2>/dev/null)\"
     " 2>/dev/null | tr -d '\r' | awk -F= '
-      /^alive=/{a=$2} /^cells=/{c=$2} /^deadline=/{d=$2}
-      END{printf "%s %s %s", (a==""?"?":a), (c==""?"?":c), (d==""?0:d)}'
+      /^alive=/{a=$2} /^cells=/{c=$2} /^deadline=/{d=$2} /^rundone=/{r=$2}
+      END{printf "%s %s %s %s", (a==""?"?":a), (c==""?"?":c), (d==""?0:d), (r==""?"-":r)}'
   )"
+  # A box that cannot be read at all (terminated, IP gone) is not "still measuring": stop after a
+  # bounded run of unreadable polls instead of polling a dead address forever.
+  if [[ "$alive" == "?" ]]; then
+    unreadable=$((unreadable + 1))
+    if (( unreadable >= MAX_UNREADABLE )); then
+      log "box unreadable for $unreadable polls in a row - giving up (partial kept in $PARTIAL/$GW.json)"
+      exit 1
+    fi
+  else
+    unreadable=0
+  fi
 
   # THE PULL HAPPENS EVERY POLL, not at the end. The snapshot is the live file the engine rewrites as
   # each batch of cells lands, so this is always the most complete thing that exists.
@@ -111,12 +131,19 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
   # NEVER READ "NOT STARTED YET" AS "FINISHED". At launch the box is still provisioning and `otb` is
   # absent, so a bare `alive == 0` test would take the exit path before the run had begun - the same
   # shape of mistake that lost eight hours of busbar. The run is only over once it has been seen alive.
+  # The run's own .run-done sentinel is the other proof it is over, and the only one available to a
+  # watcher that started after otb had already exited.
   [[ "$alive" =~ ^[1-9] ]] && seen_alive=1
-  if [[ "${seen_alive:-0}" == "1" && "$alive" == "0" ]]; then
+  if [[ "$alive" == "0" && ( "${seen_alive:-0}" == "1" || "${rundone:--}" != "-" ) ]]; then
     rsync -az --timeout=180 -e "$SSHCMD" \
       "ubuntu@$IP:benchmarking/results/snapshots/result_${GW}_*.json" "$HERE/results/snapshots/" 2>/dev/null \
       && { log "final snapshot pulled"; break; }
-    log "otb gone but no final snapshot yet - retrying"
+    no_final=$((no_final + 1))
+    if (( no_final >= MAX_NO_FINAL )); then
+      log "RUN ENDED WITHOUT A FINAL SNAPSHOT (run-done=${rundone}) after $no_final pulls - the engine exited before writing result_${GW}_*.json; partial kept in $PARTIAL/$GW.json"
+      exit 1
+    fi
+    log "otb gone but no final snapshot yet - retrying ($no_final/$MAX_NO_FINAL)"
   fi
   sleep 240
 done

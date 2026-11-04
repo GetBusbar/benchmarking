@@ -21,9 +21,9 @@ import sys
 # because refusing the honest not-served result and republishing last run's stale served=true biases
 # the board in that gateway's favor (audit R4-M2).
 #
-# The ONLY authoritative in-band boot-failure sentinel is the one lib/harness.sh:127 emits when
-# harness_launch_ready() exhausts every attempt: HARNESS_SERVE_ERR = "failed to boot after N attempts:
-# ...". That string is anchored (it always LEADS the serve_error) and subsumes the per-attempt
+# The ONLY authoritative in-band boot-failure sentinel is the one the harness emits when
+# harness_launch_ready() exhausts every attempt (the retired lib/harness.sh's HARNESS_SERVE_ERR, kept in
+# BOOT_FAILURE_MARKERS below as the single copy of the literal): "failed to boot after N attempts: ...". That string is anchored (it always LEADS the serve_error) and subsumes the per-attempt
 # "not ready;" / "port ... not listening" diagnostics. The bare tokens we used to match - "venv",
 # "not ready", "not listening", "no such file or directory" - are NOT harness sentinels: they only
 # ever appear inside the verbatim `gw_diag=[...]` tail (or a gateway's own captured stderr), so a
@@ -52,11 +52,14 @@ UNREADABLE = object()
 def load(path):
     try:
         with open(path) as f:
-            return json.load(f)
+            doc = json.load(f)
     except FileNotFoundError:
         return None  # genuinely no file: nothing to protect, nothing to promote
     except Exception:
         return UNREADABLE  # present but unreadable: assume it may be good data
+    # Valid JSON that is not an object (a list, a number) is no result this guard can read, so it is
+    # UNREADABLE - fail closed - rather than an AttributeError further down.
+    return doc if isinstance(doc, dict) else UNREADABLE
 
 
 def is_served(doc, suite):
@@ -65,8 +68,10 @@ def is_served(doc, suite):
     if suite == "matrix":
         # matrix: "served" at all if the gateway configured+served any upstream cell.
         ups = doc.get("upstreams") or {}
+        # The SAME served test as the per-cell loop below: truthiness let the string "not_verified"
+        # (the harness never verified this upstream) count as served.
         for u in ups.values():
-            if isinstance(u, dict) and u.get("served"):
+            if isinstance(u, dict) and (u.get("served") is True or u.get("served") == "verified"):
                 return True
         # HIGH-R3-H1: the old `bool(doc.get("cells"))` fallback treated a fully-populated grid of
         # exclusively NOT-served cells (e.g. a process that listens but warms 502 under every egress —
@@ -166,11 +171,17 @@ def is_boot_failure(doc, suite):
 def main():
     if len(sys.argv) != 4:
         print("usage: promote_guard.py <suite> <existing> <incoming>", file=sys.stderr)
-        return 0  # fail-open on misuse: do not block the pipeline, just promote
+        # FAIL CLOSED, like every other input this guard cannot read: exit 0 means PROMOTE, so a
+        # miscalled guard used to wave every incoming file - boot failures included - over good data.
+        return 2
     suite, existing_path, incoming_path = sys.argv[1], sys.argv[2], sys.argv[3]
     incoming = load(incoming_path)
     if incoming is None or incoming is UNREADABLE:
-        # no incoming result at all, or one we cannot read -> nothing to promote, keep whatever exists
+        # no incoming result at all, or one we cannot read -> nothing to promote, keep whatever exists.
+        # Said out loud: the caller's log otherwise reads this as a refused boot failure.
+        why = "absent" if incoming is None else "unreadable or not a JSON object"
+        print(f"GUARD: incoming {suite} result {incoming_path} is {why} - keeping the existing file",
+              file=sys.stderr)
         return 1
     existing = load(existing_path)
     # If the incoming file is a genuine boot/build failure AND the existing file was a real

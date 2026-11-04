@@ -14,11 +14,12 @@ set -euo pipefail
 
 # The gateway's own directory, whatever it is called and wherever it is checked out.
 GW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+rm -f "$GW_DIR/.build-provenance.json"
 
 # PINNED. A revision, not a branch: a moving ref would make two runs weeks apart incomparable while
 # reporting the same build string. Overridable for a local experiment, never in the field.
 REPO="${AISIX_REPO:-https://github.com/api7/aisix}"
-COMMIT="${AISIX_COMMIT:-0f90a98ec8c43864d43e740e3ab66fe1d639c143}"   # tag v0.5.0
+COMMIT="${AISIX_COMMIT:-fb80aafb21f70b9ddcbb4de1344168c7bcdd0351}"   # tag v0.7.0
 SRC="$GW_DIR/src"
 
 # Prerequisites. Unconditionally, because apt-get install is already idempotent and already
@@ -31,7 +32,11 @@ SRC="$GW_DIR/src"
 # ubuntu user passwordless sudo, which the harness already relies on elsewhere; if that ever stops
 # being true this must fail loudly at the missing package rather than hang the run waiting on a tty
 # that is not there.
-sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev protobuf-compiler
+# NEEDRESTART_MODE=l for the same reason the box provisioning passes it: Ubuntu's needrestart hook
+# otherwise restarts polkit/dbus/ssh under this session and passwordless sudo flaps mid-build. The
+# dpkg lock timeout waits out unattended-upgrades instead of failing the entrant on a lock the box
+# itself was holding.
+sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q git build-essential pkg-config libssl-dev protobuf-compiler
 command -v protoc >/dev/null || { echo "build: protoc is required by this gateway's build dependencies and is not installed"; exit 1; }
 
 [ -d "$SRC" ] || git clone -q "$REPO" "$SRC"
@@ -46,3 +51,5 @@ git -C "$SRC" checkout -q "$COMMIT"
 BIN="$SRC/target/release/aisix"
 [ -x "$BIN" ] || { echo "build: finished but $BIN is not there"; exit 1; }
 echo "build: $BIN at $(git -C "$SRC" rev-parse --short HEAD)"
+
+python3 "$GW_DIR/../../lib/gateway_build_provenance.py" "$SRC" "$BIN" "$GW_DIR/.build-provenance.json"

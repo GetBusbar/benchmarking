@@ -13,11 +13,11 @@ provider_keys:
 models:
   - display_name: {GW_MODEL_OPENAI}
     provider: openai
-    model_name: gpt-4o-mini
+    model_name: {GW_MODEL_OPENAI}
     provider_key: mock-openai
   - display_name: {GW_MODEL_ANTHROPIC}
     provider: anthropic
-    model_name: claude-3-5-sonnet-20241022
+    model_name: {GW_MODEL_ANTHROPIC}
     provider_key: mock-anthropic
 api_keys:
   - display_name: bench

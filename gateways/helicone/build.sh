@@ -13,6 +13,7 @@
 set -euo pipefail
 
 GW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+rm -f "$GW_DIR/.build-provenance.json"
 
 # PINNED to a revision rather than a branch, so two runs weeks apart measure the same code.
 REPO="${HELICONE_REPO:-https://github.com/Helicone/ai-gateway}"
@@ -29,7 +30,11 @@ SRC="$GW_DIR/src"
 # ubuntu user passwordless sudo, which the harness already relies on elsewhere; if that ever stops
 # being true this must fail loudly at the missing package rather than hang the run waiting on a tty
 # that is not there.
-sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev
+# NEEDRESTART_MODE=l for the same reason the box provisioning passes it: Ubuntu's needrestart hook
+# otherwise restarts polkit/dbus/ssh under this session and passwordless sudo flaps mid-build. The
+# dpkg lock timeout waits out unattended-upgrades instead of failing the entrant on a lock the box
+# itself was holding.
+sudo -n NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q git build-essential pkg-config libssl-dev
 
 [ -d "$SRC" ] || git clone -q "$REPO" "$SRC"
 # Re-pin every time, not only on a fresh clone: a surviving source tree would otherwise keep an old
@@ -45,3 +50,5 @@ git -C "$SRC" checkout -q "$COMMIT"
 BIN="$SRC/target/release/ai-gateway"
 [ -x "$BIN" ] || { echo "build: finished but $BIN is not there"; exit 1; }
 echo "build: $BIN at $(git -C "$SRC" rev-parse --short HEAD)"
+
+python3 "$GW_DIR/../../lib/gateway_build_provenance.py" "$SRC" "$BIN" "$GW_DIR/.build-provenance.json"

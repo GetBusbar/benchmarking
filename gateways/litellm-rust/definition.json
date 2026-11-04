@@ -42,6 +42,6 @@
   "repo": "https://github.com/BerriAI/litellm",
   "runtime": {
     "kind": "native",
-    "proc_match": "litellm-ai-gateway"
+    "proc_match": "litellm-rust/target/release/"
   }
 }

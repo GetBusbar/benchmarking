@@ -1,9 +1,12 @@
-# Why each declared setting exists. One claim per setting; the config lint fails on any setting that
-# is declared and not claimed here.
+# Why each declared setting exists. One claim per setting. Nothing machine-checks this file (the
+# shell config lint that read these claims was deleted in 1127cf1); it is a reviewed disclosure and is
+# kept in step with definition.json and conf/config.yaml.tmpl by hand.
 
-port 10000
-  Plano's own example LLM listener port (config/test_passthrough.yaml). Nothing in this harness
-  depends on the number; it is Plano's default rather than one we chose.
+port 12000
+  Plano's own default for the LLM listener. Not 10000: Plano always renders a prompt-gateway
+  listener on 10000 (utils.py convert_legacy_listeners), so an LLM listener there double-binds and
+  envoy exits at boot ("'egress_traffic' has duplicate address '0.0.0.0:10000'"). The template binds
+  {GW_PORT}, which the harness drives at this declared port.
 
 path /v1/chat/completions
   The OpenAI ingress route the crate serves (70 references in crates/, against 14 for /v1/messages).
@@ -20,10 +23,10 @@ launch.args: none
 
 mount conf/config.yaml -> /app/plano_config.yaml (read-only)
   The path the image's config generator reads by default (cli/planoai/config_generator.py:205), so
-  Plano is launched the same way as the other file-configured entrants - kong mounts one file to
-  /kong/kong.yml, apisix two into its conf dir - rather than through an environment variable only
-  this gateway would use. Read-only because the gateway has no reason to write to it, and a writable
-  mount would let a run mutate the input the next run reads.
+  Plano is launched the same way as the other file-configured entrants - a config file mounted where
+  the image already looks - rather than through an environment variable only this gateway would
+  use. Read-only because the gateway has no reason to write to it, and a writable mount would let a
+  run mutate the input the next run reads.
 
 listeners[].type: model
   Selects the LLM gateway listener rather than the agent-orchestration listener. Measuring the agent
@@ -34,21 +37,28 @@ model_providers[].base_url
   Points every upstream at the harness mock. This is the setting that makes Plano measurable here at
   all; without it the cells would be untestable, as they are for the entrants that pin the vendor host.
 
-model_providers[].provider_interface
-  Selects the egress dialect per upstream (openai / claude / gemini). This is what the egress axis of
-  the matrix is measuring, so it has to be stated per provider rather than inferred from the model
-  name.
+version: v0.3.0
+listeners[].name: llm
+model_providers[].default: true
+  In the config as committed, with no recorded justification. NOT individually tested for
+  necessity (none was removed and the container re-booted without it), so they are disclosed here
+  as unverified rather than claimed as boot requirements.
+
+model_providers[].model (openai/, anthropic/, gemini/ prefixes)
+  upstream. The prefix is what selects each upstream's provider, and so each egress column. There is
+  deliberately NO provider_interface key: for a prefix Plano already knows, setting it as well is
+  rejected by config_generator.py:445, which exits and takes the container down with it.
+
+model_providers[].access_key
+  boot. See `auth dummy` above.
 
 tracing.random_sampling: 0
   Tracing off. It is observability work the other entrants are not doing in their measured path, and
   Plano's default of 100 would sample every request on the hot path.
 
-PLANO_CONFIG_FILE=/etc/plano/config.yaml
-  boot. The image's entrypoint is supervisord, which accepts no arguments, so the config path cannot
-  be passed on the command line - the first attempt did and the container refused to start with
-  "positional arguments are not supported: ['up', '/etc/plano/config.yaml']". Its config generator
-  reads this variable (cli/planoai/config_generator.py:205) and defaults to /app/plano_config.yaml,
-  a path our read-only mount deliberately does not occupy.
+No environment variables. There is no `env` file: the config is mounted at the generator's default
+path (above), so PLANO_CONFIG_FILE - which an earlier version set to /etc/plano/config.yaml - is not
+needed and not set.
 
 KNOWN, UNRESOLVED: Plano dies after the first cell, and this harness cannot yet say why.
   In both field runs of 2026-07-28 (engines dd26a54 and 8f2af5d) Plano served openai>openai

@@ -3,15 +3,16 @@
 # The rule, from the published methodology: a setting may appear only if it is needed to boot the
 # process at all, to point an upstream at the test mock instead of a real provider, to expose an
 # ingress path the matrix exercises, or to bind the port and cores the rig requires. One claim per
-# line: <pattern> <boot|upstream|ingress|bind>. Anything unclaimed is a lint failure, and a claim
-# that matches nothing is a stale claim and also a failure.
+# line: <pattern> <boot|upstream|ingress|bind>. Nothing machine-checks this file: the shell lint
+# that read these claims was deleted in 1127cf1, so it is a reviewed disclosure kept in step with
+# the config by hand.
 #
-# Migrated from GW_CONFIG_WHY in gateway.sh, which is dead code the lint was still reading.
+# Migrated from GW_CONFIG_WHY in the shell-era gateway.sh (deleted in 1127cf1).
 resources_file boot   # standalone source; without it aisix demands an etcd cluster
 proxy          bind
 addr           bind   # the port the harness drives
 admin          boot   # with no admin block the binary refuses to load its config:
-admin_keys     boot   #   \"admin.admin_keys must contain at least one key\" (tested, see below)
+admin_keys     boot   #   "admin.admin_keys must contain at least one key" (tested, see below)
 _format_version boot  # the resources file will not load without it
 provider_keys  boot
 display_name   boot   # a resource without a name cannot be referenced
@@ -25,7 +26,8 @@ provider_key   upstream  # which provider_key (and so which egress) this model r
 api_keys       boot      # aisix has NO anonymous mode: every proxy handler 401s without a known key
 key_env        boot      # where the plaintext comes from
 allowed_models boot      # an api_key with no allowance can reach nothing
-BENCH_AISIX_KEY boot     # that plaintext. The name must NOT start with AISIX_ - see _aisix_launch
+BENCH_AISIX_KEY boot     # that plaintext. The name must NOT start with AISIX_: aisix's config
+                         # scrape claims every AISIX_* variable and rejects unknown fields
 # The build-time variables are UNSET before launch (a leading `-` in `env` removes one), so the
 # measured process does not inherit the repo and revision its build used. They are claimed here
 # because the env file names them, and anything the deployment names must be justified.

@@ -11,9 +11,14 @@
 //
 // Reads each gateways/*/definition.json manifest's repo, hits the GitHub API
 // (unauthenticated is fine for this many public repos; set GITHUB_TOKEN if you are
-// rate-limited), and writes { "<gateway-key>": { "stars": N, "as_of": "YYYY-MM-DD" } }.
+// rate-limited), and writes
+//   { "<gateway-key>": { "stars": N, "first_commit": "YYYY-MM-DD", "as_of": "YYYY-MM-DD" } }.
 // Two gateways may share one upstream repo; each still gets that repo's count under its
 // OWN key, so gen-data stays a plain key lookup.
+//
+// ALL OR NOTHING. The file is rewritten wholesale, so a gateway skipped here would silently lose
+// its previously recorded entry. Any gateway that cannot be resolved, or any value GitHub did not
+// actually return, fails the script before stars.json is written, with a nonzero exit.
 
 import { readdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -48,10 +53,13 @@ async function firstCommitDate(slug) {
     if (!r2.ok) throw new Error(`GitHub API ${r2.status} for ${slug} root commit`);
     return r2.json();
   })() : await r.json();
-  return page[0]?.commit?.committer?.date?.slice(0, 10) ?? null;
+  const date = page[0]?.commit?.committer?.date?.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? "")) throw new Error(`GitHub API returned no root-commit date for ${slug}`);
+  return date;
 }
 
 const out = {};
+const skipped = [];
 const cache = new Map(); // owner/repo -> {stars, first_commit} (shared repos fetched once)
 for (const key of keys) {
   // The manifest is JSON, and it is the same one the engine runs from. Regex-scraping a shell
@@ -60,22 +68,29 @@ for (const key of keys) {
   try {
     repo = JSON.parse(readFileSync(join(HERE, key, "definition.json"), "utf8")).repo ?? null;
   } catch {
-    console.warn(`skip ${key}: definition.json is unreadable or not JSON`);
+    skipped.push(`${key}: definition.json is unreadable or not JSON`);
     continue;
   }
   const slug = repo && repo.match(/github\.com\/([^/]+\/[^/\s#?]+)/)?.[1];
   if (!slug) {
-    console.warn(`skip ${key}: no parsable github repo (${repo})`);
+    skipped.push(`${key}: no parsable github repo (${repo})`);
     continue;
   }
   if (!cache.has(slug)) {
     const r = await fetch(`https://api.github.com/repos/${slug}`, { headers });
     if (!r.ok) throw new Error(`GitHub API ${r.status} for ${slug} (rate-limited? set GITHUB_TOKEN or use: gh api repos/${slug} --jq .stargazers_count)`);
-    cache.set(slug, { stars: (await r.json()).stargazers_count, first_commit: await firstCommitDate(slug) });
+    const stars = (await r.json()).stargazers_count;
+    if (!Number.isInteger(stars) || stars < 0) throw new Error(`GitHub API returned no stargazers_count for ${slug}`);
+    cache.set(slug, { stars, first_commit: await firstCommitDate(slug) });
   }
   out[key] = { stars: cache.get(slug).stars, first_commit: cache.get(slug).first_commit, as_of: asOf };
   console.log(`${key}: ${out[key].stars} stars, since ${out[key].first_commit} (${slug})`);
 }
 
+if (skipped.length) {
+  for (const why of skipped) console.error(`cannot resolve ${why}`);
+  console.error(`stars.json NOT written: ${skipped.length} gateway(s) would have lost their entry`);
+  process.exit(1);
+}
 writeFileSync(OUT, JSON.stringify(out, null, 1) + "\n");
 console.log(`wrote ${Object.keys(out).length} entries -> ${OUT}`);

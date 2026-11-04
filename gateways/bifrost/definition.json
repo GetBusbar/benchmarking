@@ -1,6 +1,7 @@
 {
   "auth": "sk-dummy",
   "cell_paths": {
+    "anthropic>anthropic": "/anthropic/v1/messages",
     "anthropic>openai-responses": "/anthropic/v1/messages"
   },
   "class": "LLM gateway",
@@ -42,12 +43,12 @@
   "matrix": [
     "101110",
     "010000",
-    "010000",
+    "011000",
     "000000",
     "000000",
     "000000"
   ],
-  "matrix_note": "Bifrost v1.6.4 has no openai-chat -> responses bridge and no gemini/cohere/bedrock-format ingress; undeclared cells are grey by that capability limit",
+  "matrix_note": "Researched against Bifrost v1.6.4 source (tag transports/v1.6.4); the pinned image is v1.6.6 and these cells have not been re-researched against it. v1.6.4 has no openai-chat -> responses bridge and no gemini/cohere/bedrock-format ingress. Its Anthropic-Messages ingress is the drop-in route /anthropic/v1/messages, which converts to a Responses request for the provider the model name resolves to, so from anthropic ingress the openai-responses column and the anthropic diagonal are declared; anthropic ingress into gemini/cohere/bedrock has not been researched and is not claimed. Undeclared cells are grey on that basis",
   "model": "gpt-4o-mini",
   "name": "bifrost",
   "path": "/v1/chat/completions",
@@ -60,5 +61,5 @@
   "untestable": [
     "openai/bedrock"
   ],
-  "untestable_note": "Bifrost v1.6.4 hardcodes the Bedrock host (bedrock-runtime.<region>.amazonaws.com, core/providers/bedrock/bedrock.go; network_config.base_url never overrides it), so the harness mock cannot stand in for the upstream; Bifrost does serve Bedrock Converse in production"
+  "untestable_note": "Researched against Bifrost v1.6.4 (the pinned image is v1.6.6; not re-verified against it): v1.6.4 hardcodes the Bedrock host (bedrock-runtime.<region>.amazonaws.com, core/providers/bedrock/bedrock.go; network_config.base_url never overrides it), so the harness mock cannot stand in for the upstream; Bifrost does serve Bedrock Converse in production"
 }
