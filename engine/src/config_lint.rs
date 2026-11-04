@@ -3,14 +3,14 @@
 //
 // Config necessity, as a lint over Manifest values.
 //
-// The shell counterpart, lib/gateway_config_lint.sh, enforces this standard: every gateway config is
-// the bare minimum required to run. A setting appears only if it is required to boot, to point an
+// The standard (the shell lint that also enforced it, lib/gateway_config_lint.sh, was deleted in
+// 1127cf1; this module is what remains): every gateway config is the bare minimum required to run. A setting appears only if it is required to boot, to point an
 // upstream at the test mock, to expose an ingress path the matrix drives, or to bind the port or
 // cores the rig requires. We do not turn features on, we do not turn them off, and we do not restate
 // a default: a restated default is still a line we wrote, and it silently becomes an override the
 // day upstream changes what the default is.
 //
-// The shell lint reads a free-text GW_CONFIG_WHY block and greps for one of four words. Here the
+// The deleted shell lint read a free-text GW_CONFIG_WHY block and greps for one of four words. Here the
 // four necessities are ConfigReason, an enum a ConfigSetting cannot be built without, so rule 1 below
 // is not really a check, it is a comment explaining why the type already made the violation
 // unrepresentable. What the type cannot catch is: a restated default, an empty key or value, and two
@@ -36,7 +36,8 @@ pub enum Rule {
     RestatesDefault,
     /// A setting's key is empty (after trimming).
     EmptyKey,
-    /// A setting's value is empty (after trimming).
+    /// A setting records no value (its `note` is empty after trimming). A WARNING, not a block: see the
+    /// rule's own comment in `lint`.
     EmptyValue,
     /// Two settings in the same manifest claim the same key.
     DuplicateKey,
@@ -107,14 +108,21 @@ pub fn lint(manifest: &Manifest, defaults: &Defaults) -> Vec<Finding> {
             continue;
         }
 
+        // A WARNING, NOT A BLOCK. The "value" here is `note`, which the manifest schema documents as
+        // free text for a human, never load bearing, and lets a manifest omit. A blank note says the
+        // manifest did not RECORD a value - not that the setting configures nothing - so blocking a
+        // run on it, with advice to delete a setting that may be required to boot, was the lint
+        // overreaching its own evidence. What a blank note does cost is real and is said: the
+        // restated-default check below cannot run on it.
         if value.is_empty() {
             findings.push(Finding {
                 gateway: manifest.name.clone(),
                 key: key.to_string(),
                 rule: Rule::EmptyValue,
-                severity: Severity::Block,
+                severity: Severity::Warn,
                 message: format!(
-                    "{}: setting {:?} has an empty value, so it configures nothing and should be deleted",
+                    "{}: setting {:?} records no value in its note, so whether it restates a default \
+                     cannot be checked",
                     manifest.name, key
                 ),
             });
@@ -157,197 +165,9 @@ pub fn lint(manifest: &Manifest, defaults: &Defaults) -> Vec<Finding> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manifest::ConfigSetting;
-
-    fn base() -> Manifest {
-        crate::manifest::test_fixture()
-    }
-
-    fn setting(key: &str, value: &str, reason: ConfigReason) -> ConfigSetting {
-        ConfigSetting {
-            key: key.into(),
-            reason,
-            note: value.into(),
-        }
-    }
-
-    // THE CASE A NAIVE LINT GETS WRONG. A gateway that needs no configuration is the ideal, not an
-    // error, so an empty config list must come back clean.
-    #[test]
-    fn a_manifest_with_zero_settings_passes() {
-        let m = base();
-        assert!(m.config.is_empty());
-        let findings = lint(&m, &Defaults::new());
-        assert!(
-            findings.is_empty(),
-            "an empty config is the ideal case: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn a_clean_manifest_with_settings_passes() {
-        let mut m = base();
-        m.config = vec![
-            setting("listen.port", "8080", ConfigReason::RigBinding),
-            setting("base_url", "http://mock", ConfigReason::UpstreamToMock),
-        ];
-        let findings = lint(&m, &Defaults::new());
-        assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn restating_a_default_fires_only_when_the_value_matches() {
-        let mut defaults = Defaults::new();
-        defaults.insert("metrics.enabled".into(), "true".into());
-
-        let mut restated = base();
-        restated.config = vec![setting(
-            "metrics.enabled",
-            "true",
-            ConfigReason::RequiredToBoot,
-        )];
-        let findings = lint(&restated, &defaults);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::RestatesDefault);
-        assert!(findings[0].message.contains("metrics.enabled"));
-
-        let mut overridden = base();
-        overridden.config = vec![setting(
-            "metrics.enabled",
-            "false",
-            ConfigReason::RequiredToBoot,
-        )];
-        let findings = lint(&overridden, &defaults);
-        assert!(
-            findings.is_empty(),
-            "a value that differs from the default is a real override: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn an_empty_key_fires() {
-        let mut m = base();
-        m.config = vec![setting("  ", "x", ConfigReason::RequiredToBoot)];
-        let findings = lint(&m, &Defaults::new());
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::EmptyKey);
-    }
-
-    #[test]
-    fn an_empty_key_is_silent_on_a_clean_setting() {
-        let mut m = base();
-        m.config = vec![setting("listen.port", "8080", ConfigReason::RigBinding)];
-        let findings = lint(&m, &Defaults::new());
-        assert!(findings.iter().all(|f| f.rule != Rule::EmptyKey));
-    }
-
-    #[test]
-    fn an_empty_value_fires() {
-        let mut m = base();
-        m.config = vec![setting("base_url", "  ", ConfigReason::UpstreamToMock)];
-        let findings = lint(&m, &Defaults::new());
-        assert!(findings.iter().any(|f| f.rule == Rule::EmptyValue));
-        let f = findings
-            .iter()
-            .find(|f| f.rule == Rule::EmptyValue)
-            .unwrap();
-        assert!(f.message.contains("base_url"));
-    }
-
-    #[test]
-    fn an_empty_value_is_silent_on_a_clean_setting() {
-        let mut m = base();
-        m.config = vec![setting(
-            "base_url",
-            "http://mock",
-            ConfigReason::UpstreamToMock,
-        )];
-        let findings = lint(&m, &Defaults::new());
-        assert!(findings.iter().all(|f| f.rule != Rule::EmptyValue));
-    }
-
-    #[test]
-    fn duplicate_keys_fire_even_when_both_entries_are_otherwise_valid() {
-        let mut m = base();
-        m.config = vec![
-            setting("listen.port", "8080", ConfigReason::RigBinding),
-            setting("listen.port", "8081", ConfigReason::RequiredToBoot),
-        ];
-        let findings = lint(&m, &Defaults::new());
-        let dupes: Vec<_> = findings
-            .iter()
-            .filter(|f| f.rule == Rule::DuplicateKey)
-            .collect();
-        assert_eq!(dupes.len(), 1, "{findings:?}");
-        assert!(dupes[0].message.contains("listen.port"));
-    }
-
-    #[test]
-    fn duplicate_keys_are_silent_when_every_key_is_unique() {
-        let mut m = base();
-        m.config = vec![
-            setting("listen.port", "8080", ConfigReason::RigBinding),
-            setting("base_url", "http://mock", ConfigReason::UpstreamToMock),
-        ];
-        let findings = lint(&m, &Defaults::new());
-        assert!(findings.iter().all(|f| f.rule != Rule::DuplicateKey));
-    }
-
-    #[test]
-    fn blocks_is_true_only_when_a_blocking_finding_exists() {
-        assert!(!blocks(&[]));
-        let f = Finding {
-            gateway: "gw".into(),
-            key: "k".into(),
-            rule: Rule::EmptyKey,
-            severity: Severity::Block,
-            message: "x".into(),
-        };
-        assert!(blocks(&[f]));
-    }
-}
+#[path = "tests/config_lint_tests.rs"]
+mod tests;
 
 #[cfg(test)]
-mod real_field_tests {
-    use super::*;
-    use std::collections::BTreeMap as Map;
-
-    /// Discovered from the gateways' own directories, not listed in one file. Same reason as
-    /// `manifest::real_field_tests::field`: a single file naming every entrant is the roster the
-    /// isolation lint exists to prevent.
-    fn field() -> Map<String, Manifest> {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gateways");
-        let mut out = Map::new();
-        for entry in std::fs::read_dir(&root).expect("gateways dir").flatten() {
-            let def = entry.path().join("definition.json");
-            if !def.is_file() {
-                continue;
-            }
-            if let Ok(m) = Manifest::load(&entry.path()) {
-                out.insert(m.name.clone(), m);
-            }
-        }
-        out
-    }
-
-    // No defaults table is claimed for the real field here: this test proves the lint runs over
-    // every entrant without panicking, it does not assert the real field is clean. What it says is
-    // reported by the caller of this module, not asserted away in a test.
-    #[test]
-    fn the_lint_runs_over_every_real_manifest_without_panicking() {
-        let f = field();
-        assert!(
-            f.len() >= 13,
-            "the whole field should be represented, got {}",
-            f.len()
-        );
-        for (name, m) in &f {
-            let findings = lint(m, &Defaults::new());
-            // Every entrant gets a result, whether or not it is empty.
-            let _ = findings;
-            assert_eq!(&m.name, name);
-        }
-    }
-}
+#[path = "tests/config_lint_real_field_tests.rs"]
+mod real_field_tests;
