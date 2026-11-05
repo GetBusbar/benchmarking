@@ -17,6 +17,10 @@ on:
       - "lib/**"
       - "history/**"
       - "run-on-ec2.sh"
+      - "run-mutants-ec2.sh"
+      - "watch-busbar.sh"
+      - "watch-mutants.sh"
+      - "watch-orphans.sh"
       # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
       # wrong-key-path class its header describes) or a results push that violated every invariant
       # never triggered the job that exists to catch it - the same paths-as-decoration defect the
@@ -71,6 +75,10 @@ on:
       - "lib/**"
       - "history/**"
       - "run-on-ec2.sh"
+      - "run-mutants-ec2.sh"
+      - "watch-busbar.sh"
+      - "watch-mutants.sh"
+      - "watch-orphans.sh"
       # The audit gate's own subjects. Without these, an edit that broke bench-audit.py (the exact
       # wrong-key-path class its header describes) or a results push that violated every invariant
       # never triggered the job that exists to catch it - the same paths-as-decoration defect the
@@ -226,6 +234,10 @@ jobs:
         run: bash lib/publish_paths_test.sh
       - name: Liveness probe retries before declaring a box gone
         run: bash lib/box_reachable_test.sh
+      - name: EC2 host keys match authenticated console fingerprints
+        run: python3 lib/ssh_trust_test.py
+      - name: Every SSH client refuses unauthenticated hosts before connecting or pulling
+        run: python3 lib/ssh_clients_test.py
       - name: Promote guard (a boot failure never overwrites a served result)
         run: python3 lib/promote_guard_test.py
       - name: Append-only history

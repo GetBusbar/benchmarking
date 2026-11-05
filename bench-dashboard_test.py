@@ -230,6 +230,7 @@ bd.parse_progress = _orig_parse
 import subprocess  # noqa: E402 - kept beside the block that uses it, like the render test below
 
 _orig_run = bd.subprocess.run
+_orig_authenticated_ssh = bd.authenticated_ssh
 
 
 def _timeout(*_a, **_k):
@@ -237,6 +238,7 @@ def _timeout(*_a, **_k):
 
 
 bd.remote_tail = _REAL_REMOTE_TAIL
+bd.authenticated_ssh = lambda ip: bd.SSH  # Trust ordering is exercised by lib/ssh_clients_test.py.
 try:
     bd.subprocess.run = _timeout
     check("remote_tail: an ssh timeout is a failed fetch (None), not an empty log",
@@ -261,6 +263,7 @@ try:
           row["phase"], "booting (no ssh yet)")
 finally:
     bd.subprocess.run = _orig_run
+    bd.authenticated_ssh = _orig_authenticated_ssh
 
 # ── render() must survive a stdout codec that cannot encode its glyphs ──────────────────────────────
 #
