@@ -20,7 +20,6 @@ ITYPE="${MUTANT_ITYPE:-m7g.8xlarge}"          # 32 vCPU Graviton; same arch fami
 JOBS="${MUTANT_JOBS:-12}"                      # test processes in flight; see the note by --jobs below
 MAX_MIN="${MUTANT_MAX_MIN:-720}"               # box self-terminates after this many minutes, whatever happens here
 SSM="/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"
-SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEYFILE"
 OUT="$HERE/results/mutants"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -68,15 +67,19 @@ aws ec2 wait instance-running --instance-ids "$IID" || die "$IID never reached r
 IP="$(aws ec2 describe-instances --instance-ids "$IID" \
       --query 'Reservations[].Instances[].PublicIpAddress' --output text)"
 [[ -n "$IP" && "$IP" != "None" ]] || die "$IID has no public IP"
+KNOWN_HOSTS="$STATE/$IID.known_hosts"
+python3 "$HERE/lib/ssh_trust.py" "$IID" "$IP" "$KNOWN_HOSTS" || die "host key authentication failed"
+SSHOPT=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=15 -i "$KEYFILE")
+printf -v RSYNC_SSH '%q ' ssh "${SSHOPT[@]}"
 log "ip $IP - waiting for ssh"
 ssh_ok=0
 for _ in $(seq 1 40); do
-  ssh $SSHOPT "ubuntu@$IP" true 2>/dev/null && { ssh_ok=1; break; }; sleep 10
+  ssh "${SSHOPT[@]}" "ubuntu@$IP" true 2>/dev/null && { ssh_ok=1; break; }; sleep 10
 done
 [[ $ssh_ok == 1 ]] || die "ssh to $IP never came up"
 
 log "provisioning (rust + cargo-mutants); this compiles cargo-mutants once, a few minutes"
-ssh $SSHOPT "ubuntu@$IP" bash -s <<'REMOTE'
+ssh "${SSHOPT[@]}" "ubuntu@$IP" bash -s <<'REMOTE'
 set -e
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev git >/dev/null
@@ -88,7 +91,7 @@ REMOTE
 [[ $? == 0 ]] || die "provisioning failed on $IP"
 
 log "cloning @ $SHA"
-ssh $SSHOPT "ubuntu@$IP" "git clone -q https://github.com/GetBusbar/benchmarking.git bench && git -C bench checkout -q $SHA && echo cloned" \
+ssh "${SSHOPT[@]}" "ubuntu@$IP" "git clone -q https://github.com/GetBusbar/benchmarking.git bench && git -C bench checkout -q $SHA && echo cloned" \
   || die "clone/checkout of $SHA failed on $IP"
 
 # --jobs, not --test-threads: cargo-mutants runs whole `cargo test` invocations in parallel, and the
@@ -96,7 +99,7 @@ ssh $SSHOPT "ubuntu@$IP" "git clone -q https://github.com/GetBusbar/benchmarking
 # those flake, and a flaky test reports a mutant as CAUGHT when it was not - a false pass, which is
 # worse than a slow run. 12 on 32 vCPU leaves each test process real headroom.
 log "running mutants (-j $JOBS) - this is the long part"
-ssh $SSHOPT "ubuntu@$IP" bash -s <<REMOTE
+ssh "${SSHOPT[@]}" "ubuntu@$IP" bash -s <<REMOTE
 . "\$HOME/.cargo/env"
 # RAISE THE DESCRIPTOR LIMIT FIRST. Ubuntu ships nofile=1024, and this suite binds a listener per
 # socket test with many tests in flight; under cargo-mutants there are \$JOBS whole suites at once.
@@ -118,9 +121,9 @@ log "waiting for completion (polling every 5m)"
 unreachable=0
 while :; do
   sleep 300
-  done_now="$(ssh $SSHOPT "ubuntu@$IP" 'pgrep -c cargo-mutants || true' 2>/dev/null | head -1 | tr -d '\r\n ')"
+  done_now="$(ssh "${SSHOPT[@]}" "ubuntu@$IP" 'pgrep -c cargo-mutants || true' 2>/dev/null | head -1 | tr -d '\r\n ')"
   [[ -n "$done_now" ]] || done_now="?"
-  tail_now="$(ssh $SSHOPT "ubuntu@$IP" 'tail -1 ~/mutants.log 2>/dev/null' 2>/dev/null || true)"
+  tail_now="$(ssh "${SSHOPT[@]}" "ubuntu@$IP" 'tail -1 ~/mutants.log 2>/dev/null' 2>/dev/null || true)"
   log "mutants running=$done_now | $tail_now"
   [[ "$done_now" == "0" ]] && break
   if [[ "$done_now" == "?" ]]; then
@@ -135,10 +138,10 @@ log "pulling report"
 mkdir -p "$OUT"
 pulled=0
 for _ in 1 2 3; do
-  if rsync -az -e "ssh $SSHOPT" "ubuntu@$IP:~/bench/engine/mutants.out/" "$OUT/"; then pulled=1; break; fi
+  if rsync -az -e "$RSYNC_SSH" "ubuntu@$IP:~/bench/engine/mutants.out/" "$OUT/"; then pulled=1; break; fi
   sleep 10
 done
-rsync -az -e "ssh $SSHOPT" "ubuntu@$IP:~/mutants.log" "$OUT/mutants.log" || log "WARNING mutants.log not pulled"
+rsync -az -e "$RSYNC_SSH" "ubuntu@$IP:~/mutants.log" "$OUT/mutants.log" || log "WARNING mutants.log not pulled"
 if [[ $pulled != 1 ]]; then
   log "REPORT NOT RETRIEVED: mutants.out could not be pulled from $IP (box unreachable=$unreachable polls); the box is terminated on exit"
   exit 1

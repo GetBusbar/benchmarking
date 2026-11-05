@@ -32,8 +32,8 @@ IP="${1:?usage: watch-busbar.sh <ip> [gateway-key]}"
 # (1.4.1 and 1.5.0 are separate entrants). Defaulting to `busbar` and hardcoding it are different
 # things: hardcoded, this script silently watched a file the 1.5.0 box never writes.
 GW="${2:-busbar}"
-KEYFILE="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}/gateway-bench-key.pem"
-SSHCMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=25 -i $KEYFILE"
+STATE="${BENCH_STATE_DIR:-$HOME/.cache/gateway-bench}"
+KEYFILE="$STATE/gateway-bench-key.pem"
 PARTIAL="$HERE/results/partial"
 REMOTE_SNAP="/home/ubuntu/benchmarking/results/snapshots/$GW.json"
 # 6x6 for a field run; override when the grid is narrowed (OTB_DIALECTS) so the ETA is against the
@@ -45,6 +45,22 @@ MAX_UNREADABLE="${MAX_UNREADABLE:-6}"
 MAX_NO_FINAL="${MAX_NO_FINAL:-3}"
 
 log() { printf '[%s] %s-watch: %s\n' "$(date -u +%H:%M:%S)" "$GW" "$*"; }
+mkdir -p "$STATE" || exit 1
+# This monitor receives an IP, not an instance identity. Resolve the exact running
+# gateway through AWS before authenticating its host key; never trust an IP alone.
+if ! rows="$(aws ec2 describe-instances --filters "Name=ip-address,Values=$IP" \
+    "Name=tag:Name,Values=gateway-bench-$GW" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress]' --output text)"; then
+  log "cannot resolve the gateway instance - refusing connection"; exit 1
+fi
+read -r IID resolved_ip extra <<<"$rows"
+if [[ ! "$IID" =~ ^i-[0-9a-f]+$ || "$resolved_ip" != "$IP" || -n "$extra" || "$rows" == *$'\n'* ]]; then
+  log "gateway instance identity is missing or ambiguous - refusing connection"; exit 1
+fi
+KNOWN_HOSTS="$STATE/$IID.known_hosts"
+python3 "$HERE/lib/ssh_trust.py" "$IID" "$IP" "$KNOWN_HOSTS" || exit 1
+SSHOPT=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=25 -i "$KEYFILE")
+printf -v RSYNC_SSH '%q ' ssh "${SSHOPT[@]}"
 mkdir -p "$PARTIAL"
 
 count_cells() {  # count measured cells in a snapshot file, on stdin's behalf
@@ -62,7 +78,9 @@ while :; do
   # "poll unreadable" alarms, and packing three outputs onto one line and reading them positionally
   # produced a false "ENGINE GONE" on a perfectly healthy run.
   read -r alive cells deadline rundone <<<"$(
-    $SSHCMD "ubuntu@$IP" "
+    # The remote snapshot path is selected by this client.
+    # shellcheck disable=SC2029
+    ssh "${SSHOPT[@]}" "ubuntu@$IP" "
       printf 'alive=%s\n' \"\$(pgrep -c otb || echo 0)\"
       printf 'cells=%s\n' \"\$(python3 -c '
 import json
@@ -95,7 +113,7 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
 
   # THE PULL HAPPENS EVERY POLL, not at the end. The snapshot is the live file the engine rewrites as
   # each batch of cells lands, so this is always the most complete thing that exists.
-  if rsync -az --timeout=120 -e "$SSHCMD" "ubuntu@$IP:$REMOTE_SNAP" "$PARTIAL/$GW.json" 2>/dev/null; then
+  if rsync -az --timeout=120 -e "$RSYNC_SSH" "ubuntu@$IP:$REMOTE_SNAP" "$PARTIAL/$GW.json" 2>/dev/null; then
     got="$(count_cells "$PARTIAL/$GW.json")"
     held="partial held locally: ${got:-0}"
   else
@@ -135,7 +153,7 @@ except Exception: print(0)' 2>/dev/null || echo 0)\"
   # watcher that started after otb had already exited.
   [[ "$alive" =~ ^[1-9] ]] && seen_alive=1
   if [[ "$alive" == "0" && ( "${seen_alive:-0}" == "1" || "${rundone:--}" != "-" ) ]]; then
-    rsync -az --timeout=180 -e "$SSHCMD" \
+    rsync -az --timeout=180 -e "$RSYNC_SSH" \
       "ubuntu@$IP:benchmarking/results/snapshots/result_${GW}_*.json" "$HERE/results/snapshots/" 2>/dev/null \
       && { log "final snapshot pulled"; break; }
     no_final=$((no_final + 1))

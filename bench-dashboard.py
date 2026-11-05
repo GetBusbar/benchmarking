@@ -29,9 +29,37 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEY = os.path.join(os.environ.get("TMPDIR", "/tmp"), "gateway-bench-key.pem")
-SSH = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+STATE = os.environ.get("BENCH_STATE_DIR", os.path.expanduser("~/.cache/gateway-bench"))
+KEY = os.path.join(STATE, "gateway-bench-key.pem")
+SSH = ["ssh", "-o", "StrictHostKeyChecking=yes",
        "-o", "ConnectTimeout=6", "-o", "BatchMode=yes", "-i", KEY]
+SSH_PINS = {}
+
+
+def authenticated_ssh(ip):
+    """Resolve the exact EC2 instance and authenticate its host key before reading it."""
+    if ip in SSH_PINS:
+        return SSH_PINS[ip]
+    response = subprocess.run(
+        ["aws", "ec2", "describe-instances", "--filters", f"Name=ip-address,Values={ip}",
+         "Name=tag:purpose,Values=gateway-bench", "Name=instance-state-name,Values=running",
+         "--query", "Reservations[].Instances[].[InstanceId,PublicIpAddress]", "--output", "text"],
+        capture_output=True, text=True, timeout=15)
+    rows = [line.split() for line in response.stdout.splitlines() if line.strip()]
+    if (response.returncode or len(rows) != 1 or len(rows[0]) != 2
+            or not re.fullmatch(r"i-[0-9a-f]+", rows[0][0]) or rows[0][1] != ip):
+        return None
+    instance = rows[0][0]
+    os.makedirs(STATE, exist_ok=True)
+    known_hosts = os.path.join(STATE, instance + ".known_hosts")
+    verified = subprocess.run(
+        [sys.executable, os.path.join(HERE, "lib/ssh_trust.py"), instance, ip, known_hosts],
+        capture_output=True, text=True, timeout=140)
+    if verified.returncode:
+        return None
+    command = SSH + ["-o", "UserKnownHostsFile=" + known_hosts]
+    SSH_PINS[ip] = command
+    return command
 
 
 def _configure_stdout():
@@ -266,8 +294,11 @@ def remote_tail(ip):
     if not ip:
         return ""
     try:
+        command = authenticated_ssh(ip)
+        if command is None:
+            return None
         r = subprocess.run(
-            SSH + [f"ubuntu@{ip}",
+            command + [f"ubuntu@{ip}",
                    "grep -a -E '^\\[(cell|phase)' ~/benchmarking/.run.log 2>/dev/null | tail -n 4000"],
             capture_output=True, text=True, timeout=15)
     except Exception:
