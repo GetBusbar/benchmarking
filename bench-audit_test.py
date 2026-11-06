@@ -328,6 +328,20 @@ def cost_cell(cpu, rps=1_000, util=0.5, ok=4_000):
     return c
 
 
+def wedge_boundary_tests(failures):
+    # Re-measurement can fail at a previously held top without proving the gateway stopped
+    # serving. Failing BELOW that clean prefix still requires the wedge explanation.
+    for last_conc, should_reject in [(4, False), (3, True)]:
+        with isolated(failures, f"wedge boundary: final failure at c={last_conc}, clean top=4"):
+            observed = trace_cell(
+                [rung(1), rung(2), rung(4), rung(8, passed=False), rung(6, passed=False),
+                 rung(5, passed=False), rung(4, passed=False), rung(last_conc, passed=False)],
+                sustained=None, absence_detail="the bisection did not hold")
+            got = list(audit.check_a_wedged_gateway_is_named_as_one("t", observed))
+            if bool(got) != should_reject:
+                failures.append(f"wedge boundary at c={last_conc}: expected rejection={should_reject}, got {got}")
+
+
 def board_level_tests(failures):
     # ── the budget exemption still lets a search that really spent it go ────────────────────────────
     with isolated(failures, "check_search_spent_its_budget accepts a fully-spent step-down budget"):
@@ -527,6 +541,8 @@ def main():
             got = list(check("t", clean))
             if got:
                 failures.append(f"{check.__name__} rejected a clean cell: {got}")
+
+    wedge_boundary_tests(failures)
 
     # The other side of the two new definition-of-done checks: an absence WITH its reason, and a
     # measured zero, must both be accepted - the checks forbid bare holes, not honest absences.
