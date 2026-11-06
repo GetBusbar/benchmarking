@@ -719,10 +719,10 @@ def check_a_wedged_gateway_is_named_as_one(name, c):
     # already reported as such.
     #
     # This fired mid-run as a violation, the second false positive of its kind. The impossible
-    # signature - and the only one that means the process stopped serving - is a tail failure at or
-    # under the top of the uncontaminated ascending prefix.
+    # signature - and the only one that means the process stopped serving - is a tail failure strictly
+    # below the top of the uncontaminated ascending prefix.
     clean = proven_clean_top(rungs)
-    if clean <= 0 or not any((r.get("conc") or 0) <= clean for r in rungs[-5:]):
+    if clean <= 0 or not any((r.get("conc") or 0) < clean for r in rungs[-5:]):
         return
     entry = (c.get("absences") or {}).get("stream.streams_sustained") or {}
     detail = (entry.get("detail") or "").lower()
