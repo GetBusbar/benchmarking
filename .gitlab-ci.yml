@@ -3,13 +3,15 @@
 # Mondays at 06:00 UTC; web pipelines support an immediate refresh as well.
 workflow:
   rules:
-    - if: '$REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+    - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
     - when: never
 
 stages: [publish]
 
 refresh-gateway-stars:
   stage: publish
+  tags: [onthebench-production]
+  timeout: 15m
   image: node:22-bookworm
   resource_group: onthebench-production
   variables:
