@@ -1,0 +1,31 @@
+# Weekly refresh of the gateway counts at onthebench.ai/gateways.
+# GitHub Actions stays retired. The schedule uses REFRESH_GATEWAY_STARS=1,
+# Mondays at 06:00 UTC; web pipelines support an immediate refresh as well.
+workflow:
+  rules:
+    - if: '$REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+    - when: never
+
+stages: [publish]
+
+refresh-gateway-stars:
+  stage: publish
+  image: node:22-bookworm
+  resource_group: onthebench-production
+  variables:
+    OTB_SINGLE_ENGINE: "1"
+    WRANGLER_SEND_METRICS: "false"
+  script:
+    # Always rebuild the currently published source branch. Scheduling from dev
+    # must never publish unqualified development results or promote product code.
+    - publish_dir="$CI_BUILDS_DIR/onthebench-publish-$CI_JOB_ID"
+    - trap 'rm -rf "$publish_dir"' EXIT
+    - git clone --quiet --depth 1 --single-branch --branch main "$CI_REPOSITORY_URL" "$publish_dir"
+    - cd "$publish_dir"
+    # Fail the refresh on API errors; stale data must not look like a fresh run.
+    - node gateways/fetch-stars.mjs
+    - node site/gen-data.mjs
+    - node site/check-consistency.mjs site/data.json
+    - node site/test-coverage.mjs
+    - node site/test.mjs
+    - npx --yes wrangler@4.156.2 pages deploy site --project-name=onthebench --branch=main
