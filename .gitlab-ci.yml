@@ -1,6 +1,6 @@
-# Weekly refresh of the gateway counts at onthebench.ai/gateways.
+# Nightly refresh of the gateway counts at onthebench.ai/gateways.
 # GitHub Actions stays retired. The schedule uses REFRESH_GATEWAY_STARS=1,
-# Mondays at 06:00 UTC; web pipelines support an immediate refresh as well.
+# Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
 workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
