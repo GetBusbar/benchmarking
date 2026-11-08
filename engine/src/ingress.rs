@@ -103,7 +103,7 @@ impl Dialect {
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
             return false;
         };
-        if !v.is_object() || v.get("error").is_some() {
+        if !v.is_object() || v.get("error").is_some_and(|error| !error.is_null()) {
             return false;
         }
         let text = |value: &serde_json::Value| value.as_str().is_some_and(|s| !s.is_empty());

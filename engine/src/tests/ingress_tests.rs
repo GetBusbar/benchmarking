@@ -487,3 +487,30 @@ fn nonstream_probe_requires_protocol_output_not_just_http_success() {
     }
     assert!(!Dialect::Cohere.valid_nonstream_response(fixtures[0].1.as_bytes()));
 }
+
+#[test]
+fn successful_responses_may_explicitly_have_no_error() {
+    let body = br#"{"object":"response","status":"completed","error":null,"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}"#;
+    assert!(super::Dialect::OpenaiResponses.valid_nonstream_response(body));
+    let failed = br#"{"error":{"message":"failed"},"output":[{"content":[{"text":"partial"}]}]}"#;
+    assert!(!super::Dialect::OpenaiResponses.valid_nonstream_response(failed));
+}
+
+#[test]
+fn recorded_bifrost_protocol_responses_pass_content_validation() {
+    let proof: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../results/diagnostics/refresh-configuration/bifrost-native-route-probe-2026-11-08.json"
+    )).unwrap();
+    let responses = proof["responses"].as_array().unwrap();
+    assert_eq!(responses.len(), 30);
+    for response in responses {
+        let dialect: super::Dialect = response["ingress"].as_str().unwrap().parse().unwrap();
+        assert_eq!(response["status"], 200);
+        assert!(
+            dialect.valid_nonstream_response(response["body_start"].as_str().unwrap().as_bytes()),
+            "rejected recorded {} response for upstream {}",
+            dialect,
+            response["egress_requested"]
+        );
+    }
+}
