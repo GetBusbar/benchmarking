@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {trendIndicator,metricDirection} from './history.mjs';
+import {trendIndicator,metricDirection,historicalComparison} from './history.mjs';
 test('trend tolerance includes both five-percent boundaries',()=>{
  for(const after of [950,999,1000,1001,1050]) assert.equal(trendIndicator(1000,after,'higher').state,'flat');
  assert.equal(trendIndicator(1000,1051,'higher').state,'improved');
@@ -64,4 +64,19 @@ test('active refresh keeps the full roster pending without stale current values'
  const manifest=await (await get(new URL(current.url).pathname)).json();
  assert.deepEqual([...manifest.roster].sort(),[...data.active_field.gateways].sort());
  assert.ok((await (await get('/api/v1/runs?limit=1')).json()).total>0);
+});
+
+test('two-run comparisons preserve distinct throughput bounds and missing values',()=>{
+ const row=value=>({gateway_id:'bifrost',status:{state:'served'},provenance:{},test:{ingress_protocol:'openai',upstream_protocol:'openai'},metrics:{},frontier:[
+   {bound_ms:1,concurrency:32,rps:{value,state:value==null?'not_measured':'valid'}},
+   {bound_ms:null,concurrency:32,rps:{value:2000,state:'valid'}}
+ ]});
+ const comparisons=historicalComparison(row(null),row(1001));
+ assert.equal(comparisons.length,2);
+ assert.equal(comparisons[0].before,null);
+ assert.equal(comparisons[0].after,1001);
+ assert.match(comparisons[0].metric,/≤ 1 ms/);
+ assert.equal(comparisons[0].change_percent,null);
+ assert.equal(comparisons[0].trend.state,'not_comparable');
+ assert.match(comparisons[1].metric,/unbounded/);
 });

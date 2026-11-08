@@ -77,7 +77,7 @@ export function historyArticle(family, page, q, comparisons = []) {
   }
   return `<h1>${esc(family)} history</h1><nav aria-label="Gateway"><a href="${link}">Overview</a> · <strong>History</strong> · <a href="${link}/evidence">Evidence</a></nav>
   <p>Every retained run, including incomplete and unavailable evidence. Values describe the recorded local-mock configuration. Missing readings are never zero.</p>
-  <form method="get" class="history-controls"><label>Ingress <input name="ingress" value="${esc(q.ingress)}" list="protocols"></label> <label>Upstream <input name="egress" value="${esc(q.egress)}" list="protocols"></label><datalist id="protocols">${['openai','openai-responses','anthropic','gemini','cohere','bedrock'].map(p=>`<option value="${p}">`).join('')}</datalist> <label>Metric <select name="metric">${options(page.metrics)}</select></label> <label>From <input type="date" name="from" value="${esc(q.from || '')}"></label> <label>Through <input type="date" name="to" value="${esc(q.to || '')}"></label> <button>Show runs</button></form>
+  <form method="get" class="history-controls"><label>Ingress <input name="ingress" value="${esc(q.ingress)}" list="protocols"></label> <label>Upstream <input name="egress" value="${esc(q.egress)}" list="protocols"></label><datalist id="protocols">${['openai','openai-responses','anthropic','gemini','cohere','bedrock'].map(p=>`<option value="${p}">`).join('')}</datalist> <label>Metric <select name="metric">${options(page.metrics)}</select></label> <label>Throughput p99 bound <select name="bound">${['1','5','10','50','100','none'].map(b=>`<option value="${b}"${b === (q.bound || '10') ? ' selected' : ''}>${b === 'none' ? 'Unbounded' : `${b} ms`}</option>`).join('')}</select></label> <label>From <input type="date" name="from" value="${esc(q.from || '')}"></label> <label>Through <input type="date" name="to" value="${esc(q.to || '')}"></label> <button>Show runs</button></form>
   <p>↑ Improved · ↓ Regressed · — Roughly unchanged (within ±5%). This is a display tolerance, not a statistical margin of error. Trends use the preceding comparable run; unknown evidence is neutral.</p>
   ${chart}<p>${page.total} retained runs. Catalog <code>${esc(page.catalog_id)}</code>.</p>
   <div class="table-scroll"><table><thead><tr><th>Measured</th><th>Build</th><th>Engine</th><th>Result</th><th>Trend</th><th>Field placement</th><th>Evidence</th></tr></thead><tbody>${points.map(p=>`<tr><td>${esc(p.measured_at || 'Undated')}</td><td>${esc(p.gateway_build || 'Not recorded')}</td><td>${esc(p.engine?.slice(0,12) || 'Not recorded')}</td><td>${p.value == null ? 'n/a' : esc(p.value)} — ${esc(p.state)}</td><td>${trendHtml(p.trend)}</td><td>${p.placements?.length ? p.placements.map(r=>`<a href="/api/v1/fields/${esc(r.field_id)}">${r.rank} of ${r.eligible} eligible / ${r.rostered} rostered</a> (${esc(r.field_name)})`).join("<br>") : "Not ranked in a retained field"}</td><td><a href="${esc(p.provenance?.run_url || '#')}">Run evidence</a></td></tr>`).join('')}</tbody></table></div>
@@ -87,11 +87,19 @@ export function historyArticle(family, page, q, comparisons = []) {
   <p><a href="/api/v1/history?family=${esc(family)}">Bounded history JSON</a> · <a href="/gateways/runs">All gateway runs</a></p>`;
 }
 export function historicalComparison(left, right) {
-  return [...new Set([...Object.keys(left.metrics), ...Object.keys(right.metrics)])].map(metric => {
-    const c = compareRuns(left, right, metric);
-    const before = left.metrics[metric]?.value ?? null, after = right.metrics[metric]?.value ?? null;
-    return { trend: trendIndicator(before, after, metricDirection(metric), c.comparability.status === "comparable"), metric, before, after, status: c.comparability.status, reasons: c.comparability.reasons,
-      change_percent: c.comparability.status === 'comparable' && before !== 0 ? (after-before)/Math.abs(before)*100 : null };
+  const metrics = [...new Set([...Object.keys(left.metrics), ...Object.keys(right.metrics)])].map(metric => ({metric}));
+  const bounds = [...new Set([...(left.frontier || []), ...(right.frontier || [])].map(f => f.bound_ms))];
+  metrics.push(...bounds.map(bound => ({metric: 'throughput_rps', bound: bound == null ? 'none' : String(bound)})));
+  return metrics.map(({metric, bound}) => {
+    const c = compareRuns(left, right, metric, bound);
+    const reading = record => metric === 'throughput_rps'
+      ? record.frontier?.find(f => f.bound_ms === (bound === 'none' ? null : Number(bound)))?.rps?.value ?? null
+      : record.metrics[metric]?.value ?? null;
+    const before = reading(left), after = reading(right);
+    return { trend: trendIndicator(before, after, metricDirection(metric), c.comparability.status === "comparable"),
+      metric: bound == null ? metric : `${metric} (p99 ${bound === 'none' ? 'unbounded' : `≤ ${bound} ms`})`,
+      before, after, status: c.comparability.status, reasons: c.comparability.reasons,
+      change_percent: c.comparability.status === 'comparable' && before !== null && after !== null && before !== 0 ? (after-before)/Math.abs(before)*100 : null };
   });
 }
 
