@@ -13,7 +13,9 @@
     "openai",
     "anthropic"
   ],
-  "headers": [],
+  "headers": [
+    "Authorization: Bearer {GW_AUTH}"
+  ],
   "lang": "Rust",
   "launch": {
     "args": [],
