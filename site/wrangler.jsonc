@@ -1,0 +1,18 @@
+{
+  "name": "onthebench",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-01",
+  "account_id": "91612b184a379a695266d84761cbee8f",
+  "workers_dev": false,
+  "preview_urls": false,
+  "limits": { "cpu_ms": 1000 },
+  "kv_namespaces": [{ "binding": "PUBLICATIONS", "id": "58198dca379f412995de7a1e0698fc3b" }],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "none",
+    "not_found_handling": "none"
+  },
+  "routes": [{ "pattern": "onthebench.ai/*", "zone_name": "onthebench.ai" }]
+}

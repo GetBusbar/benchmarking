@@ -7,6 +7,9 @@
    sweep chart) is exported for the node smoke test in site/test.mjs. */
 "use strict";
 
+// Each server render gets its own state and document. The browser uses the same
+// renderer, so publishing HTML cannot introduce a second set of metric rules.
+function createApp(document = globalThis.document) {
 const NODE = typeof window === "undefined";
 
 /* ---- category model ---------------------------------------------------------
@@ -4310,14 +4313,37 @@ function boot() {
     .catch((err) => {
       // View still titles itself on the failure path.
       updateTitle();
-      document.querySelector("main").innerHTML =
-        `<p class="muted">Could not load site data (${esc(err.message)}). Run <code>node site/gen-data.mjs</code> first.</p>`;
+      // This catch spans the fetch AND the first render, so the message must not blame a missing data.json
+      // for a render-time throw on valid data - and the stack must reach the console to be diagnosable.
+      console.error(err);
+      if (document.documentElement.hasAttribute("data-prerendered")) {
+        document.querySelector("main").insertAdjacentHTML("afterbegin",
+          '<p class="muted" role="alert">Interactive controls could not load. The published results below remain available.</p>');
+        return;
+      }
+      const loaded = !!state.data;
+      document.querySelector("main").innerHTML = loaded
+        ? `<p class="muted">The board's data loaded but could not be rendered (${esc(err && err.message)}). This is a bug in the page, not in the data; details are in the browser console.</p>`
+        : `<p class="muted">Could not load site data (${esc(err && err.message)}). Run <code>node site/gen-data.mjs</code> first.</p>`;
     });
 }
 
+function renderForPublication(data, url) {
+  const u = new URL(url, "https://onthebench.ai");
+  applyState(decodeUrl(u.pathname, u.search, u.hash));
+  state.data = data;
+  sanitizeState();
+  initFilterControls();
+  initHomeLinks();
+  renderAll();
+  document.title = pageTitle(state);
+  return state;
+}
+
 if (NODE) {
-  // Exports for the node smoke test (site/test.mjs).
-  module.exports = {
+  /* Exports for the node smoke test (site/test.mjs). */
+  return {
+    renderForPublication,
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge, measuredBadge, engineBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,
@@ -4368,4 +4394,12 @@ if (NODE) {
   };
 } else {
   boot();
+}
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = createApp();
+  module.exports.createApp = createApp;
+} else {
+  createApp();
 }

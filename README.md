@@ -291,6 +291,37 @@ cell, so the idle -> steady -> recovered arc is a real curve. Windows are tunabl
 actually used. Any RSS the sampler cannot obtain is **null, never a fabricated 0**, and a rig that
 cannot read RSS at all withholds the plateau verdict as **null** rather than asserting `false`.
 
+## Website publishing
+
+The website and engine share this repository. `site/gen-data.mjs` projects the measured
+snapshots; `site/build.mjs` validates that bundle and renders the existing dashboard into
+complete HTML with the same renderer the browser uses. It also publishes gateway evidence,
+Markdown, CSV, JSON, schemas, a sitemap, and immutable raw runs. No benchmark rerun is needed
+for a website-only change. The API documentation is at `/gateways/data`.
+
+```sh
+npm ci --prefix site --ignore-scripts
+node site/build.mjs "$PWD" /path/to/empty/build-directory
+OTB_TEST_ARTIFACT=/path/to/empty/build-directory node --test site/publishing.test.mjs
+node site/serve.mjs /path/to/empty/build-directory
+```
+
+Production is built from `main`, including its committed results and full Git history.
+The GitLab workflow on `dev` is the production controller: trigger it with
+`REFRESH_GATEWAY_STARS=1` (also scheduled nightly). It clones `main`, refreshes metadata,
+runs checks, and invokes `site/publish.mjs`. The publisher deploys a Worker with static assets
+on `onthebench.ai/*`; it does not deploy a JavaScript-only Pages shell. The existing analytics
+relay routes remain separate. `site/wrangler.jsonc` declares the route and the `PUBLICATIONS`
+KV namespace, which retains immutable dataset versions across deployments. Exact raw run
+versions are recovered from Git history and addressed by SHA-256.
+
+For an explicit release, `OTB_BUILD_ROOT=/path/to/scratch node site/publish.mjs` runs the same
+build and targeted HTTP checks before deploying with Wrangler's configured credentials.
+Use `--dry-run` to build and bundle without publishing. The token needs Workers Scripts,
+Workers Routes and Workers KV write permissions for the declared account and zone.
+CI runs the existing full site suites; local verification should use the targeted publishing
+tests and the actual generated artifact.
+
 ## Add a gateway
 
 Drop a directory under [`gateways/`](gateways/) with a `definition.json` manifest. The runners are
