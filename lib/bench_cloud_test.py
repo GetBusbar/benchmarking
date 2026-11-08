@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from bench_network import cleanup
-from bench_placement import select
+from bench_placement import select, capacity
 from aws_sdk import expected_account, verify_account
 
 class CloudTests(unittest.TestCase):
@@ -15,6 +15,15 @@ class CloudTests(unittest.TestCase):
         self.assertEqual([r['region'] for r in rows],['cheap','next'])
         self.assertEqual({r['instance_type'] for r in rows},{'m7g.4xlarge'})
         self.assertEqual({r['region'] for r in select(['bifrost','busbar'],prices,capacity,'same-region')},{'next'})
+    def test_full_vpc_region_is_skipped_before_placement(self):
+        sdk=Mock();ec2=Mock();quotas=Mock()
+        sdk.client.side_effect=lambda service,**kwargs:ec2 if service=='ec2' else quotas
+        quotas.get_service_quota.return_value={'Quota':{'Value':5}}
+        ec2.describe_vpcs.return_value={'Vpcs':[{}]*5}
+        self.assertEqual(capacity(sdk,'cheap','m7g.4xlarge')['slots'],0)
+        ec2.describe_instance_type_offerings.assert_not_called()
+        rows=select(['rust'],[{'region':'cheap'},{'region':'next'}],{'cheap':{'slots':0},'next':{'slots':1,'zone':'next-a'}},'cheapest')
+        self.assertEqual(rows[0]['region'],'next')
     def test_insufficient_quota_never_silently_changes_instance_type(self):
         with self.assertRaises(ValueError):select(['a'],[{'region':'cheap'}],{'cheap':{'slots':0}},'cheapest')
     def test_cleanup_refuses_someone_elses_vpc(self):

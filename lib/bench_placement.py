@@ -47,6 +47,9 @@ def live_prices(sdk, instance_type='m7g.4xlarge', disk_gb=60):
 
 def capacity(sdk, region, instance_type):
     ec2=sdk.client('ec2',region_name=region)
+    network_quota=sdk.client('service-quotas',region_name=region).get_service_quota(ServiceCode='vpc',QuotaCode='L-F678F1CE')['Quota']['Value']
+    if len(ec2.describe_vpcs()['Vpcs']) >= network_quota:
+        return {'slots':0,'reason':'regional VPC quota exhausted'}
     zones=ec2.describe_instance_type_offerings(LocationType='availability-zone',Filters=[{'Name':'instance-type','Values':[instance_type]}])['InstanceTypeOfferings']
     if not zones:return {'slots':0,'reason':'instance type unavailable'}
     quota=sdk.client('service-quotas',region_name=region).get_service_quota(ServiceCode='ec2',QuotaCode='L-1216C47A')['Quota']['Value']
