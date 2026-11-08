@@ -907,3 +907,5 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
 .metric-trend:hover, .metric-trend:focus-visible { text-decoration: underline; }
 
 .rank-change { color: var(--muted); }
+
+.build > span { display: inline-block; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }

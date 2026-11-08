@@ -153,9 +153,12 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     }
   }
   archives.sort((a,b) => (b.measured_at || "").localeCompare(a.measured_at || "") || a.id.localeCompare(b.id));
-  const catalogId = `catalog-${hash(JSON.stringify({archives, selection:data.gateways.map(g=>({key:g.key,snapshot_file:g.snapshot_file,matrix:g.matrix}))}))}`;
-  json('/_publication/history/catalog.json', { catalog_id: catalogId, projector, runs: archives });
-  retain(`history/catalogs/${catalogId}`, { catalog_id: catalogId, projector, runs: archives });
+  const catalogId = `catalog-${hash(JSON.stringify({storage_version:2,archives, selection:data.gateways.map(g=>({key:g.key,snapshot_file:g.snapshot_file,matrix:g.matrix}))}))}`;
+  const catalog = { catalog_id: catalogId, projector, runs: archives, shards: {} };
+  const retainShard = (key,value) => {
+    const content=JSON.stringify(value), storageKey=`history/shards/${hash(content)}`;
+    catalog.shards[key]=storageKey; retain(storageKey,content);
+  };
   for (const family of new Set(archives.map(r => r.gateway_family))) {
     const records = archives.filter(r => r.gateway_family === family).flatMap(r => r.evidence_available ? expandHistorical(JSON.parse(readFileSync(join(out, `_publication/history/runs/${r.id}.json`), "utf8"))) : []);
     for (const gateway of data.gateways.filter(g => familyOf(g.key) === family)) {
@@ -175,7 +178,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       const bundle=compactRecords(records.filter(m=>m.test.ingress_protocol===ingress && m.test.upstream_protocol===egress));
       const key=`families/${family}/${ingress}--${egress}`;
       json(`/_publication/history/${key}.json`,bundle);
-      retain(`history/catalogs/${catalogId}/${key}`,bundle);
+      if (bundle.measurements.length) retainShard(key,bundle);
     }
   }
   let measurements = data.gateways.flatMap(g => projectMeasurements(g, byFile));
@@ -244,8 +247,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   for (const family of new Set(archives.map(r=>r.gateway_family))) for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) {
     const key=`${family}/${ingress}--${egress}`, rows=placements.get(key)||[];
     json(`/_publication/history/placements/${key}.json`,rows);
-    retain(`history/catalogs/${catalogId}/placements/${key}`,rows);
+    if (rows.length) retainShard(`placements/${key}`,rows);
   }
+  json('/_publication/history/catalog.json', catalog);
+  retain(`history/catalogs/${catalogId}`,catalog);
   for (const render of deferredHistoryPages) render();
   json('/_publication/history/fields.json', fields);
   json('/api/v1/releases.json', { schema_version: '1.0', releases: fields });

@@ -39,6 +39,7 @@ test('history pagination, schema and snapshot revisions preserve identities',{sk
 test('saved catalog stays traversable after a newer deployment',{skip:!artifact},async()=>{
  const catalog=JSON.parse(readFileSync(artifact+'/_publication/history/catalog.json'));
  const old={...catalog,catalog_id:'catalog-'+'a'.repeat(64)};
+ delete old.shards; // Older deployed catalogs remain supported.
  const family=readFileSync(artifact+'/_publication/history/families/bifrost/openai--openai.json','utf8');
  const env={ASSETS:fileAssets(artifact),PUBLICATIONS:{get:async key=>key===`history/catalogs/${old.catalog_id}`?JSON.stringify(old):key===`history/catalogs/${old.catalog_id}/families/bifrost/openai--openai`?family:null}};
  const r=await worker.fetch(new Request('https://onthebench.ai/api/v1/history?family=bifrost&catalog='+old.catalog_id),env);
@@ -110,4 +111,16 @@ test('rank movement rejects partial fields and engine changes', () => {
  assert.equal(rankChanges(before,after,q).a.change,-1);
  assert.deepEqual(rankChanges(before,field([row('b',90)]),q),{});
  assert.deepEqual(rankChanges(before,field([row('a',100,'new'),row('b',90,'new')]),q),{});
+});
+
+test('shared archive shards preserve nonempty history and explicit empty pairs',{skip:!artifact},async()=>{
+ const catalog=JSON.parse(readFileSync(artifact+'/_publication/history/catalog.json'));
+ assert.ok(catalog.shards);
+ const retained=new Map(JSON.parse(readFileSync(artifact+'/_publication/retention.json')).map(e=>[e.key,e.value]));
+ const old={...catalog,catalog_id:'catalog-'+'b'.repeat(64)};
+ const env={ASSETS:fileAssets(artifact),PUBLICATIONS:{get:async key=>key===`history/catalogs/${old.catalog_id}`?JSON.stringify(old):retained.get(key)??null}};
+ const get=async pair=>worker.fetch(new Request('https://onthebench.ai/api/v1/history?family=bifrost&catalog='+old.catalog_id+pair),env);
+ const response=await get('');assert.equal(response.status,200);assert.ok((await response.json()).points.length);
+ delete old.shards['families/bifrost/bedrock--bedrock'];delete old.shards['placements/bifrost/bedrock--bedrock'];
+ const empty=await get('&ingress=bedrock&egress=bedrock');assert.equal(empty.status,200);assert.ok((await empty.json()).points.every(p=>p.value===null));
 });
