@@ -476,10 +476,13 @@ function withHistoryTrend(cell, g, record, key, bound) {
   return {...cell,historyTrend:{...trend,url:`/gateways/${encodeURIComponent(g.history_family || g.key)}/history?${query}`}};
 }
 function historyTrendMarkup(trend) {
-  if (!trend) return "";
+  if (!trend || !trend.rank_change) return "";
   const rank = trend.rank_change;
   const detail = `${rank ? `Position ${rank.before} → ${rank.after}. ` : ""}${trend.label}: ${trend.change_percent > 0 ? "+" : ""}${trend.change_percent.toFixed(1)}% since ${trend.previous_measured_at.slice(0,10)}. Within ±5% is roughly unchanged.`;
-  return ` <a class="metric-trend trend-${esc(trend.state)}" href="${esc(trend.url)}" title="${esc(detail)}" aria-label="${esc(detail)}">${esc(trend.symbol)}${rank && rank.change ? ` <span class="rank-change">(${rank.change > 0 ? "+" : ""}${rank.change})</span>` : ""}</a>`;
+  const neutral = trend.state === "flat" || !rank.change;
+  const symbol = neutral ? "—" : rank.change > 0 ? "↑" : "↓";
+  const label = neutral ? symbol : `${symbol} ${rank.change > 0 ? "+" : ""}${rank.change}`;
+  return ` <span class="metric-trend trend-${neutral ? "flat" : rank.change > 0 ? "improved" : "regressed"}" title="${esc(detail)}" aria-label="${esc(detail)}">${label}</span>`;
 }
 function metricTd(cell, sc = "") {
   if (cell.na)
@@ -1753,7 +1756,7 @@ const COL_NAME = {
     // window of one measurement - which is a much larger claim than the metric supports. The finding
     // is not hidden: the Growth column carries the rate, and the per-cell tooltip says what each
     // window did and, when it did not settle, whether it climbed or merely swung.
-    return `<td class="name">${a}<br><a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>`;
+    return `<td class="name">${a}</td>`;
   },
 };
 // The "Tested on" column: present in EVERY mode (identical column set across Own cell/Same/Custom). It reads
@@ -2325,7 +2328,10 @@ function rowComparator(col, desc, tiebreak) {
       if (ta === null || tb === null || typeof ta === "string" || typeof tb === "string") return byName;
       return ta === tb ? byName : ta - tb;
     };
-    if (va === null && vb === null) return byTie();
+    if (va === null && vb === null) {
+      const completed = Number(Boolean(b.measured_at)) - Number(Boolean(a.measured_at));
+      return completed || byTie();
+    }
     if (va === null) return 1;
     if (vb === null) return -1;
     const cmp = typeof va === "string" ? va.localeCompare(vb) : va - vb;
@@ -3475,7 +3481,7 @@ function renderTable() {
         // render columns emit their own <td>; tint the sorted one by injecting the class.
         return sc ? c.render(g, state).replace("<td", `<td class="sorted-col"`).replace('class="sorted-col" class="', 'class="sorted-col ') : c.render(g, state);
       }
-      return metricTd(c.get(g), sc);
+      return metricTd({...c.get(g), historyTrend: sc ? c.get(g).historyTrend : null}, sc);
     }).join("") + "</tr>"
   ).join("");
   // Empty-state line: filters that clear the table must never render as a bare header over nothing.
@@ -5283,7 +5289,7 @@ function renderGateways() {
     const lastRun = gatewayLastRun(g);
     const lastRunTxt = fmtLastRun(lastRun);
     return `<tr data-gw="${esc(g.key)}" class="rowlink" tabindex="0">
-      <td class="name">${name}<br><a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.history_family || g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>
+      <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${version
         ? `<span title="${esc(versionBasis(g))}">${esc(version)}</span>`
