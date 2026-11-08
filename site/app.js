@@ -359,7 +359,7 @@ const ZERO_WHY = {
    the cell (ZERO_WHY short form), not only in the hover tooltip. */
 function metricTd(cell, sc = "") {
   if (cell.na)
-    return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`;
+    return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}${cell.why ? `<span class="zero-why">${esc(cell.why)}</span>` : ""}</td>`;
   // `cell.why` is an explicit short on-cell reason for states an envelope note token can't carry:
   // e.g. a frontier reading where no rung held the bound is a measured 0, and "0" alone reads as "no data".
   const zeroWhy = cell.why || (cell.v === 0 && cell.env && ZERO_WHY[cell.env.note]);
