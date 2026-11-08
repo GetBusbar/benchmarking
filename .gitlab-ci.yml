@@ -3,6 +3,7 @@
 # Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
 workflow:
   rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
@@ -66,3 +67,30 @@ refresh-gateway-stars:
     - node site/test.mjs
     - npm ci --prefix site --ignore-scripts
     - node site/publish.mjs
+
+# Build the immutable instrument separately from website publication.
+verify-engine:
+  stage: verify
+  tags: [onthebench-production]
+  image: rust:1.98-bookworm
+  timeout: 60m
+  rules:
+    - if: '$VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
+  variables:
+    REFRESH_GATEWAY_STARS: "1"
+  script:
+    - git fetch origin "$VERIFY_ENGINE_REF"
+    - git checkout --detach "$VERIFY_ENGINE_REF"
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - cargo test --workspace --locked
+    - rustup target add aarch64-unknown-linux-musl
+    - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
+    - mkdir -p rig
+    - cp target/aarch64-unknown-linux-musl/release/otb rig/otb-arm64
+    - cp target/aarch64-unknown-linux-musl/release/mock rig/mock-arm64
+    - printf '%s\n' "$VERIFY_ENGINE_REF" > rig/engine-commit
+    - sha256sum rig/otb-arm64 rig/mock-arm64 > rig/SHA256SUMS
+  artifacts:
+    paths: [rig/]
+    expire_in: 90 days
