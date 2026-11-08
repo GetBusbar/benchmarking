@@ -1,0 +1,109 @@
+{
+  "checked_at": "2026-11-08T23:39:44.917173+00:00",
+  "image": "kong:3.9.4@sha256:2d572848be6fc58b73ba75edc84f028837bb7be998b3a8b8117fdb44a6892220",
+  "kind": "local correctness preflight; not performance measurements",
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "body": "{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"stream\":false,\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "{\"model\":\"mock\",\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"finish_reason\":\"end_turn\",\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"stream\":false,\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "gemini",
+      "status": 200,
+      "body": "{\"model\":\"gpt-4o-mini\",\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/gpt-4o-mini:generateContent",
+          "last_snippet": "{\"generationConfig\":{\"maxOutputTokens\":16},\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "status": 200,
+      "body": "{\"model\":\"gpt-4o-mini\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/gpt-4o-mini/converse",
+          "last_snippet": "{\"inferenceConfig\":{\"maxTokens\":16},\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"anthropic_version\":\"bedrock-2023-05-31\"}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "cohere",
+      "status": 200,
+      "body": "{\"model\":\"gpt-4o-mini\",\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"object\":\"chat.completion\",\"id\":\"x\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"stream\":false,\"message\":\"hello\",\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "gemini",
+      "egress": "gemini",
+      "status": 200,
+      "body": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/gpt-4o-mini:generateContent",
+          "last_snippet": "{\"contents\": [{\"parts\": [{\"text\": \"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "bedrock",
+      "status": 200,
+      "body": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/gpt-4o-mini/converse",
+          "last_snippet": "{\"messages\": [{\"role\": \"user\", \"content\": [{\"text\": \"hello\"}]}]}"
+        }
+      }
+    }
+  ],
+  "definition_sha256": "eab3db1e2bf342000b45f4b49351a0636bc04aabaa7a94a6d39bd542560ad650",
+  "config_template_sha256": "0a6557ff8f5fca1ae984a0dd1a1d4ba49f3dfbf2c628eab253229693662a0657",
+  "mock_source_sha256": "023b057426f6dd67c4db77d2f235079853ddc8c6f6263832d3b37d6665fe0682",
+  "source": "Pinned image /usr/local/share/lua/5.1/kong/plugins/ai-proxy/schema.lua and kong/llm/drivers/"
+}

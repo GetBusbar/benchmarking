@@ -773,3 +773,15 @@ fn cohere_response_matches_the_requested_api_version() {
     assert!(v2.get("text").is_none());
     assert_eq!(body_for("/v1/chat/completions"), OPENAI);
 }
+
+#[test]
+fn bedrock_request_validation_ignores_json_whitespace() {
+    assert!(request_shape_ok(
+        "bedrock",
+        br#"{ "messages": [ { "role": "user", "content": [ { "text": "hello" } ] } ] }"#
+    ));
+    assert!(!request_shape_ok(
+        "bedrock",
+        br#"{"messages":[{"content":"hello"}],"inferenceConfig":{"maxTokens":16}}"#
+    ));
+}

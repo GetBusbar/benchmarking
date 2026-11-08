@@ -35,3 +35,8 @@ bedrock           boot
 aws_region        boot   # the bedrock signer fails without a region -> HTTP 500
 aws_access_key_id     boot
 aws_secret_access_key boot
+
+cohere upstream # Pinned Kong 3.9.4 ships a Cohere v1 adapter; route header selects it
+llm_format ingress # Native Gemini and Bedrock formats supported by the pinned ai-proxy schema, each restricted to its matching provider
+
+Seven configured pairs passed response-content and upstream-recorder checks in kong-protocol-preflight.json. The explicit capability grid prevents unconfigured columns from falling through to the OpenAI route.
