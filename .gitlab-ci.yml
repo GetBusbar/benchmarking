@@ -1,4 +1,4 @@
-# Nightly refresh of the gateway counts at onthebench.ai/gateways.
+# Publish the website and its machine-readable evidence from production main.
 # GitHub Actions stays retired. The schedule uses REFRESH_GATEWAY_STARS=1,
 # Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
 workflow:
@@ -11,7 +11,7 @@ stages: [publish]
 refresh-gateway-stars:
   stage: publish
   tags: [onthebench-production]
-  timeout: 15m
+  timeout: 30m
   image: node:22-bookworm
   resource_group: onthebench-production
   variables:
@@ -22,7 +22,8 @@ refresh-gateway-stars:
     # must never publish unqualified development results or promote product code.
     - publish_dir="$CI_BUILDS_DIR/onthebench-publish-$CI_JOB_ID"
     - trap 'rm -rf "$publish_dir"' EXIT
-    - git clone --quiet --depth 1 --single-branch --branch main "$CI_REPOSITORY_URL" "$publish_dir"
+    # Full history retains original raw bytes when a snapshot is corrected.
+    - git clone --quiet --single-branch --branch main "$CI_REPOSITORY_URL" "$publish_dir"
     - cd "$publish_dir"
     # Fail the refresh on API errors; stale data must not look like a fresh run.
     - node gateways/fetch-stars.mjs
@@ -30,4 +31,5 @@ refresh-gateway-stars:
     - node site/check-consistency.mjs site/data.json
     - node site/test-coverage.mjs
     - node site/test.mjs
-    - npx --yes wrangler@4.156.2 pages deploy site --project-name=onthebench --branch=main
+    - npm ci --prefix site --ignore-scripts
+    - node site/publish.mjs
