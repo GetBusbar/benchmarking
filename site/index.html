@@ -98,7 +98,7 @@
   <!-- Gateways overview: the category's default view. A NEUTRAL alphabetical roster
        (no perf numbers, no ranking, no winner highlighting); the other tabs do the measuring. -->
   <section id="view-gateways" class="view">
-    <p class="fineprint">Every gateway on the board, in alphabetical order. Language, the exact version measured (hover for the full build/image digest), when it was last benchmarked, project age, stars (snapshot), and each project's own self-description. The other tabs measure how they perform.</p>
+    <p class="fineprint">Every gateway on the board, in alphabetical order. Language, the exact version measured (hover for the build stamp the run recorded: an immutable image digest or a pinned source commit), when it was last benchmarked, project age, stars (snapshot), and each project's own self-description. The other tabs measure how they perform.</p>
     <div class="table-scroll">
       <table id="gateways-table">
         <thead><tr><th data-sort="name">Gateway</th><th data-sort="lang">Language</th><th class="build" data-sort="version">Version</th><th class="lastrun" data-sort="lastrun">Last benchmarked</th><th class="age" data-sort="age">Project Age</th><th class="stars" data-sort="stars">Stars</th><th class="contrib" data-sort="contrib">Contributors</th></tr></thead>
@@ -180,7 +180,7 @@
         <tbody></tbody>
       </table>
     </div>
-    <p class="fineprint">Click a column to sort, a row for full detail. A muted cell was not measured. Every view is shareable via its URL.</p>
+    <p class="fineprint">Click a column to sort, a row for full detail. A muted cell carries no number, and its label and tooltip say why: not served, not declared, not measured, a rig fault, or (in red) a measured failure. Every table view, with its sort, bound, cell and filters, is shareable via its URL.</p>
     <!-- REFERENCE MATERIAL, BELOW THE DATA. Two things live here, both populated by app.js:
          the tab's own notes (how to read the columns, what each marker means, what a measured 0 is) and
          the engine's OWN definition of every metric the table shows, generated from the constants that ran
@@ -223,7 +223,7 @@
       <p class="essay-standfirst"><strong>Who runs this.</strong> Built and operated by the Busbar team; busbar is one of the entrants. Same shared harness for every gateway, no per-gateway special-casing, every number from committed JSON, fully open source. <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">Read the code and re-run it yourself</a>. Gateway creators are welcome to PR and maintain their gateway manifest and configuration.</p>
 
       <p class="essay-lede">A benchmark is only worth reading if you can see what it did. Every gateway here gets its own machine, its own dedicated cores, the same local upstream, the same measuring tools, and the kind of configuration a real operator would actually deploy. Nothing is tuned to make anyone look good, including us. What follows is how it works, why we chose it, and where it can still be wrong.</p>
-      <p>The short version: one gateway per machine so nobody inherits anyone else's mess. Fixed cores so the load generator can never steal from the thing being measured. A local fake provider so we are timing the gateway and not the internet. Default configuration, because a benchmark of how well we tuned the published entrants is not a benchmark of the products. And when we are not sure a number is real, we do not print it.</p>
+      <p>The short version: one gateway per machine so nobody inherits anyone else's mess. Fixed cores so the load generator can never steal from the thing being measured. A local fake provider so we are timing the gateway and not the internet. Default configuration, because a benchmark of how well we tuned every product on the board is not a benchmark of the products. And when we are not sure a number is real, we do not print it.</p>
 
       <h3>One gateway, one machine</h3>
       <p>Each gateway is measured alone. It gets a fresh AWS <code>m7g.4xlarge</code>, sixteen real Graviton3 cores and 64&nbsp;GB of memory on Ubuntu 24.04, launched for that gateway and terminated when its run finishes. Nothing another gateway built, pulled, cached or left behind in page cache is ever on the box. The field can also be run on an Intel instance of the same size, and every result records which architecture produced it, because a number from one architecture is not a number from the other.</p>
@@ -237,7 +237,7 @@
       <h3>The upstream is a mock, on purpose</h3>
       <p>Nothing in this benchmark talks to a real model provider. The upstream is a local mock running on the same box, on its own cores, a few microseconds away. That is a deliberate restriction of what we are willing to claim to measure.</p>
       <p>Point a gateway at a real provider and most of the resulting latency belongs to somebody else: the region you landed in, the queue in front of the model, the rate limiter, the weather on the public internet that afternoon. Two gateways measured an hour apart would be measured against two different upstreams, and the ranking would move for reasons no gateway author can control or fix. With a local mock, the upstream is close to free and effectively constant, so what is left in the measurement is the gateway: its parsing, its translation, its connection handling, its scheduling.</p>
-      <p>The mock does more than answer quickly. It records what it received, so a gateway that returns a plausible 200 without ever calling the upstream in the dialect it was supposed to speak fails the correctness check rather than scoring a fast time. The mock also has a ceiling of its own, and when a throughput sweep saturates near that ceiling instead of the gateway's, the number is not published: it reads n/a and draws no bar, because it would be a measurement of our instrument rather than of the entrant.</p>
+      <p>The mock does more than answer quickly. It records what it received, so a gateway that returns a plausible 200 without ever calling the upstream in the dialect it was supposed to speak fails the correctness check rather than scoring a fast time. The mock also has a ceiling of its own, measured on the same box. A throughput number that came close to that ceiling is still published, with how close it came stated beside it (the share of the mock's own ceiling it reached), so you can see when a figure may describe our instrument rather than the entrant. We used to withhold such numbers; saying how close they came tells you strictly more.</p>
       <p>What this cannot tell you is how a gateway behaves against a slow, flaky, remote provider, where retries, timeouts and connection reuse start to dominate. That is a real and interesting question. It is not this benchmark.</p>
 
       <h3>Real configurations, not benchmark configurations</h3>
@@ -266,7 +266,7 @@
       <h3>What a run is allowed to publish</h3>
       <p>A run that measures nothing publishes nothing. If a run produced no fresh result anywhere, nothing derived from it is pushed, which sounds obvious until you have watched a broken harness finish in ninety seconds, report success and regenerate the whole board from the previous run's data. That happened here, and the rule exists because of it.</p>
       <p>Below that sits a promote guard on every individual result. A gateway that failed to build or never came up at all is our environment failing, not a measured property of the gateway, and such a non-result is refused rather than allowed to overwrite a good one. A gateway that did boot and then honestly refused a request is a real observation and is published as one, because quietly republishing last week's better number in its place would bias the board.</p>
-      <p>On the surface, a value we do not have renders n/a, never a zero and never a filled-in guess. A measured zero is shown as a zero with a note, kept distinct from a value the rig could not certify. A cell a gateway does not serve is grey and carries the probe's own evidence, never a red mark, because failing to offer a protocol is not the same as failing at it. Every number on the board regenerates from committed JSON, and the per-gateway download is the complete record rather than a summary of it.</p>
+      <p>On the surface, a value we do not have renders n/a, never a zero and never a filled-in guess. A measured zero is shown as a zero with a note, kept distinct from a value the rig could not certify. A cell a gateway does not serve is grey and carries the probe's own evidence, never a red mark, because failing to offer a protocol is not the same as failing at it. Every number on the board regenerates from committed JSON, and the per-gateway download is the complete record the board was built from (with the memory curves thinned for drawing; the full series are in the committed snapshots).</p>
 
       <h3>Where this can still be wrong</h3>
       <p>The uncomfortable part first: the same gateway, same version, same config, same instance type can produce materially different numbers on two different boxes. A cloud instance is a slice of shared physical hardware, and a neighbour on that host can take cycles our core pinning cannot see or prevent. We measure isolation inside our own box. We cannot measure who else is on the machine underneath it.</p>
@@ -311,8 +311,8 @@ cd benchmarking
 <div id="compare-bar" class="compare-bar hidden"></div>
 
 <div id="backdrop" class="backdrop hidden"></div>
-<aside id="drawer" class="drawer hidden" aria-label="Gateway detail">
-  <button id="drawer-close" class="close" title="Close">✕</button>
+<aside id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-label="Gateway detail" tabindex="-1">
+  <button id="drawer-close" class="close" title="Close" aria-label="Close gateway detail">✕</button>
   <div id="drawer-body"></div>
 </aside>
 

@@ -1,14 +1,14 @@
 # AI gateway benchmarks
 
-[![CI](https://github.com/GetBusbar/benchmarking/actions/workflows/bench-tests.yml/badge.svg)](https://github.com/GetBusbar/benchmarking/actions/workflows/bench-tests.yml)
-[![codecov](https://codecov.io/gh/GetBusbar/benchmarking/branch/main/graph/badge.svg)](https://codecov.io/gh/GetBusbar/benchmarking)
+[![Coverage](https://codecov.io/gh/GetBusbar/benchmarking/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/benchmarking)
 
 > **Browse the results:** [onthebench.ai](https://onthebench.ai) - sortable tables, protocol matrix, charts, methodology.
 
 A fair, reproducible benchmark for self-hostable AI gateways - **LiteLLM (Rust & Python), Bifrost,
 Portkey, Kong, Helicone, GoModel, Busbar, and whatever else you drop in.** Same box, same mock, same load,
 same cpu pin, for every gateway. One command runs it; the charts regenerate from raw results; every
-source ref is pinned in the open and the built commit is stamped into the output.
+source ref is pinned in the open (container images by tag) and the built commit or image tag is
+stamped into the output.
 
 Chart bars are coloured by **implementation language** (a neutral property), never by rank or brand, so
 the colour can't be misread as favouring the sponsor. Every number regenerates from committed JSON. If a
@@ -44,16 +44,28 @@ bake in.
 **To run locally on your own box:**
 - **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
-- **Python 3 + matplotlib** - draws the charts (`pip install matplotlib`). Optional; JSON results are written either way.
-- Docker. Every gateway pulls its own pinned official image on first run; the pin lives in that gateway's own `gateways/<name>/definition.json`. A few build from pinned source because no arm64 image exists - each says so in its own manifest header.
+- **Python 3** - runs the auditors and verifiers (`bench-audit.py`, `verify-*.py`). No plotting library is needed: the charts are drawn by the site in the browser (the static matplotlib pipeline was retired in 704fcf6).
+- Container gateways use official ARM64 images pinned by tag and digest. Native builds pin named release commits.
 
-**To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` - creds + a default region). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** - nothing to set up, nothing to clean up.
+Cloud runs use Python's AWS SDK, bash 4+, SSH and rsync. Install `lib/aws-sdk-requirements.txt` in a virtual environment and set `OTB_AWS_PYTHON` to that interpreter. Set `OTB_AWS_ACCOUNT_ID` explicitly and select `OTB_AWS_PROFILE`, standard SDK credentials, or an authorized workload role. No credentials belong in the repository. See [frozen rig and credential setup](rig/frozen/README.md).
+
+`run-field.py` queries current on-demand compute, gp3 and public IPv4 prices. `--placement cheapest` can distribute identical boxes across eligible regions; `--placement same-region` selects the cheapest region with enough quota for the whole field. Owned VPCs, subnets and routing are created and torn down with the run. Other workloads' networks are never adopted.
+
+```sh
+export OTB_AWS_ACCOUNT_ID=YOUR_ACCOUNT_ID
+export OTB_AWS_PROFILE=YOUR_PROFILE
+export OTB_AWS_PYTHON=/path/to/venv/bin/python
+"$OTB_AWS_PYTHON" run-field.py --placement cheapest --state-dir /path/to/private-state --rig-dir /path/to/verified-rig
+# Later, run just one updated gateway with the same frozen rig:
+"$OTB_AWS_PYTHON" run-field.py busbar --placement same-region --state-dir /path/to/another-private-state --rig-dir /path/to/verified-rig
+```
 
 ## Run it - one command, every metric
 
 Clone, then run one script. Everything is at the repo root, and **every gateway provisions itself**
-from the ref pinned in its own [`gateways/<name>/definition.json`](gateways/) - Docker images, pip, source,
-or (for a native gateway) its released image's binary. Nothing to fetch by hand for any of them.
+from the ref pinned in its own [`gateways/<name>/`](gateways/) directory - a Docker image tag in
+`definition.json`, or (for native gateways) a source commit in `build.sh`. Nothing to fetch
+by hand for any of them.
 
 ```sh
 git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
@@ -64,7 +76,7 @@ git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
 ./run-on-ec2.sh kill                 # terminate every box now
 ```
 
-Requires awscli v2 (configured), `ssh` and `rsync`. Every gateway gets its own fresh
+The lower-level runner requires explicit SDK credentials, a verified rig, `ssh` and `rsync`. Every gateway gets its own fresh
 `m7g.4xlarge`, so no gateway inherits another's page cache or disk state, and the wall clock is
 the slowest single gateway rather than the sum of all of them.
 
@@ -75,7 +87,7 @@ and the engine commit that measured it - which is what the board is generated fr
 ### On a fresh cloud box (nothing to install)
 
 `run-on-ec2.sh` launches a Graviton box, installs everything, runs the full suite, pulls results
-back, and **terminates the box**. Only needs AWS CLI v2 configured.
+back, and **terminates the box**. Use `run-field.py` above for credential verification and automatic network management.
 
 ```sh
 ./run-on-ec2.sh                     # every gateway, one-click (Graviton/arm64)
@@ -92,7 +104,8 @@ One-API to its arm64 tag), so nothing is quietly arm64-only or x86-only.
 
 A gateway that can't be stood up (unreachable, or needs infra a single container can't provide) is
 recorded `served: false` and shown as such - never silently dropped. To pin a different build of any
-gateway, edit the pin in its own `gateways/<name>/definition.json` (or override the env var); the exact ref
+gateway, edit `launch.image` in its own `gateways/<name>/definition.json`, or for a source-built one the
+`COMMIT` in its `build.sh` (which also reads a `<NAME>_COMMIT` override); the image tag or built commit
 is stamped into every result.
 
 ### How long it takes
@@ -158,17 +171,18 @@ token stream. The mock answers `stream:true` with a valid SSE stream: a role chu
 content deltas paced at 20 ms, then finish + `[DONE]` (Anthropic event shape on `/messages`).
 Against that fixed pace, per gateway:
 
-- **added TTFT (µs)** - time to the first content frame through the gateway minus direct-to-mock,
-  at concurrency 1. The delay a user waits before the first token appears.
-- **added inter-frame latency (µs)** - p50/p99 of the gateway's content-frame gap minus the
-  direct-to-mock gap. Both sides carry the mock's 20 ms pace and the same timer jitter, so the
+- **added TTFT (µs)** - time to the first SSE event through the gateway (not necessarily a content
+  token: a role chunk or other scaffolding event counts) minus direct-to-mock, at concurrency 1.
+- **added inter-frame latency (µs)** - p50/p99 of the gateway's inter-event gap over every SSE event
+  of the stream (scaffolding events included) minus the direct-to-mock gap. Both sides carry the mock's 20 ms pace and the same timer jitter, so the
   subtraction isolates the gateway's per-frame overhead.
 - **streams sustained** - the highest concurrent stream count where every expected content frame
   arrives, no stream stalls past 10x the mock's pacing interval, and the stream error rate stays
   under 0.1%; plus the frames/sec carried there. A proxy that drops a frame has dropped a user's
-  token, so the sustained ceiling is the last concurrency before anything is lost. The mock-ceiling guardrail applies here too: the
-  mock's own frames/sec at top concurrency is recorded and a result within 10% is flagged
-  mock-bound.
+  token, so the sustained ceiling is the last concurrency before anything is lost. Beside it, the
+  mock's own frames/sec at the operating concurrency (derived from its declared pacing) is published
+  as `streams_sustained_mock_ceiling`, with `streams_sustained_headroom` = carried / ceiling (a ratio
+  that may exceed 1.0); nothing is flagged or withheld on it.
 
 A gateway that answers 200 but buffers the stream (never frames) is recorded with its
 `stream_served` naming the absence reason (`"untestable"`, `"rig_limited"`, and the rest of the
@@ -200,9 +214,10 @@ capability suite rather than a latency suite. One gateway is probed across six i
 shapes (OpenAI chat completions, OpenAI Responses, Anthropic Messages, Gemini `generateContent`,
 Cohere v2 chat with a v1 fallback, Bedrock Converse) while the upstream mock stays fixed on the
 OpenAI shape, so every non-OpenAI cell is a translation claim: the gateway must convert the request
-out and the response back. One probe per cell validates the response envelope, not just the status
-code (`choices[0].message`, a Responses envelope, `"type":"message"` plus a content array,
-`candidates[0].content`, `message.content`, `output.message.content`). The xlate passthrough guard
+out and the response back. One probe per cell decides it: the engine's probe accepts any 2xx status
+and does NOT validate the reply envelope (it does not check for `choices[0].message`, a Responses
+envelope, an Anthropic content array, `candidates[0].content` and so on), so a served cell means "the
+gateway answered 2xx on that pairing", not "the reply was a well-formed translation". The xlate passthrough guard
 generalizes to every cell: the mock answers all six protocols by path, so a gateway that proxies an
 ingress path verbatim gets a plausible 200 from the mock's canned constant; every translation cell
 rejects that canned body as untranslated passthrough. Bedrock gets one extra honesty rule: real
@@ -225,10 +240,12 @@ in CI by the `mock-shape` job.
 - **idle RSS** - the MEDIAN over the cold-idle window on a freshly restarted process, sampled *before*
   it serves any request (a warm post-sweep process would measure "recovered", not "idle").
 - **steady-state RSS** - the level the RSS settles at while the identical fixed load runs on that cell.
-  A cell whose RSS never goes steady within the cap has no steady state, and publishes its **growth
-  rate** (MiB/min over the final window) instead: at the cap that rate IS the leak rate.
-- **plateaued / time to plateau / growth rate** - whether the RSS went steady on that cell, how long it
-  took, and how fast it was still moving. The growth rate is published whether or not the cell
+  A cell whose RSS is not steady over the trailing window when the fixed load ends has no steady
+  state, and publishes its **growth rate** (MiB/min over the final window) instead: that rate IS the
+  leak rate.
+- **plateaued / time to plateau / growth rate** - whether the RSS was steady over the trailing window at
+  the END of the load, when it first read flat (recorded only; it does not end the load), and how fast
+  it was still moving. The growth rate is published whether or not the cell
   plateaued, because any threshold admits a leak slower than itself.
 - **recovered RSS** - the RSS at the END of the recovery window after the load stops: does it release,
   or stay pinned? A gateway that pools memory and never returns it looks bounded on a boot-time
@@ -280,15 +297,16 @@ the gateway's ceiling.
 suite is deleted - it mislabelled itself as 6x6 provenance). **Every served cell gets its own window**
 and no cell is selected: the gateway is **cold-started for that cell**, its **cold idle RSS** is sampled
 before it serves a single request, then the **identical fixed load** (same concurrency and payload for
-every gateway and every cell - `MATRIX_MEM_CONC` / `MATRIX_MEM_PAYLOAD`) runs **until the RSS is
-steady** over a trailing window (`MEM_PLATEAU_WINDOW_S`, drift and spread both under their thresholds)
-or until the `MEM_PLATEAU_CAP_S` cap, and RSS is sampled through a recovery window after the load stops.
-Reaching the cap is a **published result** (`plateaued: false` plus the growth rate), not an error. A
-fixed duration would have let the stopping point decide the answer for any gateway still climbing when
-it expired; a plateau test holds every gateway to the same standard instead. One process lifecycle per
-cell, so the idle -> steady -> recovered arc is a real curve. Windows are tunable (`MEM_IDLE_S` /
-`MEM_SETTLE_S`) and travel in the result, so every published label renders the durations the run
-actually used. Any RSS the sampler cannot obtain is **null, never a fabricated 0**, and a rig that
+every gateway and every cell, c=32) runs for a **fixed `MEMORY_LOAD_S` (300 s) on every cell**, and RSS
+is sampled through a recovery window after the load stops. The **plateau verdict is taken at the end**
+of that load, over the trailing 60 s (drift and range both under their thresholds); the first flat
+trailing minute is only recorded, as `time_to_plateau_s`, and never shortens the load - a load whose
+length depended on how settled a gateway looked would ask different gateways different questions. Not
+plateaued at the end is a **published result** (`plateaued: false` plus the growth rate), not an error.
+One process lifecycle per cell, so the idle -> steady -> recovered arc is a real curve. The idle,
+load, recovery and plateau windows and the load concurrency are engine constants (not environment
+tunables); the protocol string and the window lengths travel in the result, so every published label
+renders the durations the run actually used. Any RSS the sampler cannot obtain is **null, never a fabricated 0**, and a rig that
 cannot read RSS at all withholds the plateau verdict as **null** rather than asserting `false`.
 
 ## Website publishing
@@ -345,20 +363,22 @@ gateway-agnostic; there is nothing else to edit. See [`gateways/README.md`](gate
 ## Honesty notes (the receipts)
 
 - **Source refs are config, not defaults buried in a script.** Each gateway's ref is pinned in its
-  own `gateways/<name>/definition.json`, next to that manifest's disclosure of what it deviates from
-  and why, and every pin is overridable from the environment; the *actual* version/commit built is
-  written into each result's `build` field. "You used an old branch" is answerable by pointing at the
-  manifest and the recorded commit.
+  own directory, next to its disclosure of what it deviates from and why: a container image tag in
+  `definition.json` (tag only, not a digest), or a source commit in `build.sh` (overridable from the
+  environment). The image tag, or the *actual* commit built, is written into each result's `build`
+  field. "You used an old branch" is answerable by pointing at the manifest and the recorded build.
 - **Each gateway is launched the only way it actually serves the endpoint.** For example,
   LiteLLM-Rust's `/v1/messages` route only serves the `azure_ai` provider *and* only serves at all
   under its `python-config` reader (the lean env config returns `400`) - verified against its own
   source. We launch it that way and record what it costs, rather than quoting an idle number from a
   config that doesn't serve. The reasoning is in
-  [`gateways/litellm-rust/definition.json`](gateways/litellm-rust/definition.json).
+  [`gateways/litellm-rust/definition.json`](gateways/litellm-rust/definition.json) (`matrix_note`) and
+  [`gateways/litellm-rust/why`](gateways/litellm-rust/why).
 - **The mock is deterministic and dumb** - it answers any path with a fixed small body (OpenAI shape,
   or Anthropic shape for `/messages`), so the number is the *gateway's* cost, not the upstream's.
-- **The chart colors by measurement, not by name.** Green goes to whichever gateway measured lowest.
-  If Busbar loses a metric, Busbar isn't green on it.
+- **The chart colors by language, not by name or rank.** Every bar takes its gateway's
+  implementation-language colour, the same palette every other surface uses, so no colour marks a
+  winner and none marks the sponsor; order and length carry the measurement.
 
 ## Why this exists
 

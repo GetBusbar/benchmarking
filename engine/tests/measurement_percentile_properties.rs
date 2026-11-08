@@ -37,11 +37,38 @@ const ALL_REASONS: [Absent; 7] = [
     Absent::HarnessError,
 ];
 
+/// EXHAUSTIVE ON PURPOSE, and that is the completeness guard: a variant added to `Absent` stops this
+/// compiling until it is placed here, and the check below then requires it in `ALL_REASONS` at the
+/// same position. (Comparing `ALL_REASONS` against a second hand-written token list could not see a
+/// new variant at all.)
+fn position_in_all_reasons(r: &Absent) -> usize {
+    match r {
+        Absent::NotServed => 0,
+        Absent::NotMeasured => 1,
+        Absent::BelowResolution => 2,
+        Absent::RigLimited => 3,
+        Absent::SearchExhausted => 4,
+        Absent::Untestable => 5,
+        Absent::HarnessError => 6,
+    }
+}
+
+#[test]
+fn every_absent_variant_is_in_all_reasons() {
+    for (i, r) in ALL_REASONS.iter().enumerate() {
+        assert_eq!(
+            position_in_all_reasons(r),
+            i,
+            "{} is out of place",
+            r.token()
+        );
+    }
+}
+
 #[test]
 fn the_all_reasons_list_is_complete() {
-    // serde's own enum knowledge is the source of truth: every token that deserialises must be in
-    // ALL_REASONS, and ALL_REASONS must contain no duplicates. A new variant lands in serde
-    // automatically and would be missing here, turning this red.
+    // Every token that deserialises must be in ALL_REASONS, and ALL_REASONS must contain no
+    // duplicates. (A NEW variant is caught by `position_in_all_reasons` above, not here.)
     let mut seen = std::collections::BTreeSet::new();
     for r in &ALL_REASONS {
         assert!(seen.insert(r.token()), "duplicate reason {}", r.token());
@@ -151,7 +178,7 @@ proptest! {
     // that also lived here went with the helpers themselves - see measurement.rs.)
     #[test]
     fn no_accessor_route_reaches_a_number_for_any_absence(
-        which in 0usize..7,
+        which in 0usize..ALL_REASONS.len(),
         detail in "[a-z ]{0,40}",
     ) {
         let reason = ALL_REASONS[which].clone();
@@ -189,7 +216,7 @@ proptest! {
     // block is built from, so a defect here is a board full of unexplained nulls.
     #[test]
     fn record_absence_maps_exactly_the_absent_fields(
-        which in 0usize..7,
+        which in 0usize..ALL_REASONS.len(),
         value in -1.0e12f64..1.0e12,
         detail in "[a-z ]{1,40}",
     ) {
@@ -211,7 +238,7 @@ proptest! {
     // under a right-looking key.
     #[test]
     fn an_absent_entry_survives_the_wire_for_every_reason(
-        which in 0usize..7,
+        which in 0usize..ALL_REASONS.len(),
         detail in proptest::option::of("[a-zA-Z0-9 .:=/-]{1,60}"),
     ) {
         let entry = AbsentEntry { reason: ALL_REASONS[which].clone(), detail: detail.clone() };
@@ -252,6 +279,21 @@ proptest! {
         prop_assert_eq!(n.copied(), None);
         prop_assert!(!n.is_measured());
     }
+}
+
+/// The concrete case the saved proptest seed recorded (`value = -980235823809.7559`). The seed file
+/// replays an RNG state, and after the strategy changed shape (`value` became `int_value`/`f_value`)
+/// it no longer regenerates this input, so it is pinned here directly under the same documented
+/// relative slack.
+#[test]
+fn the_recorded_float_regression_still_round_trips() {
+    let v = -980_235_823_809.755_9_f64;
+    let json = serde_json::to_string(&Measurement::Measured(v)).expect("serialise");
+    let back: Measurement<f64> = serde_json::from_str(&json).expect("deserialise");
+    let got = back
+        .copied()
+        .expect("a measured value must read back measured");
+    assert!((got - v).abs() <= v.abs() * 1e-15, "{v} read back as {got}");
 }
 
 /// An empty sample set has no percentile at any p: absent, never zero. GenStats::pct_us documents

@@ -1,0 +1,9 @@
+{
+  "captured_at": "2026-11-08T19:11:10.056000+00:00",
+  "dataset_id": "dataset-0e94f34b177392a78b5a0a0de8d5f4eca433b24af2f2081064af48974f5ef5b8",
+  "generated_at": "2026-11-08T19:07:23.959Z",
+  "published_at": "2026-11-08T19:07:23.620Z",
+  "collection_sha256": "b5f17e338f9f624ec392cfcd95f54ba68e272695803d81b6d0120d199f93d680",
+  "source": "https://onthebench.ai/api/v1/benchmarks/latest",
+  "interpretation": "Descriptive ordering of published observations, not a causal or statistically significant product ranking. Compare identical protocol pairs and metric definitions. New engine results are a different experiment; report both engine versions."
+}

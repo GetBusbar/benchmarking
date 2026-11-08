@@ -10,6 +10,7 @@
 #
 #   python3 bench-dashboard_coverage_test.py
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -60,9 +61,10 @@ check("phase fraction: the declared weights sum to ~1 (they are shares of one ce
       abs(sum(bd.PHASE_COST.values()) - 1.0) < 0.01, True)
 
 # ── parse_progress: the fail-CLOSED served counter ───────────────────────────────────────────────
-# Guards against counting any `[cell N/M] id: <verdict>` line as served unless the verdict is a
-# known MEASURED one; an allowlist of cheap verdicts previously let same-prefix lines (e.g. cost
-# breakdowns) double-count as served.
+# The regression this guards: any `[cell N/M] id: <verdict>` line used to count as served unless the
+# verdict was in a cheap-list, so a cost-breakdown line under the same prefix double-counted every
+# measured cell ("10/8 served") and zeroed the ETA mid-run. Only the engine's own MEASURED verdicts
+# may count.
 log = "\n".join([
     "[cell 1/36] openai>openai: served",
     "[cell 2/36] openai>anthropic: failed (HTTP 500 across the retry budget)",
@@ -72,22 +74,31 @@ log = "\n".join([
     "[cell 5/36] openai>bedrock: cost throughput=120s memory=200s",  # the regression line shape
     "[phase] openai>bedrock memory",
 ])
-# `complete` flags when the log tail starts mid-grid, making served_done a floor rather than a
-# total. Unpacked here so a tuple-shape change breaks this test loudly.
+# `complete` was added when the dashboard stopped presenting a lower bound as a count: the log tail
+# it reads can start mid-grid, and then served_done is a floor, not a total. Unpacked here so this
+# test breaks loudly if the tuple changes again rather than silently reading the wrong field.
 cells, total, served_done, phase, complete = bd.parse_progress(log)
 check("parse_progress: latest cell position wins", (cells, total), (5, 36))
-check("parse_progress: ONLY measured verdicts count as served (2 of 6 lines)", served_done, 2)
+# `failed (HTTP ...)` is Served::No: the probe answered an error and the engine measured nothing
+# (`Served::is_measurable()` is Served::Yes only), so it is not a served cell either.
+check("parse_progress: ONLY the engine's `served` verdict counts (1 of 6 lines)", served_done, 1)
+# The regression line shape on its own, so the fail-closed rule is pinned independently of the count
+# above: a `[cell N/M] id: cost ...` line must add nothing.
 check("parse_progress: an unrecognised same-prefix line is ignored, never believed",
-      served_done <= 5, True)
+      bd.parse_progress("[cell 1/36] openai>openai: cost throughput=120s memory=200s")[2], 0)
 check("parse_progress: the latest phase is reported with its cell id", phase, "memory openai>bedrock")
-# An empty tail reports complete=True: `complete` only qualifies a COUNT, and with no cell line
-# there is no count to bound (cells is None; caller renders "-"). The fail-closed case is below —
-# a tail that DID see cells but missed the start.
+# A verdict line closes its cell: the phase seen before it must not be credited to the next cell.
+check("parse_progress: a cell's verdict clears the phase it finished in",
+      bd.parse_progress("[phase] openai>openai cost\n[cell 1/36] openai>openai: served")[3], None)
+# An empty tail reports complete=True, which reads like vacuous truth and is not: `complete` only
+# ever qualifies a COUNT, and with no cell line there is no count (cells is None, so the caller
+# renders "-"). Saying "incomplete" here would attach a bound to a number that does not exist. The
+# fail-closed case that matters is the one below: a tail that DID see cells but missed the start.
 check("parse_progress: an empty tail has no position, no phase, and nothing to bound",
       bd.parse_progress(""), (None, None, 0, None, True))
 check("parse_progress: a log carrying every cell position from 1 is complete", complete, True)
-# A tail that starts mid-grid knows it can't count, so the dashboard can say 'at least N' rather
-# than passing a floor off as a reading.
+# The fail-closed half: a tail that starts mid-grid knows it cannot count, so the dashboard can say
+# 'at least N' rather than passing a floor off as a reading.
 _, _, _, _, partial = bd.parse_progress("[cell 7/36] openai>openai: served")
 check("parse_progress: a tail starting mid-grid reports itself incomplete", partial, False)
 
@@ -138,6 +149,21 @@ with tempfile.TemporaryDirectory() as td:
     check("fanout_logs: orchestration logs never become phantom gateway rows",
           sorted(logs), ["realgw"])
 
+# ── declared_served: an empty matrix is UNDECLARED, not "declares zero" ──────────────────────────
+with tempfile.TemporaryDirectory() as td:
+    _old_here = bd.HERE
+    try:
+        bd.HERE = td
+        for _gw, _matrix in (("undeclared", []), ("declared", ["110000", "010000"])):
+            os.makedirs(os.path.join(td, "gateways", _gw))
+            with open(os.path.join(td, "gateways", _gw, "definition.json"), "w") as f:
+                json.dump({"matrix": _matrix}, f)
+        check("declared_served: an empty matrix has no denominator (None), not 0",
+              bd.declared_served("undeclared"), None)
+        check("declared_served: a declared matrix counts its '1's", bd.declared_served("declared"), 3)
+    finally:
+        bd.HERE = _old_here
+
 # ── row_for: the assembled row, with the remote leg stubbed ──────────────────────────────────────
 bd.remote_tail = lambda ip: ""
 bd.declared_served = lambda gw: 8
@@ -179,6 +205,24 @@ with tempfile.TemporaryDirectory() as td:
     bd.remote_tail = lambda ip: ""
     row = bd.row_for("gw", p4, 10 * 3600 + 10 * 60)
     check("row_for: with nothing measured and no phase, the ETA is the honest '~'", row["eta"], "~")
+
+# ── main(): an INCOMPLETE box is not a clean exit ────────────────────────────────────────────────
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+_saved = (bd.fanout_logs, bd.row_for, sys.argv)
+try:
+    bd.fanout_logs = lambda: {"gw": "/nonexistent"}
+    sys.argv = ["bench-dashboard.py"]
+    for _bad, _want in ((True, 1), (False, 0)):
+        bd.row_for = lambda gw, path, now_s, _b=_bad: dict(
+            gw=gw, phase="INCOMPLETE" if _b else "DONE", cells="-", served="-", elapsed="-", eta="-",
+            done=not _b, bad=_b)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _rc = bd.main()
+        check(f"main: exit {_want} when the board ends {'INCOMPLETE' if _bad else 'DONE'}", _rc, _want)
+finally:
+    bd.fanout_logs, bd.row_for, sys.argv = _saved
 
 if _fail == 0:
     print("all bench-dashboard coverage tests passed")

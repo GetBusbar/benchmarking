@@ -32,7 +32,7 @@
   "lang": "Other",
   "launch": {
     "args": [],
-    "image": "higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:2.2.4",
+    "image": "higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:2.2.5@sha256:9846006cb3cf2dafa942deab0e1d004ed30e219fbc9580438f9e3c58e7096422",
     "kind": "docker",
     "mounts": [
       {
@@ -47,15 +47,6 @@
       }
     ]
   },
-  "matrix": [
-    "100000",
-    "010000",
-    "001000",
-    "000100",
-    "000010",
-    "000001"
-  ],
-  "matrix_note": "Higress 2.2.4 runs as the official all-in-one image with file-based config: one McpBridge static registry aimed at the mock and one six-path Ingress to it, so every served cell is same-dialect verbatim passthrough on the diagonal. The cross-dialect cells need the ai-proxy wasm plugin's per-ingress provider bindings (WasmPlugin matchRules), which this one-static-config manifest has not been verified against, so they are grey by that configuration limit rather than measured false. Upstream selection by request header - the mechanism other entrants use to light up cross columns on one path - is not configured because the Ingress resource Higress's file config speaks has no header matcher.",
   "model": "gpt-4o-mini",
   "name": "higress",
   "path": "/v1/chat/completions",

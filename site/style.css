@@ -307,13 +307,7 @@ tbody tr { cursor: pointer; }
 #gateways-table thead th[data-dir="asc"]::after { content: " \25B2"; font-size: .7em; color: var(--fg-mute); }
 #gateways-table thead th[data-dir="desc"]::after { content: " \25BC"; font-size: .7em; color: var(--fg-mute); }
 #gateways-table tbody tr { cursor: pointer; }
-/* Contributors cell: outside people who submitted/maintain an entrant. A first-party row renders a
-   muted dash; a credited row shows @handle chips linking to GitHub. The link colour is the normal
-   accent so it reads as "click me", and it stops the row-click so the profile opens instead of the
-   drawer. */
-#gateways-table td.contrib { color: var(--fg-dim); white-space: nowrap; }
-#gateways-table td.contrib .contrib-link { color: var(--accent); text-decoration: none; }
-#gateways-table td.contrib a.contrib-link:hover { text-decoration: underline; }
+#gateways-table td.cls { color: var(--fg-dim); }
 
 /* drawer (per-gateway slide-over) */
 .backdrop { position: fixed; inset: 0; background: var(--overlay); z-index: 60; }
@@ -457,6 +451,8 @@ tbody tr { cursor: pointer; }
 .matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
 .matrix-legend .lg-unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
 .matrix-legend .lg-untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
+.matrix-legend .lg-unprobed { background: var(--grey); }
+.matrix-legend .lg-failed { background: var(--red); }
 .matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
@@ -827,7 +823,7 @@ td.memcurve.na { color: var(--fg-mute); }
   padding: 0 .35rem;
   border-radius: 3px;
   font: 500 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--muted, #6b7280);
+  color: var(--fg-mute);
   background: rgba(127, 127, 127, .12);
   vertical-align: baseline;
 }
@@ -865,6 +861,13 @@ tbody tr.tied-above > td {
 #chart-panel canvas { width: 100%; height: auto; max-width: 900px; }
 #chart-note { margin-top: .6rem; font-size: .82rem; line-height: 1.5; }
 
+/* Visually hidden, still read by screen readers: the data tables behind the canvas charts (app.js
+   chartDataTable). Takes no space and draws nothing, so the page looks exactly as it did. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
 /* Publication resources stay readable without dominating the results. */
 .data-links{display:flex;flex-wrap:wrap;gap:.4rem .7rem;padding:1.2rem 0;font-size:.8rem;border-top:1px solid var(--border);margin-top:1.5rem}.crawler-links{font-size:.72rem;margin:.3rem 0 1rem;overflow-wrap:anywhere}.crawler-links p{margin:0}.footer-content{display:grid;gap:.7rem}.footer-content p{max-width:85ch}.footer-content details{max-width:85ch}.footer-content summary{cursor:pointer}.footer-content pre{overflow:auto;font-size:.78rem}.footer-credit{font-weight:500}
 
@@ -874,3 +877,25 @@ tbody tr.tied-above > td {
 .publication-resources{margin-top:2rem;border-top:1px solid var(--border);padding-top:1rem}.publication-resources .data-links{border:0;margin:0;padding:0;font-size:.82rem;gap:.6rem 1.25rem}.publication-resources .crawler-links{margin:.65rem 0 0;color:var(--fg-mute)}.crawler-links summary{cursor:pointer}.crawler-links nav{padding:.5rem 0}.publication-article{min-width:0}.publication-article table{font-size:.82rem}.publication-article ul{padding-left:1.3rem}.publication-article p{overflow-wrap:anywhere}
 
 main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow-wrap:anywhere}.publication-article .table-scroll{max-width:100%;overflow-x:auto}#home-measurements{max-width:100%;overflow-x:auto}
+
+/* History trend direction means improvement, not numerical increase. */
+.history-trend { font-weight: 600; white-space: normal; }
+.trend-improved { color: #167341; }
+.trend-regressed { color: #b32c32; }
+.trend-flat { color: #896500; }
+.trend-not_comparable { color: var(--muted, #66717c); }
+[data-theme="dark"] .trend-improved { color: #65d899; }
+[data-theme="dark"] .trend-regressed { color: #ff9298; }
+[data-theme="dark"] .trend-flat { color: #edcf69; }
+
+.history-controls { display:flex; flex-wrap:wrap; align-items:end; gap:1rem; margin:1.5rem 0; }
+.history-controls label { display:flex; flex-direction:column; gap:.35rem; min-width:0; flex:1 1 9rem; }
+.history-controls input, .history-controls select, .history-controls button { font:inherit; padding:.5rem; border:1px solid var(--border,#b8c2ca); border-radius:.35rem; max-width:100%; }
+.history-controls select { min-width:0; width:100%; }
+.history-chart { display:block; width:100%; height:auto; }
+.table-scroll { overflow-x:auto; }
+
+.refresh-status { margin:1rem 0; padding:1rem; border:1px solid var(--border); border-radius:.5rem; color:var(--muted); }
+
+#gateways-table td.contrib { color:var(--fg-dim); white-space:nowrap; }
+#gateways-table .contrib-link { color:var(--accent); }

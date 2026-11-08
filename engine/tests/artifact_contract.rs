@@ -119,6 +119,7 @@ const MEMORY_METRICS: [&str; 11] = [
 
 fn measured_perf() -> CellPerf {
     CellPerf {
+        sweep_max_proxy_interrupted: false,
         added_latency_p50_us: Measurement::Measured(120),
         added_latency_p99_us: Measurement::Measured(480),
         gateway_c1_p99_us: Measurement::Measured(2_000),
@@ -431,17 +432,23 @@ fn skipped_reasons_publish_under_a_stable_token() {
 /// reader-facing, and a snippet cut mid-character is not printable evidence.
 #[test]
 fn an_evidence_snippet_is_bounded_and_never_cut_mid_character() {
-    // 100 two-byte characters = 200 bytes exactly; adding one more crosses the cap with a
-    // multi-byte char straddling the boundary.
-    let body: String = "\u{00e9}".repeat(150); // 300 bytes of 2-byte chars
-    let snippet = Evidence::snippet(&body);
+    // A one-byte lead puts every two-byte character on an ODD offset, so byte 200 falls in the
+    // middle of one (bytes 199..201). Without the lead, 2-byte characters from offset 0 always end
+    // exactly on byte 200 and the boundary walk-back is never exercised.
+    let body: String = format!("a{}", "\u{00e9}".repeat(150)); // 301 bytes
     assert!(
-        snippet.len() <= 200,
-        "snippet must stay within its byte bound, got {} bytes",
+        !body.is_char_boundary(200),
+        "the fixture must straddle the cap"
+    );
+    let snippet = Evidence::snippet(&body);
+    assert_eq!(
+        snippet.len(),
+        199,
+        "the cut must back off to the char boundary below the cap, got {} bytes",
         snippet.len()
     );
     assert!(
-        snippet.chars().all(|c| c == '\u{00e9}'),
+        snippet.chars().skip(1).all(|c| c == '\u{00e9}'),
         "a boundary cut corrupted a character: {snippet:?}"
     );
     assert!(!snippet.is_empty(), "a non-empty body yields evidence");

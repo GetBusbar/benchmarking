@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 #
-# bench-dashboard.py never fails a build, so a wrong figure only shows up as an operator killing a
-# box that was nearly done, or babysitting one that's wedged. This file pins the three defect
-# classes that matter: a FABRICATED progress number (phase table entry for a metric the engine
-# doesn't have), a label that MISDESCRIBES state (falsy-zero ETA/served rendering as "-"), and a
-# gate that CANNOT FAIL (the phase table checked only against itself, not against
-# `engine/src/metric.rs`).
+# THE STATUS BOARD IS ALSO A PUBLISHED NUMBER, and it is the one people act on fastest.
+#
+# Nothing here ends up on the website, which is exactly why it drifted: a wrong figure in
+# `bench-dashboard.py` never fails a build, it just makes an operator kill a box that was nearly done
+# or babysit one that has been wedged for an hour. Thirteen boxes billing by the hour is the whole
+# reason the tool exists, so "the ETA was a bit off" is the failure mode it was written to prevent.
+#
+# The defect classes this file pins are the same three the rest of the repo polices:
+#
+#   a number that could be FABRICATED - the per-cell progress fraction was accumulated from a phase
+#     table containing a metric group the engine does not have, so every cell in its last two phases
+#     claimed 19.8 points of progress against work that does not exist;
+#   a label that MISDESCRIBES a state - an eta of exactly 0.0 rendering as "no estimate", and a served
+#     count derived from a truncated log presented as a count rather than as a floor;
+#   a gate that CANNOT FAIL - a phase table asserted only against itself. The drift check below reads
+#     `engine/src/metric.rs` and would have caught `sustained_throughput` the day it was retired.
 #
 # Run: python3 bench-dashboard_test.py
 import importlib.util
@@ -18,6 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _SPEC = importlib.util.spec_from_file_location("bench_dashboard", os.path.join(HERE, "bench-dashboard.py"))
 bd = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bd)
+# Kept before any block below stubs it out, so the fetch itself can be tested.
+_REAL_REMOTE_TAIL = bd.remote_tail
 
 _fail = 0
 
@@ -33,11 +45,16 @@ def check(name, got, want):
 
 # ── the phase table must be the ENGINE'S phase list ───────────────────────────────────────────────
 #
-# `PHASE_ORDER`/`PHASE_COST` are keyed by the group names the engine prints as `[phase] <cell> <group>`
-# (from `metric::METRICS` and each metric's `name()`). Nothing at runtime connects the two, so a
-# renamed/added/retired group leaves the table silently describing a run shape that no longer
-# happens. The weights themselves can't be derived from source (they're measured wall-clock
-# shares), so the table stays hand-written; only the key match is automated here.
+# `PHASE_ORDER`/`PHASE_COST` are keyed by the group names the engine prints as `[phase] <cell> <group>`,
+# which come from `metric::METRICS` and the `name()` each metric declares. Nothing at runtime connects
+# the two: the dashboard reads a log, not the engine's source, so a group that is renamed, added or
+# retired leaves the table describing a run shape that no longer happens - and every consequence is a
+# quietly wrong number rather than an error. `sustained_throughput` sat in this table after the engine
+# folded it into `throughput`, and the only symptom was optimistic ETAs.
+#
+# Reading metric.rs from the test rather than from the tool is the deliberate line: the ETA weights
+# cannot be derived from the source (they are measured wall-clock shares), so the table has to be
+# hand-written, and the thing worth automating is the assertion that it still matches.
 
 _METRICS_RE = re.compile(r"pub const METRICS: &\[&dyn Metric\] = &\[(.*?)\];", re.S)
 _STRUCT_RE = re.compile(r"&(\w+)")
@@ -49,9 +66,10 @@ _NAME_RE = re.compile(r"^impl Metric for (\w+) \{\s*\n\s*fn name\(&self\)[^\n]*\
 def engine_phase_order(src):
     """The metric-group names the engine runs, in order, parsed from metric.rs's own source.
 
-    Two steps since the facts live apart: METRICS gives the order as a list of types, `name()` gives
-    the string each carries. Returns None (a failure, not []) when either shape can't be found, so a
-    parse failure can't masquerade as an empty, vacuously-passing table."""
+    Two steps because the two facts live apart: METRICS gives the ORDER as a list of types, and each
+    type's `name()` gives the STRING the log line carries. Returns None when either shape cannot be
+    found, which the caller must treat as a failure - a parser that silently returns [] would turn
+    this whole check into the vacuous pass it exists to prevent."""
     m = _METRICS_RE.search(src)
     if not m:
         return None
@@ -60,8 +78,9 @@ def engine_phase_order(src):
     return None if any(o is None for o in order) else order
 
 
-# Fixture with a different metric list, to prove the parser reads the source rather than echoing
-# PHASE_ORDER (a parser that did that, or returned [] on anything unfamiliar, would never disagree).
+# RED for the parser itself: point it at a source declaring a DIFFERENT metric list and it must report
+# that list. A parser that echoed PHASE_ORDER, or that returned [] on anything unfamiliar, would agree
+# with the dashboard forever.
 _FIXTURE_RS = '''
 pub const METRICS: &[&dyn Metric] = &[
     &Alpha,
@@ -89,10 +108,11 @@ check("the metric.rs parser reads the ENGINE's list, not the dashboard's",
 check("...and refuses to answer when METRICS is not there (never a silent empty list)",
       engine_phase_order("fn main() {}"), None)
 
-# The real engine source and the real table must agree.
+# ACCEPT: the real engine source and the real table agree.
 _METRIC_RS = os.path.join(HERE, "engine", "src", "metric.rs")
 if not os.path.exists(_METRIC_RS):
-    # Not a skip: a check that can't run has not passed.
+    # Not a skip. A check that cannot run has not passed, and this one exists precisely because the
+    # thing it compares against is easy to move.
     check("engine/src/metric.rs is present so the phase table can be checked against it", False, True)
 else:
     with open(_METRIC_RS) as f:
@@ -105,18 +125,28 @@ else:
 
 check("the phase weights still sum to one whole cell", round(sum(bd.PHASE_COST.values()), 6), 1.0)
 
-# The fabricated-progress regression, tested as a property rather than a hardcoded number: a
-# phantom phase-table entry (has happened twice — a stale `sustained_throughput`, then a retired
-# `cpu_fps`) inflates `cell_fraction_done`'s accumulated weight for every later phase. Hardcoded
-# expected sums caught the phantom but also broke on legitimate reweights, so instead assert the
-# cumulative fraction equals the sum of exactly the phases before it in PHASE_ORDER, computed from
-# the table itself — phantom-proof (caught by the keys check above) and reweight-proof.
+# THE FABRICATED-PROGRESS REGRESSION, tested as the PROPERTY rather than as a number.
+#
+# It has now happened twice. First a phantom `sustained_throughput` sat in the table at 0.198 for a
+# group metric.rs does not have, so a cell in `streams_sustained` counted that weight as already
+# elapsed. Then `cpu_fps` was retired from the engine and its 0.102 became phantom in exactly the same
+# way. Both times the real defect was the same: `cell_fraction_done` accumulates PHASE_ORDER weight
+# until it reaches the phase it was given, so any entry for work that does not happen inflates every
+# later phase's progress and shortens every ETA built on it.
+#
+# The first version of this test hardcoded the sums (0.845, and 1.0 - 0.102). That caught the phantom
+# but ALSO broke on a legitimate reweight - which is what happened when the weights were re-measured
+# after the memory phase became a fixed duration. A test that fires on a correct change is a test that
+# gets edited until it stops firing. So: assert the cumulative fraction equals the sum of exactly the
+# phases BEFORE it in PHASE_ORDER, computed from the table itself. That is phantom-weight-proof
+# (a phantom is not in PHASE_ORDER, or is, and then the keys check above fails) and reweight-proof.
 for _i, _phase in enumerate(bd.PHASE_ORDER):
     _before = sum(bd.PHASE_COST[p] for p in bd.PHASE_ORDER[:_i])
     check(f"progress into {_phase} is exactly the phases before it, no invented work",
           round(bd.cell_fraction_done(_phase), 6), round(_before, 6))
 
-# A retired phase name must claim nothing rather than silently matching another phase's weight.
+# And a RETIRED phase name claims nothing. `cpu_fps` ran in this harness for months; a log line naming
+# it must now contribute 0.0 rather than silently matching some other phase's weight.
 check("the retired cpu_fps group contributes nothing", bd.cell_fraction_done("cpu_fps"), 0.0)
 check("the retired sustained_throughput group contributes nothing",
       bd.cell_fraction_done("sustained_throughput"), 0.0)
@@ -127,9 +157,10 @@ check("no phase at all claims no progress", bd.cell_fraction_done(None), 0.0)
 
 # ── parse_progress: a served count is a count only if we saw every cell ────────────────────────────
 #
-# The count comes from `[cell N/M]` lines in the box's log; a truncated log (e.g. the old 20 KB tail
-# cap scrolling early cells out) silently becomes a floor. The engine numbers cells contiguously
-# from 1, so completeness of the history is decidable.
+# The count is derived by counting `[cell N/M]` lines out of the box's log. `remote_tail` used to cap
+# that log at 20 KB, so on any real grid the earliest cells fell out of the window and the count
+# silently became a floor - a gateway that had finished seven cells read "3/8", and the ETA divided by
+# 3. The engine numbers cells contiguously from 1, so the completeness of the history is decidable.
 _FULL_LOG = "\n".join([
     "[cell 1/4] openai>openai: served",
     "[phase] openai>openai throughput",
@@ -150,8 +181,8 @@ check("...and the phase is the metric GROUP, which is what PHASE_COST is keyed b
       phase.split()[0], "streams_sustained")
 check("...so the in-flight fraction is a real one", bd.cell_fraction_done(phase.split()[0]) > 0, True)
 
-# The same run with its first two cells scrolled off: positions {3,4} != {1,2,3,4}, so the count
-# is known to be short.
+# RED: the same run with its first two cells scrolled off. Position 3 is the earliest seen, so
+# positions {3,4} != {1,2,3,4} and the count is known to be short.
 _TRUNCATED = "\n".join(_FULL_LOG.split("\n")[4:])
 _c, _t, _sd, _p, _complete = bd.parse_progress(_TRUNCATED)
 check("a log that does not reach back to cell 1 is NOT reported complete", _complete, False)
@@ -172,8 +203,9 @@ def _drive(progress, declared=2, now=100):
 
 _orig_parse = bd.parse_progress
 
-# All declared cells (2) are already served -> left == 0 -> eta == 0.0, falsy in Python; must not
-# render as "-" (no estimate).
+# All declared cells (2) are already served -> left == 0 -> eta == 0.0, which is falsy in Python. The
+# render expression used to be `hms(eta) if eta else (...)`, printing '-' ("no estimate") on a run
+# that is finishing this second.
 row = _drive((2, 2, 2, "done", True))
 check("eta of exactly 0.0 (all cells served) renders as an estimate, not '-'", row["eta"], "0m00s")
 check("a complete history shows the served count bare", row["served"], "2/2")
@@ -183,19 +215,63 @@ row = _drive((2, 2, 1, "done", False))
 check("an incomplete history marks the served count as a floor", row["served"], "≥1/2")
 check("...and marks the ETA built on it as a floor too", row["eta"].startswith("≥"), True)
 
-# A cell position of 0 must not print as "no cell information" (same falsy-zero class as the eta bug).
+# A cell position of 0 must not print as "no cell information". Same falsy-zero reading as the eta bug.
 row = _drive((0, 36, 0, None, True))
 check("a cell position of 0 prints the position, not '-'", row["cells"], "0/36")
 
 bd.parse_progress = _orig_parse
 
+# ── remote_tail: a failed fetch is not "nothing logged yet" ──────────────────────────────────────────
+#
+# remote_tail used to turn every ssh failure - a timeout, a refused connection, ssh's own exit 255 -
+# into "", the same string a box that has logged nothing returns. parse_progress("") is complete with
+# no cells, so row_for rendered a box hours into its run that stopped answering as "booting/building",
+# served 0/N with no floor mark: the reading of a healthy fresh box.
+import subprocess  # noqa: E402 - kept beside the block that uses it, like the render test below
+
+_orig_run = bd.subprocess.run
+_orig_authenticated_ssh = bd.authenticated_ssh
+
+
+def _timeout(*_a, **_k):
+    raise subprocess.TimeoutExpired(cmd="ssh", timeout=15)
+
+
+bd.remote_tail = _REAL_REMOTE_TAIL
+bd.authenticated_ssh = lambda ip: bd.SSH  # Trust ordering is exercised by lib/ssh_clients_test.py.
+try:
+    bd.subprocess.run = _timeout
+    check("remote_tail: an ssh timeout is a failed fetch (None), not an empty log",
+          bd.remote_tail("1.2.3.4"), None)
+    bd.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 255, stdout="", stderr="refused")
+    check("remote_tail: ssh exiting 255 is a failed fetch (None), not an empty log",
+          bd.remote_tail("1.2.3.4"), None)
+    bd.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+    check("remote_tail: a reachable box with nothing logged yet is an empty log", bd.remote_tail("1.2.3.4"), "")
+
+    # The whole row, through the REAL fetch with ssh timing out.
+    bd.subprocess.run = _timeout
+    bd.declared_served = lambda gw: 8
+    bd.local_state = lambda path: {"ip": "1.2.3.4", "start": 0, "measuring": 60, "terminal": None}
+    row = bd.row_for("fakegw", "/tmp/fake", 3 * 3600)
+    check("row_for: a box measuring for hours that stops answering ssh is UNREACHABLE, not booting",
+          row["phase"], "UNREACHABLE (ssh failed)")
+    check("...and shows no served count or ETA it did not read", (row["served"], row["eta"]), ("?/8", "-"))
+    bd.local_state = lambda path: {"ip": "1.2.3.4", "start": 0, "measuring": None, "terminal": None}
+    row = bd.row_for("fakegw", "/tmp/fake", 60)
+    check("row_for: before measurement starts, a refused ssh is a box still booting",
+          row["phase"], "booting (no ssh yet)")
+finally:
+    bd.subprocess.run = _orig_run
+    bd.authenticated_ssh = _orig_authenticated_ssh
+
 # ── render() must survive a stdout codec that cannot encode its glyphs ──────────────────────────────
 #
-# `render()` unconditionally prints "·" (U+00B7); under LANG=C/PYTHONIOENCODING=ascii (cron, a
-# minimal container, `> log.txt`) an unguarded ASCII stdout encoder would raise UnicodeEncodeError
-# and kill the live monitor mid-run.
-import subprocess
-
+# `render()` prints "·" (U+00B7) unconditionally on its summary line, with no stdout.reconfigure()
+# and no encoding safeguard anywhere in the file. That is fine on an interactive UTF-8 terminal, but a
+# cron job, a minimal container, or a plain `> log.txt` redirection under LANG=C/LC_ALL=C/
+# PYTHONIOENCODING=ascii gives Python an ASCII stdout encoder, and the very first refresh cycle raises
+# UnicodeEncodeError and kills the live monitor mid-run.
 _render_script = (
     "import importlib.util\n"
     f"spec = importlib.util.spec_from_file_location('bd', {os.path.join(HERE, 'bench-dashboard.py')!r})\n"

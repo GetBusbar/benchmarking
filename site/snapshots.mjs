@@ -1,20 +1,39 @@
-// Scoped re-run layering. Pure functions, in their own module so they can be tested directly.
-/* SCOPED RE-RUNS: a run narrowed with OTB_DIALECTS walks a SUBSET of the 6x6 grid. Recency alone would
-   let those few cells replace a full run and delete the rest from the board, so instead: when a newer
-   snapshot's cell set is a STRICT SUBSET of an older one's, it LAYERS over that run rather than
-   replacing it - its cells win (newer, really taken), the rest keep the older run's numbers, and each
-   layered cell is stamped with the run that actually produced it.
-   Scope is derived from the snapshot itself, not an env var: a cell that genuinely stopped being served
-   still appears with `served: "not_configurable"`; a cell ABSENT ENTIRELY was simply never probed. */
+// Scoped re-run layering. Pure functions, in their own module so they can be tested directly:
+// gen-data.mjs is a script, and this logic decides whether 32 measured cells survive a 4-cell re-run.
+/* ---- SCOPED RE-RUNS ------------------------------------------------------------------------------
+
+   A re-run narrowed with OTB_DIALECTS walks a SUBSET of the 6x6 grid, so its snapshot carries only the
+   upstreams it was told to walk. Recency alone would let those 4 cells replace a 36-cell run and delete
+   32 measured cells from the board - the same failure gen-data.mjs's degraded-mode guard exists to stop, and
+   for the same reason: the producer was TOLD NOT TO MEASURE the rest, so its silence about them is not
+   a finding.
+
+   This is NOT the "a re-run that finds less IS the new truth" case, and the difference is visible in the
+   data rather than asserted. A gateway that genuinely stops serving a pairing still emits that cell,
+   with `served: "not_configurable"` and a reason - all 36 are present on every full run. A cell that is
+   ABSENT ENTIRELY was never probed. So the scope is derivable from the snapshot itself and needs no
+   env-var provenance to be trusted.
+
+   The rule: when a newer snapshot's cell set is a STRICT SUBSET of an older one's, it does not replace
+   that run - it layers over it. Cells it measured win outright (they are newer and were really taken);
+   cells it never looked at keep the older run's numbers. Every layered cell is stamped with the run
+   that actually produced it, so the board never claims a spliced cell was measured when its neighbours
+   were. */
 export function snapshotCellCoords(m) {
   const out = new Set();
   if (!m || typeof m !== "object") return out;
   for (const [egress, up] of Object.entries(m.upstreams || {}))
     for (const ingress of Object.keys((up && up.cells) || {})) out.add(`${egress}|${ingress}`);
-  /* v1-shaped matrices carry cells under a bare `cells` map with no `upstreams`; without this fallback
-     that reads as an empty set (a strict subset of everything), silently dropping the newest run. The
-     `v1` sentinel keeps a v1 snapshot from ever looking like a subset of a v2 one, since the two shapes
-     can't be aligned cell-for-cell (egress is unknown in v1). */
+  /* THE v1 TOP-LEVEL ROW COUNTS TOO. A v1-shaped matrix carries its cells under a bare `cells` map
+     with no `upstreams`, and this returned an EMPTY set for it - and an empty set is a strict subset
+     of everything, so such a snapshot could never be the base and layered nothing either. The newest
+     run would be silently deleted from the board with no warning. `normalizeMatrix` and `app.js`
+     both still treat that row as real measured cells, so counting zero of them here was this
+     module disagreeing with the rest of the pipeline about what a cell is.
+
+     The egress is unknown in that shape, hence the `v1` sentinel: it makes the coords comparable
+     within v1 and keeps a v1 snapshot from ever looking like a subset of a v2 one, which is the
+     honest answer when the two shapes cannot be aligned cell-for-cell. */
   if (!out.size) for (const ingress of Object.keys(m.cells || {})) out.add(`v1|${ingress}`);
   return out;
 }
@@ -23,18 +42,33 @@ export function isStrictSubset(a, b) {
   for (const k of a) if (!b.has(k)) return false;
   return true;
 }
+/* isScopedRelativeTo(a, b): is the run with coords `a` a SCOPED RE-RUN of the grid `b`? It walked fewer
+   cells than `b` and re-measured at least one of them. NOT "a strict subset of b": a re-run that also
+   touched a coordinate `b` never had (a 7th dialect, OTB_DIALECTS=openai,vertex) is still a 4-cell scoped
+   run, and the subset test classified it as a FULL run that then became the base by recency and deleted
+   every other measured cell from the board. A set sharing no coordinate at all (a v1-shaped run beside a
+   v2 one) is not alignable cell-for-cell and is never treated as scoped. */
+export function isScopedRelativeTo(a, b) {
+  if (a.size >= b.size) return false;
+  for (const k of a) if (b.has(k)) return true;
+  return false;
+}
 /* Layer `scoped` over `base`, returning a new matrix. Both are snapshot matrices. */
 export function layerScopedMatrix(base, scoped, scopedSnap) {
   const merged = structuredClone(base);
   const stamp = { build: scopedSnap.build ?? null, measured_at: scopedSnap.measured_at ?? null,
                   file: scopedSnap.__file ?? null };
   const layered = [];
+  const dropped = [];
   for (const [egress, up] of Object.entries(scoped.upstreams || {})) {
     for (const [ingress, cell] of Object.entries((up && up.cells) || {})) {
       const target = merged.upstreams?.[egress]?.cells;
-      if (!target) continue;                       // an upstream the base never had: nothing to layer onto
+      // An upstream the base never had: nothing to layer onto. RECORDED, never silently discarded, so the
+      // provenance says measured cells exist that the board does not show.
+      if (!target) { dropped.push(`${ingress}>${egress}`); continue; }
       const c = structuredClone(cell);
-      // Stamp the cell with the run that actually produced it, so it's never dated by its neighbours'.
+      // THE CELL CARRIES THE RUN THAT PRODUCED IT. Without this the board dates a spliced cell by its
+      // neighbours' run, which is exactly the provenance lie the snapshot format exists to prevent.
       c.__run = stamp;
       target[ingress] = c;
       layered.push(`${ingress}>${egress}`);
@@ -49,13 +83,16 @@ export function layerScopedMatrix(base, scoped, scopedSnap) {
       }
     }
   }
-  // Append, never overwrite: `resolvedSnapshot` layers multiple scoped runs in turn, so rebuilding
-  // `__layered` from scratch each pass would disclose only the most recent run's provenance.
+  /* APPEND, NEVER OVERWRITE. `resolvedSnapshot` layers each scoped run in turn onto the result of
+     the last, and this rebuilt the record from scratch every pass - so with two scoped re-runs the
+     published provenance disclosed only the most recent one, and the cells from the earlier run
+     read as if they had come from the base. The per-cell `__run` stamps survived, which is what
+     bounded the damage, but `__layered` is the summary a reader actually looks at. */
   const prior = Array.isArray(base.__layered?.runs) ? base.__layered.runs : [];
   merged.__layered = {
     from: stamp,
     cells: layered.sort(),
-    runs: [...prior, { from: stamp, cells: layered.sort() }],
+    runs: [...prior, { from: stamp, cells: layered.sort(), ...(dropped.length ? { dropped: dropped.sort() } : {}) }],
   };
   return merged;
 }

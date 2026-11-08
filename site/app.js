@@ -35,14 +35,20 @@ const DEFAULT_CATEGORY = "gateways";
    It is not a category tab; the category nav and view tabs render only inside a
    category. Encoded as a pseudo-view so state/URL plumbing stays one codepath. */
 const HOME_VIEW = "home";
-// Each perf tab ranks an internally coherent path so a single sort is honest:
-//   passthrough = openai->openai only (no translation); translation = openai-in -> best non-openai
-//   egress; streaming = SSE passthrough (its own stall-gated ceiling).
-// Tab order: neutral roster (`gateways`, alphabetical, no perf numbers) first, rankings second,
-// matrix + method last; `charts` folds into method.
-// `performance` is one cell-chooser-driven tab (Peak | Same | Custom picks the cell of the 6x6 run).
-// `frontier` is its own tab rather than more Performance columns: "what shape is this gateway" is a
-// different question from "who is fastest at my bound", and less scrolling wins.
+// The three perf tabs each rank an INTERNALLY COHERENT path so a single sort is honest:
+//   passthrough = openai->openai only (every gateway on the identical dialect, no translation)
+//   translation = openai-in -> best non-openai egress (fixed fair ingress, egress varies)
+//   streaming   = SSE passthrough (its own stall-gated ceiling)
+// The board leads with a NEUTRAL ROSTER (the `gateways` overview: who is on the bench, in
+// alphabetical order, no perf numbers) and the rankings come second; matrix + method round it
+// out.
+// TAB BAR (matrix-sole-source): Gateways · Memory · Performance · Frontier · Streaming · Protocol matrix ·
+// Charts · Method (VIEWS below is the authority).
+// `performance` is ONE cell-chooser-driven tab (Peak | Same | Custom picks which cell of the ONE 6x6
+// run to show).
+// A `frontier` TAB rather than six more columns on Performance, or a taller Performance page: the whole
+// curve is a different question ("what shape is this gateway") from the ranking ("who is fastest at my
+// bound"), and the layout rule here is that less scrolling wins even at the cost of another tab.
 const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"];
 const VIEW_LABELS = { gateways: "Gateways", memory: "Memory", performance: "Performance", frontier: "Frontier", streaming: "Streaming", matrix: "Protocol matrix", charts: "Charts", method: "Method" };
 // The default (bare /gateways) view: the roster overview.
@@ -58,64 +64,104 @@ const CHOOSER_VIEWS = new Set(["performance", "frontier", "streaming", "memory",
 // not a global control: nothing on Streaming or Memory is read at a bound, and a control that changed
 // nothing would imply those numbers had a bound too.
 const BOUND_VIEWS = new Set(["performance", "frontier", "charts"]);
-// Maps retired view names onto current tabs so old shared links keep resolving. `translation`
+// Maps retired view names onto the current tabs so old shared links keep resolving. `translation`
 // aliases to `performance` (its ?xin/?xout still decode into the Custom in/out below).
+// `charts: "method"` WAS HERE and is gone: it pointed a retired /charts tab at Method, and Charts is a
+// real tab again. `resolveView` checks VIEWS first, so the alias was already shadowed - leaving it
+// would have been a dead entry claiming a redirect that no longer happens. An old /gateways/charts
+// link now lands on the Charts tab, which is what the URL says.
 const VIEW_ALIASES = { results: "performance", peak: "performance", matched: "performance", passthrough: "performance", translation: "performance" };
-// Each perf tab's default (headline) sort column; a clean URL omits the sort when it equals this.
-// Streaming defaults to added TTFT, not streams-sustained: the sustained count saturates at the
-// harness cap and ties break by name, floating a slow-TTFT gateway above a fast one. Added TTFT
-// doesn't saturate.
-// "f10" is `boundColId(DEFAULT_BOUND_MS)` written out (this object initialises before that constant
-// exists); site/test.mjs asserts the two agree.
+// Each perf tab's default (and honest headline) sort column; a clean URL omits the sort when it
+// equals this, and switching tabs snaps to it unless the URL pins another.
+// Streaming defaults to added TTFT (asc), NOT streams-sustained: the sustained count saturates at the
+// harness cap (1024 in the current field data) so it ties several gateways and breaks ties by name,
+// floating a slow-TTFT gateway above a fast one at the same count. Added TTFT is the streaming-overhead
+// discriminator that a user actually feels first and it does not saturate.
+// The frontier tab lands on the DEFAULT BOUND's column, and follows the reader's selection from there
+// (renderTable moves the sort with the bound, so switching re-ranks the board in front of them).
+// "f10" is `boundColId(DEFAULT_BOUND_MS)` written out, because this object is initialised before that
+// constant exists; site/test.mjs asserts the two agree, so the literal cannot outlive the default.
 const VIEW_SORT = { performance: "rps", frontier: "f10", streaming: "sttft", memory: "mempeak" };
-/* Retired sort ids, remapped so old shared permalinks still land on a ranking. `rps20`/`rpsmax`
-   named scalar metrics that no longer exist; both meant "rank by throughput", which the frontier
-   reading at the selected bound now is. */
+/* RETIRED SORT IDS, remapped so a shared permalink still lands on a ranking. `?sort=rps20` and
+   `?sort=rpsmax` are in every link ever shared to the Performance tab and in the charts' deep links; the
+   columns they name are gone with the two scalar metrics, and an unrecognised sort id silently falls back to
+   the tab default, which is fine - but both of those links MEANT "rank by throughput", and the frontier
+   reading at the selected bound is that ranking. Mapping them says so instead of quietly dropping them. */
 const SORT_ALIASES = { rps20: "rps", rpsmax: "rps", cpufps: "streamfps" };
-/* Cell-chooser modes shared by Performance + Streaming (which cell(s) of the 6x6 run to show):
-     peak   — each gateway on its own representative same-dialect diagonal (best_cell). Default.
-     same   — one picked dialect's diagonal (X->X) for every gateway.
-     custom — any ingress->egress cell (incl. translation) for every gateway.
+/* The cell-chooser modes shared by Performance + Streaming: which cell(s) of the ONE 6x6 run to show.
+     peak   — each gateway on its OWN REPRESENTATIVE same-dialect diagonal (best_cell). Default. Per-row pill.
+     same   — ONE picked dialect's diagonal (X→X) for every gateway. No pill (the dialect is in the control).
+     custom — any ingress→egress cell (incl. translation) for every gateway. No pill.
 
-   `peak` is a URL contract, not a description: `?mode=peak` is in shared links so the token stays,
-   but the UI label is "Own cell" (MODE_LABELS). Per gen-data.mjs `bestCell`, peak picks the openai
-   diagonal when served, else the lowest-added-latency-p99 diagonal - it never reads throughput, so
-   it is not a maximum of anything and the tail-latency bound can't change the pick (kong's diagonals
-   span 3,903-22,891 req/s at the same bound, so "highest throughput" would be wrong by ~6x). */
+   THE `peak` KEY IS A URL CONTRACT, NOT A DESCRIPTION, and it is deliberately no longer what the control
+   SAYS. `?mode=peak` is in every link ever shared to this board (and VIEW_ALIASES maps a retired /peak tab
+   onto it), so the token stays; the label a reader sees is "Own cell" (MODE_LABELS), because "Peak" asserted
+   a maximum that the selection does not compute.
+   WHAT IT ACTUALLY SELECTS, from gen-data.mjs `bestCell`: the openai→openai diagonal unconditionally when
+   the gateway serves one, otherwise the diagonal with the LOWEST added-latency p99. It never reads a
+   throughput number, so it is not a maximum of anything, and switching the tail-latency bound cannot change
+   which cell it picks. The board caught this claiming "the most req/s each gateway carried": kong's four
+   diagonals span 3,903 → 22,891 req/s at the same bound, so "the most" was wrong by ~6x on that one row.
+   The chooser is a REPRESENTATIVE-CELL chooser and every surface now says so. */
 const CHOOSER_MODES = new Set(["peak", "same", "custom"]);
-/* Memory lane's own mode set: Min | Max | Same | Custom. No `peak`: best_cell ranks on latency, so
-   using it for memory would select on one axis and report another. Min/Max select on memory and
-   report memory. Candidate sets differ per gateway (min-of-26 vs min-of-1), so the row also shows
-   the cell count. */
+/* The MEMORY lane's own mode set: Min | Max | Same | Custom.
+   There is deliberately no `peak` here. best_cell prefers the openai diagonal and otherwise ranks on
+   LATENCY; using it for memory would select on one axis and report another - the exact defect per-cell
+   measurement exists to remove - and it would arrive dressed as a UI control, so a reader could not see
+   it. Min/Max ARE offered because they select on memory and report memory: real minima and maxima of the
+   quantity in the column.
+   Their candidate sets still differ per gateway (min-of-26 vs min-of-1), which is why the row shows the
+   cell count, and why the two are offered together (Min flatters breadth, Max penalises it). */
 const MEM_CHOOSER_MODES = new Set(["min", "max", "same", "custom"]);
 // The modes a view offers, and the mode it lands on when none is pinned.
-// Memory defaults to Min, not Same: Same picks one shared dialect cell, so a gateway not serving it
-// drops out of the default view (e.g. one-api, which declares only openai). Min uses each gateway's
-// own lowest cell so nobody drops out, and the row states the candidate-set size.
+//
+// MEMORY DEFAULTS TO MIN, NOT SAME. Same is the like-for-like comparison and it is the right tool
+// when you want one shared cell, but it makes the DEFAULT view depend on which dialect happens to be
+// the widest on a part-published board: a gateway that does not serve the chosen cell reads n/a and
+// drops out, correctly and by design, so a reader arriving at the tab can see a row missing for a
+// gateway that measured perfectly well on a cell it does declare. one-api declares exactly one cell
+// (openai) and vanished from a board whose widest dialect was anthropic. Min shows every gateway on
+// its own lowest steady-state cell, so nobody drops out of the default view, and the row states the
+// size of the set the minimum came from so the comparison discloses its own basis.
 function modesFor(view) { return view === "memory" ? MEM_CHOOSER_MODES : CHOOSER_MODES; }
 function defaultMode(view) { return view === "memory" ? "min" : "peak"; }
-/* Which chooser family a view belongs to. Perf lanes offer Peak/Same/Custom; memory offers
-   Min/Max/Same/Custom - they overlap on Same/Custom only, so one carried-across `mode` can't serve both. */
+/* Which chooser family a view belongs to. The perf lanes offer Peak/Same/Custom; memory offers
+   Min/Max/Same/Custom. They overlap on Same/Custom but not on the mode most readers want, which is
+   why a single carried-across `mode` cannot serve both. */
 function modeFamily(view) { return view === "memory" ? "memory" : "perf"; }
-/* Coerce a mode onto a view that offers it (e.g. a shared ?mode=peak link landing on Memory falls
-   back to Same rather than rendering a throughput-selected memory number). */
+/* resolveMode: coerce a mode onto a view that offers it. This is what a SHARED URL hits: a link carrying
+   ?mode=peak that lands on the memory tab must NOT render a throughput-selected memory number, so it falls
+   back to the memory default (defaultMode("memory"), Min); the reverse (?mode=min on Performance) falls back to Peak rather than reading nothing. */
 function resolveMode(mode, view) { return modesFor(view).has(mode) ? mode : defaultMode(view); }
-/* The mode and family memo after navigating fromView->toView. Each family remembers its own mode
-   (stashed on the way out) so a tab flip is lossless in both directions - coercing without memoing
-   would make Performance(Custom) -> Memory -> Performance land on Min instead of the original Custom.
-   A same-family arrival (incl. re-render of the current view) must NOT consult the memo, since memo is
-   pre-seeded and would otherwise silently overwrite the mode decodeUrl just parsed from the URL.
-   Pure/exported so the round trip is assertable without a browser. */
+/* modeOnArrival(fromView, toView, mode, memo): the mode and the family memo after navigating fromView->toView.
+
+   EACH FAMILY REMEMBERS ITS OWN MODE, because coercing across them is LOSSY. The tabs do not offer the same
+   modes: Peak is meaningless (and dishonest) on memory, Min/Max are meaningless on the perf lanes. Coercing on
+   arrival keeps the control and the numbers agreeing, but it also OVERWRITES the mode - Performance(Custom) ->
+   Memory coerces to Min, and coming back to Performance kept Min's coercion instead of the Custom the reader
+   had chosen. Stashing the OUTGOING family's mode before coercing makes a tab flip lossless in both directions.
+
+   A SAME-FAMILY ARRIVAL MUST NOT CONSULT THE MEMO AT ALL, and that is the half that was broken: the memo is
+   pre-seeded (newState gives it perf:"peak", memory:"min"), so `memo[arriving] ?? mode` never falls through to
+   `mode`, and reading it on every arrival - including the first render of a deep link, and every re-render of
+   the view you are already on - overwrote the mode decodeUrl had just parsed out of the URL. Frontier ->
+   Performance is one family; so is a plain re-render; neither is a place where a remembered mode can be more
+   authoritative than the current one.
+
+   Pure, and exported, because showView is DOM-bound and this decision is not: the round trip has to be
+   assertable without a browser. */
 function modeOnArrival(fromView, toView, mode, memo) {
   const leaving = modeFamily(fromView), arriving = modeFamily(toView);
   if (leaving === arriving) return { mode: resolveMode(mode, toView), memo };
   return { mode: resolveMode(memo[arriving] ?? mode, toView), memo: { ...memo, [leaving]: mode } };
 }
-// Choke point for the memory lane's mode: guarantees a stale/hand-built state with mode:"peak" still
-// reads as Same rather than a peak-selected memory number.
+/* memoryMode: THE choke point for the memory lane's mode. Every memory reader routes through it, so even a
+   state hand-built with mode:"peak" (a stale in-memory state, a test, a future caller) cannot produce a
+   peak-selected memory number - it reads the memory default (Min) instead. */
 function memoryMode(st = state) { return MEM_CHOOSER_MODES.has(st.mode) ? st.mode : defaultMode("memory"); }
-/* Segmented control's copy, one entry per mode across both mode sets. `peak` reads "Own cell" (see
-   CHOOSER_MODES); Min/Max keep their names since they are real extrema, unlike peak. */
+/* The segmented control's copy, one entry per mode across both mode sets.
+   `peak` READS "Own cell", not "Peak": see CHOOSER_MODES. Min/Max keep their names because they really
+   are extrema of the quantity their column reports; this one is not an extremum of anything. */
 const MODE_LABELS = { peak: "Own cell", min: "Min", max: "Max", same: "Same", custom: "Custom" };
 const MODE_TIPS = {
   peak: "Each gateway on its own representative same-dialect diagonal: its OpenAI passthrough where it serves one, otherwise its lowest-added-latency diagonal. Not the highest-throughput cell - switching the tail-latency bound cannot change which cell this picks.",
@@ -137,17 +183,22 @@ const LANG_COLORS = {
 const CMP_COLORS = ["#4cc38a", "#6cb6ff", "#e5a54b"];
 
 const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
-/* Rate is the one metric that can legitimately be below 1. `Math.round` would send 0.25 req/s to "0",
-   which this board reads as "measured, carried nothing" - so keep two decimals below 1/s, matching
-   GenStats::rps's own split, and a whole number at or above it. */
+/* A RATE, WHICH IS THE ONE METRIC THAT CAN LEGITIMATELY BE BELOW 1.
+   `Math.round` sends 0.25 req/s to "0", and "0" on this board means "measured, and it carried nothing"
+   - so a gateway serving one request every four seconds would be reported as serving none. The engine
+   was changed to stop making exactly that statement (GenStats::rps publishes a fraction below 1/s and a
+   whole number at or above it); rounding here re-made it at the last step, which is how a fix reaches
+   the artifact and dies at the renderer. Same split as the engine's, so the two cannot disagree. */
 const fmtRate = (v) => (v > 0 && v < 1 ? v.toFixed(2) : fmtInt(v));
-// Added-latency deltas are shown raw (no noise-floor smoothing): the paced stream suite's per-frame
-// value is noise-dominated and can flip sign run-to-run, so smoothing here would just hide that.
+// Added-latency deltas are shown raw (no noise-floor smoothing). On the paced stream
+// suite the per-frame value is noise-dominated and can flip sign run-to-run; the honest
+// per-frame number comes from the CPU-bound stream suite, not from massaging this one.
 const fmtAdded = fmtInt;
 const fmt1 = (v) => v.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-/* Three significant figures because the quantity can be tiny (e.g. 0.008 MiB): fmt1 would round it
-   to "0.0", a false "nothing happened". maximumSignificantDigits keeps small values legible without
-   over-precision on large ones. */
+/* Three significant figures for a quantity whose whole point is that it can be TINY. The idle window's
+   span is the case: litellm-rust moves 0.008 MiB (one 8 KiB page) and bifrost moves 64.7, and fmt1 rounds
+   the first to "0.0" - a flat zero, which is precisely the "nothing happened" claim the span exists to
+   distinguish from. maximumSignificantDigits keeps 0.00781 legible without giving 64.7 five decimals. */
 const fmt2 = (v) => v.toLocaleString("en-US", { maximumSignificantDigits: 3 });
 // Streaming latency cells: the column is µs (headers say so), but several gateways land in the
 // hundreds of ms where a bare "596,693" invites misreading. Annotate any value >= 1 ms with its
@@ -155,8 +206,9 @@ const fmt2 = (v) => v.toLocaleString("en-US", { maximumSignificantDigits: 3 });
 const fmtUsMs = (v) => (v >= 1000 ? `${fmtInt(v)} (${fmt1(v / 1000)} ms)` : fmtAdded(v));
 const fmtPct = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`;
 
-/* Footer timestamps: clean UTC date/time plus a coarse relative age (hours/days only, deliberately
-   imprecise), computed client-side so it stays fresh without a rebuild. Pure; covered by site/test.mjs. */
+/* Footer timestamps: a clean UTC date/time plus a COARSE relative age (hours or
+   days only, deliberately imprecise). Age is computed client-side against now,
+   so it stays fresh without a rebuild. Pure; covered by site/test.mjs. */
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function fmtStamp(iso) {
   const t = Date.parse(iso);
@@ -178,9 +230,11 @@ function stampWithAge(iso, now = Date.now()) {
   return age ? `${fmtStamp(iso)} (${age})` : fmtStamp(iso);
 }
 
-/* Per-gateway freshness badge. Each gateway is measured + published independently, so mixed per-row
-   ages are expected, not a bug. Shows the row's own measured_at plus, when gen-data set g.stale (data
-   aged past MAX_GATEWAY_AGE_DAYS), a greyed "stale" pill. Returns "" with no measurement.
+/* Per-gateway freshness badge. Under matrix-sole-source each gateway is measured + published
+   INDEPENDENTLY, so the board legitimately carries mixed per-gateway ages (one row measured today,
+   another 3 weeks ago) - that is honest, not a bug. We surface each row's OWN measured_at ("measured 3d ago",
+   full stamp in the tooltip) and, when gen-data set g.stale (its data aged past MAX_GATEWAY_AGE_DAYS),
+   a greyed "stale" pill. Returns "" when the gateway has no measurement at all (renders nothing).
    Pure; covered by site/test.mjs. */
 function measuredBadge(g, now = Date.now()) {
   if (!g || !g.measured_at) return "";
@@ -192,8 +246,8 @@ function measuredBadge(g, now = Date.now()) {
   return `<span class="measured-at${g.stale ? " stale" : ""}" title="${esc(stampWithAge(g.measured_at, now))}">${esc(rel)}</span>${stalePill}${engineBadge(g)}`;
 }
 
-/* Read defensively: called from measuredBadge(), which site/test.mjs drives under Node, where there
-   is no window and no live state. */
+/* The board's own benchmark version, read defensively: this helper is called from measuredBadge(),
+   which site/test.mjs drives under Node where there is no window and no live state. */
 function boardBenchmarkVersion() {
   try {
     return (typeof state !== "undefined" && state.data && state.data.benchmark_version) || null;
@@ -202,10 +256,14 @@ function boardBenchmarkVersion() {
   }
 }
 
-/* Which harness measured this row: a row on an older engine isn't necessarily wrong but isn't
-   comparable to the rest of the board. Current rows show the sha quietly; an older one is flagged.
-   Returns "" when neither the row nor the board carries an engine (nothing to compare).
-   Pure; covered by site/test.mjs. */
+/* WHICH HARNESS MEASURED THIS ROW.
+   The engine commit already travelled into every row and nothing rendered it, so "which version of
+   the benchmark produced this number" was answerable only by opening the JSON. A row measured by an
+   older engine is not necessarily wrong, but it is not comparable to the rest of the board, and a
+   reader deciding whether to trust a side-by-side needs to see that rather than be told.
+   Current rows show the sha quietly; an older one is red and says what it should have been.
+   Returns "" when the row carries no engine at all AND the board has none either - there is nothing
+   to compare, so a badge would be noise. Pure; covered by site/test.mjs. */
 function engineBadge(g, boardEngine = boardBenchmarkVersion()) {
   const e = g && g.engine;
   if (!e) return "";
@@ -226,9 +284,14 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/* Gateway name, linked to its repo when present. Single function (was duplicated at 4 call sites,
-   each a separate escaping question) so one test covers every href the board emits. gen-data
-   validates the URL scheme on the way in; this is the second line of defence. */
+/* gwLink(g): the gateway's name, linked to its repo when it has one and plain text when it does not.
+   ONE PLACE, because there were FOUR and no test built a gateway with a hostile repo at any of them.
+   The roster, the perf/streaming/memory table's name column, the drawer head and the protocol-matrix
+   section each wrote out the same anchor by hand, so `g.repo` reached an href attribute at four
+   independent sites and "is it escaped here" was four separate questions with four separate answers.
+   gen-data validates the scheme on the way in (an https:// URL or null - see its `repo` field), which
+   is the primary defence; this is the second one, and the reason it is a function is so that a single
+   test can cover every href the board emits and a fifth site cannot open quietly. */
 function gwLink(g) {
   const name = esc((g && g.display) ?? "");
   return g && g.repo ? `<a href="${esc(g.repo)}" target="_blank" rel="noopener">${name}</a>` : name;
@@ -237,9 +300,12 @@ function gwLink(g) {
 /* The benchmarking repo where config corrections are filed. */
 const BENCH_REPO = "https://github.com/GetBusbar/benchmarking";
 
-/* Per-gateway deep link to a pre-filled GitHub issue (config-correction template) so anyone can
-   propose a fix to a gateway's published config. GitHub issue Forms map ?<field-id>=<value> onto
-   form fields, so `gateway=<display>` fills the template's "gateway" input. */
+/* configCorrectionUrl: a per-gateway deep link to a PRE-FILLED GitHub issue in the benchmarking repo,
+   so anyone (not just maintainers) can propose a fix to a gateway's published OOTB config. Uses the
+   config-correction issue-form template (?template=config-correction.yml) and pre-sets the title +
+   the gateway field, encoding every param. GitHub issue Forms map ?<field-id>=<value> onto the form's
+   fields, so `gateway=<display>` lands in the template's "gateway" input. Everything is
+   encodeURIComponent'd, so a display name with spaces/specials can't break the URL. */
 function configCorrectionUrl(g) {
   const label = g.display || g.key;
   const p = new URLSearchParams({
@@ -251,51 +317,73 @@ function configCorrectionUrl(g) {
   return `${BENCH_REPO}/issues/new?${p.toString()}`;
 }
 
-// Absolute rig paths (bench box filesystem) are harness noise, not evidence; scrub before display.
+/* Absolute rig paths (the bench box's own filesystem: /home/ubuntu/.npm/..., file:///home/...)
+   are harness noise inside captured diagnostics, not evidence a reader needs; leaking them into
+   tooltips reads as sloppy. Scrub them to a neutral placeholder wherever a note is surfaced. */
 const RIG_PATH_RE = /(?:file:\/\/)?\/(?:home|root)\/[^\s'"):,]+/g;
 function stripRigPaths(s) {
   return String(s || "").replace(RIG_PATH_RE, "<rig path>");
 }
 
-/* Short cell label for a served-flag that is a token, not a boolean (e.g. `stream_served` can be
-   true/false/"not_probed"/etc - record.rs). Renders the token's meaning; raw tokens like
-   `search_exhausted` must never leak to the public board as-is. Unknown tokens render "not available"
-   rather than guess. */
+/* STATUS_LABEL: the SHORT cell label for a served-flag that is a TOKEN rather than a boolean.
+   `stream_served` publishes `true`, any of the engine's Absent tokens as a string, "not_probed", and
+   `false` only as a legacy parse-only value (record.rs). Those tokens are machine vocabulary: the badge
+   renders the token's MEANING and the full sentence rides on the tooltip (METRIC_NOTES, the same
+   vocabulary the envelope reasons render through), because a raw `search_exhausted` on a public board is
+   a leak of our own field names, not a disclosure. A token this table does not know renders as "not
+   available" - which claims nothing - rather than as a guess at which of "never ran" or "refused" it is. */
 const STATUS_LABEL = {
   not_measured: "not measured", not_probed: "not measured", not_served: "not served",
   untestable: "not testable", rig_limited: "rig-limited", search_exhausted: "search exhausted",
   harness_error: "harness error", below_resolution: "below resolution",
 };
-/* Compact label for a lane that was not served. Suite diagnostic notes are long and must never be
-   dumped as metric values; the cell shows a short badge, the full (scrubbed) note rides the tooltip,
-   and the drawer shows the first line plus a folded Evidence block. */
+/* naText: compact honest label for a lane that was not served. The suites emit
+   long diagnostic notes (passthrough evidence, launch errors); those must never
+   be dumped as metric values or they blow the table layout wide open. The cell
+   shows a short badge and the full note (rig paths scrubbed) travels in the
+   title tooltip; the drawer shows the first line plus a folded Evidence block. */
 function naText(j, flag, errKey) {
   if (!j) return { text: "not measured", note: "" };
   const note = stripRigPaths(j[errKey] || j.serve_error || "");
   let text = "not served";
-  // A refusal and a lane that never ran are different findings and must not share a label: the
-  // served flag isn't always boolean (StreamServed can be a status token - record.rs), and a
-  // non-true value must not collapse into "did not stream", which asserts a measured refusal.
+  // A REFUSAL AND A LANE THAT NEVER RAN ARE DIFFERENT FINDINGS AND MUST NOT SHARE A LABEL.
+  //
+  // The served flag is not a boolean on every lane: StreamServed is `true`, `false`, or a STATUS TOKEN
+  // ("not_measured", "not_probed", "untestable" - record.rs), and the recovered 2026-07-29 snapshots
+  // carry seven cells of exactly that. Every non-true value used to fall through to "did not stream",
+  // which asserts a MEASURED refusal - the gateway was offered stream load and framed none - about
+  // cells the harness never offered anything to. That is the compare table making an accusation out of
+  // a gap in its own coverage, and the two read identically on a screenshot.
   const status = j[flag];
   if (typeof status === "string")
     return { text: STATUS_LABEL[status] || "not available", note: note || METRIC_NOTES[status] || "" };
-  // A lane the gateway never claimed is "not declared", never a failure - same rule as the matrix.
+  // A lane the gateway never CLAIMED (manifest declares the capability 0, with a cited note) is
+  // "not declared", never a failure - same rule as the matrix capability grid.
   if (j.xlate_declared === false) text = "not declared";
   else if (j.xlate_passthrough === true || note.startsWith("UNTRANSLATED passthrough")) text = "n/a (passthrough)";
-  // "manifest defines no <hook>": this harness never implemented the probe for this gateway.
-  // That's "not tested", not "not supported" - never assert a capability verdict we didn't exercise.
+  // "manifest defines no <hook>" means THIS harness did not implement that suite's probe for this
+  // gateway (e.g. the governed suite is only wired for gateways whose manifest defines the hook).
+  // That is "not tested", NOT "not supported": we must never assert a capability verdict about a
+  // gateway we did not actually exercise (several here have native governance we simply did not probe).
   else if (note.includes("manifest defines no")) text = "not tested";
-  // Boot/build failure is our environment failing to start the gateway, not a refusal: must read
-  // as "did not run", never as a capability verdict. Same rule as the protocol matrix.
+  // A boot/build failure is OUR environment failing to start the gateway, not the gateway refusing
+  // a probe: it must read as "did not run", never as a capability verdict against the gateway. Same
+  // honesty rule as the protocol matrix (status 000 / "failed to boot" / never became ready).
   else if (String(j.last_http_status || "") === "000" || /failed to boot|no such file|not listening|never became ready|build failed/i.test(note)) text = "did not run";
+  // A MEASURED streaming refusal (answered, but never framed SSE): "did not stream", with the
+  // evidence in the note/tooltip. Same wording family as the stream charts' "no SSE streaming".
   else if (flag === "stream_served") text = "did not stream";
   return { text, note };
 }
 
-/* If the suite file exists but the served flag is false, surface a compact label (full note in
-   .note); if the file is absent, "not measured". */
-/* Only `true` counts as served; `false` and status tokens do not. A flag the record doesn't carry
-   at all is treated as served, since legacy per-suite records predate the flag. */
+/* laneVal: if the suite file exists but the served flag is false, surface a
+   compact label (full note in .note); if the file is absent, "not measured". */
+/* laneServed(j, flag): did this lane actually serve? Only `true` is served. `false` and every STATUS
+   TOKEN the producer can put there (StreamServed's "not_measured" / "not_probed" / "untestable") are
+   not, and each keeps its own wording through naText - reading "anything that is not literally false"
+   as served is what let an unprobed cell render as a measured streaming refusal. A flag the record does
+   not carry at all is treated as served: the legacy per-suite records predate the flag, and demoting
+   them would turn every one of their published numbers into an n/a. */
 function laneServed(j, flag) {
   if (!j) return false;
   const v = j[flag];
@@ -310,84 +398,121 @@ function lane(g, suite, flag, errKey, pick) {
   return pick(j);
 }
 
-/* ---- the data-honesty reader (Design E §2.3) --------------------------------
-   Every metric in data.json is a sealed envelope ({value, certified, suppressed, reason?, note?, ...})
-   emitted by gen-data.mjs. The honesty gate lives upstream at seal time; a suppressed metric has
-   value:null and the raw number is gone from the bundle, so the reader has no gate logic to bypass.
-   This is the one accessor every surface reads a metric through.
+/* ---- THE data-honesty reader (Design E §2.3) --------------------------------
+   Every metric in data.json is a SEALED ENVELOPE ({value, certified, suppressed, reason?, note?, …})
+   emitted by gen-data.mjs (see seal.mjs). The honesty gate lives UPSTREAM, at seal time; a suppressed
+   metric has value:null and the raw number is GONE from the bundle. So the reader has NO gate logic:
+   it cannot return an ungated value because there is none. This is the ONE accessor every surface reads
+   a metric through.
      metric(env)        -> { v, text, na, note, source, env } ; v is null (na:true) when not shown.
    `fmt` formats the value; a suppressed/absent metric reads "n/a". */
 function isEnvelope(x) { return x != null && typeof x === "object" && typeof x.certified === "boolean"; }
-// The envelope's machine token -> the sentence a reader sees. A measured failure (certified 0) and
-// not measured (null) are different states and must read differently.
+/* The envelope's machine token -> the sentence a reader sees. A MEASURED FAILURE (the gateway was
+   offered the load and sustained none: a certified 0) and NOT MEASURED (no reading at all: null) are
+   different states and must read differently. */
 const METRIC_NOTES = {
-  // Only the streaming counts can carry this zero; it names the stream delivery gate specifically
-  // (seal.mjs emits it only for streams_sustained / streams_sustained_fps).
+  /* THE ZERO THAT ONLY THE STREAMING COUNTS CAN CARRY, and it names THEIR gate. It used to read "served,
+     but no tested load held p99 < 1 s at <0.1% errors", which by the end was wrong twice over: no gate ever
+     enforced 1 s (the retired throughput gate used 20 ms, and the frontier that replaced it names its bound
+     on every surface), and the frontier grants no error tolerance at all - a rung qualifies only if it
+     failed nothing it accepted. The two retired throughput columns were the only surfaces that showed this
+     note; seal.mjs now emits it for `streams_sustained` / `streams_sustained_fps` alone, so it states the
+     STREAM delivery gate, which is the one this token is now ever true about. */
   no_qualifying_ceiling: "served, but no tested concurrency held the stream delivery gate (every expected frame delivered, no stall, under 0.1% of streams erroring), so there is no qualifying ceiling to publish",
   measured_failure: "MEASURED FAILURE: the gateway was offered the load and sustained none of it (a real 0, not an unmeasured cell)",
-  // No `mock_bound`/`unverifiable`: those were suppression reasons (measurements near the rig ceiling
-  // hidden as null). The engine now publishes the number with its ceiling/fraction instead.
+  // NO `mock_bound` / `unverifiable`. Those were the two suppression reasons: a measurement at or above
+  // 90% of the rig's own ceiling was replaced with null and rendered as "not shown". The measurement was
+  // correct in every one of those cells - only what it MEANT was open - so the engine now publishes the
+  // number along with the ceiling it was measured against and the fraction of it reached, and a reader
+  // draws the conclusion these sentences used to draw for them. No producer can emit either token.
   not_measured: "not measured: no reading exists for this cell",
-  // Engine's own absence reasons (measurement.rs Absent). below_resolution is a display state in
-  // metric(), not a hole.
+  // The engine's own absence reasons (measurement.rs Absent), carried through the seal since the
+  // reason-flattening fix. below_resolution is handled in metric() as a display state, not a hole.
   below_resolution: "below measurement resolution: the comparison ran and the gateway's overhead was too small for this rig to detect (the best result this test can express)",
   rig_limited: "not shown: rig-limited, the harness's own ceiling bounded this number, so it is not a gateway reading",
   untestable: "not testable: the rig cannot pose this question for this dialect (a rig limit, not a gateway fault)",
-  // Now emitted only by the streaming ceiling (top rung still passing is our choice, not the
-  // gateway's answer). The throughput lane no longer reaches this - a frontier reading in that state
-  // publishes as a floor ("≥ 19,000") instead.
+  // Still emitted, and now ONLY by the streaming ceiling: a stream-concurrency range whose top rung still
+  // passed publishes an absence, because the top of the range is our choice and not the gateway's answer.
+  // THE THROUGHPUT LANE NO LONGER REACHES THIS. It used to discard a real measured rate for the same
+  // condition; a frontier reading in that state is published and labelled a FLOOR ("≥ 19,000"), which tells
+  // the reader strictly more than the null did.
   search_exhausted: "not shown: the search ran off the end of its range still improving, so any number would be a lower bound, not a ceiling",
   harness_error: "not shown: the harness itself failed here; this says nothing about the gateway",
   not_served: "the gateway does not serve this pairing",
 };
 function noteText(tok) { return (tok && METRIC_NOTES[tok]) || tok || ""; }
-/* Comparison-against-our-own-rig sentence, from the fraction and ceiling the envelope carries (not
-   re-derived here). Ceiling is named when known. Above 100% is rendered as-is: a gateway adding its
-   own SSE framing can legitimately carry more events/sec than the mock's own layout. */
+/* The comparison-against-our-own-rig sentence, from the fraction and the ceiling it is a fraction of.
+   Both come off the envelope; neither is re-derived here, so this cannot disagree with the engine.
+   The ceiling is named when it is known, because a bare percentage of an unstated quantity is not a
+   fact a reader can check. Above 100% is rendered as it is: two separately-timed legs scatter, and a
+   gateway that adds its own SSE framing legitimately carries more events per second than the mock's own
+   layout would - hiding that would hide the reader's best clue that the reference is the soft number. */
 function headroomText(frac, ceiling) {
   const pct = frac >= 0.1 ? (frac * 100).toFixed(0) : (frac * 100).toFixed(1);
   const of = Number.isFinite(ceiling) ? ` (${fmtInt(ceiling)})` : "";
   return `${pct}% of this rig's own ceiling${of} at the same concurrency`;
 }
-// Short on-cell form of a measured zero's meaning (full sentence stays on the tooltip). A plain zero
-// with no note renders bare.
+/* The SHORT on-cell form of a measured zero's meaning, rendered under the number in the table so the
+   state is visible without hovering (the full METRIC_NOTES sentence stays on the tooltip). Keyed by
+   the envelope's own note token; a plain zero with no note (a genuine 0.0 reading, e.g. memory
+   growth) renders bare, exactly as before. */
 const ZERO_WHY = {
   no_qualifying_ceiling: "no load held the gate",
   measured_failure: "measured failure",
 };
-/* The one `<td>` writer for every plain (non-render) column. A measured zero says what it means on
-   the cell (ZERO_WHY short form), not only in the hover tooltip. */
+/* metricTd(cell, sc): the ONE `<td>` writer for every plain (non-render) column. A MEASURED ZERO says
+   what it means ON the cell, not only in a hover tooltip: "0" beside a real maximum reads as "this
+   gateway does nothing", when the envelope's own note says "no tested load held the qualifying gates"
+   or "offered the load, sustained none". The ZERO_WHY short form rides under the number; the full
+   sentence stays on the tooltip. A zero with no note renders bare, exactly as before. */
 function metricTd(cell, sc = "") {
   if (cell.na)
     return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}${cell.why ? `<span class="zero-why">${esc(cell.why)}</span>` : ""}</td>`;
-  // `cell.why` is an explicit short on-cell reason for states an envelope note token can't carry:
-  // e.g. a frontier reading where no rung held the bound is a measured 0, and "0" alone reads as "no data".
+  // `cell.why` is an EXPLICIT short on-cell reason, for a state whose meaning is not carried by an envelope
+  // note token: a frontier reading where no rung held the bound is a measured 0 whose reason lives on the
+  // READING, not on the envelope, and "0" alone would read as "no data" for the gateways it matters most on.
   const zeroWhy = cell.why || (cell.v === 0 && cell.env && ZERO_WHY[cell.env.note]);
   return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${
     zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
 }
 function metric(env, fmt = fmtInt) {
   if (!isEnvelope(env) || env.value == null) {
-    // Below resolution is not a hole: the comparison ran and the difference was at or under what
-    // the rig can resolve. Displays as "≈0", ranks as 0 (equal-best), engine's prose in the tooltip.
+    // BELOW RESOLUTION IS NOT A HOLE. The comparison ran; the difference was at or under what the
+    // rig can resolve, which is the best outcome the test can express. It displays as "≈0", ranks
+    // as 0 (equal-best on every lower-is-better sort), and carries the engine's own prose as the
+    // tooltip. Rendering it as n/a turned a win into a blank, which is how APISIX published an
+    // added-gap p99 with no p50 - impossible for one distribution, so the table looked broken.
     if (env && env.reason === "below_resolution")
       return { v: 0, text: "≈0", na: false, note: env.detail || noteText(env.reason), env };
-    // A measured failure reads as one, in red, with its counts - never as the same n/a an untested
-    // cell gets. Only when the detail blames the gateway's own leg, though: the engine emits the
-    // same sentence shape for our reference rig's direct-to-mock leg failing, which is not the
-    // gateway's fault and must not be painted red. A rig-side failure renders as a plain n/a.
+    // A MEASURED FAILURE READS AS ONE, in red, with its counts - never as the same n/a an untested
+    // cell gets. The engine's detail carries the evidence ("0 ok, 14201 fail" - one-api's c=1 leg
+    // after the restart bug; "no stream frame arrived"), and the cell shows the digits so a
+    // screenshot proves the measurement ran and the gateway failed it.
+    // ONLY when the detail blames THE GATEWAY'S OWN LEG. The engine emits the identical sentence
+    // shape for the direct-to-mock leg ("the direct-to-mock leg at c=1 was not clean: 0 ok, N
+    // fail"), which is OUR reference rig failing, not the gateway - painting that red would accuse
+    // the gateway of a failure it never had. A rig-side total failure renders as a plain n/a with
+    // the full detail on the tooltip.
     const detail = env && env.detail;
     const okFail = detail && /the gateway leg.*?(\d+) ok, (\d+) fail/.exec(detail);
     if (okFail && Number(okFail[1]) === 0 && Number(okFail[2]) > 0)
       return { v: null, text: `failed · 0/${fmtInt(Number(okFail[2]))}`, na: true, failed: true, note: detail, env };
     if (detail && /no stream frame arrived from the gateway/.test(detail))
       return { v: null, text: "failed · 0 frames", na: true, failed: true, note: detail, env };
-    // "n/a" means not applicable (the gateway doesn't serve this pairing), not "harness declined to
-    // publish a result". `not_served`/`untestable` are capability limits (n/a is right); `not_measured`
-    // means the harness ran and got a result but withheld it - the two must not share a label.
+    /* "n/a" MEANS NOT APPLICABLE - the gateway does not serve this pairing - AND NOTHING ELSE.
+       It was the fall-through for every remaining absence, which put two opposite findings under one
+       label. `not_served` and `untestable` are capability limits: the question does not apply to this
+       gateway, and n/a is exactly right. `not_measured` is the opposite - the harness ran, got a
+       result, and refused to publish it. busbar's streaming is the case that shows the cost:
+       "the bisection proved c=4093, but it did not hold on re-measurement" is a gateway that
+       demonstrably streams, rendered identically to one that cannot stream at all.
+       The reasons are already distinct in the data; only the label collapsed them. */
     const reason = env && env.reason;
-    // When our own rig is why (a direct-to-mock leg failure, or a rung found but unconfirmed),
-    // the cell must say so rather than charge the absence to the gateway.
+    /* AND WHEN OUR OWN RIG IS WHY, THE ROW MUST SAY SO. The engine emits the same absence shape when
+       the DIRECT-TO-MOCK leg failed, or when its own search found a rung and could not confirm it -
+       neither of which is a fact about the gateway. Rendering those in the gateway's column with no
+       attribution charges the rig to the subject, which is the one thing this board exists not to do.
+       The detail already names the culprit; this reads it. */
     const rigSide = !!(detail && /(direct-to-mock leg|from the mock directly|did not hold on re-measurement)/.test(detail));
     const text = rigSide ? "unconfirmed"
       : reason === "not_measured" ? "not measured"
@@ -395,13 +520,23 @@ function metric(env, fmt = fmtInt) {
       : "n/a";
     return { v: null, text, na: true, rigSide, note: detail || noteText(reason), env: env || null };
   }
-  // A certified number can carry more than one note worth saying (zero's meaning, paced-match signal,
-  // and on legacy rows a provenance stamp when the number came from a different run than its record -
-  // e.g. cpu_fps from the streamcpu suite under a stream-suite record). Each renders only if present.
+  // A CERTIFIED NUMBER CAN CARRY MORE THAN ONE THING WORTH SAYING, so the note is composed rather than
+  // being whichever single token the envelope happened to have: the zero's meaning, the paced-match
+  // signal, and (on the legacy fallback rows) a provenance stamp OF ITS OWN when this number came out
+  // of a different run than the record around it - cpu_fps is measured by the streamcpu suite while its
+  // record is stamped by the stream suite, and dating it to the wrong run is a claim, not a formatting
+  // detail. Each is rendered only when the envelope actually carries it.
   const notes = [];
   if (env.note) notes.push(noteText(env.note));
-  // How close this came to our own rig's ceiling, stated rather than acted on (replaces a past
-  // suppression of near-ceiling numbers). Shown as a percentage: 99% = kept pace, 20% = own limit.
+  // HOW CLOSE THIS CAME TO OUR OWN RIG'S CEILING, stated rather than acted on.
+  //
+  // This is what replaced the suppression, and it has to be VISIBLE or the trade was not made: a number
+  // near the rig's limit used to be deleted, and deleting it at least told the reader something. Saying
+  // "43297 frames/sec, 83% of the mock's own 52013 ceiling" tells them strictly more and costs them
+  // nothing. A `paced_match: true` boolean rode here before, which could not distinguish 0.993 from 0.20.
+  //
+  // Rendered as a percentage because that is how the fraction reads: 99% says "kept pace with a paced
+  // upstream, the best outcome available", 20% says "plainly the gateway's own limit".
   if (Number.isFinite(env.headroom)) notes.push(headroomText(env.headroom, env.rig_ceiling));
   if (env.source && (env.source.build || env.source.measured_at))
     notes.push(`from a separate run than the rest of this record: build ${env.source.build || "?"}, measured ${env.source.measured_at || "?"}`);
@@ -411,9 +546,11 @@ function metric(env, fmt = fmtInt) {
 // (deltas, best-of ranking) where only the number matters. Never returns a suppressed number.
 // A below-resolution absence ranks as 0, the same value metric() displays it as: the comparison ran
 // and found nothing the rig could weigh, which is equal-best, not missing.
-/* mval() for a metric whose value is a code, not a magnitude. mval maps a below_resolution absence
-   to 0, which is honest for a magnitude but not for a code (0 already means something, e.g. shape 0
-   = oscillating), so this keeps that case null instead. */
+/* mcode(env): mval() for a metric whose value is a CODE rather than a magnitude.
+   mval maps a `below_resolution` absence to 0, which is the honest reading of "smaller than we can
+   measure" for a magnitude. For a code, 0 is a real value with a meaning of its own (shape 0 =
+   oscillating), so that coercion would turn an unmeasured field into a positive claim. Everything else
+   about the read is identical, so this defers to mval rather than reaching into the envelope itself. */
 function mcode(env) {
   if (isEnvelope(env) && env.reason === "below_resolution") return null;
   return mval(env);
@@ -426,66 +563,89 @@ function mval(env) {
 }
 
 /* ---- the latency-throughput frontier ----------------------------------------
-   Replaces two retired throughput scalars (`rps_sustained_20ms`, `rps_max_proxy`) that collapsed the
-   same concurrency sweep to one number at a fixed latency ceiling. Each perf record now carries
-   `frontier`: one sealed reading per declared tail-latency bound (1, 5, 10, 50, 100 ms) plus one
-   unbounded reading, ascending, from seal.mjs `sealFrontier`.
+   WHAT THIS REPLACED, AND WHY THE UI IS SHAPED THE WAY IT IS. The board used to publish two throughput
+   scalars per cell, `rps_sustained_20ms` and `rps_max_proxy`. Both were the SAME concurrency sweep
+   collapsed to one number by a chosen latency ceiling (engine/src/frontier.rs states the case), and one
+   of the two columns even captioned a qualifying bar of "p99 < 1 s" that the engine never enforced.
+   They are deleted. Each perf record now carries `frontier`: one sealed reading per declared tail-latency
+   bound (1, 5, 10, 50, 100 ms) plus one unbounded reading, ascending, from seal.mjs `sealFrontier`.
 
-   The headline finding is the SHAPE of the curve, not any one point - two gateways with similar rates
-   at one bound can diverge sharply at another. So every throughput surface shows the shape beside the
-   number (frontierSpark + gain factor), and the bound a number was read at is always named and
-   switchable. */
-// Declared bounds, ms. Mirrors seal.mjs FRONTIER_BOUNDS_MS/DEFAULT_BOUND_MS (itself mirroring the
-// engine's frontier::P99_BOUNDS_US); app.js can't import that module in-browser, so it's duplicated
-// and site/test.mjs asserts the two agree.
+   THE HEADLINE FINDING IS THE SHAPE OF THE CURVE, not any one of its six points. On the 2026-07-29 board
+   agentgateway carried 23,630 req/s under a 1 ms tail and gained 7% by dropping the bound entirely, while
+   apisix went 10,697 → 19,339 by letting its tail out from 1 ms to 5 ms and apisix anthropic>anthropic
+   nearly tripled across the range. Published as one number those three read as comparable machines. They
+   are not, and the difference was in the data the whole time. So every surface that shows a throughput
+   number here shows the SHAPE beside it (frontierSpark + the gain factor), and the bound the number was
+   read at is NAMED on the column and switchable by the reader. */
+// THE DECLARED BOUNDS, in milliseconds. A MIRROR of seal.mjs FRONTIER_BOUNDS_MS / DEFAULT_BOUND_MS, which
+// mirrors the engine's `frontier::P99_BOUNDS_US` - app.js is loaded as a plain <script> in the browser and
+// cannot import the module, so the list is duplicated and the duplication is CHECKED: site/test.mjs asserts
+// these two constants equal seal.mjs's, so a bound added on one side cannot quietly shorten the other's table.
 const FRONTIER_BOUNDS_MS = [1, 5, 10, 50, 100];
-// Which bound the board opens on - a view, not a verdict (seal.mjs says why 10ms). Every bound is
-// published on every cell and switchable.
+// WHICH BOUND THE BOARD OPENS ON. A VIEW, NOT A VERDICT (seal.mjs says why 10 ms): it decides which column
+// opens first, never which measurement exists. Every bound is published on every cell and the reader can
+// switch, which re-ranks the board in front of them.
 const DEFAULT_BOUND_MS = 10;
-// Readings in published order: each declared bound, then unbounded (`null` = no latency bound, zero
-// failures only). `null` is a first-class choice, not a missing value.
+// The readings in published order: each declared bound, then the unbounded one (`null` = no latency bound,
+// zero failures only). `null` is a first-class choice here, not a missing value.
 const BOUND_CHOICES = [...FRONTIER_BOUNDS_MS, null];
 // A bound's short name, for a control or a column header.
 function boundLabel(ms) { return ms == null ? "no bound" : `${ms} ms`; }
-/* Standard phrasing: "18,995 req/s while 99% of requests finished under 10 ms" - not "rps at 10 ms",
-   which reads as a category error. Every caption/tooltip/header renders this clause. */
+/* THE PHRASING WAS SETTLED WITH THE OWNER: "18,995 req/s while 99% of requests finished under 10 ms."
+   Not "rps at 10 ms", which reads as a category error - the 10 ms is not a rate and the reading is not a
+   latency. Every caption, tooltip and column header renders the clause from here, so no surface can state
+   the bound in a way that implies the gateway was held to a target it was not. */
 function boundClause(ms) {
   return ms == null
     ? "under no latency bound at all, having failed no request it accepted"
     : `while 99% of requests finished under ${ms} ms`;
 }
-// Column header for a reading at `ms`. Names the bound explicitly, always (a past board's captions
-// stated a bar the engine didn't actually enforce). Standalone form for Performance's single ranked
-// column and the compare panel.
+// The column header for a reading at `ms`. Names the bound it is showing, always: the retired board's
+// captions claimed "p99 < 1 s" while the engine enforced 20 ms - a bar 96% of rungs pass against 57% for
+// the real one - so readers reasoned about a test that never ran.
+// STILL THE STANDALONE FORM, used by the Performance tab's single ranked column and by the compare panel,
+// where there is nothing beside it to share a group header with.
 function boundColLabel(ms) { return ms == null ? "Req/s · no bound" : `Req/s · 99% under ${ms} ms`; }
-/* Spanning group header over Frontier's six per-bound columns (which show just "1 ms" etc beneath).
-   Must carry the same "99% of requests" qualifier as boundClause(), since it's the only place that
-   appears on this table. */
+/* The SPANNING group header over the Frontier tab's six per-bound columns, which say only "1 ms", "5 ms",
+   ... "no bound" beneath it. The shared clause is stated once here instead of six times; it must carry the
+   same "99% of requests" qualifier boundClause() does, because the group header is now the only place the
+   99% appears on that table. */
 const BOUND_GROUP_LABEL = "Req/s · 99% of requests under:";
-// Frontier tab's per-bound column id. Stable, so a shared ?sort=f10 keeps resolving.
+// The frontier tab's per-bound column id. Stable, so a shared ?sort=f10 keeps resolving.
 function boundColId(ms) { return ms == null ? "fnone" : `f${ms}`; }
-// Read defensively: these helpers are called from renderers the node suite drives with a hand-built
-// state, and from column labels that take no arguments.
-/* The concurrency the board is ranked at, or null for each gateway's own peak.
-   Exists because showing each gateway at its own peak concurrency renders misleadingly (e.g.
-   "77,248 @ 128 conc" beside "44,475 @ 32 conc" looks like 4x the concurrency was handed to one
-   entrant, even though it's an honest per-gateway measurement). Picking one rung and reporting what
-   every gateway carried there lets a stable ratio across the ladder prove the difference is real.
-   A gateway that never drove the chosen rung reads n/a rather than being interpolated. */
+// The reader's currently-selected bound, read defensively: these helpers are called from renderers the
+// node suite drives with a hand-built state, and from column labels that take no arguments.
+/* THE CONCURRENCY THE BOARD IS RANKED AT, or null for each gateway's own peak.
+
+   WHY IT EXISTS. The default column shows every gateway at the concurrency where ITS OWN throughput
+   peaked. That is a measurement, not a setting - each gateway is driven up the identical ladder and
+   the rung is where it topped out - but it RENDERS as "77,248 @ 128 conc" beside "44,475 @ 32 conc",
+   which reads as four times the concurrency handed to one entrant. The first person to screenshot it
+   says so, and they are reading the pixels correctly even though the conclusion is wrong.
+
+   The refutation was already measured and had nowhere to appear: at c=128 - the rung busbar is shown
+   at - litellm-rust carries 47,825, within 0.5% of its own peak, and busbar leads by 1.6x at EVERY
+   rung from 1 to 256. A stable ratio across the whole ladder is the proof that the concurrency
+   difference is not doing the work; peak-vs-peak cannot show it and a tooltip cannot fix a
+   screenshot.
+
+   So: pick a rung, and every row reports what it carried THERE. A gateway that never drove that rung
+   reads n/a rather than being interpolated - it is not a measurement we took. */
 function selectedConc(st = (typeof state !== "undefined" ? state : null)) {
   if (!st || st.conc == null) return null;
   return Number.isFinite(st.conc) ? st.conc : null;
 }
-// Rung readings for the chosen cell, or [] for a record measured before rungs were published.
+/* The rung readings for the chosen cell, or [] for a record measured before rungs were published. */
 function rungsOf(rec) {
   return rec && Array.isArray(rec.rungs) ? rec.rungs : [];
 }
-// Sealed reading at one concurrency, or null when this gateway never drove that rung.
+/* The sealed reading at one concurrency, or null when this gateway never drove that rung. */
 function rungAt(rec, conc) {
   return rungsOf(rec).find((r) => r.conc === conc) || null;
 }
-// Every concurrency any gateway on this board drove, ascending. Derived from the run so a board
-// swept over a different ladder offers that ladder rather than one hardcoded here.
+/* Every concurrency ANY gateway on this board drove, ascending: the choices the selector offers.
+   Derived from the run rather than listed here, so a board swept over a different ladder offers that
+   ladder instead of one named in the code. */
 function concChoices(data = (typeof state !== "undefined" ? state.data : null)) {
   const seen = new Set();
   for (const g of (data && data.gateways) || [])
@@ -497,42 +657,52 @@ function selectedBound(st = (typeof state !== "undefined" ? state : null)) {
   if (!st || !("bound" in st)) return DEFAULT_BOUND_MS;
   return st.bound === null || FRONTIER_BOUNDS_MS.includes(st.bound) ? st.bound : DEFAULT_BOUND_MS;
 }
-// Sub-millisecond tails are real and common (e.g. 584 µs), so they keep their own unit rather than
-// rounding to "0.6 ms".
+// A TAIL LATENCY as a reader reads it. Sub-millisecond tails are real and common (agentgateway's 1 ms
+// column sits at 584 µs), so they keep their own unit rather than rounding to "0.6 ms".
 function fmtTail(us) { return us < 1000 ? `${fmtInt(us)} µs` : `${fmt1(us / 1000)} ms`; }
-// The record's readings, or [] - the normal shape for a snapshot measured before frontier existed.
+// frontierOf(rec): the record's readings, or [] - which is what EVERY snapshot measured before the
+// frontier existed carries, so an empty array is the normal shape of an old record and not an error.
 function frontierOf(rec) { return rec && Array.isArray(rec.frontier) ? rec.frontier : []; }
-/* The reading taken at one bound. Mirrors seal.mjs's `frontierAt` and charts.py's `_frontier_at`, so
-   every surface reads the same reading for the same bound. `null` selects the unbounded reading -
-   a bound value, never "unset". */
+/* frontierAt(frontier, boundMs): the reading taken at one bound. Mirrors seal.mjs's accessor of the same
+   name (and charts.py's `_frontier_at`), so the table, the drawer, the compare panel and the charts all
+   read the SAME reading for the same bound and cannot disagree about which column they are showing.
+   `null` selects the unbounded reading; it is a bound value, never "unset". */
 function frontierAt(frontier, boundMs) {
   if (!Array.isArray(frontier)) return null;
   return frontier.find((r) => (boundMs == null ? r.bound_ms == null : r.bound_ms === boundMs)) || null;
 }
-// A cell with no frontier shows no throughput - never a 0, never a blank that reads as one.
+// A cell with no frontier at all shows NO THROUGHPUT - never a 0, and never a blank that reads as one
+// (requirement: a legacy row and a gateway not yet re-measured are the same state, and both are absence).
 const NO_FRONTIER_NOTE = "no frontier in this record: it was measured before the throughput frontier " +
   "existed, or this cell has not been re-measured. There is no throughput to show - which is not the same " +
   "as a throughput of zero.";
-/* The whole reading, in words, with its evidence (engine publishes both `concurrency`, where the
-   winning rate was observed, and `first_disqualified_conc`, the next rung that stopped qualifying -
-   frontier.rs). `p99_us` is the observed tail, never the bound - they can differ a lot. */
+/* readingSentence(rd, v): the whole reading, in words, with its own evidence attached. Both halves of the
+   proof travel because the engine publishes both (frontier.rs: `concurrency` is where the winning rate was
+   observed, `first_disqualified_conc` is the lowest concurrency above it that stopped qualifying).
+   `p99_us` IS THE OBSERVED TAIL, NEVER THE BOUND. 4 ms under a 100 ms bound and 99 ms under it are very
+   different findings, and a tooltip that echoed the bound back would restate the question as the answer. */
 function readingSentence(rd, v) {
-  // fmtRate, not fmtInt: rounding would put "0 req/s" one hover away from a cell reading 0.25.
+  /* fmtRate, not fmtInt: this sentence explains the cell beside it, and rounding here put
+     "0 req/s" one hover away from a cell reading 0.25 - the same false statement the engine and the
+     cell renderer were both changed to stop making. */
   const bits = [`${fmtRate(v)} req/s ${boundClause(rd.bound_ms)}.`];
   if (rd.concurrency != null) bits.push(`Observed with ${fmtInt(rd.concurrency)} concurrent requests in flight.`);
   if (rd.p99_us != null) bits.push(`The tail it actually produced there was ${fmtTail(rd.p99_us)}.`);
   if (rd.lower_bound === true)
-    // A floor, not a ceiling: the sweep ran out of ladder while this rung still qualified, so the
-    // rate is real but maximality isn't established.
+    // A FLOOR, NOT A CEILING. The sweep ran out of ladder while this rung was still qualifying, so the
+    // rate is real and maximality is not established. The retired search published null for this state,
+    // discarding a measured rate for failing to prove something the reader never asked it to prove.
     bits.push("The sweep ran out of ladder with this concurrency still qualifying, so this is a FLOOR (≥), " +
       "not a maximum: the gateway carries at least this much and we did not look higher.");
   else if (rd.first_disqualified_conc != null)
     bits.push(`The next concurrency probed above it (${fmtInt(rd.first_disqualified_conc)}) stopped qualifying, which is what establishes this as the boundary.`);
   return bits.join(" ");
 }
-/* The {v, text, na, note} cell shape every table column and popup uses, for one record at one bound.
-   Rate is read through metric() so an absent reading surfaces the engine's own reason (frontier.rs
-   `absence_for`) instead of a flattened hole. A `lower_bound` reading renders "≥ 19,000". */
+/* frontierCell(rec, boundMs): the {v, text, na, note} cell shape every table column and popup uses, for
+   one record at one bound. The RATE is read through metric() like every other published number, so an
+   absent reading surfaces the engine's own reason (frontier.rs `absence_for` distinguishes "nothing served
+   cleanly anywhere" from "nothing held THIS bound") instead of a flattened hole.
+   A `lower_bound` reading renders "≥ 19,000": the floor is in the glyph, not only in the tooltip. */
 function frontierCell(rec, boundMs) {
   const f = frontierOf(rec);
   if (!f.length) return { v: null, text: "no frontier", na: true, note: NO_FRONTIER_NOTE };
@@ -542,29 +712,34 @@ function frontierCell(rec, boundMs) {
       note: `this record publishes no reading at ${boundLabel(boundMs)}` };
   const c = metric(rd.rps, fmtRate);
   if (c.na) return c;   // the engine's absence reason, rendered by the one accessor
-  /* "Measured, and it cannot do this" is not "not measured", and the two must never look alike.
-     `below_resolution` means rungs served cleanly but none held this bound (frontier.rs `absence_for`).
-     A dash or "n/a" would read as neutral "no data" for what is a damning measurement, flattering the
-     slowest gateways. So it ranks as 0 (metric() already does that) and says why on the cell: "0" with
-     "no rung held this tail", distinct from "no frontier" (never measured at all).
-     Detected via mcode(), not the envelope's raw `.value` (invariant C5: display rules live in
-     accessors) - mcode returns null for below-resolution while mval coerces it to 0. */
+  /* An uncertified bound is unavailable, never numeric zero. Preserve its recorded reason. */
   if (mcode(rd.rps) == null) return { ...c, v: null, na: true, text: "n/a", why: "no rung held this tail", reading: rd };
   const floor = rd.lower_bound === true;
   return { ...c, text: floor ? `≥ ${c.text}` : c.text, note: readingSentence(rd, c.v), reading: rd, floor };
 }
-/* The shape as one number: what fraction of its full (unbounded) rate the cell still carried at the
-   tightest tail-latency bound it holds at all. Replaced a raw gain factor ("×1.0 from 1 ms"), which
-   was ambiguous (×1.0 read like an unfilled default) and required assembling meaning from three
-   scattered pieces. A percentage of full rate is self-explanatory (more is better).
+/* frontierHeld(frontier): THE SHAPE, AS ONE NUMBER — what FRACTION of its full rate the cell still carried
+   at the tightest tail-latency bound it holds at all.
 
-   Denominator is always the unbounded reading (never the 100ms one), since the frontier is monotone
-   and the unbounded reading is the true maximum; if it's absent, no percentage is published rather
-   than rebasing against a bound that isn't the max.
+   IT REPLACED A GAIN FACTOR ("×1.0 from 1 ms"), AND THE REASON IS THE OWNER READING HIS OWN COLUMN:
+   "its just not clear what this means, even I know and i cant figure it out". A gain factor made the reader
+   assemble one sentence out of three scattered pieces - the multiplier (of WHAT?), "from 1 ms" (to what?),
+   and the missing half of that ("to no bound") stranded up in the column header. Worse, ×1.0 was the BEST
+   possible result and read like an unfilled default. A percentage of full rate is the same measurement with
+   none of that: the direction is obvious without a legend (more is better), and the number is a share of a
+   quantity the reader can see in the columns to the left.
 
-   Numerator is the tightest bound with a reading, and the cell names that bound: two gateways can
-   both read "×1.0"/99% while one holds it at 1ms and the other only at 50ms - very different findings
-   that a bare factor would conflate. */
+   THE DENOMINATOR IS THE UNBOUNDED READING, never the 100 ms one and never a max across bounds. The frontier
+   is monotone by construction (a looser tail can only admit more concurrency), so the unbounded reading IS
+   the maximum and "full rate" is well defined. If it is somehow absent while a bounded reading exists we
+   publish NO percentage rather than promote the 100 ms reading into a denominator it is not - that would
+   silently rebase one row against a different quantity from every other row while looking identical to them.
+
+   THE NUMERATOR IS THE TIGHTEST BOUND THAT HAS A READING, and the cell NAMES that bound, because for most of
+   the field it is not 1 ms. This is the fact a bare factor destroyed: on the 2026-07-30 data litellm-rust and
+   tensorzero both read "×1.0" - the same six characters - while the first runs at full rate with a 0.56 ms
+   tail and the second cannot serve one request under 10 ms. "99% of its full rate at 1 ms" and "99% of its
+   full rate at 50 ms" are still one form, so they are still comparable, but they can no longer be mistaken
+   for the same finding. */
 function frontierHeld(frontier) {
   const f = Array.isArray(frontier) ? frontier : [];
   const tight = f.find((r) => r.bound_ms != null && mval(r.rps) > 0);
@@ -573,36 +748,65 @@ function frontierHeld(frontier) {
   if (held == null || full == null || !(held > 0) || !(full > 0)) return null;
   return { frac: held / full, boundMs: tight.bound_ms, held, full, lowerBound: loose.lower_bound === true };
 }
-/* The fraction as a whole percent, never 100 unless the curve is exactly flat: rounding 99.6% up to
-   100% would claim the gateway loses nothing to a tight tail when it does. Floors at 99 unless
-   held === full exactly. Whole percent because field differences are tens of points, not tenths. */
+/* heldPct(frac): the fraction as a whole percent, WHICH NEVER READS 100% UNLESS THE CURVE IS EXACTLY FLAT.
+   Rounding 99.6% up to "100% of its full rate" would assert the gateway loses nothing at all to a tight tail
+   when its own two readings say it loses something, and that assertion is the exact class of overclaim this
+   column exists to remove. So anything short of equality floors at 99, and only held === full - two readings
+   that are the same number - is allowed to print 100.
+   Whole percent rather than a decimal because the discriminating differences in the field are tens of points
+   (31%, 56%, 66%, 93%), and a tenth of a percent off a single concurrency sweep is not a difference we
+   measured. */
 function heldPct(frac) { return frac >= 1 ? 100 : Math.min(99, Math.round(frac * 100)); }
-/* One ranking number: (bound-of-origin, then share of full rate), bigger = better, so tightest-tail
-   holders sort to the top. Origin dominates and is inverted+scaled by 2 so each origin group owns a
-   disjoint interval - a 99% share at 50ms must never outrank a lower share held at 1ms. */
+/* heldSortKey(originIndex, frac): ONE number ranking the column by (bound-of-origin, then share of full rate),
+   with BIGGER = BETTER, so the column's descending default puts the gateways that hold their rate at the
+   tightest tail on top - where the column's own question ("what does it still carry when you demand a tight
+   tail") points.
+   Origin dominates, and it has to: 99% at 50 ms and 99% at 1 ms are answers to different questions, and
+   ranking them on the share alone would file a gateway that serves nothing under 10 ms beside one running at
+   full rate at 0.56 ms. Origin is INVERTED (a tighter bound scores higher) and scaled by 2, so each origin
+   group owns a disjoint interval of width 2 while `frac` spans [0, 1] - no share, not even an exactly flat
+   1.0, can leak into the neighbouring group. */
 function heldSortKey(originIndex, frac) { return (HELD_NOTHING_INDEX - originIndex) * 2 + frac; }
-/* Origin index for a cell that held nothing under any published bound: one past the loosest bound, so
-   heldSortKey puts it at the bottom. Must not be `v: null` (rowComparator sinks nulls regardless of
-   sort direction), since holding nothing everywhere is the worst curve, not a missing measurement. */
+/* The origin index a cell that held NOTHING under any published bound sorts at: one past the loosest bound,
+   which through heldSortKey's inversion makes it the bottom of the ranking.
+   plano carried nothing under ANY declared bound and 19 req/s unbounded, so there is no share of full rate to
+   state - and that is the most extreme shape on the board, not a missing measurement. It must not carry
+   `v: null`, which rowComparator sinks to the bottom regardless of direction: the single worst curve in the
+   field would then sort as though it had not been measured. */
 const HELD_NOTHING_INDEX = FRONTIER_BOUNDS_MS.length;
-/* Reference paragraph for the column, rendered below the table (see captionText): states which
-   reading is the denominator and why the named bound matters, which a cell can't say in six words. */
+/* The reference paragraph for the column, rendered BELOW the table (see captionText). It states the two
+   things six words on a cell cannot: which reading is the denominator, and why the named bound is part of the
+   number rather than a footnote. */
 const HELD_REFERENCE = `"N% of its full rate at B" in the last column is what the cell still carried at B, the TIGHTEST tail-latency bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape: the gateway gives up almost nothing even when you demand a 1 ms tail. A low percentage means it needs a loose tail to go fast. The bound matters as much as the percentage - 99% at 50 ms is not a flat gateway, it is a gateway that holds no rate at all under 50 ms - so the column sorts by that bound first and the percentage second, and a cell that held nothing under any published bound says so in words instead of showing 0%.`;
-/* The curve, drawn as a sparkline rather than six numbers: the finding is a slope, which the eye
-   reads in one pass and a row of digits does not.
-   Y scale is shared across the board (opts.min/opts.max, from boardFrontierScale), not per-row -
-   per-row auto-scaling would make every curve equally tall regardless of magnitude.
-   Y is logarithmic so equal slopes are equal ratios (the finding), and so the field's wide spread
-   (some gateways orders of magnitude apart) doesn't collapse the slower rows onto the baseline.
-   A bound the gateway served but could not hold is drawn ON the floor, not skipped: that's a
-   measurement (below_resolution), distinct from a bound never measured at all (a gap).
-   X is the bound's index, not its value, since the bounds (1,5,10,50,100ms) are unevenly spaced and
-   most movement happens in the first three. */
+/* frontierSpark(frontier, opts): the curve, drawn.
+   WHY A SPARKLINE AND NOT SIX NUMBERS. The finding is a SLOPE - "flat" vs "nearly doubles by 5 ms" - and a
+   slope is something the eye reads in one pass and a row of digits is not. Six numbers per row across
+   fourteen rows is 84 figures a reader has to hold in their head to notice that two gateways with similar
+   headline rates are not the same machine at all. The line makes that difference pre-attentive; the gain
+   factor beside it carries the same fact in text for sorting and for a screen reader.
+   THE Y SCALE IS SHARED ACROSS THE BOARD (opts.min/opts.max, from boardFrontierScale), NOT per-row. Per-row
+   auto-scaling would draw every gateway's curve full-height, so a 7% climb and a 170% climb would look
+   identical - the exact defect the RSS sparkline was fixed for.
+   AND IT IS LOGARITHMIC, which is what makes the shape the thing the eye reads. On a log axis equal SLOPES
+   are equal RATIOS, and the ratio IS the finding: ×1.07 (holds its rate under a tight tail) and ×2.7 (needs
+   a loose tail to go fast) are two visibly different slopes whatever the gateway's absolute level. A shared
+   LINEAR axis cannot do that at this field's spread - the 2026-07-30 run has litellm-rust at 44,363 req/s
+   and plano at 19 - because plano's entire curve would collapse onto the baseline and the row would read as
+   broken rather than as slow. The charts moved to a log y axis for the same reason.
+   A BOUND THE GATEWAY SERVED BUT COULD NOT HOLD IS DRAWN ON THE FLOOR, not skipped. That state is
+   `below_resolution` - "no rung held this tail" - and it is a MEASUREMENT, so a gap there (which is what a
+   never-measured bound gets) would turn plano's five damning columns into five shrugs. On the floor, with an
+   open tick, the row reads as what it is: flat on the bottom until the bound is dropped entirely.
+   x IS THE BOUND'S INDEX, not its value: the bounds are ticks decided by where the field's p99 population
+   separates (1, 5, 10, 50, 100), so spacing them linearly by value would crush the first three columns -
+   where nearly all of the movement is - into the left 10% of the line. */
 function frontierSpark(frontier, opts = {}) {
   const f = Array.isArray(frontier) ? frontier : [];
-  /* One point per published reading position, so a missing bound leaves a gap rather than shifting
-     the curve left. Three states kept apart: a rate -> point at its level; a measured 0 -> point on
-     the floor (`onFloor`, held nothing under this tail); no reading -> nothing, a genuine gap. */
+  /* One point per PUBLISHED reading position, so a missing bound leaves a gap rather than shifting the curve
+     left and mis-stating which bound a point belongs to. Three states, deliberately kept apart:
+       a rate           -> a point at its level
+       a measured 0     -> a point ON THE FLOOR (`onFloor`), because the gateway held nothing under this tail
+       no reading / no rate for another reason -> nothing, a genuine gap */
   const pts = BOUND_CHOICES.map((b, i) => {
     const rd = frontierAt(f, b);
     if (!rd) return null;
@@ -616,8 +820,9 @@ function frontierSpark(frontier, opts = {}) {
   // The shared domain, widened if this row happens to exceed it (it cannot, but a caller may pass none).
   const hi = Math.max(Number.isFinite(opts.max) ? opts.max : 0, ...rates, 1);
   const loSeed = Number.isFinite(opts.min) && opts.min > 0 ? opts.min : Math.min(...rates, hi);
-  // Headroom below the field's floor so the slowest row's own points sit above the baseline - the
-  // baseline is reserved for "held nothing under this tail", a different statement.
+  // HALF THE FIELD'S FLOOR AS HEADROOM (a factor of 2), so the slowest row's own points sit above the baseline
+  // rather than on it - the baseline is reserved for "held nothing under this tail", which is a different
+  // statement and must not be confused with "slowest on the board".
   const lo = Math.max(Math.min(loSeed, ...rates) / 2, 1);
   const l0 = Math.log10(lo), l1 = Math.log10(Math.max(hi, lo * 2));
   const x = (i) => PAD + (i / (BOUND_CHOICES.length - 1)) * (W - 2 * PAD);
@@ -625,14 +830,19 @@ function frontierSpark(frontier, opts = {}) {
     ? PAD + (1 - (Math.log10(Math.max(v, lo)) - l0) / (l1 - l0)) * (H - 2 * PAD - 3)
     : H - PAD);
   const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
-  // The selected bound is marked on the curve, so the ranked column and the shape visibly relate.
+  // The SELECTED bound is marked on the curve, so the reader can see which point of the shape the ranked
+  // column is reading. A number in a column and a shape beside it that do not say how they relate is two
+  // facts a reader has to join up themselves.
   const selIdx = BOUND_CHOICES.indexOf(opts.boundMs === undefined ? null : opts.boundMs);
   const rule = selIdx >= 0
     ? `<line x1="${x(selIdx).toFixed(1)}" y1="${PAD}" x2="${x(selIdx).toFixed(1)}" y2="${H - PAD}" ` +
       `stroke="currentColor" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="2 2"/>`
     : "";
-  /* Three markers, three claims: filled dot = established ceiling; open dot = a floor (sweep ran out
-     of ladder while still qualifying); floor tick = served but held nothing under this tail. */
+  /* THREE MARKERS, THREE CLAIMS:
+       filled dot  - an established ceiling at that bound
+       open dot    - a FLOOR: the sweep ran out of ladder with that concurrency still qualifying, so a
+                     filled dot identical to a proven ceiling would state something the sweep did not
+       floor tick  - served, but nothing held this tail (a measured nothing, not a missing measurement) */
   const dots = pts.map((p) => {
     const cx = x(p.i).toFixed(1), cy = y(p.v).toFixed(1);
     const title = `<title>${esc(`${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtRate(p.v)} req/s${p.floor ? " or more" : ""}`}`)}</title>`;
@@ -649,9 +859,11 @@ function frontierSpark(frontier, opts = {}) {
     rule +
     `<path d="${path}" fill="none" stroke="currentColor" stroke-width="1.4"/>` + dots + `</svg>`;
 }
-/* Shared log domain for every sparkline on the board. Computed over the whole bundle, not filtered
-   rows, so the scale doesn't move as a reader types in search. Zero rates excluded from the floor
-   (drawn on the baseline instead). */
+/* boardFrontierScale(data): the SHARED log domain for every sparkline on the board - the lowest and highest
+   rate any row publishes at any bound. Computed over the whole bundle rather than the filtered rows, so the
+   scale does not move when a reader types in the search box: a curve that changes shape because a different
+   gateway was filtered out is a curve that cannot be trusted. Zero rates are excluded from the floor, since
+   "held nothing under this tail" is drawn on the baseline rather than placed on the scale. */
 const FRONTIER_SCALE_CACHE = new WeakMap();
 function boardFrontierScale(data = (typeof state !== "undefined" ? state.data : null)) {
   if (!data || !Array.isArray(data.gateways)) return { min: null, max: null };
@@ -679,11 +891,16 @@ function boardFrontierScale(data = (typeof state !== "undefined" ? state.data : 
 }
 
 /* ---- the engine's own metric definitions, on the surface that shows the number --
-   `data.definitions` is a metric-key -> prose map generated from the engine's constants
-   (engine/src/suite.rs `metric_definitions`). Surfaced inline (each table/drawer lane carries a fold)
-   rather than filed elsewhere, since a definition a reader has to leave the page for is unread.
-   Selected by key prefix, never an enumerated list, so a new engine definition appears with no
-   change here. */
+   `data.definitions` is a metric-key -> prose map GENERATED FROM THE ENGINE'S CONSTANTS
+   (engine/src/suite.rs `metric_definitions`), stating for each metric what quantity it is, which
+   observations counted, and how the measurement knew to stop.
+   IT IS SURFACED RATHER THAN FILED because the failure it exists to prevent is a reader reasoning
+   carefully about a test that never ran: every published surface described the retired throughput gate as
+   "p99 < 1 s" while the engine enforced 20 ms. A definition a reader has to leave the page to find is a
+   definition nobody reads, so each table and each drawer lane carries a fold with the definitions for the
+   metrics IT shows, verbatim from the engine.
+   SELECTED BY KEY PREFIX, never by an enumerated list: a definition the engine adds under `perf.` appears
+   on the Performance surfaces with no change here, which is the only way this cannot go stale. */
 const DEFINITION_PREFIXES = { performance: ["perf."], frontier: ["perf.frontier"], streaming: ["stream."], memory: ["memory"] };
 // Lane -> the prefixes whose definitions belong in that drawer/compare lane.
 const LANE_DEFINITION_PREFIXES = { perf: ["perf."], xlate: ["perf."], stream: ["stream."], memory: ["memory"] };
@@ -706,8 +923,10 @@ function definitionsFor(prefixes, data = (typeof state !== "undefined" ? state.d
     .filter((k) => typeof defs[k] === "string" && defs[k].trim())
     .map((k) => [k, defs[k]]);
 }
-// Collapsed "What these numbers mean" block. Rendered as prose exactly as the engine wrote it -
-// rewording here would be a second source of truth. Returns "" when the bundle carries none.
+/* definitionsFold(prefixes, data): the collapsed "What these numbers mean" block. Collapsed by default so
+   it costs no vertical space until asked for (the board's whole layout rule is that less scrolling wins),
+   and rendered as prose exactly as the engine wrote it - reworded here it would be a second source of
+   truth, which is the defect the generated map exists to close. Returns "" when the bundle carries none. */
 function definitionsFold(prefixes, data = (typeof state !== "undefined" ? state.data : null)) {
   const entries = definitionsFor(prefixes, data);
   if (!entries.length) return "";
@@ -719,26 +938,29 @@ function definitionsFold(prefixes, data = (typeof state !== "undefined" ? state.
 }
 
 /* ---- provenance-driven captions (Design E §3.2) -----------------------------
-   Every caption/label naming where a datum came from is rendered from the cell's `source.sweep`
-   stamp through this one table - no caption string literal may hard-code a source token ("6x6",
-   "matrix", "sweep", "suite"); check-consistency's C3 lint enforces this. Keyed by source.sweep;
-   receives the cell's path. */
+   EVERY caption/label that names where a datum came from is rendered FROM the cell's `source.sweep`
+   stamp through this ONE table — no caption string literal may hard-code a source token ("6x6",
+   "matrix", "sweep", "suite"); the lint in check-consistency (C3) enforces that. A label cannot claim
+   "6×6" unless the datum's stamp is a 6x6-* sweep. Keyed by source.sweep; receives the cell's path. */
 const SWEEP_CAPTION = {
   "6x6-diagonal":        (p) => `${laneDialect(p && p.dialect)} passthrough — 6×6 diagonal cell`,
   "6x6-translation":     (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — 6×6 translation cell`,
-  // Legacy single memory window: one fixed-duration load on the gateway's throughput-peak cell.
+  // The LEGACY single memory window: one fixed-duration load on the gateway's throughput-peak cell. It
+  // still renders (older bundles carry it) and its caption still says peak cell, because that IS what that
+  // record is - the honest label is how a reader tells it apart from the per-cell windows below.
   "6x6-memory-window":   ()  => `post-6×6 memory window (identical fixed load on the peak cell, fresh cold-restarted process)`,
-  // Per-cell memory windows: one cold-started process per cell, load run until RSS is steady.
-  "6x6-memory-diagonal": (p) => `${laneDialect(p && p.dialect)} passthrough - 6×6 memory window (cold start, load run to plateau)`,
-  "6x6-memory-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out - 6×6 memory window (cold start, load run to plateau)`,
+  // The PER-CELL memory windows: one cold-started process per cell, the same fixed-length load on every
+  // cell, steadiness judged over the trailing window at the end. The cell is the workload, so the caption names it exactly like every other lane's does.
+  "6x6-memory-diagonal": (p) => `${laneDialect(p && p.dialect)} passthrough - 6×6 memory window (cold start, fixed-length load)`,
+  "6x6-memory-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out - 6×6 memory window (cold start, fixed-length load)`,
   "6x6-stream-diagonal": (p) => `${laneDialect(p && p.dialect)} SSE stream — 6×6 diagonal cell`,
   "6x6-stream-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out SSE stream — 6×6 translation cell`,
   "perf-suite":          (p) => `${laneDialect(p && p.dialect)} passthrough — perf suite (no 6×6 cell for this gateway yet)`,
   "xlate-suite":         (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — translation suite (no 6×6 cell for this gateway yet)`,
   "stream-suite":        (p) => `${laneDialect(p && p.dialect)} SSE stream — stream suite (legacy)`,
 };
-// Provenance label for a projected cell, from its own source.sweep stamp. Throws if the stamp is
-// absent/unknown (C3 asserts every displayed cell's stamp is in the table).
+// caption(cell): the provenance label for a projected cell, rendered from its own source.sweep stamp.
+// Throws if the stamp is absent/unknown (C3 asserts every displayed cell's stamp is in the table).
 function caption(cell) {
   const sweep = cell && cell.source && cell.source.sweep;
   const render = SWEEP_CAPTION[sweep];
@@ -746,48 +968,58 @@ function caption(cell) {
   return render(cell.path || {});
 }
 
-/* The single passthrough perf record every surface reads (table, drawer, compare; charts.py reads
-   the same best_cell). gen-data emits g.best_cell from the matrix sweep, or synthesizes it from the
-   perf suite when no swept diagonal exists. Legacy bundles with no best_cell fall back to the raw
-   perf suite object. */
-// Thin wrappers returning the projected cell (or null) so all lane accessors + check-consistency
-// read the one canonical record. No gate logic here: the gate is upstream, at seal time.
+/* canonicalPerf: THE single passthrough perf record every surface reads (table, drawer,
+   compare; charts.py reads the same best_cell from data.json). gen-data emits g.best_cell
+   from the matrix per-cell sweep, or synthesizes it from the perf suite when no swept
+   diagonal exists (source:"perf-fallback"). Only a legacy bundle with no best_cell at all
+   falls back to the raw perf suite object (whose field names match). */
+// canonicalPerf / canonicalXlate / canonicalStreaming: under the sealed envelope there is nothing left
+// to "canonicalize" — the projected cell (g.best_cell / g.translation_cell / g.streaming) already carries
+// one honest envelope per metric; a suppressed metric is {value:null,…} in the data itself. These thin
+// wrappers just return that cell (or null), so the LANES accessors + check-consistency read the ONE
+// canonical record. No gate logic here: the gate is upstream, at seal time (Design E §2).
 function canonicalPerf(g) { return g.best_cell || null; }
 function canonicalXlate(g) { return g.translation_cell || null; }
 function canonicalStreaming(g) { return g.streaming || null; }
-/* The single memory record, projected solely from the matrix's post-6x6 memory window
-   (g.memory_read, source:"matrix"): a fixed identical load on this gateway's peak cell, measured on
-   a fresh cold-restarted process. No synthetic-suite fallback. */
+/* canonicalMemory: THE single memory record. gen-data projects it SOLELY from the matrix's dedicated
+   post-6x6 memory window (g.memory_read, source:"matrix"): a fixed identical load on this gateway's
+   peak cell (load_cell), measured on a fresh cold-restarted process. There is no synthetic-suite
+   fallback. Returns a record with served + idle/peak/recovered + load_cell/load_recipe, or null. */
 function canonicalMemory(g) {
   const m = g.memory_read;
   if (m) return { served: true, ...m };
   return null;
 }
 
-// Pretty "ingress → egress" for a memory record's load_cell ("ingress>egress").
+/* memLoadCellLabel: pretty "ingress → egress" for a memory record's load_cell ("ingress>egress"). */
 function memLoadCellLabel(lc) {
   if (typeof lc !== "string" || !lc.includes(">")) return lc || "?";
   const [ing, eg] = lc.split(">");
   const L = (d) => (MATRIX_LABELS[d] || d || "?");
   return `${L(ing)} → ${L(eg)}`;
 }
-/* AUDIT #14: memory windows are tunable in the harness (idle_window_s / recovery_window_s), so
-   labels must render from the data rather than hardcode "60 s". memWindows(m) reads one record;
-   boardMemWindows() reads the board's records for column headers, falling back to 60s default only
-   when nothing states otherwise. */
+/* AUDIT #14: the memory windows are engine constants today (metric.rs MEMORY_IDLE_S / MEMORY_RECOVERY_S),
+   but each run emits them as idle_window_s / recovery_window_s on the memory block, and an older or future
+   engine may use other values. Every window label therefore RENDERS from the
+   data — hard-coding "60 s" published the default as a fact even when the run used another duration.
+   memWindows(m) reads one record; boardMemWindows() reads the board's records for the column headers /
+   captions (which are not per-row), falling back to the 60 s default only when nothing states otherwise. */
 const MEM_WINDOW_DEFAULT = 60;
 function memWindows(m) {
   const idle = m && Number.isFinite(Number(m.idle_window_s)) ? Number(m.idle_window_s) : MEM_WINDOW_DEFAULT;
   const rec = m && Number.isFinite(Number(m.recovery_window_s)) ? Number(m.recovery_window_s) : MEM_WINDOW_DEFAULT;
-  // Steadiness window (how long RSS held still before the plateau was believed) rides in the load
-  // recipe. Null when the record predates it.
+  // The STEADINESS window (how long the RSS had to hold still before the plateau was believed) rides in
+  // the load recipe, not beside the other two. Null when the record predates it: a caption then states
+  // the settling time without claiming a confirmation length it does not know.
   const lr = m && m.load_recipe;
   const steady = lr && Number.isFinite(Number(lr.plateau_window_s)) ? Number(lr.plateau_window_s) : null;
   return { idle, recovery: rec, steady };
 }
 function boardMemWindows(data = (typeof state !== "undefined" ? state.data : null)) {
-  // Per-cell first: reading only the legacy per-gateway record would silently fall back to the 60s
-  // default on every per-cell bundle. Legacy bundles still answer through g.memory_read.
+  // PER-CELL FIRST. The windows ride on the per-cell records; reading only the legacy per-gateway record
+  // here would silently fall back to the 60 s DEFAULT on every per-cell bundle, republishing a hard-coded
+  // duration as a fact about a run that may not have used it. Legacy bundles still answer through
+  // g.memory_read.
   const gws = (data && data.gateways) || [];
   for (const g of gws) {
     for (const c of memoryCells(g)) {
@@ -799,26 +1031,31 @@ function boardMemWindows(data = (typeof state !== "undefined" ? state.data : nul
   return memWindows(rec);
 }
 const memWindowLabel = (s) => `${fmtInt(s)} s`;
-// Fixed-load basis + peak cell, for the "Tested on" cell tooltip.
+/* memLoadRecipeTip: the fixed-load basis + peak cell, for the "Tested on" cell tooltip. */
 function memLoadRecipeTip(m) {
   const r = m && m.load_recipe;
   const w = memWindows(m);
   const basis = r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, ${fmtInt(r.duration_s)} s` : "identical fixed load for every gateway";
   return `peak cell ${memLoadCellLabel(m && m.load_cell)} — ${basis}, on a fresh cold-restarted process ` +
-    `(${memWindowLabel(w.idle)} idle → load → ${memWindowLabel(w.recovery)} recovery)${memDisclosure(m)}`;
+    `(${memWindowLabel(w.idle)} idle → load → recovery, reported over its final ${memWindowLabel(w.recovery)})${memDisclosure(m)}`;
 }
-/* Honesty disclosures (uncertified basis, payload mismatch, failed load - each a reason a peak RSS
-   came back null) ride inside memory.protocol as text after the leading recipe sentence; surface them
-   wherever the memory record is attributed. */
+/* memDisclosure(m): the producer rides its HONESTY DISCLOSURES inside memory.protocol as text — an
+   uncertified peak-cell basis, a payload mismatch, a failed fixed load (each of which is why a peak RSS
+   came back NULL). Carrying that string in the bundle without ever rendering it would hide the reason a
+   column reads n/a, so it is SURFACED wherever the memory record is attributed. Everything after the
+   protocol's leading recipe sentence is a disclosure clause. */
 function memDisclosure(m) {
   const p = m && typeof m.protocol === "string" ? m.protocol : "";
   const parts = p.split(";").slice(1).map((x) => x.trim()).filter(Boolean);
   return parts.length ? ` — DISCLOSED: ${parts.join("; ")}` : "";
 }
 
-/* Canonical memory record made self-describing for the one "Tested on" renderer (colTested): pins
-   load_cell onto .path so there's no second source of truth. Keeps its own source stamp (audit #1:
-   describe the record shown, never the perf chooser's cell). Null -> no pill. */
+/* memoryTestedRecord(g): the canonical memory record, made SELF-DESCRIBING for the ONE "Tested on"
+   renderer (colTested). The memory window's cell rides on the record as load_cell ("ingress>egress")
+   rather than as a matrix cell's .path, so this pins THAT SAME cell onto .path — no second source of
+   truth, no bespoke memory pill. The record keeps its own source stamp (6x6-memory-window), so the pill's
+   provenance is the MEMORY window's, never the perf chooser's cell (audit #1: describe the record shown).
+   Null when the gateway has no memory record or no load_cell → the shared renderer paints NO pill. */
 function memoryTestedRecord(g) {
   const m = canonicalMemory(g);
   const lc = m && m.load_cell;
@@ -828,18 +1065,20 @@ function memoryTestedRecord(g) {
 }
 
 /* ---- per-cell memory --------------------------------------------------------
-   Memory is measured as a cold-started, plateau-terminated window on every served cell. Which cell to
-   show is a display choice the reader makes (Min | Max | Same | Custom), not one the harness picks by
-   throughput and hides.
-   Everything below is null-safe: bundles predating per-cell measurement carry none of these fields. */
-// The memory window a served cell carries, or null. Same lookup shape as xlateMatrixCell.
+   Memory is measured as a cold-started, plateau-terminated window on EVERY served cell. WHICH cell to
+   show is a display choice the reader makes and can see (Min | Max | Same | Custom), never one the
+   harness picks by throughput and hides.
+
+   Everything below is null-safe by construction: the published bundles that predate per-cell measurement
+   carry none of these fields, and the board must degrade to that shape rather than blank the tab. */
+// perCellMemory: the memory window a served cell carries, or null. Same lookup shape as xlateMatrixCell.
 function perCellMemory(g, ingress, egress) {
   const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   const cell = up && up.cells && up.cells[ingress];
   return (cell && cell.served === true && cell.memory && typeof cell.memory === "object") ? cell.memory : null;
 }
-// Every served cell this gateway has a memory window for, in stable (egress, ingress) order so
-// Min/Max tie-breaks are deterministic rather than object-key-order dependent.
+// memoryCells(g): every served cell this gateway has a memory window for, in a stable (egress, ingress)
+// order so Min/Max tie-breaks are deterministic rather than object-key-order dependent.
 function memoryCells(g) {
   const out = [];
   for (const egress of MATRIX_CELLS) for (const ingress of MATRIX_CELLS) {
@@ -848,9 +1087,12 @@ function memoryCells(g) {
   }
   return out;
 }
-/* Does this bundle carry per-cell memory at all? Switch is per bundle, never per gateway: a gateway
-   missing per-cell data in a per-cell bundle reads n/a rather than substituting its old peak-cell
-   number behind a memory-selected label. Memoised - every row of every memory column asks this. */
+/* hasPerCellMemory(data): does this BUNDLE carry per-cell memory at all? The board runs the memory lane in
+   one of two shapes and says which: per-cell (chooser + steady state + growth) or LEGACY (the single
+   post-6x6 window, no chooser). The switch is per BUNDLE, never per gateway: a gateway missing per-cell
+   data in a per-cell bundle reads n/a, because substituting its old peak-cell number into a named mode
+   would put a throughput-selected reading behind a memory-selected label. Memoised on the data object -
+   every row of every memory column asks this question. */
 const PER_CELL_MEM_CACHE = new WeakMap();
 function hasPerCellMemory(data = (typeof state !== "undefined" ? state.data : null)) {
   if (!data || typeof data !== "object") return false;
@@ -859,14 +1101,24 @@ function hasPerCellMemory(data = (typeof state !== "undefined" ? state.data : nu
   PER_CELL_MEM_CACHE.set(data, yes);
   return yes;
 }
-/* Does any gateway on this board carry a measured cost-per-request? Cost columns appear only when the
-   board can answer them, rather than showing n/a on every row for a board measured before the
-   capture existed - a column nothing on the page can answer is noise, not disclosure. */
+/* hasCost(data): does ANY gateway on this board carry a measured cost-per-request?
+   The cost columns follow the per-cell-memory precedent above and appear only when the board can
+   answer them. This is not hiding an absence: every OTHER column shows "not measured" per row,
+   because a row that lacks one metric still has the rest. A cost column on a board measured before
+   the capture existed would be n/a on EVERY row - a column that asks a question nothing on the page
+   can answer, which is noise rather than disclosure. It lights up by itself on the first board that
+   carries the field. */
 const COST_CACHE = new WeakMap();
-/* Concurrency every gateway's CPU-per-request was measured at. Peak req/s and CPU-per-request come
-   from different, fixed concurrencies (the frontier's choice vs one held identical for every
-   gateway) - multiplying them together would produce an impossible number (e.g. cores > box has).
-   Read from the data, not hardcoded, since the engine's window concurrency can change. */
+/* costWindowConc(data): the concurrency every gateway's CPU-per-request was measured at.
+   THE NUMBER THAT STOPS THE COST FIGURE BEING MULTIPLIED BY THE PEAK RATE. The board publishes a peak
+   req/s at the concurrency the frontier chose (busbar: 82,328 at c=64) and a CPU-per-request at a
+   DIFFERENT, fixed concurrency held identical for every entrant (c=8). Both are labelled in the
+   artifact - `cost_window_conc` has been in every snapshot - but nothing rendered it, so the page
+   showed "53.6 µs" beside "82,328 req/s" with no sign they came from different windows. Multiply them
+   and you get 4.41 cores on a 4-core box: an impossible number assembled from two correct ones, which
+   is the most damaging way for a real measurement to be read.
+   Read from the data rather than hardcoded, because the engine's COST_WINDOW_CONCURRENCY can change
+   and a stale literal here would mislabel every row. Null when the board carries no cost. */
 function costWindowConc(data = (typeof state !== "undefined" ? state.data : null)) {
   for (const g of (data && data.gateways) || []) {
     for (const cell of [g.best_cell, g.translation_cell]) {
@@ -881,18 +1133,31 @@ function hasCost(data = (typeof state !== "undefined" ? state.data : null)) {
   if (COST_CACHE.has(data)) return COST_CACHE.get(data);
   const yes = (data.gateways || []).some((g) => {
     const cells = [g.best_cell, g.translation_cell].filter(Boolean);
-    // Through mval(), not a raw .value read - C5 requires this since a raw read bypasses the
-    // below_resolution rule (null value but "measured, too small to weigh" is still a measurement).
+    // THROUGH mval(), not a raw .value read. C5 exists because a raw read bypasses the
+    // below_resolution rule (an envelope whose value is null but whose reason means "measured, too
+    // small to weigh" IS a measurement), and the lint caught this line the first time it was
+    // written the other way.
     return cells.some((c) => mval(c.cpu_us_per_request) != null);
   });
   COST_CACHE.set(data, yes);
   return yes;
 }
-/* Smallest difference this rig can actually resolve, derived from the board rather than chosen.
-   Every box runs the same qualification, and `box_qualify.drift_pct` is how far it landed from the
-   shared baseline; the spread between luckiest and unluckiest box is what the rig can't tell apart.
-   Derived, not hardcoded, so the figure tracks the actual fleet. Null with fewer than two boxes
-   reporting drift (no spread to observe). */
+/* rigResolutionPct(data): the smallest DIFFERENCE this rig can actually resolve, derived from the
+   board itself rather than chosen.
+
+   Every box runs the SAME qualification before it measures anything, and `box_qualify.drift_pct` is
+   how far that box landed from the shared baseline. Those boxes are identical by construction - same
+   instance type, same image, same mock - so the spread between the luckiest and unluckiest box is a
+   direct measurement of what the rig cannot tell apart. Two gateways closer than that did not
+   demonstrate a difference; they demonstrated which box they happened to land on.
+
+   DERIVED, NOT PICKED. A hard-coded "1%" or "2%" would be a rule nobody measured deciding which
+   published comparisons count - and this project's whole position is that no undeclared rule may
+   author a number. The figure moves with the fleet: a tighter fleet resolves finer, and a noisier one
+   honestly admits it resolves less.
+
+   Null when fewer than two boxes report a drift: with one box there is no spread to observe, and
+   inventing a floor from a single sample would be the magic number this exists to avoid. */
 const RESOLUTION_CACHE = new WeakMap();
 function rigResolutionPct(data = (typeof state !== "undefined" ? state.data : null)) {
   if (!data || typeof data !== "object") return null;
@@ -906,23 +1171,34 @@ function rigResolutionPct(data = (typeof state !== "undefined" ? state.data : nu
 }
 
 /* ---- the Charts tab -----------------------------------------------------------------------------
-   Replaces 25 static PNGs from a python script (nine metrics x2 views + three frontier views), which
-   were a second surface republishing the same numbers and could silently drift out of sync with the
-   data. A tab that re-draws at read time (bound, cell, metric all live) avoids that.
-   One registry since the metrics are structurally identical: number per gateway, direction, formatter. */
+
+   WHAT THIS REPLACED. The board used to ship 25 static PNGs drawn by a python script: nine metrics,
+   each rendered twice (full field and "top 5"), plus three frontier views. They were a SECOND SURFACE
+   publishing the same numbers, and on 2026-07-31 the chart toolchain silently failed to regenerate and
+   shipped one run's images beside another run's data.
+
+   A picture cannot answer a question asked after it was drawn, and that is not a small complaint here:
+   half those files existed because "top 5" had to be decided at render time, by one metric, before the
+   reader arrived. A tab that re-draws answers it at read time instead - change the bound, change the
+   cell, change the metric, and every chart follows.
+
+   ONE REGISTRY, because the metrics are structurally identical: a number per gateway, a direction, a
+   formatter. A chart per metric would be nine near-copies drifting apart. */
 const CHART_METRICS = [
   { id: "cpu", label: "CPU per request", unit: "µs", log: true, desc: false,
     note: "Microseconds of gateway CPU per completed request, measured at one concurrency held identical for every gateway. Lower is better.",
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).cpu_us_per_request) },
   { id: "rpsdollar", label: "Requests per $/hr", unit: "req/s per $/hr", log: true, desc: true,
-    note: "Requests per second per dollar of hourly instance cost, at the selected bound. Higher is better.",
+    // PRICED AT ONE FIXED BOUND, NOT THE SELECTED ONE. gen-data costLanes() computes both dollar lanes once,
+    // from the frontier reading at DEFAULT_BOUND_MS (the record's `priced_at_bound_ms`); they do not follow
+    // the bound selector, so the note must not say they do.
+    note: `Requests per second per dollar of hourly instance cost, priced at the ${DEFAULT_BOUND_MS} ms tail bound whatever bound is selected. Higher is better.`,
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).rps_per_dollar) },
   { id: "permillion", label: "Cost per million requests", unit: "USD", log: true, desc: false,
-    note: "Instance cost to serve a million requests at the selected bound. Lower is better.",
-    // Cost is $/hr ÷ throughput, so below_resolution (no weighable rate) makes cost undefined, not
-    // zero - mval's below_resolution->0 coercion would render $0.0000, falsely the cheapest gateway.
-    get: (g, st) => { const e = (chooserCellPerf(g, st) || {}).cost_per_million_usd;
-      return (isEnvelope(e) && e.reason === "below_resolution") ? null : mval(e); } },
+    note: `Instance cost to serve a million requests, priced at the ${DEFAULT_BOUND_MS} ms tail bound whatever bound is selected. Lower is better.`,
+    // NOT mval: mval ranks a below_resolution absence as 0, which on a lower-is-better DOLLAR axis is
+    // "free", the cheapest bar on the chart. A cost with no resolvable rate is undefined, never $0.
+    get: (g, st) => mcode((chooserCellPerf(g, st) || {}).cost_per_million_usd) },
   { id: "lat", label: "Added latency (p99)", unit: "µs", log: true, desc: false,
     note: "Gateway p99 minus direct-to-mock p99 at concurrency 1. Lower is better.",
     get: (g, st) => mval((chooserCellPerf(g, st) || {}).added_latency_p99_us) },
@@ -934,23 +1210,35 @@ const CHART_METRICS = [
     get: (g, st) => mval((memoryFor(g, st) || {}).peak_rss_mib) },
 ];
 
-/* Log scale isn't a preference here, it's the only readable axis for metrics with huge spreads (e.g.
-   cost per request can span 2000x+, collapsing a linear axis to one pixel). Bounded-spread metrics
-   (throughput, memory) stay linear since log would flatten real, readable differences. */
+/* LOG SCALE IS NOT A PREFERENCE ON SOME OF THESE, IT IS THE ONLY HONEST AXIS.
+   Cost per request spans 89 µs to 199,333 µs on the current board - 2,247x. On a linear axis twelve
+   gateways collapse into a single pixel beside the slowest one, which renders the comparison the chart
+   exists to make unreadable. Metrics whose spread is bounded (throughput, memory) stay linear, because
+   a log axis there would flatten differences that are real and readable. */
 function chartRows(metric, gateways, st) {
   const rows = [];
   for (const g of gateways || []) {
     const v = metric.get(g, st);
-    if (typeof v === "number" && Number.isFinite(v)) rows.push({ key: g.key, name: g.name || g.key, v, g });
+    if (typeof v === "number" && Number.isFinite(v)) rows.push({ key: g.key, name: g.display || g.key, v, g });
   }
   rows.sort((a, b) => (metric.desc ? b.v - a.v : a.v - b.v));
   return rows;
 }
 
-/* Whether a cell's core utilisation may be read as a saturation verdict. The cost window runs at one
-   concurrency, identical for every gateway; a gateway whose peak needs far more concurrency is barely
-   loaded there, so its idle cores say nothing about saturation at peak. Returns the utilisation with
-   the ratio that qualifies it; `verdict` is null when the window didn't get close enough to peak. */
+/* costSaturation(cell): whether a cell's core utilisation may be read as a saturation verdict.
+
+   THE NUMBER ALONE IS MISLEADING AND I MISREAD IT MYSELF. The cost window runs at ONE concurrency,
+   held identical for every gateway, which is what makes cost per request comparable. But a gateway
+   whose peak needs far more concurrency is barely loaded there - tensorzero's window carried 200 rps
+   against a 13,303 peak, 2% of it - so its idle cores say nothing whatever about whether it
+   saturates at its peak. I wrote "tensorzero is not CPU-bound" from exactly that figure.
+
+   one-api is the case that IS a verdict: 95% of its peak at that same concurrency and still using
+   2.6% of its cores. Same utilisation shape, opposite meaning, and only the ratio distinguishes them.
+
+   So this returns the utilisation WITH the ratio that qualifies it, and `verdict` is null whenever
+   the window did not get close enough to the peak for the question to be answerable. A caller cannot
+   render the number without also holding the reason it may or may not be believed. */
 const SATURATION_NEEDS_FRAC_OF_PEAK = 0.75;
 function costSaturation(cell) {
   const util = mval((cell || {}).cost_core_utilisation);
@@ -981,9 +1269,17 @@ function peakFrontierRps(cell) {
   return best;
 }
 
-/* Keys of rows the sorted column cannot separate from the row directly above them: when two adjacent
-   values are closer than the rig's own resolution, their order records which box they landed on, not
-   a finding. Only the sorted column is checked; nothing is marked when resolution is unknown. */
+/* tiedRuns(rows, col, state, pct): the keys of rows the SORTED column cannot separate from the row
+   directly above them.
+
+   A table sorted by a column implies the order carries information. When two adjacent values are
+   closer than the rig's own resolution, the order between them records which box they landed on -
+   not a finding. Marking that boundary is the difference between publishing a measurement and
+   publishing a coin toss with a decimal point.
+
+   ONLY THE SORTED COLUMN, because a tie on some other column is not what the reader is being shown a
+   ranking of. And nothing is marked when the resolution is unknown (a single box, so no spread to
+   observe): asserting a tie needs a figure, and we do not invent one. */
 function tiedRuns(rows, col, st, pct) {
   const out = new Set();
   if (pct == null || !col || col.render || typeof col.get !== "function") return out;
@@ -994,8 +1290,8 @@ function tiedRuns(rows, col, st, pct) {
   return out;
 }
 
-// Are two published values closer than the rig can resolve? Relative to the larger value so the
-// comparison means the same thing at 19 rps and at 49,000.
+/* indistinguishable(a, b, pct): are two published values closer than the rig can resolve?
+   Relative to the LARGER value, so the comparison means the same thing at 19 rps and at 49,000. */
 function indistinguishable(a, b, pct) {
   if (typeof pct !== "number" || !(pct > 0)) return false;
   if (typeof a !== "number" || typeof b !== "number") return false;
@@ -1008,8 +1304,10 @@ function indistinguishable(a, b, pct) {
 function stateData(st) {
   return (st && st.data) || (typeof state !== "undefined" ? state.data : null);
 }
-/* Identity cell the most gateways serve: default for memory's Same mode. Derived from the data, never
-   hardcoded, so no gateway/protocol is special-cased. Ties break alphabetically. Null if nothing served. */
+/* widestDialect(data): the identity cell the MOST gateways serve: the default for memory's Same mode.
+   Derived from the data, never named: no gateway or protocol may be special-cased, and "the dialect most
+   of the field can actually be compared on" is a property of the run, not an editorial choice. Ties break
+   alphabetically so the answer is deterministic. Null when nothing is served (no data yet). */
 function widestDialect(data = (typeof state !== "undefined" ? state.data : null)) {
   const gws = (data && data.gateways) || [];
   if (!gws.length) return null;
@@ -1020,15 +1318,19 @@ function widestDialect(data = (typeof state !== "undefined" ? state.data : null)
   }
   return best;
 }
-/* Steady-state RSS of one cell's window, or null when it never plateaued. This is the value Min/Max
-   select on, matching what the column reports. A never-plateaued cell isn't a min/max candidate. */
+/* memSteady(mem): the steady-state RSS of one cell's window, or null when it never plateaued. This is the
+   value Min/Max SELECT on, so it is the same quantity the column REPORTS - the rule the old peak-cell
+   memory number broke. A cell that never plateaued has no steady state to be the min or max of, so it is
+   not a candidate (its growth rate is the finding, and it is reported as such). */
 function memSteady(mem) { return mval(mem && mem.steady_state_rss_mib); }
-/* Per-cell memory record the memory lane shows, stamped through the same choke point (stampChosen)
-   every other lane uses:
-     min / max  -> this gateway's lowest / highest steady-state RSS across cells it serves
-     same       -> the chosen dialect's identity cell
-     custom     -> the chosen ingress->egress cell
-   Never peak. Returns null rather than a substituted cell when nothing qualifies. */
+/* chosenMemory(g, st): the per-cell memory record the memory lane shows, stamped through the SAME choke
+   point every other lane's chosen record goes through (stampChosen), so the pill, the drawer and the
+   tooltip all render its provenance from one caption table.
+     min / max  → this gateway's lowest / highest steady-state RSS across the cells it serves
+     same       → the chosen dialect's identity cell
+     custom     → the chosen ingress→egress cell
+   Never peak: memoryMode() cannot return it. Returns null when the gateway has no window for the chosen
+   cell (Same/Custom) or no plateaued cell at all (Min/Max) - n/a, never a substituted cell. */
 function chosenMemory(g, st = state) {
   const cells = memoryCells(g);
   if (!cells.length) return null;
@@ -1047,17 +1349,20 @@ function chosenMemory(g, st = state) {
     }
   }
   if (!pick) return null;
-  // Candidate count travels on the record so min-of-26 vs min-of-1 (different-sized searches) is disclosed.
+  // The candidate count travels ON the record: min-of-26 and min-of-1 are different-sized searches and the
+  // row has to be able to say so (the bias Min/Max carry is disclosed, not designed away).
   return { served: true, ...stampChosen(pick.mem, g, pick.ingress, pick.egress, "memory-"),
     mem_candidates: cells.filter((c) => memSteady(c.mem) != null).length, mem_cells: cells.length };
 }
-// The memory record every memory column reads. Per-cell bundle -> chosen cell; legacy bundle ->
-// single post-6x6 window unchanged.
+/* memoryFor(g, st): THE memory record every memory column reads. Per-cell bundle → the chosen cell;
+   legacy bundle → the single post-6x6 window, unchanged (that is what keeps the published board working
+   until the field re-runs; the caption says which shape is on screen). */
 function memoryFor(g, st = state) {
   return hasPerCellMemory(stateData(st)) ? chosenMemory(g, st) : canonicalMemory(g);
 }
-// Idle is sampled cold, before the first request, so it stays outside the chooser - valid in every
-// mode. With one sample per cell, publish the median plus spread rather than picking one cell.
+/* idleAcrossCells(g): idle is sampled COLD, before the first request, so no cell is involved in it and it
+   stays OUTSIDE the chooser - valid for every gateway in every mode. With one sample per cell we publish
+   the median plus the spread rather than picking a cell's sample to stand for the rest. */
 function idleAcrossCells(g) {
   const vals = memoryCells(g).map((c) => mval(c.mem.idle_rss_mib)).filter((v) => v != null).sort((a, b) => a - b);
   if (!vals.length) return null;
@@ -1065,57 +1370,85 @@ function idleAcrossCells(g) {
   return { median: vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2,
     min: vals[0], max: vals[vals.length - 1], n: vals.length };
 }
-// This gateway's RSS never went steady on any cell it serves - flagged at gateway level rather than
-// per-cell. False when there's no per-cell data to judge.
+/* neverPlateaued(g): this gateway's RSS never went steady on ANY cell it serves. That is the strongest
+   statement the memory metric makes - the published number for such a gateway would describe when we
+   stopped, not the gateway - so it is flagged at GATEWAY level (next to the name, in every mode) rather
+   than being something a reader has to find by selecting the right cell. False when there is no per-cell
+   data to judge: absence of measurement is not a verdict. */
 function neverPlateaued(g) {
-  // Tri-state: `plateaued: null` is a withheld verdict (harness never got a clean measurement), not
-  // a negative one. `null !== true` would turn every withheld verdict into "never settles" - on
-  // macOS, where RSS is unreadable, that would flag every gateway. Only judged cells may vote.
+  // TRI-STATE, because the producer is deliberately tri-state. `plateaued: null` is a WITHHELD verdict,
+  // not a negative one: the harness writes it when the cold-restarted process never opened its port, when
+  // the fixed load stopped delivering, and when the trailing window held fewer than the four RSS samples
+  // the steadiness test needs. `null !== true` quietly turned every one of those into "never settles" -
+  // a named, permanent accusation on the board about a gateway the rig never actually watched. On macOS,
+  // where no RSS is readable at all, that meant EVERY gateway on EVERY locally generated board. Only
+  // cells that were genuinely judged may vote, and at least one must have been.
   const judged = memoryCells(g).filter((c) => c.mem.plateaued != null);
   return judged.length > 0 && judged.every((c) => c.mem.plateaued === false);
 }
-/* How a window failed to settle - "climbing", "swinging", "releasing" - or "" when settled/unpublished.
-   "Never settles" conflates unbounded climb with a GC-driven swing around a level; the engine
-   separates them and this only reads its verdict, never re-derives one. */
-/* Whether to show a verdict word beside the growth rate. Off: the rate's sign already says
-   everything, and a printed verdict is a way to be wrong about someone else's product (this
-   happened - cells labelled "(leak)" while memory was falling). The shape is still measured and
-   spelled out in the drawer/tooltip; this only gates the table cell's word. */
+/* memShape(rec): HOW a window failed to settle - "climbing", "swinging", "releasing" - or "" when it
+   settled, when the producer did not publish a shape, or when the record predates the field.
+
+   "Never settles" describes two different gateways. One climbs without bound. The other swings around
+   a level it keeps returning to, which is a garbage collector working, not a leak. Rendered under one
+   phrase - NEVER SETTLES, in red, beside a rate the column calls a leak rate - the second gateway is
+   accused of the first one's defect. The engine now separates them; everything below reads its verdict
+   and never re-derives one from the series. */
+/* SHOW A WORD BESIDE THE GROWTH RATE, OR LET THE NUMBER SPEAK.
+
+   OFF. The rate and its sign already say everything: +12.5 MiB/min is a leak whether or not we print
+   the word, and -0.4 is not one whether or not we print it. Adding a verdict only creates a way to be
+   wrong about somebody else's product - which is exactly what happened, with 22 cells labelled
+   "(leak)" while their memory was falling.
+   The shape is still measured, still published in the artifact, and still spelled out in the drawer
+   and the tooltip where there is room to be accurate. This is only about the word in the table cell.
+   Set to true to bring the suffixes back; the wording below is kept correct so that switch stays
+   honest rather than needing to be rewritten first. */
 const SHOW_GROWTH_VERDICT = false;
 function memShape(rec) {
   // mcode, not mval: 0 is a real shape code here, so an absence must not decay into "it swung".
   const c = mcode(rec && (rec.shape ?? rec.memory_shape));
   return c === 1 ? "climbing" : c === 0 ? "swinging" : c === -1 ? "releasing" : "";
 }
-// This gateway is climbing on at least one cell (the red-pill distinction: only accused when
-// something is actually growing, not merely oscillating).
+/* memGrowing(g): this gateway is CLIMBING on at least one cell. The distinction the red pill turns on:
+   an unsettled gateway is only accused when something is actually growing. A gateway whose every
+   unsettled cell merely oscillates is reported, in neutral type, as what it is. Records with no shape
+   published (older boards, withheld verdicts) do not vote either way - the pill falls back to the
+   unshaped wording rather than guessing. */
 function memGrowing(g) {
   return memoryCells(g).some((c) => memShape(c.mem) === "climbing");
 }
-// At least one unsettled cell told us its shape, so shape-aware wording is available (distinguishes
-// an all-oscillating gateway from one on a board too old to carry shapes).
+/* memShaped(g): at least one unsettled cell told us its shape, so the shape-aware wording is available.
+   Without this an all-oscillating gateway and a gateway on a board too old to carry shapes would render
+   identically, and only one of them has actually been cleared. */
 function memShaped(g) {
   return memoryCells(g).some((c) => c.mem.plateaued === false && memShape(c.mem) !== "");
 }
-// How many of this gateway's measured cells had their verdict withheld (affects pill wording).
+// memoryUnjudged(g): how many of this gateway's measured cells had their verdict WITHHELD. The pill's
+// wording depends on it: "on any cell this gateway serves" overclaims when some cells were never judged.
 function memoryUnjudged(g) { return memoryCells(g).filter((c) => c.mem.plateaued == null).length; }
-// Highest growth rate across this gateway's cells, so the gateway-level flag can quantify itself.
+/* worstGrowth(g): the highest growth rate across this gateway's cells. When a cell was not steady at the end of
+   the fixed load this IS its leak rate, so the gateway-level flag can quantify itself instead of just asserting. */
 function worstGrowth(g) {
   const vals = memoryCells(g).map((c) => mval(c.mem.growth_rate_mib_per_min)).filter((v) => v != null);
   return vals.length ? Math.max(...vals) : null;
 }
-// "Tested on" tooltip for a per-cell record: did it settle, how long, and what it was doing if not.
-// Legacy record's tooltip (memLoadRecipeTip) stays separate for legacy rows.
+/* memCellTip(rec): the "Tested on" tooltip for a PER-CELL record. The legacy record's tooltip
+   (memLoadRecipeTip) describes the peak-cell window and stays for legacy rows; this one describes what a
+   per-cell window actually did: did it settle, how long it took, and what it was still doing if not. */
 function memCellTip(rec) {
   const bits = [];
   const r = rec && rec.load_recipe;
-  bits.push(r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, run until RSS is steady`
-    : "identical fixed load for every gateway, run until RSS is steady");
+  bits.push(r ? `identical fixed load: ${fmtInt(r.concurrency)} concurrent, ${fmtInt(r.payload_bytes)} B payload, for a fixed duration, steadiness judged at the end`
+    : "identical fixed load for every gateway, for a fixed duration, steadiness judged at the end");
   bits.push("cold-started for this cell (idle sampled before the first request)");
   if (rec && rec.plateaued === true) {
-    // time_to_plateau_s is when RSS went flat, not when steadiness was confirmed. 0 is a real answer
-    // (already steady when load began), so say that rather than "settled after 0 s".
-    const t = Number(mval(rec.time_to_plateau_s));
+    // time_to_plateau_s is WHEN THE RSS WENT FLAT, not when the steadiness test finished confirming it
+    // (the producer reports the trailing window's START for exactly that reason). 0 is a real answer:
+    // the working set was already steady when the load began, so say that rather than "settled after 0 s".
+    // Number(null) is 0, which read an ABSENT plateau time as "steady from the moment the load started".
+    const tv = mval(rec.time_to_plateau_s);
+    const t = tv == null ? NaN : Number(tv);
     const w = memWindows(rec).steady;
     const conf = w ? ` (steady for the ${memWindowLabel(w)} that followed)` : "";
     bits.push(!Number.isFinite(t) ? "settled"
@@ -1124,49 +1457,67 @@ function memCellTip(rec) {
   } else if (rec && rec.plateaued === false) {
     const gr = mval(rec.growth_rate_mib_per_min);
     const sh = memShape(rec);
-    // Same number, different meaning: under a climb it's a leak rate, under a swing it's just the
-    // sampling instant's velocity, not called a leak. No verdict wording - the rate and sign are the
-    // finding; every reading still prints.
+    // The rate is the same number in all three cases; what it MEANS is not. Under a climb it is a leak
+    // rate. Under a swing it is how fast the window happened to be moving when it closed, which is a
+    // fact about the sampling instant and not about the gateway - so it is not called a leak there.
+    // NO VERDICT WORDING. The rate, its sign and its units ARE the finding; "NEVER SETTLED" in caps on
+    // top of them was the board passing judgement on a gateway instead of publishing a measurement.
+    // Nothing is dropped - every reading these branches carried still prints.
     const what = sh === "swinging"
       ? "no steady state, and did not grow: RSS swung around a level it kept returning to"
       : sh === "releasing"
-      ? "no steady state: still RELEASING memory when the cap was reached, not growing"
-      : "no steady state: RSS was still rising when the cap was reached";
+      ? "no steady state: still RELEASING memory when the fixed load ended, not growing"
+      : "no steady state: RSS was still rising when the fixed load ended";
     bits.push(gr != null && sh !== "swinging" && sh !== "releasing"
-      ? `no steady state: ${fmt1(gr)} MiB/min under load when the cap was reached`
+      ? `no steady state: ${fmt1(gr)} MiB/min under load when the fixed load ended`
       : gr != null && sh === "swinging"
       ? `${what} (moving ${fmt1(gr)} MiB/min at the close, which is the swing, not a leak)`
       : what);
   }
-  // Mode-neutral: in Min/Max it's the search size, in Same/Custom it's still useful context.
+  // Stated mode-neutrally: in Min/Max it is the size of the search, and in Same/Custom it is still the
+  // context a reader needs for the row above it.
   if (rec && rec.mem_candidates != null)
     bits.push(`${fmtInt(rec.mem_candidates)} of this gateway's ${fmtInt(rec.mem_cells)} measured cells reached a steady state`);
   return `${bits.join("; ")}${memDisclosure(rec)}`;
 }
 
-/* Passthrough tab reads only the canonical record (g.best_cell). When it exists it is THE record: a
-   missing field reads n/a, never patched from another source. Only a legacy bundle with no best_cell
-   falls back to its perf suite. */
+/* passCell: the Passthrough tab reads ONLY the canonical record (g.best_cell). When best_cell
+   exists it is THE record: a field it lacks reads n/a, never silently patched from a different
+   source (that is exactly the numeric divergence this rule exists to kill). Only a gateway with
+   NO best_cell at all (legacy bundle) falls back to its perf suite. */
 function passCell(g, key, fmt) {
-  // Sealed envelope through metric(); no gate here, a suppressed value is already {value:null,...}.
+  // The chosen record's metric is a SEALED envelope; metric() reads it (n/a when suppressed/absent).
+  // There is no gate here — a suppressed value is {value:null,…} in the data, so it CANNOT leak.
   return g.best_cell ? metric(g.best_cell[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
-// Streaming tab reads only g.streaming. A gateway that did not stream reads n/a.
+/* streamCell: the Streaming tab reads ONLY the canonical streaming record (g.streaming). Each metric is
+   a sealed envelope; metric() reads it. A gateway that did not stream (no g.streaming) reads n/a. */
 function streamCell(g, key, fmt) {
   const s = canonicalStreaming(g);
   return s ? metric(s[key], fmt) : { v: null, text: "n/a", na: true };
 }
-/* Memory columns read the record memoryFor() chose (per-cell window, or legacy single post-6x6
-   window). No record for the chosen cell -> n/a; never substituted from another cell. */
+/* memCell: the memory columns read the record memoryFor() chose: the per-cell window for the chosen mode,
+   or (legacy bundle) the single post-6x6 window. Each metric is a sealed envelope; metric() reads it. A
+   gateway with no record for the chosen cell reads n/a; nothing is ever substituted from another cell. */
 function memCell(g, key, fmt, st = state) {
   const m = memoryFor(g, st);
   return m ? metric(m[key], fmt) : { v: null, text: "n/a", na: true };
 }
 
-/* Perf object for a gateway's ingress->egress translation cell, straight from the matrix
-   (upstreams[egress].cells[ingress]). Returns cell.perf when served+measured, else null. The
-   Translation tab pins both ends so every row is the identical translation. */
+/* DELETED: `ZERO_RPS_NOTE` / `withZeroNote(cell)`, which annotated a throughput 0 with "served, but no
+   tested load held p99 < 1 s at <0.1% errors". Its only two callers were the two retired scalar columns,
+   and the sentence was doubly wrong by the end: no gate ever enforced 1 s (the engine used 20 ms), and the
+   frontier does not grant a 0.1% error tolerance at all - a rung qualifies only if it failed nothing it
+   accepted. A frontier reading that found no qualifying rung is an ABSENCE carrying the engine's own reason
+   (frontier.rs `absence_for` separates "nothing served cleanly anywhere" from "nothing held THIS bound"),
+   so there is no 0 left here for a note to explain. The equivalent annotation for the streaming zeros it
+   never covered lives where it always did, in METRIC_NOTES. */
+
+/* xlateMatrixCell: the perf object for a gateway's ingress->egress translation cell, straight from the
+   matrix (upstreams[egress].cells[ingress]). Returns cell.perf when that exact pair is served and
+   measured, else null. The Translation tab pins BOTH ends (state.xlateIn/xlateOut) so every row is the
+   identical translation and the ranking is apples-to-apples. */
 function xlateMatrixCell(g, ingress, egress) {
   const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   const cell = up && up.cells && up.cells[ingress];
@@ -1188,16 +1539,18 @@ function xlateCell(g, key, fmt) {
 }
 
 /* ---- unified cell chooser (Performance + Streaming) --------------------------
-   The board runs the 6x6 matrix once; Performance and Streaming are picks of that one run. Chooser
-   state (st.mode + sameDialect/xlateIn/xlateOut) selects which cell each row reads:
-     peak   -> the gateway's own best diagonal (best_cell); streaming = projected diagonal g.streaming
-     same D -> the D->D diagonal cell for every gateway
-     custom -> the xlateIn->xlateOut cell (any pair, incl. translation)
-   Every mode reads the same per-cell records under the same honesty rules; a cell a gateway lacks
-   reads n/a - never 0, never fabricated. */
-// Perf object (sealed envelopes) for the chosen cell of gateway g, or null if unserved/unmeasured.
-// Mode = selection only, never gating. Peak reads best_cell; Same/Custom read the matrix cell's
-// sealed .perf (caller stamps dialects on).
+   The board runs the 6x6 matrix ONCE; Performance and Streaming are PICKS of that one run. The chooser
+   state (st.mode + sameDialect/xlateIn/xlateOut) selects WHICH cell each gateway's row reads:
+     peak   → the gateway's own best diagonal (best_cell); streaming = the projected diagonal g.streaming.
+     same D → the D→D diagonal cell (every gateway on the identical dialect).
+     custom → the xlateIn→xlateOut cell (any pair, incl. translation).
+   Every mode reads the SAME per-cell records the matrix carries, gated by the SAME mock-bound honesty
+   rules, so a value shows identically on the table, the matrix popup, and the drawer. A cell a gateway
+   lacks (unserved / unmeasured / a metric the record lacks) reads n/a — never 0, never fabricated. */
+// chooserCellPerf: the PERF object (metrics as sealed envelopes) for the currently-chosen cell of gateway
+// g, or null when that cell is unserved/unmeasured. Chooser mode = cell SELECTION only, never gating (the
+// gate is upstream at seal time). Peak reads best_cell (metrics + path/source at top); Same/Custom read
+// the matrix cell's sealed .perf (metrics at top, no path/source — the caller stamps dialects).
 function chooserCellPerf(g, st = state) {
   if (st.mode === "peak") return g.best_cell || null;
   const [ingress, egress] = chooserDialects(g, st);
@@ -1205,24 +1558,32 @@ function chooserCellPerf(g, st = state) {
   const perf = xlateMatrixCell(g, ingress, egress);
   return perf ? stampChosen(perf, g, ingress, egress, "") : null;
 }
-/* Choke point that makes every chosen record self-describing. A raw matrix cell's sealed .perf/.stream
-   carries no path/source, so this stamps it once and every surface renders provenance via caption(). */
-// `lane` is the sweep-key infix: "" (perf), "stream-", "memory-".
+/* stampChosen: THE choke point that makes EVERY chosen record self-describing. A raw matrix cell's sealed
+   .perf/.stream carries no path/source (the CELL's coordinates are implicit in where it was looked up), so
+   this stamps it ONCE, and every surface renders provenance through caption() from the same stamp
+   (Design E §3.2). */
+// `lane` is the sweep-key infix for the lane the record belongs to: "" (perf), "stream-", "memory-".
 function stampChosen(rec, g, ingress, egress, lane = "") {
   const same = ingress === egress;
   const path = { ingress, egress, ...(same ? { dialect: ingress } : {}) };
-  // Composed from the cell's own shape, never a caption literal - SWEEP_CAPTION stays the single home
-  // of the key vocabulary (C3); caption() throws if this names a key the table doesn't render.
+  // The sweep KEY is COMPOSED from the cell's own shape (matrix lane + diagonal/translation), never
+  // written as a caption literal — SWEEP_CAPTION stays the single home of the key vocabulary (C3), and
+  // caption() throws loudly if this composition ever names a key the table does not render.
   const sweep = `6x6-${lane}${same ? "diagonal" : "translation"}`;
+  // A cell layered in from a scoped re-run carries that run's stamp (`__run`); the matrix-level stamp is
+  // the BASE run's, and dating the cell by it would claim a measurement from a run that never took it.
+  const run = (matrixCell(g, egress, ingress) || {}).__run;
   return { path, source: { kind: "matrix", sweep,
-    build: (g.matrix && g.matrix.build) || null,
-    measured_at: (g.matrix && g.matrix.measured_at) || null }, ...rec };
+    build: (run ? run.build : g.matrix && g.matrix.build) || null,
+    measured_at: (run ? run.measured_at : g.matrix && g.matrix.measured_at) || null }, ...rec };
 }
-// The (ingress, egress) dialects the chosen cell is measured on, for the pill/labels + popup.
+// The (ingress, egress) dialects the chosen cell is measured on — used for the pill/labels + the popup.
 function chooserDialects(g, st = state) {
   if (st.mode === "peak") { const d = g.best_cell ? g.best_cell.path.dialect : null; return d ? [d, d] : [null, null]; }
-  // Memory's Min/Max name a cell only through the memory chooser's own pick, not the stale
-  // xlateIn/xlateOut pair the Custom arm below would otherwise silently fall back to.
+  // MEMORY'S MIN/MAX NAME A CELL ONLY THROUGH THE MEMORY CHOOSER'S OWN PICK. Before this branch they
+  // fell into the Custom arm below and every other lane (drawer perf/stream, compare, the sweep
+  // charts) silently rendered the STALE xlateIn/xlateOut pair - a cell the user never chose - while
+  // lanePathNote captioned it as "the lowest steady-state cell the table shows".
   if (st.mode === "min" || st.mode === "max") {
     const m = chosenMemory(g, st);
     const p = m && m.path;
@@ -1230,22 +1591,30 @@ function chooserDialects(g, st = state) {
   }
   return st.mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
 }
-// Perf-metric cell for the chosen cell, via metric(). No gate here.
+// A perf-metric cell for the chosen cell. Reads the sealed envelope through metric(); a suppressed/absent
+// value reads n/a. No gate here — the envelope carries the honesty decision (Design E §2.3).
 function chooserPerfCell(g, key, fmt, st = state) {
   const p = chooserCellPerf(g, st);
   return p ? metric(p[key], fmt) : { v: null, text: "n/a", na: true };
 }
-// The chosen cell's streaming record. Per-cell streaming is only measured on the diagonal today:
-//   peak   -> g.streaming (best diagonal's streaming)
-//   same D -> g.streaming only when its diagonal IS D, else n/a
-//   custom -> the cell's own sealed .stream if the matrix carries one, else n/a
+// The chosen cell's STREAMING record (metrics as sealed envelopes). Per-cell streaming is only measured on
+// the diagonal today (gen-data projects it to g.streaming), so:
+//   peak     → g.streaming (the best diagonal's streaming).
+//   same D   → g.streaming ONLY when the diagonal it was projected from IS D (else n/a: not measured here).
+//   custom   → the cell's own sealed .stream when the matrix carries one (future per-cell streaming), else n/a.
 function chooserCellStream(g, st = state) {
   if (st.mode === "peak") return canonicalStreaming(g);
   const [ingress, egress] = chooserDialects(g, st);
-  /* Same reads the cell, not the projected headline: `canonicalStreaming(g)` is one record (the
-     diagonal the headline was projected from), so asking for any other diagonal used to return null
-     even when the matrix had a fully measured cell for it. Same and Custom differ only in that Same
-     names one dialect for both ends, so both read the matrix the same way. */
+  /* SAME READS THE CELL, NOT THE PROJECTED HEADLINE. `canonicalStreaming(g)` is ONE record - the
+     diagonal the headline was projected from - so asking for any OTHER diagonal returned null even when
+     the matrix carried a fully measured cell for it. On the 2026-07-31 board that hid real streaming
+     numbers for 9 of the 14 gateways under "Same -> Anthropic": agentgateway had 468us TTFT and 4,356
+     sustained streams, busbar had 264us, litellm-rust 217us, and every one of them rendered n/a beside
+     the five gateways that genuinely cannot serve the pairing. Two opposite findings, one label.
+
+     Same and Custom differ only in that Same names one dialect for both ends, so they read the matrix
+     the same way. The diagonal-only rule below was never a measurement fact - it was the projection's
+     shape leaking into the chooser. */
   if (st.mode === "same") {
     const upSame = g.matrix && g.matrix.upstreams && g.matrix.upstreams[ingress];
     const cellSame = upSame && upSame.cells && upSame.cells[ingress];
@@ -1253,13 +1622,13 @@ function chooserCellStream(g, st = state) {
       && cellSame.stream.stream_served === true ? cellSame.stream : null;
     return rawSame ? stampChosen({ stream_served: true, ...rawSame }, g, ingress, ingress, "stream-") : null;
   }
-  // custom: a per-cell stream record if the matrix carries one for this exact pair (else n/a). Already
-  // sealed in-place by gen-data, so no re-gating needed.
+  // custom: a per-cell stream record if the matrix carries one for this exact pair (else n/a). The cell's
+  // .stream is ALREADY sealed in-place by gen-data, so no re-gating is needed — envelopes carry the truth.
   const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   const cell = up && up.cells && up.cells[ingress];
   const raw = cell && cell.served === true && cell.stream && cell.stream.stream_served === true ? cell.stream : null;
-  // Stamped through the one choke point, so a per-cell translation stream is captioned as such,
-  // never relabelled a single-dialect passthrough (audit #1/#6).
+  // Stamped through the ONE choke point, so a per-cell TRANSLATION stream is captioned as a translation
+  // stream, not relabelled a single-dialect passthrough (audit #1/#6).
   return raw ? stampChosen({ stream_served: true, ...raw }, g, ingress, egress, "stream-") : null;
 }
 // A streaming-metric cell for the chosen cell (n/a when the cell has no streaming here or lacks the field).
@@ -1276,18 +1645,23 @@ function chooserHasCell(g, st = state) {
   const [ingress, egress] = chooserDialects(g, st);
   return servesXlatePair(g, ingress, egress);
 }
-// The {ingress, egress} a perf record was measured on. best_cell carries it under .path; a raw matrix
-// .perf carries none (caller pins ingress/egress onto the record before comparing).
+// cellPath(rec): the {ingress, egress} a perf record was measured on. best_cell carries it under .path;
+// a raw matrix .perf carries none (the caller pins ingress/egress onto the record before comparing).
 function cellPath(rec) {
   if (!rec) return {};
   return rec.path || { ingress: rec.ingress, egress: rec.egress };
 }
-/* Delta for a chosen cell vs the gateway's own representative diagonal (best_cell): "+18% latency,
-   -9% req/s". `deltaToPeak` is a legacy name - best_cell is not a peak (it ranks on added latency,
-   never throughput), so this delta can legitimately come out positive on req/s.
-   Returns "" for the reference cell itself or when either number is missing.
-   Throughput is compared at one named bound (caller states which) - comparing readings at different
-   bounds would be a percentage between two different questions. */
+/* The delta for a chosen cell vs the gateway's OWN REPRESENTATIVE diagonal (best_cell): "+18% latency,
+   -9% req/s". The NAME `deltaToPeak` is legacy and the reference is not a peak - best_cell prefers the
+   openai diagonal and otherwise ranks on added latency, never on throughput (gen-data.mjs `bestCell`), so
+   this delta can and does come out POSITIVE on req/s and that is not an anomaly. Every label it feeds says
+   "its own cell" rather than "peak" for exactly that reason.
+   Returns "" for the reference cell itself, or when either reference number is missing. Honest by construction:
+   mval() returns null for an absent envelope, so a hole never enters the delta.
+   THE THROUGHPUT HALF IS COMPARED AT ONE NAMED BOUND, and the caller states which. It used to compare
+   `rps_sustained_20ms`, one collapsed reading against another; comparing two frontier readings taken at
+   DIFFERENT bounds would be a percentage between two different questions, so both sides read the same bound
+   and a cell with no reading there contributes nothing rather than a number built out of two. */
 function deltaToPeak(cellPerf, best, boundMs = selectedBound()) {
   if (!cellPerf || !best) return "";
   const cp = cellPath(cellPerf), bp = cellPath(best);
@@ -1303,23 +1677,29 @@ function deltaToPeak(cellPerf, best, boundMs = selectedBound()) {
   return bits.join(", ");
 }
 
-/* Gateway-level plateau verdict, next to the name on the memory tab. Quantified where possible (worst
-   growth rate) so it's a measurement, not an accusation. Empty when settled or no per-cell data. */
+/* neverPlateauedPill(g): the gateway-level plateau verdict, rendered next to the name on the memory tab.
+   Quantified where it can be: the worst growth rate across the gateway's cells says HOW fast, so the flag
+   is a measurement rather than an accusation. Empty for every gateway that settled somewhere, and empty
+   when there is no per-cell data to judge. */
 function neverPlateauedPill(g) {
   if (!neverPlateaued(g)) return "";
   const gr = worstGrowth(g);
   const rate = gr != null ? `, still growing at up to ${fmt1(gr)} MiB/min` : "";
-  // Say what was actually judged (narrower claim if some cells weren't measured).
+  // Say what was actually judged. A gateway can be flagged on the cells we could measure while others
+  // were withheld, and the claim has to be the narrower one in that case.
   const un = memoryUnjudged(g);
   const scope = un > 0
     ? `on any cell we could measure it on (${fmtInt(un)} further cell${un === 1 ? "" : "s"} were not measured)`
     : "on any cell this gateway serves";
-  // Only accused when something is climbing; oscillating-only gets neutral styling (a real finding,
-  // not a leak).
+  // A gateway is only ACCUSED when something is climbing. One that never settled but only ever
+  // oscillated gets the same information in neutral type: it is a real finding (no steady-state number
+  // can be published for it) but it is not a leak, and the red pill said it was.
   const growing = memGrowing(g);
   const cleared = !growing && memShaped(g);
   const cls = growing || !memShaped(g) ? "noplateau-pill" : "noplateau-pill neutral";
-  // States the measurement (no steady-state level to publish), not a verdict on the gateway.
+  // The label states the measurement (there is no steady-state level to publish), not a verdict on the
+  // gateway: "never settles" read as the board calling a gateway out, and the rate below carries the
+  // finding on its own.
   const label = cleared ? "no steady state (no growth)" : "no steady state";
   const why = cleared
     ? `RSS never went steady ${scope}, but it never grew either: it swung around a level it kept returning to, which is memory being reclaimed rather than leaked. No steady-state number is published for it because there is no single level to publish, not because it is climbing.`
@@ -1328,10 +1708,13 @@ function neverPlateauedPill(g) {
 }
 
 /* ---- column model ----------------------------------------------------------- */
-/* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell text, na marks a
-   muted "not measured / not served" cell. sortable:false columns take no part in sorting. Columns are
-   grouped into per-tab sets (COLUMN_SETS); shared leading columns (select/name) are reused across all.
-   Implementation language is not a perf column - it lives on the Gateways overview roster instead. */
+/* get(g) returns {v, text, na}: v is the sortable value (null = none), text the cell
+   text, na marks a muted "not measured / not served" cell. sortable:false columns
+   (the compare checkbox) take no part in sorting. Columns are grouped into per-tab sets
+   (COLUMN_SETS) so each perf tab ranks one coherent path; the shared leading columns
+   (select / name) are reused across all three. Implementation language is NOT a perf
+   column: the perf tabs are pure measurement (the "Tested on" pill stays, a measurement
+   fact); language lives on the Gateways overview roster. */
 const COL_SEL = {
   id: "sel", label: "", sortable: false,
   get: () => ({ v: null, text: "", na: false }),
@@ -1346,20 +1729,30 @@ const COL_NAME = {
   get: (g) => ({ v: g.display.toLowerCase(), text: null, na: false }),
   render: (g, st = state) => {
     const a = gwLink(g);
-    // No per-row date: every gateway shares the board-wide "last benchmarked" timestamp.
-    // No pill beside the name: a red plateau-verdict tag here would read as a verdict on the whole
-    // gateway rather than one measurement window; the Growth column and per-cell tooltip carry that
-    // finding instead.
+    // No per-row date: the board is one atomic run (matrix-sole-source = one source of truth), so
+    // every gateway shares a single timestamp — the board-wide "last benchmarked" (roster tab + home)
+    // IS the freshness, and a per-row date is pure redundant bloat. Just the name.
+    // NO PILL BESIDE THE NAME. The plateau verdict used to ride here on the memory tab, and a red
+    // NEVER SETTLES tag on a gateway's name reads as a verdict on the GATEWAY rather than on one
+    // window of one measurement - which is a much larger claim than the metric supports. The finding
+    // is not hidden: the Growth column carries the rate, and the per-cell tooltip says what each
+    // window did and, when it did not settle, whether it climbed or merely swung.
     return `<td class="name">${a}</td>`;
   },
 };
-// "Tested on" column, present in every mode. Reads the chosen cell's path so it always names the
-// exact cell the row's numbers were measured on. Provenance disclosure renders from the chosen cell's
-// source stamp via caption(), never a hard-coded string.
-// colTested(lane) binds to its own lane's record so a Streaming row can never advertise the Perf
-// cell's provenance, and paints no pill without a record.
-// Memory joins the same choke point: per-cell bundle -> chosen cell's window (already stamped);
-// legacy bundle -> single post-6x6 window with load_cell as the path.
+// The "Tested on" column: present in EVERY mode (identical column set across Own cell/Same/Custom). It reads
+// the CHOSEN cell's path (chooserDialects) so it always names the exact cell the row's numbers were
+// measured on — Own cell: each gateway's own representative dialect (varies per row); Same: the chosen dialect on every
+// row; Custom: the chosen ingress→egress. The provenance disclosure (tooltip / fallback star) renders FROM
+// the chosen cell's source stamp via caption() (Design E §3.2), never a hard-coded source string.
+// "Tested on" must describe THE RECORD THE ROW ACTUALLY DISPLAYS. colTested(lane) binds the column to
+// its own LANE's record, renders provenance through the ONE caption() path, and paints NO pill without
+// a record, so a Streaming row can never advertise the Perf cell's provenance and a null record can
+// never paint a pill.
+// MEMORY joins the same choke point. In a per-cell bundle its lane record is the CHOSEN cell's window
+// (Min/Max/Same/Custom), already stamped by stampChosen; in a legacy bundle it is the single post-6x6
+// window with its own load_cell pinned as the path. Either way the pill names the cell the MEMORY
+// measurement actually ran on, rendered by the SAME code as every other tab.
 const LANE_RECORD = {
   perf: (g, st) => chooserCellPerf(g, st),
   stream: (g, st) => chooserCellStream(g, st),
@@ -1371,34 +1764,45 @@ const LANE_TESTED_TITLE = {
     ? "The cell this row's memory numbers were measured on. Min/Max: this gateway's own lowest/highest steady-state cell, with the size of the search beside it. Same/Custom: the chosen cell, identical on every row."
     : "The peak cell this gateway's memory window actually ran on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs."),
 };
-// A lane may append its own extra disclosure after the record's caption on the pill tooltip. Memory
-// carries the load basis, window outcome, and honesty disclosures (memory.protocol).
+// A lane may append its OWN extra disclosure after the record's caption on the pill tooltip. Memory
+// carries the load basis, what the window did (settled or still climbing) and the producer's honesty
+// disclosures (memory.protocol). Dropping them when the memory column moved onto the shared pill would
+// hide WHY a memory column reads n/a.
 const LANE_TESTED_NOTE = { memory: (rec) => (rec && rec.load_cell ? memLoadRecipeTip(rec) : memCellTip(rec)) };
-// A lane may also append a plain-text suffix after the pill: Min/Max need the size of the candidate
-// set visible without opening anything (min-of-26 vs min-of-1 are different searches).
+/* A lane may also append a plain-text SUFFIX after the pill. Min/Max are per-gateway extrema, and an
+   extremum means nothing without the size of the set it came from: min-of-26 and min-of-1 are different
+   searches, and the reader has to be able to see that without opening anything. */
 const LANE_TESTED_SUFFIX = {
   memory: (rec, st = state) => {
     const mode = memoryMode(st);
     if ((mode !== "min" && mode !== "max") || !rec || rec.mem_candidates == null) return "";
-    return `of ${fmtInt(rec.mem_candidates)} served`;
+    // mem_candidates counts the cells that REACHED A STEADY STATE (the Min/Max candidate set), not the
+    // cells served; "of 5 served" over a gateway serving 26 understated the search it states.
+    return `of ${fmtInt(rec.mem_candidates)} steady`;
   },
 };
-// Lanes that take no part in sorting (memory's cell is attribution, not ranking).
+// Lanes that take no part in sorting (memory's cell is an attribution, not a ranking, as before).
 const LANE_TESTED_NOSORT = new Set(["memory"]);
-/* Does this lane record put at least one number (or below-resolution ≈0) on the row? All-or-nothing
-   contract: either the cell is measured and all data is reported, or it's untested and empty. A
-   record whose every envelope is empty must not advertise a measurement it doesn't have. */
-// Envelope keys no surface displays as a column or drawer metric - excluded so a record whose only
-// value is one of these (invisible to the reader) doesn't falsely pass the all-or-nothing test.
+/* recordShowsValues(rec): does this lane record put at least ONE number (or below-resolution ≈0) on
+   the row? The pill's contract is all-or-nothing, in the owner's words: "either this cell is measured,
+   and all data must be reported, or this cell wasn't tested and empty is expected. Not a combo." A
+   record whose every envelope is empty (plano's memory cells on the 2026-07-28 board: an OpenAI pill
+   over four n/a columns) must not advertise a measurement it does not have. */
+// Envelope keys NO surface displays as a column or drawer metric. They must not satisfy the
+// all-or-nothing test: a record whose only value is the harness's own direct-leg reading, or a
+// plateau timing no column renders, would otherwise paint a pill (and keep idle alive) over a row
+// whose every VISIBLE cell reads n/a - the plano shape back through a side door.
 const UNDISPLAYED_ENVELOPE_KEYS = new Set([
   "time_to_plateau_s", "direct_c1_p99_us", "gateway_c1_p99_us",
   "gateway_c1_samples", "direct_c1_samples", "peak_rss_hwm_mib",
 ]);
 function recordShowsValues(rec) {
   if (!rec || typeof rec !== "object") return false;
-  // A frontier reading is a displayed value but not an envelope on the record (it's an array of
-  // readings). Without this clause a cell with published throughput but no added-latency would fail
-  // the all-or-nothing test and wrongly show n/a.
+  // A FRONTIER READING IS A DISPLAYED VALUE, and it is not an envelope ON the record - the record carries an
+  // ARRAY of readings, each with its own sealed rate. Without this clause a cell whose throughput published
+  // and whose added-latency did not (the whole point of per-metric absences) would fail the all-or-nothing
+  // test and paint "n/a" over a row that shows six real rates: the plano rule inverted into hiding a
+  // measurement rather than advertising a missing one.
   if (frontierOf(rec).some((rd) => !metric(rd.rps).na)) return true;
   return Object.entries(rec).some(([k, v]) =>
     !UNDISPLAYED_ENVELOPE_KEYS.has(k) && isEnvelope(v) && !metric(v).na);
@@ -1411,25 +1815,27 @@ function colTested(lane) {
     id: "tested", label: "Tested on", desc: false,
     ...(LANE_TESTED_NOSORT.has(lane) ? { sortable: false } : {}),
     title: LANE_TESTED_TITLE[lane] ||
-      `The cell these ${lane === "stream" ? "streaming " : ""}numbers were measured on, with the provenance of the record actually shown. Peak: each gateway's own peak cell. Same: the chosen dialect. Custom: the chosen ingress→egress cell.`,
+      `The cell these ${lane === "stream" ? "streaming " : ""}numbers were measured on, with the provenance of the record actually shown. Own cell: each gateway's own representative same-dialect diagonal (not its highest-throughput cell). Same: the chosen dialect. Custom: the chosen ingress→egress cell.`,
     get: (g, st = state) => {
       const rec = pick(g, st);
       const shown = rec && recordShowsValues(rec);
       const p = shown ? cellPath(rec) : null;
       const ing = p && (p.ingress ?? p.dialect);
-      return { v: shown && ing ? ing : "", text: null, na: !(shown && ing) };
+      // null, not "": rowComparator sinks a null to the bottom, but "" is a real (smallest) string.
+      return { v: shown && ing ? ing : null, text: null, na: !(shown && ing) };
     },
     render: (g, st = state) => {
       const rec = pick(g, st);
-      // No record -> no pill; a record with no displayable value is the same emptiness in disguise.
+      // NO record → NO pill, and a record with NO displayable value is the same emptiness wearing a
+      // costume. A row whose every column reads n/a must not advertise a measurement.
       if (!rec || !recordShowsValues(rec)) return `<td class="tested"><span class="muted">n/a</span></td>`;
       const p = cellPath(rec);
       const ing = p.ingress ?? p.dialect, eg = p.egress ?? p.dialect;
       if (ing == null) return `<td class="tested"><span class="muted">n/a</span></td>`;
-      // Passthrough (in==out) shows the single dialect; a translation cell shows in→out.
+      // The pill label: a passthrough (in==out) shows the single dialect; a translation cell shows in→out.
       const label = ing === eg ? (MATRIX_LABELS[ing] || ing) : `${MATRIX_LABELS[ing] || ing}→${MATRIX_LABELS[eg] || eg}`;
-      // Provenance from this record's own stamp. A live-fallback record (legacy suite, not matrix) is
-      // starred so the disclosure is visible without hovering.
+      // Provenance from THIS record's own stamp, through the ONE caption table. A live-fallback record
+      // (a legacy suite, not the matrix) is starred so the disclosure is visible without hovering.
       const fb = !!(rec.source && rec.source.kind !== "matrix");
       const base = rec.source ? caption(rec) : `measured on the ${ing}-in / ${eg}-out cell`;
       const title = note ? `${base} — ${note(rec)}` : base;
@@ -1448,29 +1854,44 @@ function concAt(env) {
   if (!isEnvelope(env)) return null;
   return env.conc_at ?? env.concurrency ?? null;
 }
-// Replaces two retired throughput cells (rps_sustained_20ms / rps_max_proxy: one sweep collapsed
-// twice by two algorithms that could contradict each other) with one reader over the frontier at a
-// named bound. Chosen cell's reading at the reader's selected bound; concurrency rides inline
-// ("18,995 @ 8 conc"), full reading sentence on the tooltip.
+/* THE TWO RETIRED THROUGHPUT CELLS. `sustainedChooserCell` and `maxProxyChooserCell` read
+   `rps_sustained_20ms` and `rps_max_proxy`, which no producer emits: they were one sweep collapsed to one
+   number by a chosen ceiling, twice, by two algorithms that contradicted each other in the field (a
+   "maximum" of 16,232 against the same cell's sustained 16,610). Their replacement is one reader over the
+   frontier, at a bound the reader NAMES - and it shows the concurrency inline exactly as they did, because
+   "18,995 @ 8 conc" was the useful half of what they published. */
+// frontierChooserCell: the chosen cell's frontier reading at the reader's selected bound, as a table cell.
+// The concurrency rides inline ("18,995 @ 8 conc") and the full reading sentence - the observed tail, the
+// boundary proof, or the floor disclosure - rides on the tooltip.
 function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
   const p = chooserCellPerf(g, st);
   if (!p) return { v: null, text: "n/a", na: true };
-  // Pinned to one rung, when the reader asks for it: every row reports what it carried at the same
-  // concurrency. No "@ N conc" suffix - it's in the column header once, same for every row.
+  /* PINNED TO ONE RUNG, when the reader asks for it. Every row then reports what it carried at the
+     SAME concurrency, which is the only way the table can answer "you gave busbar 4x the concurrency"
+     - the rung is identical, so whatever is left is the gateway. No "@ N conc" suffix here: the
+     concurrency is in the column header, once, because it is the same for every row. */
   const conc = selectedConc(st);
   if (conc != null) {
     const r = rungAt(p, conc);
     if (!r) {
-      // Not interpolated: a gateway that never drove this rung has no reading there.
+      // NOT INTERPOLATED. A gateway that never drove this rung has no reading there, and inventing one
+      // between the rungs it did drive would be the board making up a measurement.
       return { v: null, text: "n/a", na: true,
                note: `This gateway did not drive c=${fmtInt(conc)}; the rungs it did drive are on its curve.` };
     }
     const v = mval(r.rps);
-    if (v == null)
-      return { v: null, text: "n/a", na: true, note: naText(r.rps) };
+    if (v == null) {
+      // THE ENVELOPE READER, not naText: naText reads a lane record and returns {text, note}, which landed
+      // here as an object note ("[object Object]") and labelled a measured all-windows-failed rung "n/a".
+      const m = metric(r.rps, fmtRate);
+      return { v: null, text: m.text, na: true, failed: m.failed, note: m.note };
+    }
     return { v, text: fmtRate(v), na: false,
              note: `Observed at c=${fmtInt(conc)}, the same rung every row on this table reports. `
-                 + `The tail it produced there was ${fmtTail(r.p99_us)}.`
+                 // sealRungs publishes p99_us null when no clean window carried a finite tail; fmtTail(null)
+                 // would print "0 µs", a tail nobody observed.
+                 + (r.p99_us == null ? "No clean window at this rung reported a tail percentile."
+                     : `The median tail across those clean windows was ${fmtTail(r.p99_us)}.`)
                  + (r.clean_windows < r.windows
                      ? ` ${r.clean_windows} of ${r.windows} windows at this rung carried no failures; the rate is their median.`
                      : ` Median of ${r.windows} windows.`) };
@@ -1480,22 +1901,27 @@ function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
   if (cell.na || !rd || rd.concurrency == null) return cell;
   return { ...cell, text: `${cell.text} @ ${fmtInt(rd.concurrency)} conc` };
 }
-// Chosen cell's reading at one named bound, for frontier's per-bound columns. No inline concurrency
-// (six "@ N conc" would be noise) - the tooltip carries the rest of the evidence.
+// frontierBoundCell: the chosen cell's reading at ONE NAMED bound, for the frontier tab's per-bound
+// columns. No inline concurrency (six columns of "@ N conc" is noise); the number and its observed tail are
+// what a reader compares across the row, and the tooltip carries the rest of the evidence.
 function frontierBoundCell(g, boundMs, st = state) {
   const p = chooserCellPerf(g, st);
   if (!p) return { v: null, text: "n/a", na: true };
   return frontierCell(p, boundMs);
 }
-// The unbounded reading's rate (the "full rate" denominator), through the same accessor as every
-// other rate so the shape column and "no bound" column can never disagree.
+/* frontierFullRate(frontier): the UNBOUNDED reading's rate, i.e. the denominator that "full rate" means.
+   Named, and read through the same accessor as every other rate, so the share stated in the shape column and
+   the number rendered in the "no bound" column can never come from two different readings. */
 function frontierFullRate(frontier) {
   const rd = frontierAt(Array.isArray(frontier) ? frontier : [], null);
   return rd ? mval(rd.rps) : null;
 }
-/* The shape column: sparkline plus, in words, what share of full rate the cell still carried at the
-   tightest tail it holds. Sortable by that share via heldSortKey (bound-of-origin first, then share -
-   a share at 1ms and one at 50ms aren't the same quantity). */
+/* frontierShapeCell: the SHAPE column - the sparkline plus, in words, what share of its full rate the cell
+   still carried at the tightest tail it holds.
+   Sortable BY THAT SHARE, deliberately: "which gateways need a loose tail to go fast" is a question about the
+   field that no single-bound ranking can answer, and it is the question the frontier exists to expose. `v` is
+   heldSortKey, which ranks bound-of-origin first and the share within it, because a share read at 1 ms and one
+   read at 50 ms are not one quantity (see heldSortKey); the render puts the curve beside it. */
 function frontierShapeCell(g, st = state) {
   const p = chooserCellPerf(g, st);
   const f = frontierOf(p);
@@ -1504,17 +1930,24 @@ function frontierShapeCell(g, st = state) {
   if (!h) {
     const full = frontierFullRate(f);
     const anyBounded = f.some((r) => r.bound_ms != null);
-    // No unbounded reading means no denominator to be a share of; promoting the 100ms reading into
-    // that role would silently rebase this row against a different quantity than every other row.
+    /* THE DENOMINATOR IS MISSING. Structurally it cannot be - every cell publishes a reading at every declared
+       bound plus the unbounded one - but a share needs a whole to be a share OF, and promoting the 100 ms
+       reading into that role would rebase this one row against a different quantity from every other row on
+       the board while looking identical to them. So: no percentage. Not 100%, and not a 0. */
     if (full == null || !(full > 0) || !anyBounded) {
       return { v: null, text: "n/a", na: false, frontier: f,
         note: "No share of full rate can be stated: this cell has no unbounded reading for the bounded ones to " +
           "be a share of. The curve beside this is what was measured." };
     }
-    // Held nothing anywhere is still a curve, and the most damning shape on the board: the sparkline
-    // still draws (ticks on the floor, one point at the right). Only the percentage is withheld -
-    // a share of a rate never reached under any bound isn't a number. Rendered in words, not a dash
-    // (a bare "—" reads as missing data, which this is not: the gateway served cleanly).
+    /* HELD NOTHING, ANYWHERE - and that is still a curve, and it is the most damning shape on the board:
+       plano carried nothing under ANY declared bound and 19 req/s unbounded. The sparkline still draws (five
+       ticks on the floor and one point at the right, which reads as "it cannot meet any bound we publish");
+       what is withheld is only the percentage, because a share of a rate the gateway never reached under any
+       bound is not a number. Rendering the whole cell n/a here would delete the finding for exactly the
+       gateways it is about, and a "0%" would claim a share at a bound where no rung qualified at all.
+       IT SAYS SO IN WORDS RATHER THAN DRAWING A DASH. The owner read the bare "—" as missing data, which is
+       the one thing it is not: plano SERVED, cleanly, and no concurrency it was offered kept 99% of requests
+       under even the loosest bound we publish. A dash is the neutral rendering of a damning measurement. */
     const loosest = FRONTIER_BOUNDS_MS[FRONTIER_BOUNDS_MS.length - 1];
     return { v: heldSortKey(HELD_NOTHING_INDEX, 0), text: `served nothing under ${boundLabel(loosest)}`,
       zero: true, na: false, frontier: f,
@@ -1528,8 +1961,9 @@ function frontierShapeCell(g, st = state) {
     ? " The unbounded reading is itself a floor (the sweep ran out of ladder), so the real full rate may be higher and this share correspondingly lower."
     : "";
   const originIndex = FRONTIER_BOUNDS_MS.indexOf(h.boundMs);
-  // The bound is part of the number, so it's part of the text on every row (including 1ms rows) - a
-  // reader must never have to know the default bound to interpret "99%".
+  /* THE BOUND IS PART OF THE NUMBER, so it is part of the text - on EVERY row, including the 1 ms rows. A
+     reader must never have to know which bound is the default to know whether "99%" means "full rate at the
+     tightest tail we publish" or "full rate, but only once you allow 50 ms". */
   const tighter = originIndex > 0
     ? ` It holds no rate at all under ${boundLabel(FRONTIER_BOUNDS_MS[originIndex - 1])}, which is why this share is read at ${boundLabel(h.boundMs)} rather than at the tightest bound the board publishes.`
     : "";
@@ -1540,9 +1974,15 @@ function frontierShapeCell(g, st = state) {
       `${boundLabel(FRONTIER_BOUNDS_MS[0])} gives up almost nothing when you demand a tight tail; a low share ` +
       `means it needs a loose tail to go fast.${tighter}${floorNote}` };
 }
-/* Shape column's <td>, shared by both tabs that carry it (was a copy-paste pair; a fix to one and not
-   the other would disagree about the same cell). The held-nothing row gets the same muted treatment as
-   "no rung held this tail", keyed off `zero` since that row's whole content IS the statement. */
+/* frontierShapeTd(g, st): the shape column's <td>, for BOTH tabs that carry it.
+   ONE renderer, because the two used to be a copy-paste pair and the Frontier tab is where this column is
+   read most: any fix applied to one and not the other would ship a board that disagrees with itself about the
+   same cell.
+   The held-nothing row gets the MEASURED-ZERO treatment the reading columns use - muted cell, the statement
+   itself in the same ink a "no rung held this tail" carries - so a reader never has to hover to learn that
+   the row without a percentage is the strongest finding in the column. It is keyed off `zero`, not off the
+   presence of a second line, because that row's whole content IS the statement: a mark plus a why underneath
+   would be the same sentence twice. */
 function frontierShapeTd(g, st = state) {
   const c = frontierShapeCell(g, st);
   if (c.na) return `<td class="shape na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
@@ -1552,22 +1992,35 @@ function frontierShapeTd(g, st = state) {
     `<span class="shape-gain">${label}</span></td>`;
 }
 const COLUMN_SETS = {
-  // Performance (Peak | Same | Custom): per-cell latency + throughput from the one 6x6 run. Columns are
-  // identical in every mode; the chooser only changes which cell each row reads. Tested-on is present
-  // in every mode, rendering a pill only when the row's lane has a record (audit #1/#13).
+  // PERFORMANCE (Peak | Same | Custom): per-cell latency + throughput from the ONE 6x6 run. The columns
+  // are IDENTICAL in every mode; the chooser only changes WHICH cell each row reads. The Tested-on column
+  // is present in EVERY mode (renderTable does not drop it); it renders a pill only when the row's lane
+  // actually has a record, and names that record's own provenance (audit #1/#13).
   performance: [
     COL_SEL, COL_NAME, COL_TESTED,
     { id: "lat50", label: "Added latency p50 (µs)", desc: false, title: "Gateway p50 minus direct-to-mock p50 at concurrency 1 on the chosen cell",
       get: (g) => chooserPerfCell(g, "added_latency_p50_us", fmtAdded) },
     { id: "lat", label: "Added latency p99 (µs)", desc: false, title: "Gateway p99 minus direct-to-mock p99 at concurrency 1 on the chosen cell",
       get: (g) => chooserPerfCell(g, "added_latency_p99_us", fmtAdded) },
-    // Ranked throughput column at the reader-selected bound. Label names the bound (boundColLabel)
-    // and re-renders on selection change, so no header can imply a bound it didn't use.
-    // `costOnly` keeps cost columns off a board that can't answer them (see hasCost). Throughput
-    // stops describing the gateway once it saturates its cores; cost per request has no such ceiling.
-    // Requests-per-CPU-second is not a second column: it's exactly 1,000,000/cpu_us_per_request, the
-    // same measurement inverted, so printing both would look like corroboration of a tautology. It
-    // lives on the Charts tab instead, answering a different question.
+    /* THE RANKED THROUGHPUT COLUMN, at the bound the reader selected. Its LABEL names that bound
+       (boundColLabel) and re-renders when the selection changes, so no header can imply a bound it did not
+       use - which is exactly what the two columns this replaces did ("Sustained RPS (20 ms upstream)", with
+       a tooltip asserting a p99 < 1 s bar the engine never enforced, over a metric read at 20 ms).
+       Switching the bound re-reads this column and re-sorts the table in front of the reader. */
+    /* WHAT A REQUEST COST, beside what it delivered. `costOnly` keeps these off a board that cannot
+       answer them (see hasCost); they light up on the first run carrying the capture.
+       WHY THIS COLUMN EXISTS AT ALL: the throughput column stops describing the GATEWAY the moment
+       one saturates its pinned cores - past that it describes the box, and two gateways at the wall
+       read the same however different they are. Cost per request has no such ceiling: at saturation
+       both deliver the same rps by definition, and the one doing less work per request still reads
+       lower. Ascending, because less CPU per request is better. */
+    /* REQUESTS PER CPU-SECOND IS NOT A SECOND COLUMN HERE, because it is not a second number.
+       1 CPU-second IS a million microseconds, so `rps_per_cpu_second` is exactly
+       1,000,000 / cpu_us_per_request - the same measurement inverted. Printed side by side they read
+       as corroboration and are nothing of the kind: 88.7 us/req and 11,273 req/CPU-s multiply to
+       1,000,000 by construction, which is the same tautology that once made a cost "cross-check"
+       pass while proving nothing. It lives on the Charts tab, where it answers a different question
+       (how much traffic per unit of CPU you are buying) rather than restating this one. */
     { id: "cpu", label: () => { const c = costWindowConc();
         return c == null ? "CPU per request (\u00b5s)" : `CPU per request (\u00b5s @ c=${c})`; },
       desc: false, costOnly: true,
@@ -1576,18 +2029,28 @@ const COLUMN_SETS = {
         `Unlike peak throughput this does not stop separating gateways once they saturate their cores. ` +
         `A window with any failure publishes no cost: CPU divided by only the successes would describe the failures, not the work.`,
       get: (g) => chooserPerfCell(g, "cpu_us_per_request", fmt2) },
-    // The header carries the concurrency pin once for the whole column, so a screenshot of the table
-    // is self-explanatory without repeating "@ 128 conc" on every row.
+    /* THE HEADER CARRIES THE PIN, once, for the whole column. With a rung selected every row reports
+       the same concurrency, so repeating "@ 128 conc" on each line would be noise - and stating it in
+       the header is what makes a screenshot of this table self-explanatory, which is the entire point
+       of the selector. */
     { id: "rps", label: () => (selectedConc() != null
         ? `Req/s @ ${fmtInt(selectedConc())} conc · same rung, every row`
         : boundColLabel(selectedBound())), desc: true,
-      title: () => `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
+      // The tooltip follows the pin exactly as the label does: a pinned column shows the rung's median
+      // clean-window rate REGARDLESS of the bound, so describing it as the frontier reading would be false.
+      title: () => selectedConc() != null
+        ? `The requests/sec the chosen cell carried at c=${fmtInt(selectedConc())}: the median of that rung's windows that failed no request, whatever its tail. ` +
+          `The bound selector does not apply while a rung is pinned. A gateway that never drove this rung reads n/a, never an interpolated value.`
+        : `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
         `One of ${BOUND_CHOICES.length} readings of the SAME concurrency sweep published on every cell - switch the bound above to re-rank the board. ` +
         `A "≥" is a floor: the sweep ran out of ladder while that concurrency was still qualifying. Hover a cell for the tail it actually produced and the concurrency that stopped qualifying above it.`,
       get: (g, st = state) => frontierChooserCell(g, st) },
-    // Shape beside the number: six figures don't communicate a slope, this does, and the share of full
-    // rate makes it sortable. Header states the quantity in words rather than a bare ratio, which
-    // needed a legend to be readable.
+    /* THE SHAPE, beside the number. A row of six figures does not communicate a slope; this does, and the
+       share of full rate makes it sortable and readable aloud. See frontierSpark on the shared y scale. */
+    /* THE HEADER STATES THE QUANTITY IN WORDS. It read "Curve across bounds" over a column of bare "×1.3"s
+       ("i dont know what 1.3x or whatever means"), then named a gain factor - and the owner still could not
+       read it: "its just not clear what this means, even I know and i cant figure it out". A ratio needed a
+       legend; a share of a rate the reader can see in the columns to the left does not. */
     { id: "shape", label: "Rate held at its tightest bound", desc: true,
       title: () => `The whole frontier as one line: throughput at ${BOUND_CHOICES.map(boundLabel).join(", ")}, left to right, on a scale shared by every row. ` +
         `Flat means the gateway holds its rate even under a tight tail; a line climbing from the floor means it needs a loose tail to go fast. ` +
@@ -1597,17 +2060,27 @@ const COLUMN_SETS = {
       get: (g, st = state) => frontierShapeCell(g, st),
       render: (g, st = state) => frontierShapeTd(g, st) },
   ],
-  /* Frontier: the whole curve, one row per gateway, all six readings side by side. Its own tab rather
-     than more Performance columns, since less scrolling wins. Performance answers "who is fastest at
-     my bound"; this answers "what shape is each gateway". Every column is a real published reading,
-     none derived; the selected bound's column is marked. */
+  /* FRONTIER: THE WHOLE CURVE, ONE ROW PER GATEWAY, ALL SIX READINGS SIDE BY SIDE.
+     Its own tab rather than more columns on Performance, and rather than a longer page: the owner's rule is
+     that less scrolling wins and more tabs are the acceptable cost. Performance answers "who is fastest at
+     MY bound"; this answers "what shape is each gateway", which is the finding the two retired scalars
+     averaged away. Fourteen rows by eight columns fits one screen, so a reader compares shapes without
+     scrolling and without opening anything.
+     Every column is a real published reading - none is derived - and the selected bound's column is marked
+     so the ranked column on Performance is locatable here. */
   frontier: [
     COL_SEL, COL_NAME, COL_TESTED,
     ...BOUND_CHOICES.map((b) => ({
       id: boundColId(b), label: boundLabel(b), group: BOUND_GROUP_LABEL, desc: true,
-      // Six headers share one spanning group (BOUND_GROUP_LABEL) and keep only their own bound, rather
-      // than repeating "Req/s · 99% under N ms" six times; full sentence still lives on each tooltip.
-      // Observed tail rides under the number since "4 ms under 100 ms" and "99 ms under it" differ.
+      /* THE SIX HEADERS SHARE ONE SPANNING GROUP AND KEEP ONLY THEIR OWN BOUND.
+         They each read "Req/s · 99% under N ms" - the same five words six times across the widest table on
+         the board, in the owner's words "make Req/s 99% a header that spans all columns vs repeating?". The
+         group header (BOUND_GROUP_LABEL) says the shared part once and each sub-header says only what differs.
+         The full sentence has NOT been dropped: it is still on every cell's own tooltip below, which is where
+         boundClause() guarantees the wording, so the reason boundColLabel exists (a header may never imply a
+         bound it did not use) is served by the group + sub-header pair rather than by repetition. */
+      // The observed tail rides UNDER the number (frontierBoundCell) because "4 ms under a 100 ms bound" and
+      // "99 ms under it" are different findings and a column of rates alone cannot tell them apart.
       title: `The most requests/sec the chosen cell carried ${boundClause(b)} and it failed no request it accepted. ` +
         `Under each number is the tail it ACTUALLY produced there, which is never the bound. "≥" marks a floor.`,
       get: (g, st = state) => frontierBoundCell(g, b, st),
@@ -1616,8 +2089,11 @@ const COLUMN_SETS = {
         const sel = selectedBound(st) === b || (b == null && selectedBound(st) == null) ? " bound-col" : "";
         if (c.na) return `<td class="na${sel}" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
         const rd = c.reading;
-        // Sub-line: the tail actually produced for a real reading, or the "why" for a measured nothing -
-        // bare cells there would read as missing measurements rather than the damning finding they are.
+        /* THE SUB-LINE UNDER THE NUMBER carries whichever of the two things this cell has to say. For a real
+           reading it is the tail the gateway ACTUALLY produced (4 ms under a 100 ms bound is not the same
+           finding as 99 ms). For a measured nothing it is WHY - "no rung held this tail" - because five
+           bare cells in a row would read as five missing measurements on exactly the gateways where the
+           measurement is the most damning thing on the board. */
         const sub = c.why
           ? `<span class="reading-none">${esc(c.why)}</span>`
           : (rd && rd.p99_us != null ? `<span class="reading-tail">tail ${esc(fmtTail(rd.p99_us))}</span>` : "");
@@ -1629,8 +2105,9 @@ const COLUMN_SETS = {
       get: (g, st = state) => frontierShapeCell(g, st),
       render: (g, st = state) => frontierShapeTd(g, st) },
   ],
-  // Streaming (Peak | Same | Custom): per-cell SSE columns from the same run. Per-cell streaming is
-  // measured on the diagonal today, so Same/Custom read n/a where the matrix carries no cell.
+  // STREAMING (Peak | Same | Custom): per-cell SSE columns from the SAME run. Per-cell streaming is
+  // measured on the diagonal today, so Same reads it only on the gateway's own measured diagonal and
+  // Custom reads a cell's own stream when the matrix carries one — else n/a (honest, never fabricated).
   streaming: [
     COL_SEL, COL_NAME, COL_TESTED_STREAM,
     { id: "sttft50", label: "Added TTFT p50 (µs)", desc: false, title: "Added time-to-first-token p50: the extra wait before the stream's first token, gateway minus direct-to-mock, at concurrency 1, on the chosen cell. Lower is better.",
@@ -1643,32 +2120,46 @@ const COLUMN_SETS = {
       get: (g) => chooserStreamCell(g, "added_gap_p99_us", fmtUsMs) },
     { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with EVERY expected frame delivered, no stalls, <0.1% errors, on the chosen cell",
       get: (g) => chooserStreamCell(g, "streams_sustained", fmtInt) },
-    // `cpufps`/`cpu_fps` is retired: it counted frames/sec without a delivery gate, so a gateway
-    // dropping frames could post a higher rate than one delivering all of them. `streams_sustained_fps`
-    // is the honest replacement, measured where every frame arrived.
+    // THE `cpufps` COLUMN IS GONE with the `cpu_fps` metric the producer retired: it counted frames/sec
+    // under an unpaced firehose WITHOUT the delivery gate, so a gateway dropping frames could post a higher
+    // relay rate than one delivering all of them - a loss rate with a numerator, not a throughput. The
+    // frame rate a reader can act on survives as `streams_sustained_fps`, measured at a concurrency where
+    // every frame arrived, and it is in the drawer's streaming lane.
     { id: "streamfps", label: "Streams sustained (frames/s)", desc: true, title: "The frame rate the sustained-streams ceiling held, on the chosen cell: the throughput behind the stream count, measured where every expected frame was delivered. Higher is better.",
       get: (g) => chooserStreamCell(g, "streams_sustained_fps", fmtInt) },
   ],
-  // Memory (cell-chooser driven, own Min | Max | Same | Custom modes): idle/steady-state/growth/recovered
-  // RSS plus the cell the window ran on and the RSS curve. perCellOnly columns are dropped on bundles
-  // predating per-cell measurement.
-  // Steady-state column keeps id "mempeak" on purpose (URL contract for shared permalinks); only the
-  // label changed.
+  // MEMORY (one row per gateway, cell-chooser driven with its OWN Min | Max | Same | Custom modes):
+  // idle / steady-state / growth / recovered RSS (best = min), the cell the chosen window ran on, plus the
+  // RSS curve. Reads the record memoryFor() chose; a gateway with no window for that cell reads n/a and
+  // nothing is substituted for it. Columns marked perCellOnly are dropped on a bundle that predates
+  // per-cell measurement (columnsFor), because a column of pure n/a is noise, not disclosure.
+  //
+  // The steady-state column keeps the id "mempeak" ON PURPOSE. The id is a URL contract (?sort=mempeak is
+  // in every shared memory permalink and in the charts' deep links); renaming it with the semantics would
+  // silently drop the sort out of every one of those links. The LABEL is what a reader sees, and it changed.
   memory: [
     COL_SEL, COL_NAME,
-    // Same pill renderer every other tab uses, bound to the memory lane.
+    // Tested on: the SAME pill renderer every other tab uses (colTested), bound to the MEMORY lane so it
+    // names the cell this row's memory numbers came from, not the perf cell.
     COL_TESTED_MEMORY,
-    /* Header names the scope of its median: with per-cell data, this column is the median across the
-       gateway's cold samples (one per cell), while the curve on the same row belongs to the selected
-       cell - they can differ, so the row label says "all cells" rather than just "median". */
+    /* THE HEADER NAMES THE SCOPE OF ITS MEDIAN. With per-cell data this column is the median ACROSS the
+       gateway's cold samples, one per served cell (idle is sampled before any request, so no cell is involved
+       in it); the curve on the same row belongs to the SELECTED CELL. The two differ on six of the live
+       board's eleven measured rows - apisix 177.9 against 178.1, bifrost 244.3 against 222.6 - and with both
+       labelled only "median" a reader comparing them concludes one is wrong. The tooltip always said this;
+       the ROW did not, and a disclosure you must hover to find does not stop a reader trusting the wrong
+       number. The legacy single-window shape has one cell, makes no such claim, and keeps the plain label. */
     { id: "memidle", label: () => (hasPerCellMemory() ? "Idle RSS (MiB, all cells)" : "Idle RSS (MiB)"), desc: false,
       title: () => (hasPerCellMemory()
         ? "Cold idle process RSS, before the first request is served. Sampled once per cell with no cell-specific work involved, so this is the median across those cold samples (hover for the spread) and it is valid in every mode. Lower is better."
         : `Cold idle process RSS: median over a ${memWindowLabel(boardMemWindows().idle)} window on a fresh cold-restarted process, before any load. Lower is better.`),
       get: (g, st = state) => {
         if (!hasPerCellMemory(stateData(st))) return memCell(g, "idle_rss_mib", fmt1, st);
-        // All-or-nothing row: a row whose chosen cell has no displayable value is fully empty - idle
-        // must not survive as one lone number on an otherwise-n/a row.
+        // THE ROW IS ALL-OR-NOTHING (owner's rule): a row whose chosen cell was not tested, or whose
+        // chosen record puts no number on the row, is fully empty - idle, however cell-independent
+        // its sampling, must not survive as one lone number on an otherwise-empty row advertising a
+        // measurement the cell does not have. Pick a mode that serves the cell (Min/Max always do)
+        // and idle appears with the rest.
         if (!recordShowsValues(memoryFor(g, st))) return { v: null, text: "n/a", na: true };
         const i = idleAcrossCells(g);
         if (!i) return { v: null, text: "n/a", na: true };
@@ -1677,12 +2168,13 @@ const COLUMN_SETS = {
       } },
     { id: "mempeak", label: () => (hasPerCellMemory() ? "Steady-state RSS (MiB)" : "Peak RSS (MiB)"), desc: false,
       title: () => (hasPerCellMemory()
-        ? "Resident memory once it stopped climbing, under a fixed load on the chosen cell that runs until RSS is steady rather than for a fixed time. A gateway that never went steady has no steady state and reads n/a: its growth rate is the reading. Lower is better."
+        ? "Resident memory once it stopped climbing, under a fixed load on the chosen cell that runs for the same fixed duration on every gateway and cell, with steadiness judged over the trailing window at its end. A gateway that never went steady has no steady state and reads n/a: its growth rate is the reading. Lower is better."
         : "Max process RSS observed while the identical fixed load runs on this gateway's peak cell. Same load recipe for every gateway. Lower is better."),
       get: (g, st = state) => (hasPerCellMemory(stateData(st))
         ? memCell(g, "steady_state_rss_mib", fmt1, st) : memCell(g, "peak_rss_mib", fmt1, st)) },
-    // Growth: ~0 once settled, the leak rate when it never did. Turns "did not plateau" from a missing
-    // value into the headline finding, so it's its own column rather than a footnote.
+    // GROWTH: ~0 once a gateway has settled, and the LEAK RATE when it never did. This is the most
+    // informative thing the metric produces - it turns "did not plateau" from a missing value into the
+    // headline finding - so it is a column of its own rather than a footnote on the steady-state n/a.
     { id: "memgrowth", label: "Growth (MiB/min)", desc: false, perCellOnly: true,
       title: "How fast RSS was still rising over the final window on the chosen cell. Around zero once the gateway has settled. If no steady state was reached, this rate under this load IS the reading, and no steady-state number exists to report instead. Lower is better.",
       get: (g, st = state) => {
@@ -1690,52 +2182,72 @@ const COLUMN_SETS = {
         const c = memCell(g, "growth_rate_mib_per_min", fmt1, st);
         if (c.na || !m) return c;
         if (m.plateaued === false && !SHOW_GROWTH_VERDICT) {
-          // The note explains the number in the tooltip rather than stamping a verdict on the cell.
+          // The note still explains what the number means - it is a tooltip with room for a sentence,
+          // not a verdict stamped on the cell.
           const gr0 = mval(m.growth_rate_mib_per_min);
           return { ...c, note: gr0 != null && gr0 > 0
-            ? "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number."
+            ? "This cell never went steady: the fixed-length load ended with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number."
             : gr0 != null && gr0 < 0
-            ? "This cell never went steady, but the rate is negative - it was releasing memory when the load hit the cap."
+            ? "This cell never went steady, but the rate is negative - it was releasing memory when the fixed load ended."
             : "This cell never went steady; neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
         }
         if (m.plateaued === false) {
-          /* Suffix follows the shape, not just "did not settle": a negative rate (memory releasing)
-             must never be labelled "(leak)". `memShape` reads the engine's own verdict; a record with
-             no shape gets neutral wording rather than a guess. */
+          /* THE SUFFIX FOLLOWS THE SHAPE, NOT MERELY "DID NOT SETTLE".
+             This appended "(leak)" to every unsettled cell whatever its direction, so agentgateway
+             published "-0.4 (leak)" - a NEGATIVE rate, memory being RELEASED, labelled as the one
+             thing it is the opposite of - under a note that said "with RSS still climbing at this
+             rate". The drawer three hundred lines up already got this right from the same field
+             ("still RELEASING memory when the fixed load ended, not growing"); the column did not, so
+             one board rendered one fact two ways and the wrong one was the one on the table.
+             `memShape` reads the engine's own verdict. A record with no shape (an older board, a
+             withheld verdict) gets the neutral wording rather than a guess. */
           const sh = memShape(m);
           if (sh === "releasing")
-            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but it was RELEASING memory when the load hit the cap - the rate is negative. That is the opposite of a leak: a longer load would not have produced a larger number." };
+            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but it was RELEASING memory when the fixed load ended - the rate is negative. That is the opposite of a leak: a longer load would not have produced a larger number." };
           if (sh === "swinging")
             return { ...c, text: `${c.text} (swing)`, note: "This cell never went steady, but it did not grow either: RSS swung around a level it kept returning to. This rate is how fast the window happened to be moving when it closed - a fact about the sampling instant, not a leak." };
           if (sh === "climbing")
-            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
-          // No shape published: fall back to the sign of the rate itself as the reading.
+            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the fixed-length load ended with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+          /* NO SHAPE PUBLISHED (an older board, a withheld verdict): fall back to the SIGN of the
+             rate, which is a reading rather than a guess. A positive rate is a climb whether or not a
+             verdict came with it, and a negative one is not a leak under any verdict. Only a rate
+             that is absent or exactly zero leaves the direction genuinely unestablished. */
           const gr = mval(m.growth_rate_mib_per_min);
           if (gr != null && gr > 0)
-            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the load stopped at the cap with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the fixed-length load ended with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
           if (gr != null && gr < 0)
-            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but the rate is negative - it was RELEASING memory when the load hit the cap, which is the opposite of a leak." };
+            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but the rate is negative - it was RELEASING memory when the fixed load ended, which is the opposite of a leak." };
           return { ...c, text: `${c.text} (no steady state)`, note: "This cell never went steady, and neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
         }
         return { ...c, note: c.note || "Settled: RSS had stopped climbing when the load was terminated." };
       } },
-    { id: "memrecov", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, desc: false,
-      title: () => `Process RSS at the end of the ${memWindowLabel(boardMemWindows().recovery)} recovery window after the fixed load stops — does the gateway release memory? Lower is better.`,
+    /* `recovery_window_s` IS THE MEDIAN SLICE, NOT THE WATCH. The engine watches recovery for
+       MEMORY_RECOVERY_S (60 s) and publishes recovered_rss_mib as the median over the trailing
+       MEMORY_RECOVERY_MEDIAN_S (30 s), which is what recovery_window_s carries (metric.rs, suite.rs).
+       "Recovered @30 s ... end of the 30 s recovery window" described a window that does not exist. */
+    { id: "memrecov", label: () => `Recovered, final ${memWindowLabel(boardMemWindows().recovery)} (MiB)`, desc: false,
+      title: () => `Median process RSS over the final ${memWindowLabel(boardMemWindows().recovery)} of the recovery watch after the fixed load stops — does the gateway release memory? Lower is better.`,
       get: (g, st = state) => memCell(g, "recovered_rss_mib", fmt1, st) },
     { id: "memcurve", label: "RSS curve", desc: false, sortable: false,
       title: () => (hasPerCellMemory()
-        ? "RSS across one process lifecycle on the chosen cell: cold idle → load run to steady state → recovery."
-        : `RSS across the memory window on one process lifecycle: ${memWindowLabel(boardMemWindows().idle)} cold idle → fixed load on the peak cell → ${memWindowLabel(boardMemWindows().recovery)} recovery`),
-      // All-or-nothing like every other memory column: rss_series isn't a sealed metric, so without
-      // this guard an empty record could still show a live sparkline.
+        ? "RSS across one process lifecycle on the chosen cell: cold idle → fixed-length load → recovery."
+        : `RSS across the memory window on one process lifecycle: ${memWindowLabel(boardMemWindows().idle)} cold idle → fixed load on the peak cell → recovery (reported over its final ${memWindowLabel(boardMemWindows().recovery)})`),
+      // ALL-OR-NOTHING, like every other memory column: a record whose every envelope is empty must
+      // not keep a live sparkline as the one surviving cell on an otherwise-n/a row - the raw
+      // rss_series is not a sealed metric, so without this guard it outlived the rule.
       get: (g, st = state) => {
         const m = memoryFor(g, st);
         const shows = recordShowsValues(m) && Array.isArray(m.rss_series) && m.rss_series.length >= 2;
         return { v: null, text: "", na: !shows };
       },
-      /* One compact ~34px curve replacing six stacked block elements (~350px row). A <button>, not a
-         div: content only in a `title` is invisible to touch/keyboard users, so this needs to be
-         focusable with an aria-label, and Enter/Space bubbles to the row handler that opens the drawer. */
+      /* ONE COMPACT LIFECYCLE CURVE, INSIDE A REAL FOCUSABLE CONTROL.
+         The cell used to stack six block elements (label, sparkline, caption, label, sparkline, caption) and
+         the row stood ~350px tall. It is now one ~34px curve, and everything the captions carried lives on
+         this control's accessible name (memCurveSummary) plus the drawer.
+         IT IS A <button> AND NOT A DIV BECAUSE OF THE REACHABILITY RULE: content that exists only in a
+         `title` is invisible to touch and to keyboard users, which is deletion for some readers. A button is
+         focusable, announces its aria-label, and its Enter/Space activation bubbles to the row handler that
+         opens the drawer - so the full detail is reachable without a pointer. */
       render: (g, st = state) => {
         const m = memoryFor(g, st);
         const spark = m && recordShowsValues(m) ? rssCurves(m, { compact: true }) : "";
@@ -1747,26 +2259,41 @@ const COLUMN_SETS = {
   ],
   // Governance is RETIRED under matrix-sole-source: no tab, no column (busbar-only, non-default suite).
 };
-// A column/metric label or title, plain string or a function rendering from live data (audit #14).
+/* txt(x): a column/metric label or title, which may be a plain string OR a function rendering it from
+   the live data (used where the wording depends on a tunable harness setting — audit #14). */
 function txt(x) { return typeof x === "function" ? String(x() ?? "") : String(x ?? ""); }
-// Columns for a view; perf tabs use COLUMN_SETS. perCellOnly columns are dropped when the data can't
-// fill them (a growth column reading n/a on every row would be noise).
+/* The set of columns for a view; perf tabs use COLUMN_SETS, everything else has no table. A column marked
+   perCellOnly exists only where the data can fill it: the published board still carries bundles measured
+   before per-cell memory, and a growth column that reads n/a on all thirteen rows would be noise. */
 function columnsFor(view, data = (typeof state !== "undefined" ? state.data : null)) {
   let cols = COLUMN_SETS[view] || COLUMN_SETS.performance;
   if (!hasPerCellMemory(data)) cols = cols.filter((c) => !c.perCellOnly);
   if (!hasCost(data)) cols = cols.filter((c) => !c.costOnly);
   return cols;
 }
-/* The roster's row order for one column and one direction. The name tiebreak is always ascending
-   regardless of sort direction, so toggling descending reverses the ranking without also reversing
-   ties' alphabetical order. Missing values always sink to the bottom in both directions. */
-// Tiebreak column: the second-best measurement, not the alphabet - a dense tie (e.g. three gateways
-// at a measured zero) should not fall straight to alphabetical order, which would read as a ranking
-// it isn't. All tiebreak columns here are latencies (lower better), so ties sort ascending regardless
-// of the primary column's direction.
+/* rowComparator(col, desc): the roster's row order for one column and one direction.
+   THE NAME TIEBREAK IS NOT PART OF WHAT THE READER ASKED TO REVERSE. Toggling a column to descending
+   reverses the RANKING; it does not mean "and also reverse the alphabet". The direction used to be
+   applied to the whole comparison, so every group of equal-valued rows flipped its name order too - and
+   on a column with dense ties (two gateways both below resolution, a lane where several rows read the
+   same round number) the table visibly reshuffled rows whose values had not changed at all. Direction
+   decides the value comparison; the name tiebreak is always ascending, so a tie sits still.
+   Missing values always sink to the bottom, in both directions: an absent reading is not a low score. */
+/* TIEBREAK: the second-best measurement, not the alphabet.
+   Three gateways sustained a MEASURED ZERO (no load held the gate), which is a real result and a real
+   three-way tie. Falling straight to display order put them in alphabetical order, which reads as a
+   ranking it is not - a reader scanning the bottom of a sorted column sees One-API above Plano above
+   TensorZero and infers something the data never said. When the sorted column cannot separate rows,
+   the next-most-relevant MEASUREMENT should, and the alphabet is only the last resort once the numbers
+   genuinely run out. Lower is better for every tiebreak column named here (they are all latencies), so
+   the tiebreak always sorts ascending regardless of the primary column's direction: it is not part of
+   the sort the reader asked for, it is what to do when that sort has nothing left to say. */
 const VIEW_TIEBREAK = {
   performance: "lat50",
-  // Frontier has no latency column and its own columns are all rates, so ties there fall to the name.
+  // The frontier tab has no latency column to fall back on, and its own columns are all rates (higher is
+  // better), so the ascending-tiebreak rule above does not fit any of them. Ties there fall to the name,
+  // which is honest: two gateways with the identical reading at the sorted bound genuinely tie on it, and
+  // the curve column beside them is where the difference shows.
   streaming: "sttft50",
   memory: "memidle",
 };
@@ -1774,7 +2301,8 @@ function rowComparator(col, desc, tiebreak) {
   return (a, b) => {
     const va = col.get(a).v, vb = col.get(b).v;
     const byName = a.display.localeCompare(b.display);
-    // Tiebreak measurement, used only when the primary column ties; never the sorted column itself.
+    // The tie-breaking measurement, used only when the primary column ties. Never the sorted column
+    // itself: comparing a column with itself always returns 0 and would just re-add the alphabet.
     const byTie = () => {
       if (!tiebreak || tiebreak.id === col.id) return byName;
       const ta = tiebreak.get(a).v, tb = tiebreak.get(b).v;
@@ -1800,8 +2328,8 @@ const ALL_COLUMN_IDS = new Set(Object.values(COLUMN_SETS).flat().map((c) => c.id
    `pathNote` (optional) returns a one-line disclosure of WHICH path the record measured. */
 const laneDialect = (d) => (MATRIX_LABELS[d] || d || "?");
 const LANES = [
-  // pathNote renders from the record's source.sweep stamp via caption(), no hard-coded string. The
-  // memory lane appends its cell attribution (load_cell) after.
+  // pathNote renders FROM the record's source.sweep stamp via caption() (Design E §3.2) — no hard-coded
+  // source string. The memory lane appends its cell attribution (load_cell) after the stamp caption.
   {
     key: "perf", label: "Latency & throughput", flag: "served", err: "serve_error",
     get: canonicalPerf,
@@ -1809,23 +2337,34 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtAdded },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtAdded },
-      // The two legs the added-latency figure above is the difference of (gateway minus direct-to-mock
-      // at c=1), so a reader can check the arithmetic. direct_c1_p99_us is best:null since it's a
-      // shared baseline (evidence, not a contest - see bestIndex).
+      // The two LEGS the added-latency figure above is the difference of. Added latency is a SUBTRACTION
+      // (gateway leg minus direct-to-mock leg at concurrency 1), and until now the board published the
+      // result while hiding both operands - a reader could not check the arithmetic, or see that a tiny
+      // "added" number came from two large legs that nearly cancelled. Both are sealed into best_cell by
+      // seal.mjs's UNGATED_LAT_FIELDS and were reaching the bundle unrendered.
+      // direct_c1_p99_us carries best:null deliberately: it is the harness's own leg against the mock, the
+      // same baseline for every row, so it is evidence rather than a contest (see bestIndex).
       { k: "gateway_c1_p99_us", label: "Gateway p99 @ c=1 (µs)", best: "min", fmt: fmtUsMs },
       { k: "direct_c1_p99_us", label: "Direct-to-mock p99 @ c=1 (µs)", best: null, fmt: fmtUsMs },
-      // Every reading, one row each, replacing two retired scalars that collapsed the same sweep
-      // twice. All six listed since the drawer/compare are where a reader checks the evidence.
-      // `cell` (not `k`+`fmt`) since a reading is an envelope plus its own evidence.
+      /* EVERY READING, ONE ROW EACH, in published order - replacing `rps_max_proxy` and
+         `rps_sustained_20ms`, which were the same sweep collapsed twice and which contradicted each other
+         in the field. All six are listed rather than only the selected one BECAUSE THE DRAWER AND THE
+         COMPARE PANEL ARE WHERE A READER GOES FOR THE EVIDENCE: the shape across bounds is the finding, and
+         in compare it puts three gateways' whole curves side by side as numbers, which is the one place
+         digits beat the sparkline. `cell` (not `k`+`fmt`) because a reading is not a bare envelope on the
+         record - it is an envelope plus its own evidence, and frontierCell is what renders that pair. */
       ...BOUND_CHOICES.map((b) => ({
-        // A stable key per reading, mirroring the engine's absence keys (frontier.10ms.rps).
+        // A stable key per reading, mirroring the engine's absence keys (frontier.10ms.rps): the tests and
+        // any future per-metric lookup need to name a row, and its bound is the only thing that identifies it.
         k: `frontier.${b == null ? "unbounded" : `${b}ms`}`,
         label: boundColLabel(b), best: "max", cell: (rec) => frontierCell(rec, b),
       })),
     ],
-    // Same sparkline the table shows, at the same shared scale.
+    // The curve itself, under the numbers: the same sparkline the table shows, at the same shared scale, so
+    // the drawer's six rows arrive with the shape they describe rather than leaving the reader to plot it.
     extra: (j) => frontierBlock(j),
-    // Compare panel: one row of curves across the gateways being compared.
+    // And in the compare panel, one row of curves across the gateways being compared - three shapes beside
+    // each other is the comparison the two retired scalars made impossible.
     cmpExtra: (j) => frontierBlock(j, { compact: true }),
   },
   {
@@ -1833,27 +2372,35 @@ const LANES = [
     get: canonicalMemory,
     pathNote: (j) => {
       const base = j && j.source ? caption(j) : "";
-      // Legacy record names its peak-cell basis; per-cell record names window outcome + search size.
-      // Both end with the producer's honesty disclosures (memory.protocol), surfaced, never silent.
+      // A LEGACY record names its peak-cell basis; a per-cell record names what its window did (settled, or
+      // still climbing when the fixed load ended) and how big the Min/Max search was. Both end with the producer's own
+      // honesty disclosures (memory.protocol), which are surfaced, never carried silently.
       const note = j && j.load_cell
         ? `${base}, identical fixed load on ${memLoadCellLabel(j.load_cell)} (this gateway's peak cell)${memDisclosure(j)}`
         : (j && j.plateaued != null ? `${base}, ${memCellTip(j)}` : `${base}${memDisclosure(j)}`);
       return note;
     },
-    // Renders only when rss_series exists (>=2 points); otherwise extra() returns "".
+    // The RSS curve (idle→load→recovery, one process lifecycle). Renders ONLY when rss_series
+    // exists (≥2 points); a bundle without a series → extra() returns "" and the drawer shows just the numbers.
     extra: (j) => rssCurves(j),
     metrics: [
-      { k: "idle_rss_mib", label: "Idle RSS (MiB)", best: "min", fmt: fmt1 },
-      // Both shapes listed since both are published: per-cell record carries steady state (or none)
-      // and a growth rate; legacy record carries the peak of a fixed-duration load.
+      // THIS CELL's own cold idle sample, which is not the table's Idle RSS (the median across every served
+      // cell). Same label for two different figures read as a contradiction between table and drawer.
+      { k: "idle_rss_mib", label: "Idle RSS, this cell (MiB)", best: "min", fmt: fmt1 },
+      // Both shapes are listed because both shapes are published: a per-cell record carries a steady state
+      // (or none, when it never settled) and a growth rate; a legacy record carries the peak of a
+      // fixed-duration load. The drawer drops whichever the record does not have, so no row is invented.
       { k: "steady_state_rss_mib", label: "Steady-state RSS (MiB)", best: "min", fmt: fmt1 },
       { k: "growth_rate_mib_per_min", label: "Growth (MiB/min)", best: "min", fmt: fmt1 },
       { k: "peak_rss_mib", label: "Peak RSS (MiB)", best: "min", fmt: fmt1 },
-      // Kernel's own high-water mark: the independent check on the sampled peak above (C7 warns when
-      // hwm sits below peak).
+      // The kernel's own high-water mark, sealed and carried but unrendered. It is the independent check on
+      // the sampled peak above: C7 already WARNS when hwm sits below peak (a sampler that outran the
+      // kernel's accounting), and a reader could not see the pair the guard was comparing. Showing both
+      // makes that disclosure legible instead of build-log-only.
       { k: "peak_rss_hwm_mib", label: "Peak RSS high-water (MiB)", best: "min", fmt: fmt1 },
-      // RSS after the recovery window. Absent on pre-recovery bundles -> reads n/a.
-      { k: "recovered_rss_mib", label: () => `Recovered @${memWindowLabel(boardMemWindows().recovery)} (MiB)`, best: "min", fmt: fmt1 },
+      // Recovery: RSS 60 s after the load ends. Lower = released more of the peak (best: min). Absent on
+      // pre-recovery bundles → the drawer/compare read n/a, exactly like any other lane field it lacks.
+      { k: "recovered_rss_mib", label: () => `Recovered, final ${memWindowLabel(boardMemWindows().recovery)} (MiB)`, best: "min", fmt: fmt1 },
     ],
   },
   {
@@ -1864,11 +2411,15 @@ const LANES = [
       { k: "added_ttft_p99_us", label: "Added TTFT p99 (µs)", best: "min", fmt: fmtUsMs },
       { k: "added_gap_p99_us", label: "Added per-token p99 (µs)", best: "min", fmt: fmtUsMs },
       { k: "streams_sustained", label: "Streams sustained", best: "max", fmt: fmtInt },
-      // Sealed under the same mock-bound flag as the count above (audit #11); without this row two
-      // gateways holding the same stream count at very different frame rates would read as identical.
+      // The RATE the sustained-streams bisect held, sealed under the SAME mock-bound flag as the count
+      // above (audit #11) and carried into the bundle by sealStreamRecord - but never rendered, so the
+      // board published a stream COUNT with no throughput behind it. Two gateways holding the same number
+      // of streams at very different frame rates read as identical without this row.
       { k: "streams_sustained_fps", label: "Streams sustained (frames/s)", best: "max", fmt: fmtInt },
-      // `cpu_fps` retired: counted relay frames/sec without the delivery gate, a loss rate with a
-      // numerator. The row above is the honest replacement.
+      // DELETED: `cpu_fps` ("CPU-bound fps (peak)"). The producer retired the metric because it counted
+      // relay frames/sec WITHOUT the delivery gate, so a gateway dropping frames could out-score one
+      // delivering all of them - a loss rate with a numerator. The frame rate a reader can act on is the
+      // row above, measured at a concurrency where every expected frame arrived.
     ],
   },
   {
@@ -1878,8 +2429,11 @@ const LANES = [
     metrics: [
       { k: "added_latency_p50_us", label: "Added latency p50 (µs)", best: "min", fmt: fmtInt },
       { k: "added_latency_p99_us", label: "Added latency p99 (µs)", best: "min", fmt: fmtInt },
-      // One reading here, at the reader-selected bound, since "what does translating cost" is only
-      // answerable by comparing against passthrough at the same bound; the full curve is drawn below.
+      /* ONE READING HERE, at the bound the reader selected, rather than the perf lane's six. The translation
+         cell carries its own frontier off its own sweep, and the question this lane answers is "what does
+         translating cost", which is only answerable by comparing against the passthrough lane AT THE SAME
+         BOUND - so the row is labelled with that bound and moves with the selector, and the whole curve is
+         drawn underneath (extra) for anyone who wants the shape. */
       { k: "frontier.selected", label: () => boundColLabel(selectedBound()), best: "max",
         cell: (rec) => frontierCell(rec, selectedBound()) },
     ],
@@ -1887,8 +2441,11 @@ const LANES = [
     cmpExtra: (j) => frontierBlock(j, { compact: true }),
   },
 ];
-/* Curve as a block for the drawer/compare panel: sparkline plus share of full rate in words. Returns
-   "" for a record with no frontier, so a legacy row has no curve rather than an empty captioned frame. */
+/* frontierBlock(rec, opts): the curve as a block, for the drawer and the compare panel. The sparkline plus
+   the share of full rate in words - the two forms of the same fact, because the picture is what makes the shape
+   legible at a glance and the sentence is what a reader can quote, sort by, or hear read aloud.
+   Returns "" for a record with no frontier, so a legacy row simply has no curve rather than an empty frame
+   captioned as if a measurement were behind it. */
 function frontierBlock(rec, opts = {}) {
   const f = frontierOf(rec);
   if (!f.length) return "";
@@ -1902,32 +2459,44 @@ function frontierBlock(rec, opts = {}) {
     `<div class="stamp muted">${esc(words)}</div></div>`;
 }
 
-/* The record a drawer/compare lane shows, chooser-aware so it agrees with the table in every mode.
-   Perf + streaming are cell-chooser driven (PERF_VIEWS); memory + xlate are not (they read l.get).
-   The returned perf record carries the chosen cell's source/dialect/ingress/egress so pathNote names
-   the same path as the table pill. */
+/* laneRecord(l, g, st): the record a drawer/compare lane shows, CHOOSER-AWARE so it agrees with the
+   TABLE in every mode. The perf + streaming lanes are cell-chooser driven (PERF_VIEWS): Peak reads the
+   best diagonal, Same reads the D→D cell, Custom reads the in→out cell, exactly what the table columns
+   render. The memory + xlate lanes are NOT chooser-driven (one matrix memory read; Translation is its
+   own openai-in cell), so they read l.get. The returned perf record is GATED identically to canonicalPerf
+   (suppressed RPS → null) and carries the chosen cell's source/dialect/ingress/egress so the pathNote
+   names the SAME path the table pill does. */
 function laneRecord(l, g, st = state) {
   if (l.key === "perf") {
     const p = chooserCellPerf(g, st);
     if (!p) return null;
-    // Metrics are already sealed envelopes and the record already self-describing (stampChosen), so
-    // nothing to gate or re-stamp here (audit #1/#6).
+    // The metrics are ALREADY sealed envelopes; nothing to gate here (the gate is upstream). The chosen
+    // record is ALREADY self-describing (path + source) — chooserCellPerf stamps a raw matrix cell through
+    // stampChosen, the ONE choke point — so there is no local provenance re-invention here (audit #1/#6).
     return { served: true, ...p };
   }
   if (l.key === "stream") return chooserCellStream(g, st);
-  // Memory is chooser-driven too: canonicalMemory would show a different cell than the table.
+  // Memory is chooser-driven too: canonicalMemory would show the drawer one cell while the table shows
+  // another, so this reads the same chosen cell the table does.
   if (l.key === "memory") return memoryFor(g, st);
   return l.get ? l.get(g) : g[l.key];
 }
-/* Sweep-curve series for the chosen cell, used by drawer + compare so the plotted curve matches the
-   table + headline. One curve, not two (sustained/max-proxy used to be drawn separately despite being
-   the same sweep read twice). Marker is the reading at the selected bound. Returns [] if absent. */
+/* perfSweepSeries(g, colors, st): the sweep-curve series for the CHOSEN cell (Peak/Same/Custom), used by
+   the drawer + compare so the plotted curve reads the SAME cell the table + headline do.
+   ONE CURVE, NOT TWO. It used to draw the sustained and max-proxy sweeps as separate series, which was
+   always a fiction: they were ONE sweep read twice, so the two curves were the same points with two
+   different markers on them, and the pair could contradict each other (a "maximum" below the sustained
+   figure). The cell now publishes that one sweep once (`rec.sweep`, every rung with its own concurrency,
+   rate, tail and failure count) and the marker is the reading AT THE SELECTED BOUND - so the dot a reader
+   sees on the curve is the number the ranked column shows, at the concurrency it was observed at.
+   Returns [] when the chosen cell is absent or carries no rungs. */
 function perfSweepSeries(g, colors, st = state) {
   const p = chooserCellPerf(g, st);
   if (!p || !Array.isArray(p.sweep) || !p.sweep.length) return [];
   const bound = selectedBound(st);
   const rd = frontierAt(frontierOf(p), bound);
-  // C5: through mval(), never a bare `.value` deref.
+  // C5: the displayable number comes through the ONE accessor (mval), never a bare `.value` deref. An
+  // absent reading marks nothing rather than marking a rung the reading does not claim.
   const v = rd ? mval(rd.rps) : null;
   return [{
     label: colors.sweepLabel || `req/s across the sweep · marked at ${boundLabel(bound)}`,
@@ -1936,15 +2505,19 @@ function perfSweepSeries(g, colors, st = state) {
     peak: v != null && rd.concurrency != null ? { rps: v, conc: rd.concurrency } : null,
   }];
 }
-/* Age of the record this lane shows, from its own source.measured_at (audit #8) - not the row badge's
-   matrix age, since a lane can project from a never-refreshed legacy suite. */
+/* laneAgeNote(j): the age of the RECORD THIS LANE SHOWS, from its own source.measured_at (audit #8).
+   The row badge ages the matrix, but a lane can project from a never-refreshed legacy suite (every
+   streaming column today comes from the stream suite) — ageing that lane by the matrix stamp overstates
+   its freshness. Empty when the record carries no stamp. */
 function laneAgeNote(j, now = Date.now()) {
   const at = j && j.source && j.source.measured_at;
   const age = at ? fmtAge(at, now) : "";
   return age ? ` · measured ${age}` : "";
 }
-// pathNote for a chooser-driven lane, always through caption(j); the mode is appended only as a UI
-// hint, never as provenance.
+/* pathNote for a chooser-driven lane: ALWAYS routed through the lane's own pathNote, i.e. through
+   caption(j), keyed by the record's source.sweep. The chosen record is stamped at the choke point
+   (stampChosen) so caption() names the exact cell; the mode is appended as a UI hint only, never as
+   provenance. */
 function lanePathNote(l, j, st = state) {
   const base = l.pathNote ? l.pathNote(j) : "";
   if (!base) return "";
@@ -1964,27 +2537,33 @@ function newState() {
     q: "",
     sortCol: "rps",
     sortDesc: true,
-    /* The tail-latency bound the board is showing. `null` is a real choice (unbounded reading), so
-       the absent state is DEFAULT_BOUND_MS, never null. A view, not a verdict: every bound is
-       published on every cell, and switching it re-ranks the board. */
+    /* THE TAIL-LATENCY BOUND THE BOARD IS SHOWING. `null` is a real choice (the unbounded reading), so the
+       absent state is DEFAULT_BOUND_MS and never null.
+       IT IS A VIEW, NOT A VERDICT. The constant it replaces, the engine's `SUSTAINED_P99_CEILING_US`,
+       decided which measurements existed and no surface said so; this decides which column opens first,
+       every bound is published on every cell, and switching it re-ranks the board in front of the reader. */
     bound: DEFAULT_BOUND_MS,
-    // Mode each chooser family was last left on, so crossing tabs restores the reader's own choice.
-    // Never encoded into the URL: a link carries one mode, for the view it names.
+    // The pinned concurrency rung (?conc=), or null for the frontier reading at the selected bound.
+    conc: null,
+    // The mode each chooser family was last left on, so crossing tabs restores the reader's own
+    // choice rather than the coercion the other family forced. Never encoded into the URL: a link
+    // carries ONE mode, for the view it names.
     modeMemo: { perf: "peak", memory: "min" },
     needStream: false,
     needXlate: false,
-    // Cell chooser (Performance + Streaming): which cell(s) of the one 6x6 run to show.
-    //   mode "peak"   -> each gateway's own best diagonal (best_cell); no dialect params
-    //   mode "same"   -> sameDialect's diagonal (X->X) for every gateway
-    //   mode "custom" -> xlateIn->xlateOut cell (any pair, incl. translation) for every gateway
-    //   mode "min"/"max" -> memory only: this gateway's lowest/highest steady-state cell
+    // CELL CHOOSER (Performance + Streaming): which cell(s) of the ONE 6x6 run to show.
+    //   mode "peak"   → each gateway's own best diagonal (best_cell); no dialect params.
+    //   mode "same"   → sameDialect's diagonal (X→X) for every gateway.
+    //   mode "custom" → xlateIn→xlateOut cell (any pair, incl. translation) for every gateway.
+    //   mode "min"/"max" → MEMORY ONLY: this gateway's lowest / highest steady-state cell.
     mode: "peak",
     sameDialect: "openai",
-    // Was the Same dialect pinned by the URL? Memory's Same default is the widest-coverage dialect,
-    // computed at boot, and a pinned ?d= must survive that seeding.
+    /* Was the Same dialect pinned by the URL? Memory's Same default is the WIDEST-COVERAGE dialect,
+       computed from the data at boot, and a pinned ?d= must survive that seeding. */
     sameDialectPinned: false,
-    // Custom mode: the pinned ingress->egress pair the whole table is projected on. Both ends fixed
-    // so every row is the identical cell; a gateway not serving this exact cell reads n/a.
+    // Custom mode: the pinned ingress->egress pair the whole table is projected on. Both ends are fixed
+    // so every row is the identical cell (apples-to-apples); in==out is that dialect's passthrough, and a
+    // gateway that does not serve this exact cell reads n/a (Performance) / is absent — kept honest.
     xlateIn: "openai",
     xlateOut: "anthropic",
     cmp: [],        /* gateway keys selected for compare, max 3 */
@@ -1994,7 +2573,8 @@ function newState() {
 }
 const state = newState();
 
-// Capability filter toggles. Governance is retired: not a filter, column, or drawer section.
+/* Capability filter toggles. Governance is RETIRED (matrix-sole-source): it is neither a filter,
+   a column, nor a drawer section - the governed suite ran for a single entrant and is not a board metric. */
 const CAPS = [["needStream", "stream"], ["needXlate", "xlate"]];
 
 /* Serialize the shareable parts of state into a clean path URL:
@@ -2007,14 +2587,19 @@ function encodeUrl(st) {
   if (st.view === HOME_VIEW) return "/";
   const p = new URLSearchParams();
   if (st.q) p.set("q", st.q);
-  const caps = CAPS.filter(([k]) => st[k]).map(([, name]) => name);
-  if (caps.length) p.set("cap", caps.join("|"));
-  // Bound is in the URL so a shared link reproduces the reading it was shared at. Encoded only on
-  // BOUND_VIEWS; `none` spells out the unbounded reading rather than an empty value.
+  // NO ?cap=. The stream/translation capability checkboxes are gone from index.html, so a cap filter in a
+  // link would hide gateways behind a control the reader cannot see or clear - the same reason the retired
+  // ?cls= / ?lang= chips are ignored below.
+  /* THE BOUND IS IN THE URL, so a shared link reproduces the reading it was shared at. Encoded only on the
+     tabs whose numbers ARE read at a bound (BOUND_VIEWS): a ?bound= on the memory tab would claim the memory
+     figures had one. `none` is the unbounded reading, spelled out rather than encoded as an empty value, so
+     the link says which of the six readings it means. The default is omitted, keeping the pristine URL clean. */
   if (BOUND_VIEWS.has(st.view) && selectedBound(st) !== DEFAULT_BOUND_MS)
     p.set("bound", selectedBound(st) == null ? "none" : String(selectedBound(st)));
-  // Clean URL omits the sort when it equals the tab's default column + direction. On frontier the
-  // default column follows the selected bound.
+  // Each perf tab's clean URL omits the sort when it equals that tab's default column + direction.
+  // On the frontier tab the default column FOLLOWS the selected bound (the tab ranks at the bound the
+  // reader chose), so the link stays clean when the sort is simply that - and carries ?sort= when the
+  // reader ranked by something else, e.g. the curve.
   const defSort = st.view === "frontier" ? boundColId(selectedBound(st)) : (VIEW_SORT[st.view] || "rps");
   const defCol = columnsFor(st.view).find((c) => c.id === defSort);
   const defDesc = defCol ? defCol.desc !== false : true;
@@ -2025,15 +2610,19 @@ function encodeUrl(st) {
   if (st.cmp.length) p.set("cmp", st.cmp.join("|"));
   if (st.cmpOpen) p.set("cv", "1");
   if (st.drawer) p.set("gw", st.drawer);
-  // Cell chooser encoding (Performance, Streaming, Memory). Clean URL omits the view's default mode;
-  // Same carries the dialect, Custom the pinned pair, so a link reproduces exactly the cell(s) shown.
-  // Pinned rung travels in the link too, so "same-concurrency comparison" links reproduce exactly.
+  // CELL CHOOSER encoding (Performance, Streaming, Memory). A clean URL omits the view's DEFAULT mode
+  // (Peak on the perf lanes, Same on memory); Same carries the picked dialect (?mode=same&d=openai),
+  // Custom the pinned pair (?mode=custom&in=anthropic&out=openai), so a link reproduces exactly the
+  // cell(s) the view shows. Memory encodes its own modes (?mode=min / ?mode=max) and never Peak.
+  // A PINNED RUNG TRAVELS IN THE LINK. The whole value of this view is being able to send someone
+  // "here is the same-concurrency comparison" and have them land on exactly it.
   if (st.conc != null) p.set("conc", String(st.conc));
   if (CHOOSER_VIEWS.has(st.view)) {
     const mode = st.view === "memory" ? memoryMode(st) : st.mode;
     if (mode !== defaultMode(st.view)) p.set("mode", mode);
     if (mode === "same") {
-      // Memory's Same default is the widest-coverage dialect, derived from the run.
+      // Memory's Same default is the widest-coverage dialect, derived from the run rather than named, so
+      // the pristine memory URL stays clean when the dialect IS that default.
       const isDefault = st.view === "memory" && st.sameDialect === widestDialect(st.data);
       if (!isDefault) p.set("d", st.sameDialect);
     } else if (mode === "custom") { p.set("in", st.xlateIn); p.set("out", st.xlateOut); }
@@ -2044,22 +2633,26 @@ function encodeUrl(st) {
   return qs ? `${path}?${qs}` : path;
 }
 
-/* Parse a path + query (+ optional legacy #hash) back into state. Bare root/unknown segment is the
-   home landing page; known category segment enters it, unknown views fall back to the default.
-   Legacy hash params (#view=matrix&sort=...) win over the query so old shared URLs keep resolving;
-   boot() then rewrites them to path form. */
+/* Parse a path + query (+ optional legacy #hash) back into state.
+   The bare root (and any unknown first segment) is the HOME landing page; a
+   known category segment enters that category, with unknown views falling back
+   to its default (the roster). Pre-path-routing links carried everything in the hash
+   (#view=matrix&sort=...); when the hash holds params, it wins over the query so
+   old shared URLs keep resolving, and boot() then rewrites them to path form. */
 function decodeUrl(pathname, search, hash) {
   const st = newState();
   const segs = String(pathname || "/").split("/").filter(Boolean);
-  // Resolve a raw view token, honoring legacy aliases so old shared/deep links keep landing.
+  // Resolve a raw view token to a real view, honoring legacy aliases (results->passthrough,
+  // charts->method) so old shared/deep links keep landing on a live tab.
   const resolveView = (v) => (VIEWS.includes(v) ? v : VIEW_ALIASES[v] || null);
   let i = 0;
   if (segs[i] && CATEGORIES[segs[i]]) {
     st.category = segs[i++];
     if (segs[i] && resolveView(segs[i])) st.view = resolveView(segs[i]);
   } else {
-    // No/unknown category segment: the home landing page. A legacy hash view= still pulls state
-    // back into the default category.
+    // No (or an unknown) category segment: the site root, i.e. the HOME landing
+    // page above the category nav. A legacy hash carrying view= (below) still
+    // pulls the state back into the default category so old links keep landing.
     st.view = HOME_VIEW;
   }
   const legacy = String(hash || "").replace(/^#/, "");
@@ -2067,25 +2660,29 @@ function decodeUrl(pathname, search, hash) {
   const list = (k) => (p.get(k) || "").split("|").filter(Boolean);
   if (p.get("view") && resolveView(p.get("view"))) st.view = resolveView(p.get("view")); /* legacy hash form */
   st.q = p.get("q") || "";
-  // Retired class/language chip filters: a stale ?cls=/?lang= is silently ignored.
-  for (const cap of list("cap")) {
-    const hit = CAPS.find(([, name]) => name === cap);
-    if (hit) st[hit[0]] = true;
-  }
-  // Bound before sort: `?sort=f50` and `?bound=50` are the same intent expressed two ways. A bound
-  // the board doesn't publish is ignored rather than honoured, falling back to the named default.
+  // Retired class/language chip filters: a stale ?cls= / ?lang= in an old shared
+  // URL is IGNORED (never an error, never an invisible filter with no UI to clear).
+  // A stale ?cap= is ignored for the same reason: its checkboxes were retired, and honouring it silently
+  // dropped every gateway without streaming/translation from the tables and charts with no UI to clear it.
+  /* THE BOUND, before the sort: a `?sort=f50` link and a `?bound=50` link are the same intent expressed
+     two ways, and the sort default below is derived from the bound on the frontier tab.
+     A bound the board does not publish is IGNORED rather than honoured - an old or hand-edited ?bound=20
+     (the retired gate's ceiling, and the one value a reader is most likely to try) must not render a column
+     labelled with a bound no reading was taken at. It falls back to the default, which is named on screen. */
   const rawBound = p.get("bound");
   if (rawBound === "none") st.bound = null;
   else if (rawBound != null && FRONTIER_BOUNDS_MS.includes(Number(rawBound))) st.bound = Number(rawBound);
-  // Accept any real, sortable column id from any tab; renderTable snaps back to the tab default if it
-  // doesn't belong. Retired sort ids map onto the column carrying that ranking now.
+  // Accept any real, sortable column id from any tab; renderTable snaps it back to the tab's
+  // default if it does not belong to the resolved view. A retired throughput sort id (?sort=rps20 /
+  // ?sort=rpsmax, in every Performance link ever shared) maps onto the column that carries that ranking now.
   const rawSort = SORT_ALIASES[p.get("sort")] || p.get("sort");
   if (rawSort && ALL_COLUMN_IDS.has(rawSort) && rawSort !== "sel") {
     st.sortCol = rawSort;
     st.sortDesc = p.get("dir") !== "asc";
   } else {
-    // No sort param: default to this view's headline column and its own natural direction (not the
-    // global default, which would sort ascending-better metrics worst-first).
+    // No sort param: default to this view's headline column AND its natural direction. Leaving
+    // sortDesc at the global default would sort added-latency defaults (sttft) descending, i.e.
+    // worst-first. Derive the direction from the column's own `desc` flag.
     st.sortCol = st.view === "frontier" ? boundColId(st.bound) : (VIEW_SORT[st.view] || "rps");
     const dc = columnsFor(st.view).find((c) => c.id === st.sortCol);
     st.sortDesc = dc ? dc.desc !== false : true;
@@ -2093,10 +2690,13 @@ function decodeUrl(pathname, search, hash) {
   st.cmp = list("cmp").slice(0, 3);
   st.cmpOpen = p.get("cv") === "1" && st.cmp.length >= 2;
   st.drawer = p.get("gw") || null;
-  // Cell chooser decoding. Clean params (mode/d/in/out) plus legacy translation params (xin/xout,
-  // retired Matched tab) - a legacy link lands in Custom mode on the pinned pair.
+  // CELL CHOOSER decoding. New clean params (mode/d/in/out) plus the legacy translation params
+  // (xin/xout, from the retired Matched tab) — a legacy ?xin/?xout link lands in Custom mode on the
+  // pinned pair, exactly the cell the old Matched tab showed.
   const rawConc = Number(p.get("conc"));
-  // Only a rung the run actually drove is accepted; otherwise falls back to the peak view.
+  // Any positive finite concurrency is accepted here: the data is not loaded when the URL is decoded, so
+  // it cannot be checked against concChoices(). A rung a gateway never drove renders as n/a for that row
+  // (frontierChooserCell), never as an interpolated or substituted reading.
   st.conc = Number.isFinite(rawConc) && rawConc > 0 ? rawConc : null;
   const mode = p.get("mode");
   if (CHOOSER_MODES.has(mode) || MEM_CHOOSER_MODES.has(mode)) st.mode = mode;
@@ -2105,10 +2705,12 @@ function decodeUrl(pathname, search, hash) {
   const cout = p.get("out") || p.get("xout");
   if (MATRIX_CELLS.includes(cin)) st.xlateIn = cin;
   if (MATRIX_CELLS.includes(cout)) st.xlateOut = cout;
-  // A legacy Matched link (xin/xout, no explicit mode) means the pinned-pair Custom view.
+  // A legacy Matched link (xin/xout with no explicit mode) means the pinned-pair Custom view.
   if (!CHOOSER_MODES.has(mode) && (p.get("xin") || p.get("xout"))) st.mode = "custom";
-  // Coerce onto the view that received it: a ?mode=peak link on the memory tab must not render a
-  // throughput-selected memory number, so it lands on Same instead.
+  /* Coerce the mode onto the view that received it. This is the shared-link case that matters: a
+     ?mode=peak link opened on the memory tab must NOT render a throughput-selected memory number, because
+     selecting on throughput and reporting memory is the defect per-cell measurement exists to remove. It
+     lands on the memory default (Min) instead. (And ?mode=min on a perf tab lands on Peak rather than reading nothing.) */
   st.mode = resolveMode(st.mode, st.view);
   return st;
 }
@@ -2130,9 +2732,11 @@ function syncUrl(push = false) {
 }
 
 const SITE_TITLE = "On the Bench · AI tool benchmarks";
-/* Document title for a view. Pure, so testable without a document. View leads (not category) since
-   it's the part that differs between open tabs, and "${category} ${view}" used to truncate to the
-   shared word in a browser tab strip. */
+/* pageTitle(st): the document title for a view. Pure, so it is testable without a document.
+   THE VIEW LEADS. It used to compose "${category} ${view}", which put the constant first and produced
+   "Gateways Frontier" - two nouns with no separator, and every tab in a browser strip truncating to the word
+   they all share. The view is the only part that differs between two open tabs or two shared links, so it
+   goes first, separated, and the category and site names follow as context. */
 function pageTitle(st = state) {
   if (st.view === HOME_VIEW) return SITE_TITLE;
   const cat = CATEGORIES[st.category] || CATEGORIES[DEFAULT_CATEGORY];
@@ -2151,13 +2755,16 @@ function applyFilters(gateways, st) {
     if (q && !g.display.toLowerCase().includes(q) && !g.key.toLowerCase().includes(q)) return false;
     if (st.needStream && !canonicalStreaming(g)) return false;
     if (st.needXlate && !hasTranslation(g)) return false;
-    // Performance/Streaming deliberately unfiltered across every chooser mode: every gateway appears,
-    // and one that doesn't serve the chosen cell reads n/a rather than disappearing.
+    // Performance/Streaming are DELIBERATELY unfiltered across every chooser mode: every gateway appears
+    // (fairness beats strict same-path — filtering a competitor out reads as hiding it), and a gateway
+    // that does not serve the chosen Same/Custom cell simply reads n/a on that row (null metrics sort
+    // last), never disappearing. Same principle for a measured streaming refusal (stream_served:false):
+    // a muted "n/a" row sunk to the bottom, matching the stream charts' "no SSE streaming" bars.
     return true;
   });
 }
-// A gateway "translates" if it has a measured openai-in translation cell, or (legacy) served the
-// xlate suite. Drives the translation tab's implicit filter and the capability toggle.
+/* A gateway "translates" if it has a measured openai-in translation cell, or (legacy, no matrix) it
+   served the xlate suite. Drives both the translation tab's implicit filter and the capability toggle. */
 function hasTranslation(g) {
   return !!(g.translation_cell || (g.xlate && g.xlate.xlate_served));
 }
@@ -2174,16 +2781,27 @@ function niceStep(raw) {
 function fmtTick(v) {
   if (v >= 1e6) return `${+(v / 1e6).toFixed(1)}M`;
   if (v >= 1e3) return `${+(v / 1e3).toFixed(1)}k`;
-  // Below 1, Math.round would label every gridline "0" for a sub-1 domain (e.g. ~0.25 req/s
-  // rungs). Two significant figures separates 0.25 from 0.04 without inventing digits.
+  // BELOW 1 THE ROUNDING ATE THE WHOLE AXIS. niceStep happily produces a sub-1 step for a sub-1
+  // domain, so a sweep of ~0.25 req/s rungs draws gridlines at 0, 0.1 and 0.2 - and Math.round
+  // labelled all three "0", a chart whose entire vertical scale reads zero for a gateway that was
+  // measurably serving. Two significant figures separates 0.25 from 0.04 without inventing digits.
   if (v > 0 && v < 1) return String(+v.toPrecision(2));
   return String(Math.round(v));
 }
 
-/* Draw at the display's real resolution, present at CSS size (avoids soft/upscaled text on
-   high-DPI displays). Returns CSS dimensions; callers must use those for geometry since
-   ctx.scale(dpr,dpr) puts the drawing coordinate system in CSS pixels. CSS size is stashed on the
-   element for later hit-testing. Idempotent: a canvas already scaled must not be scaled again. */
+/* hidpi(canvas, ctx): draw at the display's real resolution, present at CSS size.
+
+   A canvas whose backing store matches its CSS size is UPSCALED by the browser on any display with a
+   device pixel ratio above 1, so every glyph is interpolated and the text reads soft. Sizing the
+   backing store to css x dpr and scaling the context once puts one canvas pixel on one device pixel.
+
+   RETURNS THE CSS DIMENSIONS, and callers must use those for all geometry: after `ctx.scale(dpr,dpr)`
+   the drawing coordinate system is CSS pixels, so reading `canvas.width` back would be off by the
+   ratio. The CSS size is stashed on the element because hit-testing runs later, from a different
+   function, long after the backing store was resized - that is exactly where this goes wrong quietly,
+   giving a chart that looks right and whose hover lands in the wrong place.
+
+   Idempotent: re-entered on every redraw, and a canvas already scaled must not be scaled again. */
 function hidpi(canvas, ctx) {
   // `dataset` and `setTransform` are DOM/2D-context features a headless test stub need not provide,
   // and this must degrade to "draw at the size you were given" rather than throw - the geometry it
@@ -2253,8 +2871,10 @@ function drawSweep(canvas, series, opts = {}) {
   const xs = [...new Set(pts.map((p) => p.x))].sort((a, b) => a - b);
   const stride = Math.ceil(xs.length / 7);
   ctx.textAlign = "center"; ctx.textBaseline = "top";
-  // Spaced in pixels, not index: on a log axis, adjacent concurrencies can land ~4px apart, so a
-  // tick whose label would overlap the last one drawn is dropped instead.
+  // SPACED IN PIXELS, NOT IN INDEX. Taking every Nth distinct concurrency says nothing about where
+  // they land: on a log axis 12 and 14 are ~4px apart, so both labels drew on top of each other and
+  // the axis read "1214". A tick whose label cannot be placed clear of the last one drawn is dropped
+  // - the gridline is what locates the point, and an unreadable number is worse than one less tick.
   let lastX = -Infinity;
   xs.filter((_, i) => i % stride === 0 || i === xs.length - 1).forEach((v) => {
     ctx.strokeStyle = grid;
@@ -2287,8 +2907,8 @@ function drawSweep(canvas, series, opts = {}) {
     ctx.stroke();
     for (const p of sp) { ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 2.4, 0, Math.PI * 2); ctx.fill(); }
   }
-  // Published-peak markers: labeled dot at each series' peak, sitting on the curve since the
-  // headline is max() over these points.
+  /* published-peak markers: a distinct labeled dot at each series' peak (its headline value at its
+     operating concurrency). It sits ON the curve because the headline is max() over these points. */
   ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
   const placed = [];
   for (const s of drawable) {
@@ -2301,8 +2921,9 @@ function drawSweep(canvas, series, opts = {}) {
     const label = s.mark.label;
     const wide = (ctx.measureText ? ctx.measureText(label).width : label.length * 6) + 10;
     const lx0 = px + 7 + wide > W - padR ? px - 7 - wide : px + 7;
-    // Two peaks near the same place is the normal case; a label that would overlap one already
-    // placed drops below the dot instead.
+    // TWO PEAKS AT THE SAME PLACE ARE THE NORMAL CASE, not the edge case: sustained and max-proxy
+    // usually peak within a rung of each other, so both labels drew on the same line and neither was
+    // readable. A label that would overlap one already placed drops below the dot instead.
     let ly = py - 6;
     if (placed.some((q) => Math.abs(q.y - ly) < 13 && lx0 < q.x1 && lx0 + wide > q.x0)) ly = py + 16;
     placed.push({ y: ly, x0: lx0, x1: lx0 + wide });
@@ -2335,8 +2956,9 @@ function attachSweepHover(canvas, series, opts) {
     const geo = redraw();
     if (!geo) return;
     const r = canvas.getBoundingClientRect();
-    // Through the CSS size, never the backing store: hidpi() enlarged the latter by the device pixel
-    // ratio, so canvas.width/r.width would misplace the readout on a retina display.
+    // THROUGH THE CSS SIZE, never the backing store: hidpi() enlarged the latter by the device pixel
+    // ratio, so `canvas.width / r.width` would scale every hit by that ratio and put the readout on
+    // the wrong point on a retina display.
     const cssW = Number(canvas.dataset.cssw) || canvas.width;
     const cssH = Number(canvas.dataset.cssh) || canvas.height;
     const mx = (ev.clientX - r.left) * (cssW / r.width);
@@ -2352,12 +2974,37 @@ function attachSweepHover(canvas, series, opts) {
     ctx.beginPath(); ctx.arc(geo.X(best.p.x), geo.Y(best.p.y), 4.2, 0, Math.PI * 2); ctx.stroke();
     ctx.font = "11px Inter, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
     ctx.fillStyle = opts.fg || "#e6edf3";
-    // fmtY, not fmtInt: must match the peak marker's formatter (fmtRate for rate, fmtInt for p99) or
-    // the same point reads two different numbers between hover and label.
+    // fmtY, NOT fmtInt: this readout shares its series with the peak marker seven lines below, and
+    // that marker was already fixed to fmtRate. Hovering the same point printed "0 rps" while the
+    // label beside it printed "0.25" - one chart, two claims about one number. The p99 chart passes
+    // fmtInt because a sub-1 MICROSECOND tail is not a thing; the rate chart passes fmtRate.
     const fmtY = opts.fmtY || fmtInt;
     ctx.fillText(`${best.s.label}  conc ${fmtInt(best.p.x)}: ${fmtY(best.p.y)} ${opts.unit || ""}`, geo.padL + 6, 2);
   });
   canvas.addEventListener("mouseleave", redraw);
+}
+
+// A rung whose rate or tail the engine left absent (null) is NOT a 0: Y(null) drew it on the baseline, the
+// best possible tail, with a "0 µs p99" hover. Absent points are omitted, never plotted as zero.
+function sweepRpsSeries(usable) {
+  return usable.map((s) => ({ label: s.label, color: s.color,
+    points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y)),
+    mark: s.peak && s.peak.rps > 0 && s.peak.conc != null
+      ? { x: s.peak.conc, y: s.peak.rps, label: `${fmtRate(s.peak.rps)} @ c=${fmtInt(s.peak.conc)}` } : null }));
+}
+function sweepP99Series(usable) {
+  return usable.map((s) => ({ label: s.label, color: s.color,
+    points: s.sweep.map((p) => ({ x: p.conc, y: p.p99_us })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y)) }));
+}
+// The two sweep figures, each canvas named (role=img) and pointed at its hidden data table.
+function sweepChartsHtml(rps, p99, idBase) {
+  const figs = [["RPS vs concurrency", rps, "rps", fmtRate, "rps"], ["p99 latency vs concurrency (µs)", p99, "µs p99", fmtInt, "p99"]];
+  return figs.map(([title, series, unit, fmtY, tag]) => {
+    const id = `${idBase}-${tag}-data`;
+    const alt = sweepChartAlt(series, title, unit, fmtY, id);
+    return `<figure class="sweep"><figcaption>${esc(title)}</figcaption>` +
+      `<canvas width="520" height="230" role="img" aria-label="${esc(alt.label)}" aria-describedby="${esc(id)}"></canvas>${alt.table}</figure>`;
+  }).join("");
 }
 
 /* Render both sweep charts (rps and p99 vs concurrency) into a container.
@@ -2368,24 +3015,26 @@ function renderSweepCharts(container, sweepSeries, theme) {
     container.innerHTML = `<p class="muted">No sweep data recorded.</p>`;
     return;
   }
-  container.innerHTML =
-    `<figure class="sweep"><figcaption>RPS vs concurrency</figcaption><canvas width="520" height="230"></canvas></figure>` +
-    `<figure class="sweep"><figcaption>p99 latency vs concurrency (µs)</figcaption><canvas width="520" height="230"></canvas></figure>`;
+  const rps = sweepRpsSeries(usable);
+  const p99 = sweepP99Series(usable);
+  container.innerHTML = sweepChartsHtml(rps, p99, container.id || "sweep");
   const [c1, c2] = container.querySelectorAll("canvas");
-  // Published peak on the RPS curve, at (peak.conc, peak.rps) - by construction one of the probed
-  // sweep points.
-  const rps = usable.map((s) => ({ label: s.label, color: s.color,
-    points: s.sweep.map((p) => ({ x: p.conc, y: p.rps })),
-    mark: s.peak && s.peak.rps > 0 && s.peak.conc != null
-      ? { x: s.peak.conc, y: s.peak.rps, label: `${fmtRate(s.peak.rps)} @ c=${fmtInt(s.peak.conc)}` } : null }));
-  const p99 = usable.map((s) => ({ label: s.label, color: s.color, points: s.sweep.map((p) => ({ x: p.conc, y: p.p99_us })) }));
-  // Both charts share one concurrency domain so they stack and align vertically.
+  // Mark the PUBLISHED peak on the RPS curve: a labeled dot at (peak.conc, peak.rps). By construction
+  // that point is one of the probed sweep points (the headline is max() over this same array), so the
+  // marker lands ON the curve and names the operating concurrency.
+  // SAME x-axis: both charts share ONE concurrency domain (min..max across BOTH series) so they stack
+  // and align vertically. Compute it from every probed concurrency on either chart.
   const allX = [...rps, ...p99].flatMap((s) => s.points.map((p) => p.x));
   const xDomain = allX.length ? [Math.min(...allX), Math.max(...allX)] : null;
   const o1 = { yLabel: "RPS", unit: "rps", fmtY: fmtRate, xDomain, ...theme };
   const o2 = { yLabel: "p99 (µs)", unit: "µs p99", fmtY: fmtInt, xDomain, ...theme };
   drawSweep(c1, rps, o1); attachSweepHover(c1, rps, o1);
   drawSweep(c2, p99, o2); attachSweepHover(c2, p99, o2);
+  // A compared gateway with no sweep is NAMED, not silently left off the curves.
+  const without = sweepSeries.filter((s) => !(s.sweep && s.sweep.length) && s.label);
+  if (without.length)
+    container.insertAdjacentHTML("beforeend",
+      `<p class="muted">No sweep recorded on the chosen cell for: ${without.map((s) => esc(s.label)).join(", ")}.</p>`);
 }
 
 function chartTheme() {
@@ -2393,14 +3042,17 @@ function chartTheme() {
   const cs = getComputedStyle(document.documentElement);
   return {
     fg: cs.getPropertyValue("--fg-dim").trim() || "#9aa4b2",
-    // Data labels are not axis chrome: `--fg-dim` is for gridlines/ticks; content gets `--fg`.
+    // THE DATA LABELS ARE NOT AXIS CHROME. `--fg-dim` is the muted grey for gridlines and tick marks;
+    // using it for the gateway names and their values renders the actual content at chrome contrast,
+    // which reads as blurry even when the pixels are sharp. Those get `--fg`, the body text colour.
     ink: cs.getPropertyValue("--fg").trim() || "#e6edf3",
     grid: cs.getPropertyValue("--grid").trim() || "rgba(154,164,178,.18)",
   };
 }
 
-// Theme switcher: persist the choice, flip data-theme on <html>, and re-render so canvas charts
-// re-read the palette. Initial data-theme is set by the inline <head> script before first paint.
+/* Theme switcher: persist the choice, flip data-theme on <html>, and re-render
+   so the canvas charts re-read the palette via chartTheme(). The initial
+   data-theme is set by the inline <head> script before first paint. */
 function initThemeToggle() {
   const btn = document.getElementById("theme-toggle");
   if (!btn) return;
@@ -2413,9 +3065,15 @@ function initThemeToggle() {
 }
 
 /* ---- results table ---------------------------------------------------------- */
-// Per-tab caption states in one line which path the tab's numbers are. Short, one-idea-per-line.
-// Streaming may be matrix-sourced or stream-fallback (standalone suite); the caption must not claim
-// "the one 6x6 run" when it's actually fallback.
+/* Per-tab caption: states in one line exactly which path this tab's numbers are, so a reader never
+   has to guess what the ranking compares. No em dashes (house style). */
+// Short, one-idea-per-line captions (rendered on their own lines). Keep each line terse and concrete.
+// Per-mode caption for the cell-chooser tabs: says in one line exactly which cell(s) of the ONE 6x6 run
+// the table is showing, so a reader never has to guess what the numbers compare.
+// The streaming numbers may be matrix-sourced (projected from the 6x6 diagonal cell) OR stream-fallback
+// (a standalone stream suite, not the matrix). The caption must NOT hard-claim "the one 6x6 run" for
+// streaming when the data is actually fallback (finding 12). Summarize the actual provenance across the
+// gateways so the lead line is honest: "the one 6x6 run" only when streaming really came from the matrix.
 function streamingProvenance(data) {
   const kinds = (data && data.gateways || []).map((g) => g.streaming && g.streaming.source && g.streaming.source.kind).filter(Boolean);
   if (!kinds.length) return { all: null };
@@ -2423,9 +3081,11 @@ function streamingProvenance(data) {
   const allFallback = kinds.every((k) => k !== "matrix");
   return { all: allMatrix ? "matrix" : allFallback ? "fallback" : "mixed" };
 }
-// Lead line for a chooser caption: latency+throughput is always the 6x6 matrix; streaming depends on
-// provenance (matrix/fallback/mixed).
-// Age of the newest record this lane shows across the board (audit #8). "" if no gateway stamps it.
+// The lead line for a chooser caption. For latency+throughput it is always the 6x6 matrix. For streaming
+// it depends on provenance: matrix → "the one 6x6 run"; fallback → the standalone stream suite (honest);
+// mixed → say so rather than over-claim.
+/* laneAgeSummary(data, lane): the age of the NEWEST record this lane actually shows across the board,
+   from g.lane_measured_at (audit #8). "" when no gateway stamps that lane. */
 function laneAgeSummary(data, lane, now = Date.now()) {
   const stamps = ((data && data.gateways) || [])
     .map((g) => g.lane_measured_at && g.lane_measured_at[lane]).filter(Boolean)
@@ -2435,27 +3095,50 @@ function laneAgeSummary(data, lane, now = Date.now()) {
   return age ? `, measured ${age}` : "";
 }
 function chooserLead(view, data) {
-  // Frontier's readings ARE the latency-bounded throughput, so no separate latency column to promise.
+  // The frontier tab shows no latency column (its readings ARE the latency-bounded throughput), so its lead
+  // must not promise one - the cell chooser it describes is the same one, though.
   if (view === "frontier") return "Per-cell throughput from the one 6x6 run; the cell chooser picks which cell every row reads.";
-  if (view !== "streaming") return "Per-cell latency + throughput from the one 6x6 run.";
+  if (view !== "streaming") {
+    // best_cell can be a perf-suite FALLBACK (no 6x6 cell for that gateway yet); claiming "the one 6x6 run"
+    // for every row would contradict that row's own pill tooltip.
+    const kinds = ((data && data.gateways) || []).map((g) => g.best_cell && g.best_cell.source && g.best_cell.source.kind).filter(Boolean);
+    if (kinds.some((k) => k !== "matrix"))
+      return "Per-cell latency + throughput from the 6x6 run, except rows starred * (a standalone perf-suite fallback; per-row provenance on the Tested-on pill).";
+    return "Per-cell latency + throughput from the one 6x6 run.";
+  }
   const prov = streamingProvenance(data).all;
   if (prov === "matrix") return "Per-cell streaming from the one 6x6 run.";
   if (prov === "mixed") return "Streaming: some gateways from the 6x6 run, some from the standalone stream suite (per-row provenance in the drawer).";
-  // Age by the stream suite's own stamp, not the matrix's, since this tab isn't matrix-sourced.
+  // fallback (or no data yet): the streaming figures come from the standalone stream suite, not the matrix.
+  // Age this tab by the STREAM SUITE's own stamp: the row badge ages the matrix, which this tab does not
+  // show, so quoting the matrix age here would overstate the freshness of every number on it.
+  // laneAgeSummary contributes ", measured 23 hours ago", so the clause it attaches to must not already
+  // end in "measured", or the two collide into "measured, measured 23 hours ago".
   return `Streaming from the standalone stream suite, not the 6x6 matrix${laneAgeSummary(data, "stream")}; each row's pill names the passthrough it ran on.`;
 }
-/* A tab's prose split as `{ lead, notes }`: lead is 1-2 plain sentences above the table saying what
-   it shows; notes (how to read it, what a marker means) render below as reference material, beside
-   the engine's definitions. Nothing deleted, only moved - notes carry findings, not decoration.
-   `captionText(c)` flattens both back into one string for tests that don't care which half says it. */
+/* A TAB'S PROSE, SPLIT BY WHERE IT BELONGS ON THE PAGE: `{ lead, notes }`.
+   THE OWNER'S INSTRUCTION, VERBATIM: "1-2 sentence english, definitions go below data table like
+   references." The Frontier tab was six paragraphs deep before the first number - a reader who came for the
+   board had to read an essay to reach it, and a reader who wanted a definition had already skipped the
+   essay. So `lead` is one or two plain sentences saying WHAT THIS TAB SHOWS and nothing else, rendered
+   above the table; `notes` is everything else - how to read it, what a marker means, what a measured 0 is -
+   rendered BELOW the table as reference material, beside the engine's own definitions.
+   NOTHING IS DELETED, ONLY MOVED. The notes carry findings, not decoration: the "0 · no rung held this
+   tail" distinction is the difference between a damning measurement and a shrug, and dropping it to shorten
+   the page would flatter exactly the slowest gateways on the board. Footnote position is right for it -
+   the reader who wants it goes looking, and the reader who wants numbers hits them immediately.
+   `captionText(c)` flattens the two halves back into one string, for a test that asserts a claim is made
+   SOMEWHERE on the tab without pinning which half says it. */
 function captionText(c) { return [...c.lead, ...c.notes].join(" "); }
 function chooserCaption(view, st, data) {
   const lead = chooserLead(view, data);
-  // HELD_REFERENCE belongs only to the tab that renders the shape column.
+  // HELD_REFERENCE belongs to whichever tab actually renders the shape column. Performance does; Streaming
+  // has no frontier column at all, and explaining a number that is not on the page is noise.
   const extra = view === "performance" ? [HELD_REFERENCE] : [];
   if (st.mode === "peak")
     return { lead: [lead,
-      // Not "best"/"peak": bestCell is representative, not a maximum. See CHOOSER_MODES.
+      // NOT "best" and NOT "peak": bestCell prefers the openai diagonal and otherwise ranks on added
+      // latency, so this is a representative cell, not a maximum. See CHOOSER_MODES.
       "Each gateway on its own representative same-dialect diagonal; the pill shows which dialect."],
       notes: [...extra, "The cell is this gateway's OpenAI passthrough where it serves one, otherwise its lowest-added-latency diagonal. It is not its highest-throughput cell: the chooser never reads a throughput number, so changing the tail-latency bound cannot change which cell a row shows.",
         "Everyone appears. Pick Same for one shared dialect, or Custom for any ingress→egress cell."] };
@@ -2471,16 +3154,17 @@ function chooserCaption(view, st, data) {
     : { lead: [lead, `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`],
         notes: [...extra, "Every row is the identical cell, so it is apples-to-apples; a gateway that does not serve it reads n/a."] };
 }
-// AUDIT #14: window durations render from the data, never hard-coded.
+// AUDIT #14: the window durations render from the data (idle_window_s / recovery_window_s), never
+// hard-coded — the harness makes them tunable and the caption must describe the run that happened.
 function memoryCaption(data = state.data, st = state) {
   const w = boardMemWindows(data);
   const I = memWindowLabel(w.idle), R = memWindowLabel(w.recovery);
   if (!hasPerCellMemory(data)) {
     return {
-      lead: [`An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (${I} idle → load → ${R} recovery).`],
+      lead: [`An identical fixed load on each gateway's PEAK cell, measured on a fresh cold-restarted process (${I} idle → load → recovery, reported over its final ${R}).`],
       notes: [
         `Same load recipe for every gateway, so it is apples-to-apples; only the cell differs (shown under Tested on).`,
-        `Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered @${R}: RSS ${R} after the load stops: does it release?`,
+        `Idle: cold-start RSS (median, no load). Peak: max RSS under the fixed load. Recovered: median RSS over the final ${R} of recovery after the load stops: does it release?`,
         "This run measured one cell per gateway, chosen by throughput, so there is no cell to choose between here. Lower is better on every column; a gateway with no served cell reads n/a.",
       ] };
   }
@@ -2496,9 +3180,15 @@ function memoryCaption(data = state.data, st = state) {
       : `Every gateway on the ${inL}→${outL} cell: client speaks ${inL}, upstream speaks ${outL}, the gateway translates both ways.`,
   }[mode];
   const flagged = ((data && data.gateways) || []).filter(neverPlateaued);
-  // States the count and where to read the rate, not a verdict.
+  // States the count and where to read the rate. It used to say "never settled ... (flagged by name)":
+  // a verdict, and a pointer to a name-column pill that no longer exists.
   const never = flagged.length
-    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} reached no steady state on any cell, so no steady-state number is published for ${flagged.length === 1 ? "it" : "them"} and the Growth column carries the rate instead: their memory under load is bounded by how long the load ran, not by the gateway.`
+    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} reached no steady state on any cell, so no steady-state number is published for ${flagged.length === 1 ? "it" : "them"}${
+        // Min/Max rank steady states, so a gateway with none has no cell to pick there and its whole row is
+        // n/a (chosenMemory never substitutes one). Only Same/Custom put the climbing rate in Growth.
+        mode === "min" || mode === "max"
+          ? `; Min and Max rank steady states, so ${flagged.length === 1 ? "its row reads" : "their rows read"} n/a here - switch to Same or Custom to see the rate in the Growth column`
+          : " and the Growth column carries the rate instead"}: their memory under load is bounded by how long the load ran, not by the gateway.`
     : "";
   return {
     lead: [
@@ -2507,14 +3197,22 @@ function memoryCaption(data = state.data, st = state) {
     ],
     notes: [
       "Nothing is averaged across cells; the chooser picks which cell each row shows.",
-      // Window lengths are board facts stated once here rather than repeated per row.
-      `Every RSS curve is one process's whole lifetime, left to right: ${memWindowLabel(w.idle)} at rest before the first request, then the load run to steady state, then ${R} of recovery after it stops. Those windows are the same for every gateway. The break in the middle of each curve is the time axis changing scale between them - the at-rest window is far shorter than the load run, and is drawn wider than its duration earns so its shape stays legible. Hover a curve for its figures, or click the row for the two windows full size and separated.`,
-      `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode - which is why the Idle column is the median across ALL of a gateway's cells while its curve is the chosen cell's own window; the two can differ. Growth is around zero once a gateway has settled, and is the rate RSS was still moving at when no steady state was reached. Recovered @${R}: RSS ${R} after the load stops, which on a gateway still releasing is not the last figure its curve reaches.${never}`,
+      /* THE WINDOW LENGTHS ARE BOARD FACTS, STATED ONCE HERE. Every row's curve used to print "(360 s)" and
+         "over 59 s at rest" - one property of the harness, identical on all fourteen rows, repeated fourteen
+         times inside the cell whose height was the complaint. The RSS curve column is the same lifecycle for
+         every gateway; only the shape differs, so only the shape is per-row. */
+      `Every RSS curve is one process's whole lifetime, left to right: ${memWindowLabel(w.idle)} at rest before the first request, then the fixed-length load (the same duration for every gateway and cell), then the recovery watch after it stops. Those windows are the same for every gateway. The break in the middle of each curve is the time axis changing scale between them - the at-rest window is far shorter than the load run, and is drawn wider than its duration earns so its shape stays legible. Hover a curve for its figures, or click the row for the two windows full size and separated.`,
+      `Idle is sampled cold, before the first request, so no cell is involved and it is valid in every mode - which is why the Idle column is the median across ALL of a gateway's cells while its curve is the chosen cell's own window; the two can differ. Growth is around zero once a gateway has settled, and is the rate RSS was still moving at when no steady state was reached. Recovered: median RSS over the final ${R} of the recovery watch, which on a gateway still releasing is not the last figure its curve reaches.${never}`,
       "Lower is better on every column. A gateway that does not serve the chosen cell reads n/a and sinks to the bottom; nothing is substituted from another cell.",
     ] };
 }
-// Frontier tab's prose: states the finding the tab exists for (two gateways with similar headline
-// rates can be different machines). Two sentences on top; rest is reference material below (captionText).
+/* frontierCaption(st, data): the Frontier tab's prose. It states the finding the tab exists for - that two
+   gateways with similar headline rates can be completely different machines - and names the evidence on the
+   row, because a table of six rates with no explanation of what varies across them is the same "six numbers"
+   that fails the reader.
+   IT USED TO BE SIX PARAGRAPHS ABOVE THE FIRST NUMBER. Every one of them was load-bearing and every one of
+   them was in the wrong place: the reader who came to compare fourteen gateways had to scroll an essay to
+   reach the table. Two sentences stay on top; the rest is reference material below it (see captionText). */
 function frontierCaption(st = state, data = state.data) {
   const sel = selectedBound(st);
   return {
@@ -2530,40 +3228,71 @@ function frontierCaption(st = state, data = state.data) {
       chooserLead("frontier", data),
     ] };
 }
-// The tab's `{ lead, notes }` from whichever caption function owns the view. One dispatch point.
+/* captionFor(view, st, data): the tab's `{ lead, notes }`, from whichever caption function owns the view.
+   ONE dispatch point, so the renderer and any test read the same split. */
 function captionFor(view, st = state, data = state.data) {
   return view === "memory" ? memoryCaption(data, st)
     : view === "frontier" ? frontierCaption(st, data)
     : chooserCaption(view, st, data);
 }
-// Lead above the table, everything else below it as a collapsed fold beside the engine's definitions.
+/* updateTableCaption(view): the lead ABOVE the table, everything else BELOW it.
+   See the `{ lead, notes }` note on captionText for why. The notes render as a collapsed fold beside the
+   engine's definitions rather than as loose paragraphs: below the table they cost nothing until asked for,
+   which is what lets them stay complete instead of being trimmed for length. */
 function updateTableCaption(view) {
   const el = document.getElementById("table-caption");
   if (!el) return;
   const c = captionFor(view, state, state.data);
   el.innerHTML = c.lead.map((l) => esc(l)).join("<br>");
   const defs = document.getElementById("table-defs");
-  // Unknown view contributes no prefixes and renders nothing rather than everything.
+  // The engine's own definitions for the metrics THIS tab shows. An unknown view contributes no prefixes and
+  // renders nothing rather than everything.
   if (defs) defs.innerHTML = notesFold(c.notes) + definitionsFold(DEFINITION_PREFIXES[view] || [], state.data);
 }
-// "How to read this table" fold. Returns "" for a view with nothing to say.
+/* notesFold(notes): the "How to read this table" reference block. Collapsed, one line of cost until opened.
+   Returns "" for a view with nothing to say rather than an empty fold with a summary and no body. */
 function notesFold(notes) {
   const lines = (notes || []).filter((n) => typeof n === "string" && n.trim());
   if (!lines.length) return "";
   return `<details class="metric-defs table-notes"><summary>How to read this table</summary>` +
     lines.map((l) => `<p>${esc(l)}</p>`).join("") + `</details>`;
 }
-/* Memory tab has no chart block: tables are tables, every chart lives on the Charts tab. Used to
-   append two static PNGs that couldn't follow the cell selector above them (stale images implying
-   they described the current selection). One live place for charts avoids that. */
+/* THE MEMORY TAB HAS NO CHART BLOCK, and that is the shape of the whole board now: tables are tables,
+   and every chart lives on the Charts tab.
+
+   It used to append two static PNGs under the memory table. They could not follow the cell selector
+   sitting directly above them - a reader switching from Min to Max cell watched the table change and
+   the pictures stay put, which is worse than having no pictures: it implies the images describe the
+   selection when they describe whatever was rendered hours earlier. One place for charts, all of them
+   live, is both simpler to read and impossible to get out of sync. */
 
 /* ---- DECLARED COLUMN GEOMETRY -------------------------------------------------
-   Column widths were auto-layout (widest rendered cell), so switching filters/modes re-measured and
-   reflowed every column even though the measurement itself hadn't changed. Widths are declared here
-   instead, with `table-layout: fixed` (style.css) using them directly; excess width distributes
-   proportionally so the table still fills its container regardless of content.
-   One table, not one per column definition, since total width has to fit a narrow desktop as a whole.
-   `tested` is capped narrow (an annotation, not a reading); readings never shrink. */
+   THE OWNER: "changing filters shouldn't change column widths, just an annoyance." Measured across filter
+   combos on the live board, every table view drifted at every width. The frontier tab at 1440, first body
+   row, per column:
+       mode=peak   bound=10   36 165  90 118 118 118 118 118  93 165
+       mode=same   bound=10   36 165  84 119 119 119 119 119  93 167
+       mode=custom bound=10   36 165 144 125 125 125  80  80  87 173
+   Nothing about the measurement changed - only which cell each row reads - and the whole grid re-solved.
+
+   THE CAUSE IS AUTO TABLE LAYOUT: a column is as wide as its widest RENDERED cell, so a filter that swaps
+   `20,119` for `20,389`, or a passthrough pill for `OpenAI→Bedrock Converse`, or a number for `no rung held
+   this tail`, re-measures every column. And the widest thing a column CAN hold is usually not in the combo
+   on screen - `Added latency p99` holds 2,083,807 for one-api and 232,065 for plano - so sizing from what is
+   rendered cannot be stable even in principle.
+
+   SO THE WIDTH IS A PROPERTY OF THE COLUMN, declared here, and `table-layout: fixed` (style.css) makes the
+   browser use it instead of consulting a cell. Excess width is then distributed proportionally over the
+   declared widths, which is also content-independent, so the table still fills its container and no filter
+   can move a column sideways.
+
+   IT IS ONE TABLE, NOT ONE PER COLUMN DEFINITION, deliberately: geometry is a property of the table as a
+   whole (the frontier's ten columns have to add up to something that fits a narrow desktop), and spreading
+   the numbers across forty column definitions would make that sum impossible to see or to check.
+   THE TWO OVER-WIDE COLUMNS ARE THE ONES THAT GIVE, which is the owner's other complaint - "column widths -
+   Tested on is huge (cos of 1 large openai > cohere)" - seen from the other side: `tested` is an annotation
+   and is narrower than any column of readings, and the curve columns are sized to their own SVG. The numbers
+   are never what shrinks. */
 const COL_W_DEFAULT = "7rem";
 const COL_WIDTHS = {
   sel: "2.4rem",   // the compare checkbox; matches the sticky rule in style.css
@@ -2586,21 +3315,76 @@ function colWidth(c) { return COL_WIDTHS[c.id] || COL_W_DEFAULT; }
 function colgroupHtml(cols) {
   return cols.map((c) => `<col style="width:${colWidth(c)}">`).join("");
 }
-/* Table head, one row normally and two when any column declares a `group` (avoids repeating the same
-   shared clause across Frontier's six reading columns). A group-less column spans both rows via
-   rowspan=2; consecutive columns sharing a group string collapse into one colspan cell. The group
-   cell is not sortable - sort affordance stays on each column's own header in the second row. */
+/* ---- KEYBOARD AND SCREEN-READER ACCESS ------------------------------------------------------------
+   The table sort, the row -> drawer navigation and the charts were mouse-only: a header was a bare <th>
+   with a click handler, a row a bare <tr>, and every chart a <canvas> with no text at all. These helpers
+   are the pure half of the fix (the DOM wiring calls them), so the suite can hold each rule directly. */
+// Enter or Space activates a focusable non-button control, exactly as they activate a <button>.
+function isActivateKey(ev) {
+  return !!ev && (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar");
+}
+// The aria-sort token for a header: the sorted column says its direction, every other sortable one "none".
+function ariaSortFor(sorted, desc) {
+  return sorted ? (desc ? "descending" : "ascending") : "none";
+}
+/* focusTrapNext(list, active, shift): where Tab must go to keep focus inside an open dialog, or null to let
+   the browser move it normally. Wraps at both ends; a focus that has escaped the dialog is pulled back in. */
+function focusTrapNext(list, active, shift) {
+  if (!list || !list.length) return null;
+  const i = list.indexOf(active);
+  if (i < 0) return shift ? list[list.length - 1] : list[0];
+  if (shift && i === 0) return list[list.length - 1];
+  if (!shift && i === list.length - 1) return list[0];
+  return null;
+}
+/* chartDataTable(id, caption, headers, rows): the accessible DATA EQUIVALENT of a canvas chart - a visually
+   hidden table (class sr-only) the canvas points at through aria-describedby. Same numbers, same formatting
+   as the labels drawn on the chart, so a screen reader reads what a sighted reader sees. */
+function chartDataTable(id, caption, headers, rows) {
+  return `<table id="${esc(id)}" class="sr-only"><caption>${esc(caption)}</caption>` +
+    `<thead><tr>${headers.map((h) => `<th scope="col">${esc(h)}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+// The Charts tab's ranked bars: the canvas's accessible name, and its data table in drawn (ranked) order.
+function rankedBarsAlt(rows, metric, id = "chart-canvas-data") {
+  const label = `${metric.label}${metric.log ? " (log scale)" : ""}: ranked bar chart of ${rows.length} gateway${rows.length === 1 ? "" : "s"}, ` +
+    `led by ${rows.length ? `${rows[0].name} at ${fmtChartValue(rows[0].v, metric.unit)}` : "none"}. The full values are in the table that follows.`;
+  const table = chartDataTable(id, `${metric.label} by gateway`, ["Rank", "Gateway", metric.label],
+    rows.map((r, i) => [String(i + 1), r.name, fmtChartValue(r.v, metric.unit)]));
+  return { label, table };
+}
+// A sweep chart (one of the drawer/compare pair): accessible name and a series x concurrency data table.
+function sweepChartAlt(series, title, unit, fmtY, id) {
+  const pts = series.reduce((n, s) => n + s.points.length, 0);
+  const label = `${title}: line chart of ${series.map((s) => s.label).join(", ")} (${pts} probed point${pts === 1 ? "" : "s"}). The values are in the table that follows.`;
+  const rows = [];
+  for (const s of series) for (const p of s.points) rows.push([s.label, fmtInt(p.x), `${fmtY(p.y)} ${unit}`]);
+  return { label, table: chartDataTable(id, title, ["Series", "Concurrency", title.split(" vs ")[0]], rows) };
+}
+
+/* theadHtml(cols, st): the table head, ONE row normally and TWO when any column declares a `group`.
+   WHY A SPANNING HEADER AT ALL: the Frontier tab's six reading columns each read "Req/s · 99% under N ms" -
+   thirty of the same words in one header strip, which is the owner's "make Req/s 99% a header that spans all
+   columns vs repeating?". The shared clause is stated once and each sub-header carries only its own bound.
+   A column with NO group spans both rows (rowspan=2) so it stays vertically aligned with the grouped pair;
+   consecutive columns sharing the same group string collapse into one colspan cell. The group cell is
+   deliberately NOT sortable and carries no data-col: the sort affordance, the `sorted` class and the
+   direction arrow all stay on the column's OWN header in the second row, so switching the bound still marks
+   and re-ranks the column the reader clicked. */
 function theadHtml(cols, st = state) {
   const th = (c) => {
     const sorted = st.sortCol === c.id;
     const dir = sorted ? `<span class="dir">${st.sortDesc ? " ▾" : " ▴"}</span>` : "";
-    // AUDIT #14: label/title may be a function so wording depending on a tunable harness window
-    // renders from the data instead of hard-coding the default.
+    // AUDIT #14: label/title may be a FUNCTION so a column whose wording depends on a tunable harness
+    // window (the memory windows) renders from the data instead of hard-coding the default.
+    // A SORTABLE header is a keyboard control: focusable, and it says which way the table is sorted.
+    const kb = c.sortable === false ? "" : `tabindex="0" aria-sort="${ariaSortFor(sorted, st.sortDesc)}" `;
     return `<th data-col="${c.id}" class="${sorted ? "sorted" : ""}${c.sortable === false ? " nosort" : ""}" ` +
-      `${c.group ? "" : `rowspan="2" `}title="${esc(txt(c.title))}">${esc(txt(c.label))}${dir}</th>`;
+      `${c.group ? "" : `rowspan="2" `}${kb}title="${esc(txt(c.title))}">${esc(txt(c.label))}${dir}</th>`;
   };
   if (!cols.some((c) => c.group)) {
-    // No groups: one row, no rowspan (else a phantom second row pushes body rows down).
+    // No groups on this tab: one row, and no rowspan (a rowspan of 2 over a one-row head would reserve a
+    // phantom second row and push every body row down by one header's height).
     return "<tr>" + cols.map((c) => th(c).replace(' rowspan="2"', "")).join("") + "</tr>";
   }
   let top = "", sub = "";
@@ -2632,15 +3416,21 @@ function renderTable() {
   // Snap the sort onto this tab if the current column does not belong to it (e.g. after switching
   // tabs, or a cross-tab sort id arrived from a shared URL).
   if (TABLE_VIEWS.has(state.view) && !cols.some((c) => c.id === state.sortCol && c.sortable !== false)) {
-    state.sortCol = VIEW_SORT[view] || cols[cols.length - 1].id;
+    // The Frontier tab's default sort is the SELECTED bound's column (as decodeUrl and encodeUrl both say),
+    // not VIEW_SORT's fixed f10: snapping to f10 ranked by 10 ms while another bound was highlighted, and
+    // encodeUrl then emitted ?sort=f10 as a non-default sort.
+    state.sortCol = view === "frontier" ? boundColId(selectedBound(state)) : (VIEW_SORT[view] || cols[cols.length - 1].id);
     const dc = cols.find((c) => c.id === state.sortCol);
     state.sortDesc = dc ? dc.desc !== false : true;
   }
   updateTableCaption(view);
 
   thead.innerHTML = theadHtml(cols, state);
-  // Declared geometry, re-stated when the column set changes. <colgroup> must be the table's first
-  // child so it's created once and refilled. Without it, table-layout:fixed divides width equally.
+  /* THE DECLARED GEOMETRY, re-stated whenever the column set changes. A <colgroup> has to be a child of the
+     <table> and the first one at that, so it cannot ride along in theadHtml's string; it is created once and
+     refilled, rather than replaced, so nothing else on the table is disturbed. Without it `table-layout:
+     fixed` would divide the width equally between the columns - the frontier's checkbox as wide as its
+     gateway names - so the CSS rule and this element are one mechanism and neither works alone. */
   const cg = table.querySelector("colgroup") ||
     table.insertBefore(document.createElement("colgroup"), table.firstChild);
   cg.innerHTML = colgroupHtml(cols);
@@ -2653,11 +3443,17 @@ function renderTable() {
   const tiebreak = cols.find((c) => c.id === VIEW_TIEBREAK[view]);
   rows = rows.slice().sort(rowComparator(col, state.sortDesc, tiebreak));
 
-  // Rows the sorted column cannot actually separate (closer than rig resolution): their order
-  // records which box they landed on, not a finding. Only the sorted column is considered.
+  /* WHICH ROWS THE SORTED COLUMN CANNOT ACTUALLY SEPARATE.
+     The table ranks by one column, and a rank implies the order means something. When two adjacent
+     values are closer than the rig can resolve (rigResolutionPct, derived from how far identical
+     boxes drift on the same qualification), the order between them is which box they landed on -
+     not a finding. Marking them is the difference between publishing a measurement and publishing
+     a coin toss with a decimal point.
+     Only the SORTED column is considered: a tie on some other column is not what the reader is
+     being shown a ranking of. */
   const tiedWithPrev = tiedRuns(rows, col, state, rigResolutionPct(state.data));
   tbody.innerHTML = rows.map((g) =>
-    `<tr data-gw="${esc(g.key)}"${tiedWithPrev.has(g.key) ? ' class="tied-above" title="Within the rig\u2019s own measurement resolution of the row above - this ordering is not a finding"' : ""}>` + cols.map((c) => {
+    `<tr data-gw="${esc(g.key)}" tabindex="0"${tiedWithPrev.has(g.key) ? ' class="tied-above" title="Within the rig\u2019s own measurement resolution of the row above - this ordering is not a finding"' : ""}>` + cols.map((c) => {
       const sc = c.id === state.sortCol ? " sorted-col" : "";
       if (c.render) {
         // render columns emit their own <td>; tint the sorted one by injecting the class.
@@ -2667,48 +3463,74 @@ function renderTable() {
     }).join("") + "</tr>"
   ).join("");
   // Empty-state line: filters that clear the table must never render as a bare header over nothing.
-  // Rows are unfiltered by the chosen cell (a gateway not serving the pinned pair reads n/a instead
-  // of disappearing), so this can only happen via search/capability filters.
+  // There is no "no gateway serves this pair" case to branch on. `view` is coerced to a TABLE_VIEWS
+  // member at the top of this function, and "translation" is not one - it was retired when the pinned
+  // pair became a chooser MODE rather than a tab, so that arm had been unreachable ever since. A branch
+  // that cannot be taken is not a safety net; it is a claim about the UI that stopped being true, and
+  // the rows are unfiltered by the chosen cell anyway: a gateway that does not serve the pinned pair
+  // stays on the board reading n/a, deliberately, so the table can never be emptied by the chooser.
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="${cols.length}" class="na">No gateways match the current filters.</td></tr>`;
   }
 
   thead.querySelectorAll("th").forEach((th) => {
-    th.addEventListener("click", () => {
+    const sortBy = () => {
       const id = th.dataset.col;
       const c = cols.find((x) => x.id === id);
-      if (!c || c.sortable === false) return;
+      if (!c || c.sortable === false) return false;
       if (state.sortCol === id) state.sortDesc = !state.sortDesc;
       else { state.sortCol = id; state.sortDesc = !!c.desc; }
       renderTable(); syncUrl(true);
+      return true;
+    };
+    th.addEventListener("click", sortBy);
+    th.addEventListener("keydown", (ev) => {
+      if (!isActivateKey(ev)) return;
+      ev.preventDefault();
+      // The head is rebuilt by the sort, so focus is put back on the same column's new header.
+      const id = th.dataset.col;
+      if (sortBy()) { const again = thead.querySelector(`th[data-col="${id}"]`); if (again) again.focus(); }
     });
   });
   tbody.querySelectorAll("input[data-cmp]").forEach((cb) => {
     cb.addEventListener("change", () => toggleCompare(cb.dataset.cmp));
     cb.addEventListener("click", (ev) => ev.stopPropagation());
   });
-  tbody.querySelectorAll("tr").forEach((tr) => {
+  tbody.querySelectorAll("tr[data-gw]").forEach((tr) => {
     tr.addEventListener("click", (ev) => {
       if (ev.target.closest("a, input")) return;
       openDrawer(tr.dataset.gw, true);
     });
+    wireRowKeys(tr);
+  });
+}
+/* A row that opens the drawer is a keyboard control too: Enter/Space on the focused ROW opens it (a key on a
+   control inside the row - the compare checkbox, a link, the sparkline button - is that control's own). */
+function wireRowKeys(tr) {
+  tr.addEventListener("keydown", (ev) => {
+    if (ev.target !== tr || !isActivateKey(ev)) return;
+    ev.preventDefault();
+    openDrawer(tr.dataset.gw, true);
   });
 }
 
 /* ---- filter bar -------------------------------------------------------------
-   Deliberately compact: search only. Class/language chip rows were retired; a stale ?cls=/?lang=
-   URL param is ignored. */
+   Deliberately compact: search only. The class/language chip rows were retired
+   (they burned vertical space above a 13-row table, and the roster tab already
+   shows language + class); a stale ?cls= / ?lang= URL param is ignored. */
 
-// Wire the persistent inputs exactly once (renderFilters may re-run on hashchange).
+/* Wire the persistent inputs exactly once (renderFilters may re-run on hashchange). */
 function initFilterControls() {
   const search = document.getElementById("search");
   search.addEventListener("input", () => { state.q = search.value; renderTable(); syncUrl(false); });
-  // Capability toggles are now implicit per tab; DOM checkboxes retired, state/URL param kept for back-compat.
+  // The capability toggles are now implicit per tab (Translation/Streaming self-filter), so the DOM
+  // checkboxes were retired; the state fields + URL param survive for back-compat. Wire only if present.
   for (const [key, name] of CAPS) {
     const el = document.getElementById(`f-${name}`);
     if (el) el.addEventListener("change", () => { state[key] = el.checked; renderTable(); syncUrl(true); });
   }
-  // Cell chooser dialect dropdowns. Changing mode or dialect re-projects every row.
+  // Cell chooser: the Peak | Same | Custom segmented control + its dialect dropdowns. Changing the mode
+  // or a dialect re-projects every row onto the newly-chosen cell and re-encodes the URL.
   const opts = MATRIX_CELLS.map((d) => `<option value="${esc(d)}">${esc(MATRIX_LABELS[d] || d)}</option>`).join("");
   const same = document.getElementById("same-dialect");
   const cin = document.getElementById("cell-in");
@@ -2716,8 +3538,9 @@ function initFilterControls() {
   if (same) same.innerHTML = opts;
   if (cin) cin.innerHTML = opts;
   if (cout) cout.innerHTML = opts;
-  // Mode buttons are re-rendered per view (different tabs offer different mode sets), so one
-  // delegated listener replaces per-button ones that would go stale after a re-render.
+  // The mode buttons are RENDERED PER VIEW (renderFilters), because the tabs offer different mode sets:
+  // the memory lane must never be able to paint a Peak button. One delegated listener therefore replaces
+  // the per-button ones, which would have been bound to buttons that no longer exist after a re-render.
   const seg = document.getElementById("mode-seg");
   if (seg) seg.addEventListener("click", (ev) => {
     const btn = ev.target.closest(".seg-btn");
@@ -2725,14 +3548,17 @@ function initFilterControls() {
     state.mode = btn.dataset.mode;
     renderFilters(); renderTable(); syncUrl(true);
   });
-  // Same delegation reason as the mode buttons.
+  // THE BOUND SELECTOR. One delegated listener, for the same reason the mode buttons have one: the buttons
+  // are re-rendered per view, so per-button listeners would bind to elements that no longer exist.
   const bseg = document.getElementById("bound-seg");
   if (bseg) bseg.addEventListener("click", (ev) => {
     const btn = ev.target.closest(".seg-btn");
     if (!btn) return;
     selectBound(btn.dataset.bound === "none" ? null : Number(btn.dataset.bound));
   });
-  // Re-renders filters too since the note under it states which claim ("own peak" vs "same rung") is on screen.
+  /* THE CONCURRENCY SELECTOR. Re-renders the filters too, because the note under it changes with the
+     selection - "each gateway at the concurrency where its own throughput peaked" is a different claim
+     from "every gateway at the same rung", and the control has to say which one is on screen. */
   const csel = document.getElementById("conc-select");
   if (csel) csel.addEventListener("change", () => {
     const v = Number(csel.value);
@@ -2748,42 +3574,65 @@ function initFilterControls() {
   if (cout) cout.addEventListener("change", onCustom);
 }
 
-/* The reader picked a tail-latency bound. Re-ranking in front of the reader is the point: the
-   frontier's claim is that a gateway's position depends on the tail you accept. Frontier's ranking
-   is per-bound column, so the sort follows the selection unless the reader sorted by something else. */
+/* selectBound(ms): the reader picked a tail-latency bound.
+   RE-RANKING IN FRONT OF THE READER IS THE POINT, not a side effect: the whole claim of the frontier is
+   that a gateway's position depends on the tail you are willing to accept, and a control that changed only
+   the numbers in place would leave that claim unmade. The Performance tab's ranked column re-reads the new
+   bound on its own; the frontier tab's ranking is per-bound COLUMN, so the sort follows the selection -
+   unless the reader had deliberately sorted by something else (the curve, a name, a latency), in which case
+   their choice is left alone. */
 function selectBound(ms) {
   const prev = selectedBound(state);
   state.bound = ms;
   if (state.view === "frontier" && state.sortCol === boundColId(prev)) state.sortCol = boundColId(ms);
-  // State change above is the whole decision and testable on its own; DOM calls below are skipped
-  // under node so the suite can drive the selector without a document.
+  // The STATE change above is the whole decision and is testable on its own; the three calls below are the
+  // DOM half, skipped under node exactly as syncUrl skips its history write, so the suite can drive the
+  // selector without a document. A guard here is the difference between "the re-rank is covered" and "the
+  // one behaviour the bound selector exists for is covered by nothing".
   if (NODE) return;
   renderFilters(); renderTable(); syncUrl(true);
 }
-/* Paint bound buttons from the one published list, mark selection, state in words what the selected
-   column means (via boundClause(), same function every header/tooltip uses).
-   Says "the cell the chooser picked", never "the most each gateway carried" - the reading is the top
-   qualifying rung of one cell's sweep, not a maximum across a gateway's cells. */
+/* renderBoundChooser(): paint the bound buttons from the ONE published list, mark the selection, and state
+   in words what the selected column means. The sentence is rendered from boundClause(), the same function
+   every column header and tooltip uses, so the control and the columns cannot describe the bound differently.
+
+   IT SAYS "THE CELL THE CHOOSER PICKED", NEVER "THE MOST EACH GATEWAY CARRIED". It used to read "showing the
+   most req/s each gateway carried while 99% of requests finished under 10 ms", which asserts a maximum ACROSS
+   a gateway's cells that nothing here computes: the reading is the top qualifying rung of ONE cell's sweep,
+   and which cell that is comes from the chooser (bestCell, which ranks on latency and never reads a
+   throughput number). kong's four diagonals span 3,903 → 22,891 req/s at the same bound, so on that row
+   alone the old wording overstated by ~6x. Per-cell is the true scope and the only scope any bound can
+   change. */
 function renderBoundChooser() {
   const seg = document.getElementById("bound-seg");
   if (!seg) return;
   const sel = selectedBound(state);
   seg.innerHTML = BOUND_CHOICES.map((b) =>
     `<button type="button" class="seg-btn${(b == null ? sel == null : b === sel) ? " active" : ""}" ` +
-    `data-bound="${b == null ? "none" : b}" role="tab" ` +
+    `data-bound="${b == null ? "none" : b}" role="tab" aria-selected="${(b == null ? sel == null : b === sel) ? "true" : "false"}" ` +
     `title="${esc(`Rank the board on the req/s each gateway's chosen cell carried ${boundClause(b)}`)}">${esc(boundLabel(b))}</button>`).join("");
   const note = document.getElementById("bound-note");
   if (note) note.textContent = `showing the req/s each gateway's chosen cell carried ${boundClause(sel)}`;
 }
-/* Concurrency control. "Best" (each gateway's own peak) is the default so the control doesn't quietly
-   answer a question the reader hasn't asked. Options are the rungs the run actually drove. Hidden
-   entirely when the board carries no rungs. */
+/* THE CONCURRENCY CONTROL. "Best" is the default and the first option, because each gateway's own peak
+   is the honest headline for a single gateway - and because a control that opens on a pinned rung would
+   be quietly answering a question the reader had not asked yet.
+
+   The options are the rungs the RUN drove, gathered from the published readings, so a board swept over
+   a different ladder offers that ladder. A rung no gateway drove is not offered, and a gateway that
+   skipped an offered rung reads n/a on it rather than being interpolated.
+
+   Hidden entirely when the board carries no rungs (an older bundle), because a selector with only
+   "Best" in it is a control that does nothing. */
 function renderConcChooser() {
   const wrap = document.getElementById("conc-chooser");
   const sel = document.getElementById("conc-select");
   if (!wrap || !sel) return;
   const choices = concChoices(state.data);
-  const offer = CHOOSER_VIEWS.has(state.view) && state.view !== "memory" && choices.length > 0;
+  // ONLY WHERE A COLUMN READS IT. The Performance tab's ranked Req/s column is the one reader of the pinned
+  // rung (frontierChooserCell); the frontier's per-bound columns, streaming and the charts ignore it, so
+  // offering the control there claimed "every gateway at the same rung" over numbers that were not.
+  const offer = state.view === "performance" && choices.length > 0;
   wrap.classList.toggle("hidden", !offer);
   if (!offer) return;
   const cur = selectedConc(state);
@@ -2803,12 +3652,14 @@ function renderFilters() {
   renderBoundChooser();
   renderConcChooser();
   for (const [, name] of CAPS) { const el = document.getElementById(`f-${name}`); if (el) el.checked = state[CAPS.find(([, n]) => n === name)[0]]; }
-  // Cell chooser: paint buttons this view offers, mark active, show only the dropdown(s) the mode needs.
-  // `peak` simply isn't rendered on the memory tab.
+  // Cell chooser: paint the buttons THIS view offers, mark the active one, and show only the dropdown(s)
+  // that mode needs (Same → one dialect; Custom → in→out pair; Own cell/Min/Max → none). The `peak` mode is
+  // simply not rendered on the memory tab: the control cannot offer a selection the metric is not allowed
+  // to make.
   const seg = document.getElementById("mode-seg");
   const mode = state.view === "memory" ? memoryMode(state) : state.mode;
   if (seg) seg.innerHTML = [...modesFor(state.view)].map((m) =>
-    `<button type="button" class="seg-btn${m === mode ? " active" : ""}" data-mode="${esc(m)}" role="tab" title="${esc(MODE_TIPS[m] || "")}">${esc(MODE_LABELS[m] || m)}</button>`).join("");
+    `<button type="button" class="seg-btn${m === mode ? " active" : ""}" data-mode="${esc(m)}" role="tab" aria-selected="${m === mode ? "true" : "false"}" title="${esc(MODE_TIPS[m] || "")}">${esc(MODE_LABELS[m] || m)}</button>`).join("");
   const sameWrap = document.getElementById("chooser-same");
   const customWrap = document.getElementById("chooser-custom");
   if (sameWrap) sameWrap.classList.toggle("hidden", mode !== "same");
@@ -2824,10 +3675,14 @@ const MATRIX_LABELS = {
   openai: "OpenAI", "openai-responses": "OpenAI Responses", anthropic: "Anthropic",
   gemini: "Gemini", cohere: "Cohere", bedrock: "Bedrock Converse",
 };
-/* Same-dialect cell for each protocol (openai>openai, etc), what the drawer's Protocol matrix shows.
-   Returns null when the gateway carries no per-cell data, keeping "not measured" distinguishable from
-   "measured, not served". Falls back to the legacy flat `cells` map for older boards; an empty object
-   counts as nothing found. */
+/* matrixDiagonal(g): the same-dialect cell for each protocol - openai>openai, anthropic>anthropic -
+   which is what the drawer's six-row Protocol matrix has always been showing. Returns null when the
+   gateway carries no per-cell data at all, so "not measured" stays distinguishable from "measured and
+   this pairing was not served".
+
+   Reads `upstreams[egress].cells[ingress]`, with the legacy flat `cells` map as a fallback so older
+   boards keep rendering. An EMPTY object counts as nothing found, not as a matrix full of holes:
+   treating a truthy `{}` as data is exactly what put six "n/a" rows under every gateway. */
 function matrixDiagonal(g) {
   const m = g && g.matrix;
   if (!m) return null;
@@ -2840,12 +3695,20 @@ function matrixDiagonal(g) {
   return Object.keys(out).length ? out : null;
 }
 
-/* A non-green cell is one of several different things, and a neutral board must not conflate them:
-     served:"not_verified"     - harness couldn't fairly test it (never a red fail)
-     served:"untestable"       - gateway pins the real cloud host, our mock is unreachable (rig limit)
-     served:"not_configured"   - probe-first: probed, round trip wasn't a correct translation (grey)
-     served:false (wrong_answer) - legacy red: gateway answered wrongly
-   The prose-note heuristic below is only a fallback for results predating these machine-readable fields. */
+/* A non-green cell is one of several very different things, and a neutral board must not
+   conflate them. The harness now says which MACHINE-READABLY:
+     served:"not_verified" (+ reason harness_boot_failure/suite_ceiling/mock_norecord) - the
+       harness could not get the gateway into a fairly-testable state: never a red fail;
+     served:"untestable" (+ reason no_base_url_override) - the gateway supports this pair in
+       production but pins the real cloud host, so our mock is unreachable: a limit of this rig,
+       not gateway incapability;
+     served:"not_configured" (+ reason probe_failed, probe_note evidence) - PROBE-FIRST (matrix v3):
+       the cell was probed and the round trip was not a correct translation; renders grey with the
+       probe evidence, NEVER a red;
+     served:false (+ reason wrong_answer) - LEGACY (pre-probe-first) red: the gateway served a
+       declared cell and answered wrongly. New results never emit it; old ones still render.
+   The prose-note heuristic below survives ONLY as a fallback for results that predate the
+   machine-readable served/reason fields. */
 const isHarnessGap = (cell) => {
   if (cell.served === "not_verified") return true;
   if (cell.reason) return false; // reason present and not not_verified: the verdict is explicit
@@ -2876,8 +3739,8 @@ const cellState = (cell) =>
 
 function laneStamp(j) {
   const bits = [];
-  // build/measured_at travel inside j.source on a projected cell; g.matrix carries them top level.
-  // Prefer the stamp, fall back to top-level.
+  // build/measured_at travel INSIDE the provenance stamp (j.source) on a projected cell; g.matrix still
+  // carries them at top level. Prefer the stamp, fall back to top-level.
   const build = (j.source && j.source.build) ?? j.build;
   const at = (j.source && j.source.measured_at) ?? j.measured_at;
   if (build) bits.push(build);
@@ -2885,25 +3748,45 @@ function laneStamp(j) {
   return bits.length ? `<div class="stamp muted">${esc(bits.join(" · "))}</div>` : "";
 }
 
-/* Smallest band the idle sparkline's y axis will ever cover, as a fraction of the published idle
-   figure - avoids drawing sampling noise as an event when the series barely moves. 2% is calibrated
-   against the field: windows that genuinely didn't move draw flat; the few that did (a late step, an
-   early ramp) fill their frame. The stamp always states the MiB regardless. */
+/* IDLE_AXIS_MIN_SPAN: the SMALLEST band the idle sparkline's y axis will ever cover, as a fraction of the
+   published idle figure. It is the idle panel's equivalent of the load panel's "2x idle is a floor, not a
+   ceiling" rule, and it exists for the same reason: an axis that shrinks to fit whatever the series did will
+   draw sampling noise as an event.
+   2% is calibrated against the field, not chosen for roundness. Below it sit every window that genuinely did
+   not move - litellm-rust 0.008 MiB on 252 (0.003%), tensorzero 0.07 on 48.7 (0.14%), kong 0.61 on 379
+   (0.16%), plano 0.5 on 625 (0.08%) - all of which now draw as the flat lines they are. Above it sit the two
+   windows that did something: apisix steps down 6.6 MiB on 178 (3.7%) late in its window, and every bifrost
+   cell ramps 65-102 MiB (up to 74%) through its first fifth and then goes flat. Those fill their frames, and
+   the stamp states the MiB either way so no magnitude has to be inferred from the picture. */
 const IDLE_AXIS_MIN_SPAN = 0.02;
-/* What the idle window did, as a phrase describing its shape. Replaces "X MiB over N s at rest"
-   wording, which misread as drift accumulating over the window when it was really one late/early
-   step - the words must say where the movement was, not just how big.
-   Geometry, not a verdict: it reads the plotted series, doesn't judge leaking vs healthy (the engine
-   owns that via idle_shape). Never "X over N s" - that pairing reads as a rate. */
+/* idleShapeNote(pts, span, floorSpan): WHAT THE IDLE WINDOW DID, as a phrase describing its SHAPE.
+   THE WORDING THIS REPLACES CAUSED A REAL MISREADING. The caption said "(6.59 MiB over 59 s at rest)", and
+   "over 59 s" is the window LENGTH, not a duration over which anything moved - so it read as 6.59 MiB of
+   drift accumulating across the minute, and the person auditing the board reported apisix as an idle drifter
+   on the strength of it. apisix does no such thing: it holds 178.078 for 127 of its 130 samples, steps DOWN
+   6.594 MiB at 98% through, and holds. One late release.
+   A span cannot distinguish these and neither can a floored axis, so the words have to.
+   THIS IS GEOMETRY, NOT A VERDICT. It says where the movement was, how big, and which direction - all read
+   off the plotted series. It does not judge whether the gateway is leaking or healthy: the engine owns that
+   (`memory_idle_static` / `idle_shape`) and idleStatic() renders the engine's own word whenever a bundle
+   carries one. This board publishes none, which is exactly why the shape of the line is all a reader has.
+   NEVER "X over N s": no phrase here may pair a magnitude with the window length, because that pairing is
+   what reads as a rate. */
 function idleShapeNote(pts, span, floorSpan) {
   const n = pts.length;
-  // Below the axis floor is the expected case and renders flat. RSS is sampled in whole pages, so
-  // "flat to within X" states the resolution rather than claiming an impossible zero.
+  // BELOW THE AXIS FLOOR IS THE EXPECTED CASE (nine of the board's eleven measured windows) and it renders
+  // flat, so it says flat. RSS is sampled in whole pages, so a static process still reports a page or two of
+  // jitter; "flat to within X" states the resolution rather than claiming an impossible zero. Sharing the
+  // axis floor is deliberate: the words and the picture must agree about what counts as movement.
   if (!(span > 0)) return "no movement at all";
   if (span < floorSpan) return `flat to within ${fmt2(span)} MiB`;
-  // Where the movement sits in time is the distinction, not the size of one biggest single step
-  // (which mis-scores a multi-sample step as gradual). So: total variation, then the shortest
-  // contiguous run of samples accounting for most of it.
+  /* WHERE THE MOVEMENT SITS IN TIME IS THE WHOLE DISTINCTION, and it is not "how big is the biggest single
+     step". Keying on one sample-to-sample delta got bifrost wrong: its climb is eight consecutive samples of
+     ~10 MiB each, none of which dominates the span, so it was described as gradual when it in fact completes
+     inside the first 2 s of a 59 s window and then holds flat.
+     So: total variation, then the SHORTEST contiguous run of samples accounting for most of it. A step is
+     movement packed into a small slice of the window whatever its sample count; drift is movement spread
+     across the window. */
   const d = [];
   let tv = 0;
   for (let i = 1; i < n; i += 1) { const v = Math.abs(pts[i].rss_mib - pts[i - 1].rss_mib); d.push(v); tv += v; }
@@ -2918,14 +3801,18 @@ function idleShapeNote(pts, span, floorSpan) {
   const t0 = pts[a].t_s, t1 = pts[b + 1].t_s, tEnd = pts[n - 1].t_s, tSpan = (tEnd - pts[0].t_s) || 1;
   const net = pts[b + 1].rss_mib - pts[a].rss_mib;
   const dir = net > 0 ? "up" : "down";
-  // Extent of the concentrated run (its own min to max), not the net across its endpoints, since the
-  // run's boundaries can land mid-climb.
+  // The EXTENT of the concentrated run (its own min to max), not the net across its endpoints: the run's
+  // boundaries can land mid-climb, and bifrost's then read "71.2 MiB up" beside a stated span of 151.0-252.5.
   const runVals = pts.slice(a, b + 2).map((q) => q.rss_mib);
   const mag = fmt2(Math.max(...runVals) - Math.min(...runVals) || span);
-  // "then held" is a claim about the rest of the window, made only when the rest earns it.
+  /* "THEN HELD" IS A CLAIM ABOUT THE REST OF THE WINDOW, made only when the rest of the window earns it.
+     bifrost climbs to 252.5 in its first 2 s then falls back ~30 MiB to 222.6 before going flat, so "settled
+     up, then held" would paper over a second movement larger than most gateways' entire span. */
   const restVar = d.reduce((acc, v, i) => (i < a || i > b ? acc + v : acc), 0);
   const held = restVar < floorSpan ? ", then held" : "";
-  // 20% of the window is the line between a step and drift.
+  /* 20% OF THE WINDOW is the line between a step and drift. apisix packs its move into one sample at 98%
+     through; bifrost into ~3% at the start. No gateway on the current board is a genuine drifter, which is
+     precisely why the retired wording - which described every one of them as though it were - misled. */
   if ((t1 - t0) / tSpan <= 0.2) {
     if (t0 <= tSpan * 0.15) return `moved ${mag} MiB ${dir} inside the first ${fmtInt(Math.max(1, t1))} s${held}`;
     if (t1 >= tSpan * 0.7) {
@@ -2937,22 +3824,31 @@ function idleShapeNote(pts, span, floorSpan) {
   }
   return `moved ${fmt2(span)} MiB gradually across the window`;
 }
-/* End of the load caption, naming the window each figure belongs to. Fixes a collision where the
-   caption's last-sample figure and the "Recovered @30s" column figure could legitimately differ (a
-   gateway still releasing after the recovery mark) and read as inconsistent data. States both points
-   in time order when they differ, collapses to one figure when they agree. */
+/* recoveryTail(lastMib, opts): the END of the load caption, naming the WINDOW each figure belongs to.
+   THE COLLISION THIS REMOVES. The caption said "peak 144.4 → recovered 129.6 MiB (365 s)" while the
+   `Recovered @30 s` column on the same row said 139.1. Both are right: one-api kept releasing after the 30 s
+   recovery mark, so the scalar the engine publishes AT that mark and the last sample of a 365 s observation
+   are two readings of one falling curve. Two figures under the single word "recovered" reads as an
+   inconsistency in the data rather than a difference of when it was read.
+   So "recovered" belongs to the column that names its window, and this states BOTH points in time order when
+   they differ - which turns the discrepancy into the finding it actually is, "it was still falling at 30 s" -
+   and collapses to one figure when they agree, which is most rows. */
 function recoveryTail(lastMib, opts = {}) {
   const at = opts.recoveredAt, w = opts.recoveryWindowS;
   const end = fmt1(lastMib);
   if (at == null || w == null) return `${end} MiB at the last sample`;
   const marked = fmt1(at);
-  if (marked === end) return `${marked} MiB at the ${memWindowLabel(w)} recovery mark, and still there at the end`;
-  return `${marked} MiB at the ${memWindowLabel(w)} recovery mark, ${at > lastMib ? "still falling" : "risen again"} to ${end} MiB by the last sample`;
+  if (marked === end) return `${marked} MiB median over the final ${memWindowLabel(w)} of recovery, and still there at the end`;
+  return `${marked} MiB median over the final ${memWindowLabel(w)} of recovery, ${at > lastMib ? "still falling" : "risen again"} to ${end} MiB by the last sample`;
 }
-/* Did it give the memory back - drawn, not asserted, so "released nothing" and "released most of it"
-   don't render with identical emphasis. No new metric: a tick between two already-plotted levels (peak
-   and final sample) at the x of the final sample. Nothing released, nothing drawn. Title states the fall
-   and what it is a fall out of, both from figures the row already
+/* releaseMark(g): DID IT GIVE THE MEMORY BACK - drawn, not asserted.
+   "Don't let 'releases nothing' and 'releases most of it' render with identical emphasis if a cheap visual
+   distinction is available." TensorZero peaks at 65.8 and ends at 65.8, releasing none of the ~19 MiB it
+   gained; bifrost peaks at 870.0 and comes back to 580.3. Both rendered as a line, a dot and two grey
+   numbers.
+   NO NEW METRIC AND NO VERDICT: a tick between two levels ALREADY PLOTTED - the peak and the final sample -
+   at the x of that final sample. Released nothing, nothing to draw. Released a lot, a tall mark, in
+   proportion. Its title states the fall and what it is a fall out of, both from figures the row already
    shows. Returns "" on an at-rest window: nothing is released before any load. */
 function releaseMark(g) {
   if (!g) return "";
@@ -2965,13 +3861,19 @@ function releaseMark(g) {
     `stroke="currentColor" stroke-width="3" stroke-opacity="0.35" stroke-linecap="round">` +
     `<title>released ${fmt1(drop)} MiB${of} between its peak and the last sample</title></line>`;
 }
-/* Compact inline-SVG recovery curve (idle -> peak -> recovery) from a memory record's rss_series.
-   Returns "" when absent or <2 points - never a fabricated flat line. Y-axis runs idle to peak; a
-   dot marks the last (recovered) sample. */
-// loadEndS: the second load stopped and recovery began (record's `load_s`), drawn as a dotted rule
-// so the curve shows which part is under load vs at rest.
-// `opts` carries what the load panel needs to avoid colliding with the Recovered column: the
-// scalar that column publishes, and the window it was read at (see recoveryTail).
+/* rssSparkline: a compact inline-SVG recovery curve (idle → peak → recovery) built from a memory
+   record's rss_series [{t_s,rss_mib},…]. Returns "" when the series is absent or has < 2 points, so a
+   pre-recovery bundle (no series) draws NOTHING — never a fabricated flat line or a zero baseline. The
+   y-axis runs from IDLE to the series' own peak, so the height of the line is the growth under load
+   and a flat gateway draws a flat line; a dot marks the last (recovered) sample. Same self-contained
+   inline-SVG style as the matrix legend/cell swatches. */
+// loadEndS: the second the load stopped and the recovery window began, from the record's own
+// `load_s`. Drawn as a dotted rule so the curve says WHICH part is under load and which is the
+// gateway with nothing asked of it - the whole point of the recovered figure beside it is that the
+// reader can see whether the line came down after that mark, and until now nothing on the chart
+// said where the mark was.
+// `opts` carries the two facts the LOAD panel needs in order to stop colliding with the Recovered column:
+// the scalar that column publishes, and the window it was read at (see recoveryTail).
 function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load", opts = {}) {
   if (!Array.isArray(series) || series.length < 2) return "";
   const pts = series
@@ -2981,18 +3883,43 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load", op
   const W = 260, H = 56, PAD = 3;
   const ts = pts.map((p) => p.t_s), ys = pts.map((p) => p.rss_mib);
   const t0 = ts[0], t1 = ts[ts.length - 1], tspan = (t1 - t0) || 1;
-  // Axis runs 0 -> at least twice idle, always far enough to show the whole curve. Two failure modes
-  // to avoid: auto-scaling to each curve's own range exaggerates small noise into a cliff; a hard cap
-  // at twice idle clips a genuine climb into a flat line pinned to the ceiling. So twice idle is a
-  // floor on the axis, never a ceiling - nothing is ever clipped.
+  // THE AXIS RUNS 0 -> AT LEAST TWICE IDLE, AND ALWAYS FAR ENOUGH TO SHOW THE WHOLE CURVE.
+  //
+  // Two failure modes, and the fix has to avoid both.
+  //
+  // Auto-scaling to each curve's own range made every curve fill the height whatever it did: 1.2% of
+  // growth (litellm-rust) drew the same cliff as 801% (kong). It exaggerated hardest for the gateways
+  // that behaved best, and made two curves impossible to compare.
+  //
+  // But a HARD cap at twice idle is worse, and the board caught it: every one of bifrost's six cells
+  // spends 100% of its samples above 2x idle (idle 153, rising through 525 and 665 to a peak of 875,
+  // then falling back to 605). Clipping drew that as a flat line pinned to the ceiling - so the one
+  // gateway on the board that reached no steady state, and publishes a 51 MiB/min growth rate instead
+  // of one, was the one whose curve showed no growth at all. Hiding the finding the row exists to
+  // report is not a scale, it is a lie with a caption.
+  //
+  // So twice idle is a FLOOR on the axis, not a ceiling: a gateway that stays near idle still gets a
+  // stable, honest frame instead of magnifying its own noise, and a gateway that climbs gets a frame
+  // big enough to show the climb. Nothing is ever clipped.
   const dataMin = Math.min(...ys), dataMax = Math.max(...ys);
   const anchored = typeof idleMib === "number" && idleMib > 0;
   const idleWin = kind === "idle";
-  /* Idle window gets its own axis, scaled to its own range with a floor on the span. The load axis's
-     0->2x-idle frame answers no question for idle series (nearly flat, would all look identical), but
-     a bare auto-scale would exaggerate one-page RSS jitter into a false cliff. So the span floors at
-     IDLE_AXIS_MIN_SPAN of the idle figure: below it, movement draws to scale inside a stable frame;
-     above it, the frame grows to fit, never clipping. */
+  /* THE IDLE WINDOW GETS ITS OWN AXIS, SCALED TO ITS OWN RANGE WITH A FLOOR ON THE SPAN.
+     The load axis above runs 0 -> 2x idle, and on an IDLE window that frame answers no question: every
+     idle series is a nearly-horizontal line at the idle level, so all 26 of them rendered as the same flat
+     line halfway up the panel whatever they did. That hid the one real finding in the window - every
+     bifrost cell keeps allocating for ~12 s AFTER it is ready to serve (openai>openai: 152.3 -> 217.0 MiB,
+     +43%, then dead flat for the remaining 48 s), and no other gateway on the board does it.
+     BUT A BARE AUTO-SCALE WOULD BE WORSE, AND IT IS THE SAME BUG THE LOAD AXIS ALREADY FIXED. RSS is
+     sampled in whole pages, so a genuinely static process still reports a jitter of one or two pages:
+     litellm-rust moves 0.008 MiB - a single 8 KiB page - across 123 samples of a 252 MiB process.
+     Auto-scaled to its own range, that one page becomes a full-height cliff, and the panel would claim a
+     memory event where the truth is "this process did not move". FLAT IS THE EXPECTED CASE HERE (20 of 26
+     windows) and it must render flat.
+     So the span is FLOORED at IDLE_AXIS_MIN_SPAN of the published idle figure: below that, movement is
+     drawn to scale inside a stable frame and reads as the flat line it is; above it, the frame grows to the
+     data and nothing is ever clipped. The exact magnitude never has to be read off the picture anyway - the
+     stamp states the span in MiB. */
   const ymin = idleWin ? dataMin : anchored ? 0 : dataMin;
   const ymax = idleWin ? dataMax : anchored ? Math.max(idleMib * 2, dataMax) : dataMax;
   const floorSpan = idleWin && anchored ? idleMib * IDLE_AXIS_MIN_SPAN : 0;
@@ -3012,16 +3939,27 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load", op
       `<title>load stopped at ${fmtInt(loadEndS)} s; everything right of this line is the gateway at rest</title></line>`
     : "";
   const restNote = marks ? `, load stopped at ${fmtInt(loadEndS)} s` : "";
-  // Idle stamp differs from the load stamp ("peak X -> recovered Y"): the idle window is at rest,
-  // sampled before load, so nothing was recovered and there's no peak-under-load. States the median
-  // and the span the samples spanned, in MiB, since a floored axis hides the magnitude visually.
+  /* THE STAMP UNDER THE CURVE, AND WHY THE IDLE WINDOW NEEDED ITS OWN.
+     Both panels used to render "peak X → recovered Y MiB (N s)". On the idle panel every word of that is
+     wrong: the idle window is the process AT REST, sampled BEFORE any load, so nothing has been recovered
+     from anything and its highest sample is not a peak under load. The idle stamp states what the window
+     actually establishes - the published median, and the band the samples spanned - and the SPAN IS STATED
+     IN MiB because that is the number the reader needs and the one a floored axis deliberately does not let
+     them read off the picture: 0.008 MiB (litellm-rust, one page of jitter) and 64.7 MiB (bifrost, still
+     allocating after it was ready to serve) are the same shape at a glance and nothing alike. */
   const span = dataMax - dataMin;
-  // A range whose ends round to the same figure isn't a range: say "held" instead of a fake span.
+  // A range whose two ends round to the same figure is not a range - "spanned 252.3-252.3 MiB" reads as a
+  // formatting fault where the fact is that the process never moved a tenth of a MiB. It says "held" instead,
+  // and the exact movement still travels in the parenthesis (litellm-rust: 0.00781 MiB, one 8 KiB page).
   const flatToTenth = fmt1(dataMin) === fmt1(dataMax);
-  // "this cell: median X", never a bare "median X": the Idle RSS column beside this is the median
-  // across the gateway's cells, while this is the selected cell's own window - they can differ.
-  // Parenthetical describes shape, not a rate (idleShapeNote) - pairing magnitude with window length
-  // reads as drift, which is not always what happened.
+  /* "THIS CELL: MEDIAN X", NEVER A BARE "MEDIAN X". The Idle RSS column beside this is the median ACROSS the
+     gateway's cells (idle is sampled cold before any request, so no cell is involved in it - which is what
+     that column's own tooltip says); this is the SELECTED CELL's own window. Both are correct and they differ
+     on six of the live board's eleven measured rows: apisix 177.9 against 178.1, bifrost 244.3 against 222.6,
+     a 21.7 MiB gap. Two figures under one unqualified word "median" reads as one of them being wrong, so each
+     names its scope - the column in its header, this in its caption.
+     THE PARENTHETICAL DESCRIBES SHAPE, NOT A RATE (idleShapeNote): "(6.59 MiB over 59 s at rest)" paired a
+     magnitude with the window length and so read as gradual drift, which is not what apisix did. */
   const stamp = idleWin
     ? `${anchored ? `this cell: median ${fmt1(idleMib)} MiB · ` : ""}` +
       (flatToTenth ? `held ${fmt1(dataMax)} MiB` : `spanned ${fmt1(dataMin)}–${fmt1(dataMax)} MiB`) +
@@ -3032,12 +3970,16 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load", op
     : `RSS curve from zero, idle ${anchored ? fmt1(idleMib) : "unknown"} MiB, peak ${fmt1(dataMax)} MiB over ${fmtInt(tspan)} s${restNote}`;
   return `<div class="rss-spark"><svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
     `aria-label="${esc(aria)}">` +
-    // Zero baseline, load axis only: it starts at 0. The idle axis is a narrow band above zero, so a
-    // bottom-edge rule there would claim a zero the frame doesn't contain.
+    // The ZERO baseline. Load axis only: it starts at 0, so the bottom of the panel IS zero. The idle axis
+    // is a window onto a narrow band a long way above zero, and a rule along its bottom edge would claim a
+    // zero the frame does not contain.
     (idleWin ? "" : `<polyline points="${x(t0).toFixed(1)},${(H - PAD).toFixed(1)} ${x(t1).toFixed(1)},${(H - PAD).toFixed(1)}" ` +
       `fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>`) +
-    // Idle level, drawn so "how far above idle" is measurable rather than inferred. On the idle panel
-    // this rule is the published median itself, so the curve and the column visibly agree.
+    /* The idle level, drawn so "how far above idle" is a thing the eye can measure rather than infer.
+       ON THE IDLE PANEL THIS RULE IS THE PUBLISHED NUMBER ITSELF: idle_rss_mib is the MEDIAN of this very
+       window (correct in all 26 cells - bifrost's median lands on its settled plateau, apisix's on the value
+       it holds), so drawing it here is what makes the sparkline and the scalar in the column beside it
+       visibly agree instead of merely coexisting. */
     (anchored
       ? `<line x1="${PAD}" y1="${y(idleMib).toFixed(1)}" x2="${(W - PAD).toFixed(1)}" y2="${y(idleMib).toFixed(1)}" ` +
         `stroke="currentColor" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="2 2">` +
@@ -3051,22 +3993,43 @@ function rssSparkline(series, loadEndS = null, idleMib = null, kind = "load", op
     `<div class="stamp muted">${esc(stamp)}</div></div>`;
 }
 
-/* Memory window as two curves: idle cost, then load cost. The two panels don't share an axis (a fix,
-   not a regression) - a shared 0->2x-idle axis reads well for the load curve but flattens every idle
-   curve into the same line, since idle series barely move. The idle panel frames its own floored span
-   (IDLE_AXIS_MIN_SPAN); both stamp their own MiB so the panels stay comparable despite differing axes.
-   Returns just the load curve when there's no idle series (bundles predating the idle window). */
-/* Inline row is one lifecycle, one line. Fraction of width given to the at-rest segment. A split
-   exists because idle and load+recovery are wildly different durations (~59s vs ~360s); a true shared
-   time axis would make the at-rest window's whole finding invisible in under 1% of the width. So
-   segments get widths their durations don't earn, and a real axis-break glyph marks the discontinuity
-   rather than silently smoothing over it. */
+/* rssCurves(mem): the memory window as TWO curves - what the process cost doing nothing, then what work
+   cost it.
+   Idle used to be a single number in a column, so a gateway that grew while completely idle looked
+   identical to one that sat still, and the load curve's baseline was a value the reader had to take
+   on trust.
+   THE TWO PANELS DO NOT SHARE AN AXIS, AND THAT IS THE FIX, NOT A REGRESSION. They used to: both ran
+   0 -> 2x idle, which reads well for the load curve (the question is "how far above idle did work push
+   it") and answers nothing at all for the idle curve, where every series in the field is a nearly flat
+   line at the idle level and all 26 of them therefore drew the same flat line halfway up the panel. The
+   idle panel now frames its own window with a floored span (IDLE_AXIS_MIN_SPAN), so a static process still
+   draws flat and bifrost's 12-second post-ready ramp is visible; both stamps state their own MiB, which is
+   what keeps the panels comparable now that their axes are not.
+   Returns just the load curve when there is no idle series, which is every bundle measured before
+   the idle window existed. */
+/* THE INLINE ROW IS ONE LIFECYCLE, ONE LINE. Fraction of the width given to the at-rest segment.
+   WHY THERE IS A SPLIT AT ALL: idle and load+recovery are not two experiments, they are one process's
+   lifetime in time order - cold start, at rest, load applied, load removed, recovery. The row rendered them
+   as two stacked panels only because the engine hands over two arrays. But the two windows are wildly
+   different lengths: ~59 s at rest against ~360 s under load. On a true shared time axis the at-rest window
+   would occupy 14% of the width, and bifrost's entire finding lives in the first 2 SECONDS of it - under 1%
+   of a 420 s axis, i.e. invisible.
+   SO THE SEGMENTS ARE GIVEN WIDTHS THEIR DURATIONS DO NOT EARN, AND THE BREAK IS SHOWN. Silently rescaling
+   two different time scales into one smooth line would draw a continuous axis that is not continuous - a
+   picture asserting when things happened, wrongly. Instead there is a real gap with an axis-break glyph in
+   it (the conventional double-slash), the two halves are drawn as two separate paths so no line crosses the
+   discontinuity, and the hover text names both window lengths. An honest discontinuity beats a dishonest
+   smooth line. */
 const LIFECYCLE_IDLE_FRAC = 0.3;
-/* Whole process lifetime as one inline sparkline for the table row. One shared y axis across both
-   segments (the load axis, 0 -> at least 2x idle, never clipping) so the reader sees how far above
-   rest work pushed the process. Trade: a small at-rest step becomes illegible inline - that's what
-   the drawer's separated, floored-axis panels are for. Inline answers "what shape is this life";
-   the drawer answers "what did each window do". */
+/* rssLifecycle(mem, opts): the whole process lifetime as ONE inline sparkline, for the table row.
+   ONE SHARED Y AXIS across both segments - that part must not be broken, because the entire point of putting
+   them on one line is that the reader can see how far above its resting level work pushed the process. It is
+   the load axis (0 → at least twice idle, never clipping), so the at-rest segment sits low and flat, which is
+   the truth: idle is a small fraction of peak.
+   THE TRADE THIS MAKES, STATED: on a shared axis a 6.59 MiB step at rest is ~2% of the frame and is not
+   legible inline. That is what the hover text and the drawer are for - the drawer keeps the separated panels,
+   where the at-rest window has its own floored axis (IDLE_AXIS_MIN_SPAN) and its movement is legible. Inline
+   answers "what shape is this process's life"; the drawer answers "what did each window do". */
 function rssLifecycle(mem, opts = {}) {
   const clean = (s) => (Array.isArray(s) ? s.filter((p) => p && typeof p.t_s === "number" && typeof p.rss_mib === "number")
     .sort((a, b) => a.t_s - b.t_s) : []);
@@ -3091,7 +4054,8 @@ function rssLifecycle(mem, opts = {}) {
   };
   const paths = (twoSeg ? `<path d="${band(rest, xRest0, wRest)}" fill="none" stroke="currentColor" stroke-width="1.4"/>` : "") +
     `<path d="${band(load, xLoad0, wLoad)}" fill="none" stroke="currentColor" stroke-width="1.4"/>`;
-  // The axis break, drawn: two slashes in the gap, so the discontinuity is visible.
+  // THE AXIS BREAK, drawn: two slashes in the gap, so the discontinuity is a thing the reader can see rather
+  // than an assumption they have to avoid making.
   const bx = PAD + wRest + GAP / 2;
   const brk = twoSeg
     ? `<g class="rss-break" stroke="currentColor" stroke-opacity="0.5" stroke-width="1">` +
@@ -3112,9 +4076,12 @@ function rssLifecycle(mem, opts = {}) {
     `<circle cx="${(xLoad0 + wLoad).toFixed(1)}" cy="${y(lastLoad.rss_mib).toFixed(1)}" r="2.2" fill="currentColor"/>` +
     `</svg>`;
 }
-/* Every figure the row's captions used to show, as one sentence. This is the accessible name of the
-   row's curve control (reachability rule: nothing may become keyboard/screen-reader unreachable when
-   a caption folds). Also the hover text; the drawer shows the same facts in full. */
+/* memCurveSummary(mem): EVERY figure the row's captions used to show, as one sentence.
+   THE REACHABILITY RULE: nothing may become unreachable when a caption folds. This string is the accessible
+   name of the row's curve control, so it is read by a screen reader and reachable by keyboard focus, not by
+   hover alone - a value that lives only in a tooltip is deleted for touch and keyboard users. It is also the
+   hover text, and the drawer shows the same facts laid out in full. Each figure names its own scope and its
+   own window, because that is the whole point of the memory tab's two labelling fixes. */
 function memCurveSummary(mem) {
   if (!mem || typeof mem !== "object") return "";
   const w = memWindows(mem), bits = [];
@@ -3123,8 +4090,9 @@ function memCurveSummary(mem) {
   if (rest.length >= 2) {
     const vs = rest.map((p) => p.rss_mib), lo = Math.min(...vs), hi = Math.max(...vs);
     const pts = rest.slice().sort((a, b) => a.t_s - b.t_s);
-    // A record can carry the series and no idle scalar; the median clause is simply not composed then
-    // (fmt1(null) throws, and a fabricated 0 would be worse).
+    // A record can carry the SERIES and no idle SCALAR (the envelope is absent for its own published reason).
+    // fmt1(null) throws, and a fabricated 0 would be worse than the omission, so the median clause is simply
+    // not composed - the span and the shape still are, because those come from the series itself.
     const med = idle != null ? `this cell: median ${fmt1(idle)} MiB, ` : "";
     bits.push(`At rest (${memWindowLabel(w.idle)}, before any request): ${med}` +
       (fmt1(lo) === fmt1(hi) ? `held ${fmt1(hi)} MiB` : `spanned ${fmt1(lo)}–${fmt1(hi)} MiB`) +
@@ -3144,18 +4112,23 @@ function memCurveSummary(mem) {
 }
 function rssCurves(mem, opts = {}) {
   if (!mem || typeof mem !== "object") return "";
-  // Compact is the table row: lifecycle curve alone, no prose labels. Everything the old ~350px
-  // caption stack said now lives in memCurveSummary, the control's accessible name, and the drawer.
+  /* COMPACT IS THE TABLE ROW: the lifecycle curve alone, no prose labels and no caption lines. A memory row
+     was ~350px tall - six block elements stacked in one cell - so three gateways filled a screen and a
+     fourteen-row comparison table stopped being comparable ("massive rows are not professional"). Everything
+     that was in those captions is in memCurveSummary, on the control's accessible name, and in the drawer. */
   if (opts.compact) return rssLifecycle(mem, opts);
   const idle = mval(mem.idle_rss_mib);
-  // Load panel needs the Recovered column's scalar and window so its caption names the same window.
+  // The load panel needs the scalar the Recovered column publishes, and the window it was read at, so its
+  // caption can name that same window instead of colliding with it. Both come off this very record.
   const load = rssSparkline(mem.rss_series, mval(mem.load_s), idle, "load", {
     recoveredAt: mval(mem.recovered_rss_mib), recoveryWindowS: memWindows(mem).recovery,
   });
   const idleSeries = mem.idle_rss_series;
   if (!Array.isArray(idleSeries) || idleSeries.length < 2) return load;
-  // The idle window has no load boundary to mark. kind:"idle" is passed explicitly rather than
-  // inferred from `loadEndS == null`, since a load window with an absent load_s also passes null there.
+  // The idle window carries no load boundary to mark, so no dotted rule: the whole window IS idle.
+  // kind:"idle" is what switches the axis, the stamp and the aria-label onto the at-rest vocabulary. It is
+  // passed explicitly rather than inferred from `loadEndS == null`, because a LOAD window whose load_s is
+  // absent also passes null there - and that row would then have been captioned as if it were at rest.
   const idleCurve = rssSparkline(idleSeries, null, idle, "idle");
   if (!idleCurve) return load;
   const verdict = idleStatic(mem);
@@ -3165,25 +4138,33 @@ function rssCurves(mem, opts = {}) {
     `</div>`;
 }
 
-// What the idle window did, as a phrase. Renders the engine's own verdict; never re-derives it.
+/* idleStatic(mem): what the idle window itself did, as a phrase. The engine judges it with the same
+   plateau test the load window uses and publishes the verdict plus its rate, so this only has to
+   render what was decided - it never re-derives the verdict from the series. */
 function idleStatic(mem) {
   const st = mval(mem.memory_idle_static ?? mem.idle_static);
   if (st == null) return "";
   if (st === 1) return "steady";
   const rate = mval(mem.memory_idle_growth_rate_mib_per_min ?? mem.idle_growth_rate_mib_per_min);
-  // A swinging idle window is genuinely uninteresting (nothing asked of the gateway); "growing" would
-  // be wrong there. mcode since 0 is a real code, not an unmeasured magnitude.
+  // An idle window that swings is the one place a wave is genuinely uninteresting - nothing is being
+  // asked of the gateway - so saying "growing" there is simply wrong, not merely harsh.
+  // mcode for the same reason as memShape: 0 is a real code, not an unmeasured magnitude.
   const sh = mcode(mem.idle_shape ?? mem.memory_idle_shape);
   if (sh === 0) return "swinging, not growing";
   if (sh === -1) return "releasing";
   return rate != null ? `growing ${fmt1(rate)} MiB/min` : "growing";
 }
 
-// The whole drawer for one gateway, as a string. `st` is threaded through so a test can drive the
-// drawer in a chosen mode without mutating live state.
+/* drawerHtml(g, st): the whole drawer for one gateway, as a string.
+   `st` is threaded through (it defaulted to the module-level state) so a test can drive the drawer in a
+   chosen mode without mutating live state - the same shape every other renderer here already has. This
+   surface had NO test of any kind: the clause that keeps a MEASURED FAILURE visible among the metrics
+   could be deleted and the suite stayed green, which would have silently removed a gateway's worst
+   result from the one place a reader goes for evidence. */
 function drawerHtml(g, st = state) {
   const langC = LANG_COLORS[g.lang] || LANG_COLORS.Other;
-  // Same per-gateway freshness signal the table row shows.
+  // The gateway's OWN freshness stamp in the drawer head: measured_at + a stale badge when flagged,
+  // the same per-gateway signal the table row shows (independent update cadences, made honest).
   const badge = measuredBadge(g);
   let h = `<header class="drawer-head">
     <h3>${gwLink(g)}</h3>
@@ -3192,21 +4173,24 @@ function drawerHtml(g, st = state) {
     ${badge ? `<div class="drawer-measured">${badge}</div>` : ""}
   </header>`;
 
-  // AUDIT #7: hardware stamp of the displayed basis (the matrix), not a deleted legacy suite object.
+  // AUDIT #7: the hardware stamp of the DISPLAYED basis (the matrix), not a deleted legacy suite object.
   const hw = gatewayHardware(g), arch = gatewayArch(g);
   if (hw) h += `<p class="stamp muted">${esc(hw)}${arch ? ` (${esc(arch)})` : ""}</p>`;
 
   for (const l of LANES) {
-    // Chooser-aware: perf + streaming read the same chosen cell the table shows, so drawer/table/
-    // compare agree in every mode; memory + xlate read their canonical accessor.
+    // CHOOSER-AWARE: the perf + streaming lanes read the SAME chosen cell the table shows in the
+    // current Peak/Same/Custom mode (laneRecord), so drawer/table/compare agree in every mode; the
+    // memory + xlate lanes are not chooser-driven and read their canonical accessor. The raw suite
+    // object is only the legacy fallback inside the accessor itself.
     const j = laneRecord(l, g, st);
     h += `<section class="drawer-lane"><h4>${esc(l.label)}</h4>`;
     if (!j) h += `<p class="muted">not measured</p>`;
     else if (!laneServed(j, l.flag)) {
-      // A multi-line diagnostic must not dump raw lines into the drawer: first line as the verdict,
-      // rest folded into a collapsed Evidence block, rig paths scrubbed.
-      // Fallback headline comes from naText, not the literal "not served" - a never-probed lane
-      // would otherwise announce a refusal it never observed.
+      // A multi-line diagnostic (e.g. a captured stack trace) must not dump ~25 raw lines into
+      // the drawer: show the first line as the verdict, fold the rest into a collapsed Evidence
+      // block, and scrub absolute rig paths (harness noise, not evidence).
+      // The fallback headline comes from naText, not from the literal "not served": with no error note
+      // to show, a lane the harness never probed would otherwise announce a refusal it never observed.
       const note = stripRigPaths(j[l.err] || "") || naText(j, l.flag, l.err).text;
       const nl = note.indexOf("\n");
       const head = nl >= 0 ? note.slice(0, nl) : note;
@@ -3218,11 +4202,14 @@ function drawerHtml(g, st = state) {
     else {
       const pn = lanePathNote(l, j, st);
       if (pn) h += `<p class="lane-note muted">${esc(pn)}</p>`;
-      // Each metric is a sealed envelope; metric() reads it (suppressed metrics filtered by na).
-      // A measured failure stays a row (red, with counts) rather than vanishing with genuinely-absent
-      // metrics - the drawer must tell the same story the table does.
-      // `m.cell` is a metric whose value is a reading plus evidence (the frontier); everything else is
-      // a plain envelope read through metric().
+      // Each metric is a sealed envelope; metric() reads it (a suppressed metric is absent, reads nothing
+      // here since we filter na). The operating concurrency travels INSIDE the envelope (env.concurrency).
+      // A MEASURED FAILURE stays a row (red, with its counts) rather than vanishing with the
+      // genuinely-absent metrics, and a measured zero carries its short reason - the drawer must
+      // tell the same story the table does, or the two surfaces disagree about the same envelope.
+      // `m.cell` is a metric whose value is a reading PLUS its evidence (the frontier), so the record does
+      // not carry a plain envelope under `m.k` and the cell renderer is the metric's own. Everything else is
+      // an envelope read through metric(), exactly as before.
       h += `<dl>` + l.metrics.map((m) => ({ m, c: m.cell ? m.cell(j, st) : metric(j[m.k], m.fmt) })).filter((x) => !x.c.na || x.c.failed).map(({ m, c }) => {
         if (c.failed)
           return `<div><dt>${esc(txt(m.label))}</dt><dd class="failtext" title="${esc(c.note || "")}">${esc(c.text)}</dd></div>`;
@@ -3231,7 +4218,8 @@ function drawerHtml(g, st = state) {
         const zeroWhy = c.v === 0 && c.env && ZERO_WHY[c.env.note];
         return `<div><dt>${esc(txt(m.label))}</dt><dd${c.note ? ` title="${esc(c.note)}"` : ""}>${esc(c.text + cc)}${
           zeroWhy ? ` <span class="muted">(${esc(zeroWhy)})</span>` : ""}</dd></div>`;
-      // Engine's definition of this lane's metrics, right under the numbers it defines.
+      // The engine's definition of this lane's metrics, right under the numbers it defines: a reader who
+      // asks "what does 'under 10 ms' actually mean" gets the answer without leaving the drawer.
       }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") +
         definitionsFold(LANE_DEFINITION_PREFIXES[l.key] || [], stateData(st)) + `${laneStamp(j)}`;
     }
@@ -3240,8 +4228,10 @@ function drawerHtml(g, st = state) {
 
   /* protocol matrix row with evidence */
   h += `<section class="drawer-lane"><h4>Protocol matrix</h4>`;
-  // Presence is not content: `g.matrix.cells` is a legacy flat map that's always `{}` now (truthy but
-  // empty), so reads go one level down into `upstreams[egress].cells[ingress]` instead.
+  // PRESENCE IS NOT CONTENT. This read `g.matrix.cells`, a legacy FLAT map that the per-cell artifact
+  // no longer fills - it is now always `{}`, which is truthy, so it sailed past the guard and every
+  // one of the six rows rendered "n/a" on every gateway on the board. The measurements were there the
+  // whole time, one level down in `upstreams[egress].cells[ingress]`.
   const diag = matrixDiagonal(g);
   if (!diag) h += `<p class="muted">not measured</p>`;
   else {
@@ -3258,14 +4248,17 @@ function drawerHtml(g, st = state) {
   }
   h += `</section>`;
 
-  // The sweep the whole frontier is read from, plotted once. The six published readings are maxima
-  // over subsets of these same probed points.
+  // THE SWEEP THE WHOLE FRONTIER IS READ FROM, plotted once. The caption no longer says "the search sweeps
+  // then bisects to the peak": nothing searches for a shape any more - every rung probed is a rung
+  // considered, and the six published readings are maxima over subsets of these same points.
   h += `<section class="drawer-lane"><h4>The concurrency sweep</h4>` +
     `<p class="lane-note muted">One sweep per cell, and every published throughput reading is a maximum over some subset of these same rungs: every point is a real probe, nothing decides when to stop looking. The marked dot is the reading at the bound the board is currently showing (${esc(boundLabel(selectedBound(st)))}), at the concurrency it was observed at.</p>` +
     `<div id="drawer-sweeps" class="sweeps"></div></section>`;
 
-  // OOTB config artifact: exact as-shipped default config (pointed at the mock). "Suggest a
-  // correction" opens a pre-filled GitHub issue.
+  /* OOTB config artifact: the exact as-shipped default config this gateway ran from (pointed at the
+     mock). Monospace, scrollable, copy-friendly. Absent (not-yet-wired gateway) → "not published".
+     A per-gateway "Suggest a correction" link opens a pre-filled GitHub issue so anyone — not just
+     maintainers — can propose a fix; the published config is a best-effort OOTB attempt. */
   h += `<section class="drawer-lane"><h4>Config</h4>`;
   if (typeof g.ootb_config === "string" && g.ootb_config.trim()) {
     h += `<p class="lane-note muted">As-shipped default, pointed at the mock — reproduce with: fresh install + this config.</p>` +
@@ -3279,7 +4272,11 @@ function drawerHtml(g, st = state) {
     h += `<p class="muted">not published</p>`;
   }
   h += `</section>`;
-  // Downloadable artifact is the gateway's complete record from data.json. Client-side blob, no server.
+  // ── Download results ──────────────────────────────────────────────────────────────────────────
+  // The downloadable per-gateway artifact IS the matrix result: its full 6x6 cell matrix (with the
+  // per-cell perf + streaming), the one memory read, the OOTB config, and the build/version stamp —
+  // the gateway's COMPLETE record from data.json. Client-side blob, no server (see openDrawer's
+  // [data-results-download] handler). Styled like the config Copy button.
   h += `<section class="drawer-lane"><h4>Results</h4>` +
     `<p class="lane-note muted">The gateway's complete record — the full 6×6 matrix (per-cell perf + streaming), the memory read, the OOTB config, and the build stamp.</p>` +
     `<button type="button" class="results-download" data-results-download title="Download this gateway's full results as JSON">Download results (JSON)</button>` +
@@ -3287,14 +4284,33 @@ function drawerHtml(g, st = state) {
   return h;
 }
 
-// The gateway's complete record from data.json, as pretty JSON for the client-side download.
+/* The per-gateway results artifact: the gateway's COMPLETE record from data.json (matrix 6x6 cells +
+   memory + OOTB config + build/version). Returned as pretty JSON for the client-side download. */
 function gatewayResultsJson(g) {
   return JSON.stringify(g, null, 2);
 }
 
+/* THE DRAWER IS A MODAL DIALOG (index.html: role="dialog" aria-modal="true"): focus moves into it on open,
+   Tab is kept inside it (trapDrawerTab), Escape closes it, and closing returns focus to the control that
+   opened it - or, when that element was re-rendered away, to the same gateway's row. */
+let drawerReturnFocus = null;
+function drawerFocusables() {
+  const d = document.getElementById("drawer");
+  if (!d) return [];
+  return [...d.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter((el) => !el.closest(".hidden"));
+}
+function trapDrawerTab(ev) {
+  if (!state.drawer || ev.key !== "Tab") return;
+  const next = focusTrapNext(drawerFocusables(), document.activeElement, ev.shiftKey);
+  if (next) { ev.preventDefault(); next.focus(); }
+}
 function openDrawer(key, push = false) {
   const g = state.data.gateways.find((x) => x.key === key);
   if (!g) return;
+  const drawerEl = document.getElementById("drawer");
+  const prev = document.activeElement;
+  if (prev && prev !== document.body && !drawerEl.contains(prev)) drawerReturnFocus = prev;
   state.drawer = key;
   document.getElementById("drawer-body").innerHTML = drawerHtml(g);
   document.getElementById("drawer").classList.remove("hidden");
@@ -3304,7 +4320,11 @@ function openDrawer(key, push = false) {
   if (copyBtn && typeof g.ootb_config === "string") {
     copyBtn.addEventListener("click", () => {
       const done = () => { copyBtn.textContent = "Copied"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500); };
-      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(g.ootb_config).then(done, () => {});
+      // A refused or unavailable clipboard must SAY so: a silent no-op let a reader paste stale clipboard
+      // contents as the as-shipped config of a reproducibility run.
+      const failed = () => { copyBtn.textContent = "Copy failed - select the text"; setTimeout(() => { copyBtn.textContent = "Copy"; }, 2500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(g.ootb_config).then(done, failed);
+      else failed();
     });
   }
   // Download the gateway's complete record as <gateway>-results.json (client-side blob, no server).
@@ -3321,16 +4341,26 @@ function openDrawer(key, push = false) {
     });
   }
   const box = document.getElementById("drawer-sweeps");
-  // Chooser-aware + gated: reads the same chosen cell the table reads, and a suppressed metric
-  // draws no curve.
+  // CHOOSER-AWARE + GATED: the drawer curve reads the SAME chosen cell the headline rows + table read
+  // (perfSweepSeries honors the Own cell/Same/Custom mode), so the marked point on the curve IS the
+  // published frontier reading at the selected bound, at its operating concurrency, for THIS mode's cell;
+  // a cell with no sweep draws no curve.
   const series = perfSweepSeries(g, { sustained: "#4cc38a", max: "#6cb6ff" });
   renderSweepCharts(box, series, chartTheme());
+  const closeBtn = document.getElementById("drawer-close");
+  if (closeBtn) closeBtn.focus();
   syncUrl(push);
 }
 function closeDrawer() {
+  const key = state.drawer;
   state.drawer = null;
   document.getElementById("drawer").classList.add("hidden");
   document.getElementById("backdrop").classList.add("hidden");
+  const saved = drawerReturnFocus;
+  drawerReturnFocus = null;
+  const back = saved && saved.isConnected ? saved
+    : (key ? document.querySelector(`.view:not(.hidden) tr[data-gw="${CSS.escape(key)}"]`) : null);
+  if (back && typeof back.focus === "function") back.focus();
   syncUrl(true);
 }
 
@@ -3365,11 +4395,15 @@ function renderCompareBar() {
   });
 }
 
-/* Indices of the best value in a compare row - every index holding it, not just the first, so a tie
-   (e.g. two gateways both below resolution) doesn't draw a false distinction. Empty Set if no contest. */
+/* bestIndex(vals, best): the indices of the best value in a compare row - EVERY index holding it, not
+   the first one to reach it. A tie is a tie: two gateways both below resolution on a metric both rank
+   as 0, which is the same reading, and highlighting only the leftmost of them draws a distinction the
+   measurement explicitly says it cannot make. Returns a Set (empty when there is no contest to call). */
 function bestIndex(vals, best) {
-  // best == null means the row is evidence, not a contest (e.g. direct_c1_p99_us is a rig property,
-  // not a gateway property) - crowning a winner would invent a ranking out of shared baseline noise.
+  // best == null means the row is EVIDENCE, not a contest: direct_c1_p99_us is the harness's own
+  // direct-to-mock leg, a property of the rig rather than of any gateway, so crowning a "winner" on it
+  // would invent a ranking out of measurement noise on a baseline every row shares. Without this the
+  // `best === "min" ? ... : ...` ternary would silently fall through to max and highlight one anyway.
   const none = new Set();
   if (best == null) return none;
   const present = vals.filter((v) => v != null);
@@ -3381,9 +4415,16 @@ function bestIndex(vals, best) {
   return winners;
 }
 
-/* The entire compare panel as a string, given the gateways being compared. Split out of renderCompare
-   (which touches the DOM on its first line) so it's testable without a DOM. Everything that decides
-   anything lives here as a pure function of (gateways, state); DOM wiring stays in renderCompare. */
+/* compareBodyHtml(gws, st): the ENTIRE compare panel as a string, given the gateways being compared.
+   IT IS SPLIT OUT SO IT CAN BE TESTED AT ALL. renderCompare reaches for document.getElementById on its
+   first useful line, the suite has no DOM, and so the compare table - the surface whose whole job is to
+   put three gateways' numbers side by side and call a winner - was structurally unreachable by every
+   test in the suite. Not under-tested: untestable. That is how a lane comes to disagree with the table
+   without anything going red, and it is exactly the divergence the "table == drawer == compare" tests
+   exist to forbid on the other two surfaces.
+   The DOM half stays in renderCompare (find the panel, set innerHTML, draw the canvases); everything
+   that DECIDES anything - which record each lane reads, which cell wins, how a failure or a suppressed
+   metric renders - lives here, as a pure function of (gateways, state). */
 function compareBodyHtml(gws, st = state) {
   let h = `<div class="table-scroll"><table class="cmp-table"><thead><tr><th></th>` + gws.map((g, i) =>
     `<th><span class="dot" style="background:${CMP_COLORS[i]}"></span>${esc(g.display)}</th>`).join("") + `</tr></thead><tbody>`;
@@ -3399,22 +4440,28 @@ function compareBodyHtml(gws, st = state) {
   }).join("")}</tr>`;
 
   for (const l of LANES) {
-    // Chooser-aware: perf + streaming read the same chosen cell the table shows, so compare can
-    // never disagree with the table. Skip the lane only when no gateway measured it at all.
+    /* CHOOSER-AWARE: perf + streaming read the SAME chosen cell the table shows in the current
+       Peak/Same/Custom mode (laneRecord); memory + xlate read their canonical accessor. So compare
+       can never disagree with the table in any mode. Skip the whole lane only when no gateway measured
+       it at all; an all not-served lane still renders rows so the header is never left bare. */
     const recs = gws.map((g) => laneRecord(l, g, st));
     if (recs.every((j) => !j)) continue;
     h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
     if (l.pathNote) {
-      // One disclosure row per canonical lane: which path each gateway's numbers measured.
+      /* one disclosure row per canonical lane: WHICH path each gateway's numbers measured */
       h += `<tr><td class="metric">Measured path</td>` + recs.map((j) =>
         laneServed(j, l.flag)
           ? `<td class="muted lane-note">${esc(lanePathNote(l, j, st))}</td>`
           : `<td class="na"></td>`).join("") + `</tr>`;
     }
     for (const m of l.metrics) {
-      // Each metric read through the same metric() accessor the table uses (mval() alone would
-      // collapse states the table renders apart). Ranking still uses mval().
-      // `m.cell` is a metric that is a reading plus evidence; everything else is a plain envelope.
+      // Each metric is a sealed envelope, read through the SAME metric() accessor the table uses -
+      // routing this surface through mval() alone collapsed the states the table renders apart: a
+      // measured failure showed as a bare n/a with no evidence, below-resolution's ≈0 showed as a
+      // plain 0, and a suppressed metric's reason vanished. Ranking still uses mval() (failed and
+      // absent rank as nothing; below-resolution ranks as 0).
+      // `m.cell` is a metric that is a reading plus its own evidence (a frontier reading), whose renderer
+      // travels with the metric; everything else is a plain envelope on the record.
       const cells = recs.map((j) => (laneServed(j, l.flag) ? (m.cell ? m.cell(j, st) : metric(j[m.k], m.fmt)) : null));
       const bi = bestIndex(cells.map((c) => (c ? c.v : null)), m.best);   // a Set: every tied best
       h += `<tr><td class="metric">${esc(txt(m.label))}</td>` + cells.map((c, i) => {
@@ -3429,7 +4476,11 @@ function compareBodyHtml(gws, st = state) {
           zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
       }).join("") + `</tr>`;
     }
-    // Curves side by side: same three gateways' readings, but as a scale a reader compares at a glance.
+    /* THE CURVES, SIDE BY SIDE. The rows above give three gateways' six readings as digits, which is
+       precise and slow to read; this row is the same three curves on the same shared scale, which is the
+       comparison a reader makes in one glance - and it is the comparison the two retired scalars made
+       impossible, since a single number cannot show that one of these machines needs a loose tail and
+       another does not. */
     if (l.cmpExtra) {
       const blocks = recs.map((j) => (laneServed(j, l.flag) ? l.cmpExtra(j, st) : ""));
       if (blocks.some(Boolean))
@@ -3451,7 +4502,9 @@ function renderCompare() {
   panel.classList.remove("hidden");
   document.getElementById("compare-body").innerHTML = compareBodyHtml(gws, state);
 
-  // Chooser + bound aware, through perfSweepSeries, the one place that decides what a perf curve is.
+  // CHOOSER-AWARE + BOUND-AWARE: each gateway's CHOSEN cell, its ONE sweep, marked at the SAME bound the
+  // rest of the panel is showing - through perfSweepSeries, the one place that decides what a perf curve is,
+  // so the drawer and the compare panel cannot plot a different thing from the same record.
   const series = gws.map((g, i) => ({ ...perfSweepSeries(g, { sustained: CMP_COLORS[i] })[0], label: g.display, color: CMP_COLORS[i] }));
   renderSweepCharts(document.getElementById("cmp-sweeps"), series, chartTheme());
 }
@@ -3462,19 +4515,24 @@ function closeCompare(sync = true) {
 }
 
 /* ---- protocol matrix view --------------------------------------------------- */
-/* One 6x6 grid per gateway, rows = ingress dialect, cols = upstream (egress) dialect. Cell states:
-   pass/fail/not configurable/unprobed_auth/n/a (unmeasured in v1). Diagonal needs no translation.
-   gen-data normalizes v1 results into the same upstreams shape. */
+/* v2: one 6x6 grid per gateway, rows = ingress dialect, cols = upstream (egress) dialect.
+   Cell states: pass (green), fail (red), not configurable (neutral: the manifest defines no egress
+   config for that dialect), unprobed_auth (grey), and n/a for egress columns a v1-era result never
+   measured. The diagonal needs no translation; a faithful passthrough passes there by design and
+   its verdict note says so. gen-data normalizes v1 results into the same upstreams shape. */
 function matrixCell(g, egress, ingress) {
   const up = g.matrix && g.matrix.upstreams && g.matrix.upstreams[egress];
   return up && up.cells ? up.cells[ingress] : null;
 }
-// Tooltip text for a cell. A grey (not_configurable) cell shows the cited capability-limit reason,
-// never a bare "we didn't test it". Green/red show the verdict label + note.
+/* Tooltip text for a cell. A grey (not_configurable) cell is the gateway's OWN declared
+   incapability, so it shows the cited capability-limit reason (verdict_note) - never a bare
+   "we didn't test it". Green/red show the verdict label + note as before. */
 function matrixCellTip(cell) {
   const [, label] = cellState(cell);
   if (cell.served === "not_configured")
-    // Probe-first grey: probed and failed - show probe evidence, never graded red.
+    // PROBE-FIRST grey: this cell WAS probed and the probe failed - show the probe's own evidence
+    // (probe_note), falling back to the verdict prose. Honest wording: not configured/supported on
+    // this pairing, never "the gateway failed" - no cell is graded red under probe-first.
     return `not configured: the capability probe on this ingress/upstream pairing did not complete a correct translation round trip${cell.probe_note ? " - " + cell.probe_note : cell.verdict_note ? " - " + cell.verdict_note : ""}`;
   if (cell.served === "not_configurable")
     // HONEST wording: the capability grid is authored by the busbar team from each project's docs
@@ -3484,32 +4542,43 @@ function matrixCellTip(cell) {
   if (cell.served === "untestable")
     return `untestable: the recorded harness could not test this pair against its mock; this does not establish gateway incapability${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
   if (cell.served === "failed")
-    // Real pairing; gateway reached and declined this attempt.
+    // The pairing is real (the status was not a 404/501-shaped absence); the gateway reached and
+    // declined this specific attempt. Surface the actual evidence, not just the verdict label.
     return `failed: the gateway answered HTTP ${cell.status || "?"}${cell.body_snippet ? " - " + cell.body_snippet : ""}`;
   if (cell.served !== true && cell.served !== "unprobed_auth" && isHarnessGap(cell))
     return `not verified: the harness could not get this gateway serving under this upstream config${cell.verdict_note ? " (" + cell.verdict_note + ")" : ""}`;
   return `${label}. ${cell.verdict_note || ""}`;
 }
-/* Per-cell perf line for a green cell's tooltip/detail: sustained RPS + added latency p99, and delta
-   vs the gateway's reference cell (named, never called "best"). Grey/red/unprobed return "".
-   Dead on the live UI (cellPopFull used instead) but still exported. Reads every metric through
-   mval() so an absent figure surfaces its own reason. */
+/* Per-cell perf line for a GREEN cell's tooltip/detail: this path's sustained RPS + added latency
+   p99, and its RPS delta vs THIS gateway's REFERENCE cell (the one the Passthrough tab ranks; not
+   necessarily the fastest, so it is named, never called "best"). Grey/red/unprobed cells carry no
+   perf and return "".
+   Dead on the live UI (cellPopFull is used instead) but still EXPORTED. It reads every metric through
+   mval(), so an ABSENT figure surfaces as its own reason rather than as a bare number - there is no
+   ungated field here for a render site to leak. (It used to be the suppression this guarded against; a
+   measurement near the rig's ceiling is now published, and only a genuine absence has nothing to show.) */
 function cellPerfTip(cell, ingress, egress, best, boundMs = selectedBound()) {
   const p = cell && cell.served === true ? cell.perf : null;
   const rd = p ? frontierAt(frontierOf(p), boundMs) : null;
   const rps = rd ? mval(rd.rps) : null;
   const lat = p ? mval(p.added_latency_p99_us) : null;
-  // A record with no reading at all at this bound has nothing to say about throughput here.
+  // A record with no reading AT ALL at this bound has nothing to say about throughput here. It used to test
+  // `isEnvelope(p.rps_sustained_20ms)`, i.e. "does this record carry the field"; the equivalent question now
+  // is whether the frontier has a reading at the bound being displayed.
   if (!p || !rd) return "";
-  // An absent reading at this bound: show the certified added-latency alone rather than a bare "".
+  // An ABSENT reading at this bound: show the certified added-latency alone rather than a bare "".
   if (rps == null) {
-    // The record's own reason, not a guessed one (via METRIC_NOTES, consistent with the rest of the file).
+    // THE RECORD'S OWN REASON, NOT A GUESSED ONE. This read "sustained RPS n/a: rig-limited" for EVERY
+    // absent sustained figure - not_measured, harness_error and below_resolution alike - so a hole this
+    // rig caused and a hole nobody has measured told the reader the same untrue thing. Everywhere else in
+    // this file an absence reason travels through METRIC_NOTES; this one sentence was hand-written.
     const why = rd.rps && rd.rps.reason ? noteText(rd.rps.reason) : "not measured";
     return lat != null ? `+${fmtInt(lat)} µs p99 added (no reading at ${boundLabel(boundMs)}: ${why})` : "";
   }
   const bpRd = frontierAt(frontierOf(best), boundMs);
   const bp = cellPath(best), bRps = bpRd ? mval(bpRd.rps) : null;
-  // The bound is named and "≥" travels: a floor must never be stated as a ceiling.
+  // The bound is NAMED, and the "≥" travels: a floor stated as a ceiling is the one thing this popup must
+  // never do (the sweep ran out of ladder; the rate is real and maximality is not established).
   let s = `${rd.lower_bound === true ? "≥ " : ""}${fmtRate(rps)} req/s ${boundClause(boundMs)}`;
   if (lat != null) s += `, +${fmtInt(lat)} µs p99 added`;
   if (bRps != null && bRps > 0) {
@@ -3520,9 +4589,12 @@ function cellPerfTip(cell, ingress, egress, best, boundMs = selectedBound()) {
   return s;
 }
 
-/* Rich matrix-cell popup, the visual face of Custom mode: hovering a cell shows the same gated
-   per-cell numbers the Performance/Streaming tables show, plus delta-to-own-cell and capability
-   verdict/evidence. Returns "" for an unmeasured egress column a v1 result never probed. */
+/* cellPopFull: the RICH matrix-cell popup. THE visual face of Custom: hovering a cell shows the SAME
+   gated per-cell numbers the Performance/Streaming tables show for that exact ingress→egress cell (read
+   through the SAME chooserPerfCell/chooserStreamCell accessors, so the popup and the table can never
+   diverge), PLUS Δ-to-Peak (this cell vs the gateway's own best diagonal), PLUS the capability
+   verdict/evidence. A rig-limited/absent cell reads "not measured", never a number.
+   Returns an HTML string (or "" for an unmeasured egress column a v1 result never probed). */
 function cellPopFull(g, ingress, egress) {
   const cell = matrixCell(g, egress, ingress);
   if (!cell) return "";
@@ -3532,7 +4604,8 @@ function cellPopFull(g, ingress, egress) {
   // Read the SAME gated values the tables read, by pinning a synthetic Custom-mode state on this cell.
   const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
   const rows = [];
-  // A measured failure is a row, not a filtered-out absence.
+  // A MEASURED FAILURE IS A ROW, not a filtered-out absence: dropping it left a popup claiming
+  // "served, not measured on this cell" over a cell whose every metric was measured and failed.
   const pushRow = (lbl, c) => {
     if (!c.na) rows.push(`<div><span>${lbl}</span><b>${esc(c.text)}</b></div>`);
     else if (c.failed) rows.push(`<div><span>${lbl}</span><b class="failtext" title="${esc(c.note || "")}">${esc(c.text)}</b></div>`);
@@ -3540,9 +4613,15 @@ function cellPopFull(g, ingress, egress) {
   const perfRow = (key, fmt, lbl) => pushRow(lbl, chooserPerfCell(g, key, fmt, st));
   perfRow("added_latency_p50_us", fmtAdded, "Added latency p50");
   perfRow("added_latency_p99_us", fmtAdded, "Added latency p99");
-  // Throughput at the board's selected bound, through the same reader the Performance table uses.
-  // Always rendered, even with no reading at that bound: silently omitting it would leave a reader
-  // unable to tell "cannot do it at 5ms" from "popup doesn't show throughput" - opposite conclusions.
+  // THROUGHPUT AT THE BOUND THE BOARD IS SHOWING, labelled with that bound, through the same reader the
+  // Performance table uses - so the popup and the table can never disagree about which reading they show.
+  // It replaces "Sustained @20ms" and "Max proxy RPS": one sweep collapsed twice, and the first label named
+  // a bound the qualifying gate did not use.
+  /* AND IT IS ALWAYS RENDERED, even when this cell has no reading at that bound. Every other row here is
+     dropped when it has nothing to say, which is right for a metric that is simply absent - but the bound is
+     the READER'S CHOICE, and a popup that silently omits the throughput row leaves them unable to tell
+     "this cell cannot do it at 5 ms" from "the popup does not show throughput". Those are opposite
+     conclusions, and on the slowest gateways the first one is most of the row. */
   {
     const lbl = esc(boundColLabel(selectedBound(state)));
     const c = frontierChooserCell(g, st, selectedBound(state));
@@ -3556,25 +4635,31 @@ function cellPopFull(g, ingress, egress) {
     ? `<div class="pop-metrics">${rows.join("")}</div>`
     // A served cell with no per-cell perf (unswept), or a non-green cell: honest "not measured".
     : (cell.served === true ? `<div class="pop-perf muted">served, not measured on this cell</div>` : "");
-  // Delta: this cell vs the gateway's own representative diagonal (best_cell). "" for that cell itself.
+  // The delta: this cell vs the gateway's own REPRESENTATIVE diagonal (best_cell). "" for that cell itself.
   const cellPerf = chooserCellPerf(g, st);
-  // A rate tells a reader whether this cell is fast; the shape tells them whether it's fast because
-  // the tail was allowed to grow.
+  // THE CELL'S CURVE, in the popup that is the visual face of Custom mode. A single rate tells a reader
+  // whether this cell is fast; the shape tells them whether it is fast because the tail was allowed to grow,
+  // which is the difference this matrix is most often used to look for.
   const shapeBlock = cellPerf ? frontierBlock(cellPerf, { compact: true }) : "";
   const cellPerfLabeled = cellPerf ? { ingress, egress, ...cellPerf } : null;
   const delta = deltaToPeak(cellPerfLabeled, g.best_cell);
   const bp = g.best_cell ? g.best_cell.path : null;
-  // "vs its own cell", not "vs peak": best_cell isn't necessarily this gateway's fastest, and calling
-  // it "peak" would make a negative delta read as impossible rather than ordinary.
+  // "vs its own cell", NOT "vs peak": the reference is best_cell, the representative diagonal the chooser
+  // picks (openai where served, else lowest added latency). Calling it the peak told a reader the other
+  // cell was this gateway's fastest, which the selection never established - and a NEGATIVE delta against
+  // a cell wrongly labelled "peak" reads as impossible rather than as ordinary.
   const deltaBlock = delta
     ? `<div class="pop-delta">vs its own cell (${esc(MATRIX_LABELS[bp.ingress] || bp.ingress)}→${esc(MATRIX_LABELS[bp.egress] || bp.egress)}): ${esc(delta)}</div>`
     : (cellPerf && bp && bp.ingress === ingress && bp.egress === egress
       ? `<div class="pop-delta muted">this IS the cell that ranks the Performance tab</div>` : "");
   const verdict = cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "";
-  // Egress fairness guard: the mock answers all six dialects by path, so a gateway forwarding the
-  // ingress request verbatim would still score 200 as a translation it never performed.
-  // egress_reverified checks it actually re-shaped the request. Only stated off-diagonal (same-dialect
-  // passthrough has nothing to translate).
+  // The egress fairness guard, surfaced where the translation claim is actually inspected. The mock answers
+  // all six dialects by path, so a gateway that forwarded the ingress request VERBATIM would still get a
+  // 200 and score as a translation it never performed. egress_reverified is the check that it really
+  // re-shaped the request into the egress dialect. This is a CAPABILITY verdict, not a perf metric, so it
+  // renders as prose next to verdict_note rather than as a lane row - and it is only stated for OFF-DIAGONAL
+  // cells, since a same-dialect passthrough has nothing to translate and "verbatim" is the correct behaviour
+  // there. reverify_note carries the basis, and an unverified cell says so rather than staying silent.
   const rv = cellPerf && cellPerf.egress_reverified;
   const reverify = (ingress !== egress && cellPerf && cellPerf.egress_reverified != null)
     ? `<div class="pop-note ${rv ? "" : "warn"}">${rv
@@ -3585,17 +4670,24 @@ function cellPopFull(g, ingress, egress) {
   const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
   return head + perfBlock + shapeBlock + deltaBlock + verdict + reverify + cta;
 }
-// Did this gateway produce a protocol matrix at all?
+/* hasMatrixGrid(g): did this gateway produce a protocol matrix at all? */
 function hasMatrixGrid(g) { return !!(g && g.matrix && (g.matrix.upstreams || g.matrix.cells)); }
-// Why a gateway has no matrix. Falls back to a plain statement rather than inventing a cause.
+/* matrixFailureReason(g): WHY a gateway has no matrix, from whatever the producer recorded. Falls back to
+   a plain statement rather than inventing a cause. */
 function matrixFailureReason(g) {
   const first = [g && g.matrix && g.matrix.error, g && g.matrix_error, g && g.serve_error]
     .find((x) => typeof x === "string" && x.trim());
+  // A row withheld for engine mismatch did produce a matrix - on an older engine - and the board blanked
+  // it rather than mix instruments. "The run produced no protocol matrix" would call that a failed run.
+  if (!first && g && g.awaiting_engine)
+    return `withheld: not yet re-measured on the current benchmark engine (${g.awaiting_engine}); its earlier result is not mixed into this board`;
   const why = first ? stripRigPaths(first).split("\n")[0] : "the run produced no protocol matrix for this gateway";
   return `no matrix result: ${why}`;
 }
-/* Rows the protocol grid renders: every gateway, matrix or not. No matrix -> all-n/a row with its
-   failure reason, never a silent absence. Sorted by pass count then name. Pure; covered by site/test.mjs. */
+/* matrixRoster(gateways): the rows the protocol grid renders: EVERY gateway, always, matrix or not. A
+   gateway with no matrix renders as an all-n/a row carrying its failure reason, never as a silent
+   absence: total failure has to provoke the same question a row of grey does. Sorted by pass count (a
+   matrix-less gateway has none, so it sorts last), then by name. Pure; covered by site/test.mjs. */
 function matrixRoster(gateways, tally) {
   return (gateways || []).slice().sort((a, b) =>
     (hasMatrixGrid(b) ? tally(b).pass : -1) - (hasMatrixGrid(a) ? tally(a).pass : -1) ||
@@ -3603,25 +4695,25 @@ function matrixRoster(gateways, tally) {
 }
 function renderMatrix() {
   const gateways = state.data.gateways || [];
-  // Empty state is for a board with no matrix data at all; a single gateway without a matrix renders
-  // as an all-n/a row instead.
+  // The empty state is for a board with NO matrix data at all (no results committed yet); it is not a
+  // per-gateway filter. One gateway without a matrix renders as an all-n/a row, not as a disappearance.
   if (!gateways.some(hasMatrixGrid)) {
     document.getElementById("matrix-empty").classList.remove("hidden");
     document.getElementById("matrix-grid").classList.add("hidden");
     return;
   }
-  // Per-gateway tallies over the full grid; sorted by pass count desc, then name.
+  /* per-gateway tallies over the full grid; sorted by measurement: pass count desc, then name */
   const tally = (g) => {
     const t = { pass: 0, fail: 0, notconf: 0, notdeclared: 0, unprobed: 0, unverified: 0, untestable: 0 };
+    // THE TALLY COUNTS WHAT THE GRID PAINTS: one classifier (cellState), so a header can never report a
+    // cell as "unverified" that the grid beneath it draws red, or the other way round.
+    const BUCKET = { served: "pass", notconf: "notconf", unprobed: "unprobed", untestable: "untestable",
+      unverified: "unverified", failed: "fail" };
     for (const e of MATRIX_CELLS) for (const c of MATRIX_CELLS) {
       const cell = matrixCell(g, e, c);
       if (!cell) continue;
-      if (cell.served === true) t.pass++;
-      else if (cell.served === "not_configured" || cell.served === "not_configurable") t.notconf++;
-      else if (cell.served === "unprobed_auth") t.unprobed++;
-      else if (cell.served === "untestable") t.untestable++;
-      else if (isHarnessGap(cell)) t.unverified++;
-      else t.fail++;
+      if (["not_configurable", "not_declared"].includes(cell.served)) t.notdeclared++;
+      else t[BUCKET[cellState(cell)[0]]]++;
     }
     return t;
   };
@@ -3649,13 +4741,18 @@ function renderMatrix() {
         MATRIX_CELLS.map((c) => `<tr><td class="name">${esc(MATRIX_LABELS[c])}</td>${
           MATRIX_CELLS.map((e) => {
             const cell = matrixCell(g, e, c);
-            // Two different absences, said differently: no matrix at all carries its failure reason.
+            // Two different absences, said differently: a gateway with no matrix AT ALL carries its
+            // failure reason on every cell, so the row reads as a failure rather than as an old result.
             if (!cell) return `<td class="na" title="${esc(missing ? matrixFailureReason(g)
               : "not measured (v1 result: this upstream dialect was not probed)")}">n/a</td>`;
-            const [cls] = cellState(cell);
+            const [cls, label] = cellState(cell);
             const diag = e === c ? " diag" : "";
-            // No native `title`: the richer hover popup carries verdict + perf; a title would double up.
-            return `<td><span class="cell ${cls}${diag}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}"></span></td>`;
+            // No native `title` here: the richer hover popup (cellPopHtml/showPop) carries the
+            // verdict + perf, and a native title on top of it would double up. But the VERDICT must not be
+            // colour-only: it rides as the accessible name, and the cell is focusable so the popup opens
+            // from the keyboard too (focus/blur below mirror mouseenter/mouseleave).
+            const aria = `${MATRIX_LABELS[c] || c} in, ${MATRIX_LABELS[e] || e} upstream: ${label}`;
+            return `<td><span class="cell ${cls}${diag}" tabindex="0" role="img" aria-label="${esc(aria)}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}"></span></td>`;
           }).join("")
         }</tr>`).join("")
       }</tbody></table></div>
@@ -3671,6 +4768,9 @@ function renderMatrix() {
     pop.className = "matrix-pop hidden";
     document.body.appendChild(pop);
   }
+  // The cell that opened the popup may just have been destroyed by this re-render (innerHTML above), and
+  // its mouseleave will never fire: hide the shared popup so it cannot float over the new grid.
+  pop.classList.add("hidden");
   const showPop = (el) => {
     const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
     // el.dataset.cell is the INGRESS (row), el.dataset.egress the upstream (column).
@@ -3691,7 +4791,10 @@ function renderMatrix() {
   grid.querySelectorAll(".cell").forEach((el) => {
     el.addEventListener("mouseenter", () => showPop(el));
     el.addEventListener("mouseleave", () => pop.classList.add("hidden"));
-    // Click a served cell -> jump to Performance tab in Custom mode with this in->out pinned.
+    el.addEventListener("focus", () => showPop(el));
+    el.addEventListener("blur", () => pop.classList.add("hidden"));
+    // Click a SERVED cell → jump to the Performance tab in Custom mode with this in→out pinned. The matrix
+    // is the visual face of Custom: the popup shows the cell's numbers, the click opens the full row for it.
     el.addEventListener("click", () => {
       const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
       const cell = g && matrixCell(g, el.dataset.egress, el.dataset.cell);
@@ -3706,10 +4809,17 @@ function renderMatrix() {
 }
 
 /* ---- charts gallery --------------------------------------------------------- */
-/* Charts tab: horizontal ranked bars from the live board, replacing 25 static PNGs. Metric is a
-   control; bound and cell come from the selectors every other tab uses.
-   A gateway with no value is listed, not dropped - an absent number usually means a refusal a reader
-   needs to see, so it's named under the chart with its reason. */
+/* renderCharts(): the Charts tab - horizontal ranked bars, drawn from the live board.
+
+   REPLACED 25 STATIC PNGs. Half of those existed only because "top 5" had to be decided at render
+   time, by one metric, before the reader arrived; the rest froze one bound and one cell into an
+   image. Here the metric is a control, the bound and cell come from the selectors every other tab
+   honours, and "top 5" is a row count rather than a decision baked into a filename.
+
+   A GATEWAY WITH NO VALUE IS LISTED, NOT DROPPED. A chart that silently omits the rows it cannot
+   draw reports a smaller, tidier field than the one that was measured - and on this board an absent
+   number usually means a refusal (the cell was not served, the window had failures) that a reader
+   needs to see. They are named under the chart with their reason. */
 function renderCharts() {
   const panel = document.getElementById("chart-panel");
   const controls = document.getElementById("chart-controls");
@@ -3735,19 +4845,24 @@ function renderCharts() {
     note.textContent = "";
     return;
   }
-  panel.innerHTML = `<canvas id="chart-canvas" width="900" height="${Math.max(160, rows.length * 30 + 60)}"></canvas>`;
+  const alt = rankedBarsAlt(rows, metric);
+  panel.innerHTML = `<canvas id="chart-canvas" width="900" height="${Math.max(160, rows.length * 30 + 60)}" ` +
+    `role="img" aria-label="${esc(alt.label)}" aria-describedby="chart-canvas-data"></canvas>` + alt.table;
   drawRankedBars(document.getElementById("chart-canvas"), rows, metric, chartTheme());
 
   note.innerHTML = esc(metric.note) +
     (metric.log ? " Drawn on a LOG scale: this metric spans orders of magnitude, and a linear axis would collapse most of the field into the width of a line." : "") +
     (missing.length
-      ? `<br>Not shown (no value on the chosen cell): ${missing.map((g) => esc(g.name || g.key)).join(", ")}.`
+      ? `<br>Not shown (no value on the chosen cell): ${missing.map((g) => esc(g.display || g.key)).join(", ")}.`
       : "");
 }
 
-/* One bar per gateway, longest-first by the metric's own direction. Log scale where the metric says
-   so (wide-spread metrics collapse to a pixel on a linear axis); gridlines fall on decades, labelled
-   in the metric's own units. */
+/* drawRankedBars: one bar per gateway, longest-first by the metric's own direction.
+
+   LOG WHERE THE METRIC SAYS SO. Cost per request spans 2,247x on the current board; on a linear axis
+   twelve of fourteen gateways are a single pixel wide beside the slowest, which destroys the very
+   comparison the chart exists to make. Gridlines fall on decades and are labelled in the metric's own
+   units, so the scale is readable as "ten times" rather than as an unlabelled curve. */
 function drawRankedBars(canvas, rows, metric, theme = {}) {
   const ctx = canvas && canvas.getContext && canvas.getContext("2d");
   if (!ctx) return null;
@@ -3808,7 +4923,8 @@ function fmtChartValue(v, unit) {
   if (unit === "µs") return v >= 1000 ? `${fmt1(v / 1000)} ms` : `${fmtInt(v)} µs`;
   if (unit === "USD") return v < 0.01 ? `$${v.toFixed(4)}` : `$${fmt2(v)}`;
   if (unit === "MiB") return `${fmt1(v)} MiB`;
-  return fmtInt(v);
+  // fmtRate, not fmtInt: a measured 0.25 req/s must not be labelled "0".
+  return fmtRate(v);
 }
 
 /* ---- method links + footer -------------------------------------------------- */
@@ -3826,11 +4942,24 @@ function renderStatic() {
   const bits = [];
   if (state.data.hardware) bits.push(`Ran on: ${state.data.hardware}`);
   if (state.data.latest_measured_at) bits.push(`Latest measurement: ${stampWithAge(state.data.latest_measured_at)}`);
-  /* Which benchmark produced this board, so the per-row sha has something to compare against.
-     Distinguishes two different facts: a row on a different sha ("measured on an older version") vs
-     a row with no sha at all ("not yet measured on it") - conflating them once produced a false
-     "stale results" claim for rows that actually had no results yet. Each clause appears only when
-     its set is non-empty. Extracted as a pure function so the sentence is testable. */
+  /* WHICH BENCHMARK PRODUCED THIS BOARD. Stated once here so the per-row sha has something to be
+     compared against: a red row means "not this one", and a reader should not have to infer what
+     "this one" is. Also counts the rows that are not on it, because one red pill in a long table is
+     easy to miss and the count is the thing that decides whether the board is safely comparable.
+
+     "NOT ON THIS ENGINE" IS TWO DIFFERENT FACTS AND THE FOOTER MUST NOT MERGE THEM.
+     It counted `!g.engine.current` and called every one of them "measured on an older version". That
+     predicate is true for both of:
+       - a row stamped with a DIFFERENT sha: it has numbers, and they are not comparable with the rest;
+       - a row stamped with NO sha (`engine.sha === null`): it has no numbers at all yet.
+     On the 2026-07-30 board the second set was seven gateways mid-run and the first was empty, so the
+     footer told a reader we were showing stale results for half the field when we were showing none. That
+     is a false statement about the board's own trustworthiness, in the one line a reader consults to decide
+     whether to trust it. The null stamp is deliberate on the producer's side (a row with no stamp must not
+     imply it matches the board's engine); the defect was reading it as a version.
+     Each clause appears only when its set is non-empty, so a clean board still reads as one bare version.
+     Extracted as a pure function for the same reason rigStamp is: the whole defect was in the SENTENCE, and a
+     sentence composed inside a DOM renderer is a sentence no test can read. */
   const bv = benchmarkVersionStamp(state.data);
   if (bv) bits.push(bv);
   bits.push(`Site data generated: ${state.data.generated_at ? stampWithAge(state.data.generated_at) : "unknown"}`);
@@ -3843,18 +4972,27 @@ function benchmarkVersionStamp(data) {
   if (!data || !data.benchmark_version) return "";
   const gws = data.gateways || [];
   const off = gws.filter((g) => g.engine && !g.engine.current);
-  const older = off.filter((g) => g.engine.sha).length;
-  const unmeasured = off.length - older;
+  // A row gen-data SUPPRESSED for engine mismatch (OTB_SINGLE_ENGINE) shows no numbers at all, so
+  // "measured on an older version" would describe numbers the board is not showing: it is awaiting
+  // re-measurement, and says so.
+  const awaiting = off.filter((g) => g.awaiting_engine).length;
+  const older = off.filter((g) => g.engine.sha && !g.awaiting_engine).length;
+  const unmeasured = off.length - older - awaiting;
   const short = String(data.benchmark_version).slice(0, 7);
   const clauses = [];
   if (older) clauses.push(`${older} row${older === 1 ? "" : "s"} measured on an older version`);
+  if (awaiting) clauses.push(`${awaiting} withheld pending re-measurement on it`);
   if (unmeasured) clauses.push(`${unmeasured} not yet measured on it`);
   return `Benchmark version: ${short}${clauses.length ? ` (${clauses.join(", ")})` : ""}`;
 }
 
-/* Which measurement instrument produced the board's numbers. The mock+loadgen come from a moving
-   GitHub release tag, so an identical harness can produce different verdicts if rebuilt in between.
-   Returns "" when no gateway records a digest. Shows a count when rows disagree. */
+/* rigStamp(): WHICH measurement instrument produced the board's numbers.
+   The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
+   different cell VERDICTS across runs purely because the instrument was rebuilt in between. Each
+   snapshot carries the mock/ugen sha256 that produced it; this surfaces the short digest so an
+   instrument change is legible. Returns "" when no gateway records one: never a fabricated identity,
+   and never the word "unknown" dressed up as a version. When rows DISAGREE the count is shown, because a
+   board built from two different instruments is exactly the condition worth seeing. */
 function rigStamp() {
   const digests = new Map();   // short digest -> how many gateways used it
   for (const g of (state.data.gateways || [])) {
@@ -3870,21 +5008,29 @@ function rigStamp() {
 }
 
 /* ---- gateways overview: the neutral roster ----------------------------------
-   Landing view is a roster, not a ranking: every gateway alphabetical, with language, a star
-   snapshot, and self-description. No perf numbers, no winner highlighting. */
-// Roster sort state: sortable by any column, defaulting to name A-Z. `name` tiebreaks every column.
+   The landing view is a ROSTER, not a ranking: every gateway in alphabetical
+   order (display name, case-insensitive), with its language, a committed star
+   snapshot, and its OWN self-description (g.cls). No perf numbers, no winner
+   highlighting; the other tabs measure how they perform. Every entry gets the
+   exact same row treatment, the operator's own included. */
+/* Roster sort state: the overview is sortable by any column, DEFAULTING to name A→Z (the neutral
+   ordering — no metric, no ranking). Clicking a header sorts by it; clicking the active header
+   flips direction. `name` is the tiebreaker for every column so ties are stable and alphabetical. */
 let rosterSort = { col: "name", dir: "asc" };
-// Per-column sort key. null/n/a sorts last regardless of direction.
+/* Per-column sort key: a comparable value (string or number) for gateway `g`. `null`/`n/a` sorts
+   LAST regardless of direction (a missing value is never "best"). */
 const ROSTER_KEY = {
   name: (g) => g.display.toLowerCase(),
   lang: (g) => (g.lang || "").toLowerCase(),
-  // Sorts on the same token the cell renders (versionToken).
+  // Sorts on the SAME token the cell renders (versionToken), so a row whose column says "no version
+  // published" sorts as the null it is rather than on a build path the column never showed.
   version: (g) => { const v = versionToken(g); return v ? v.toLowerCase() : null; },
   lastrun: (g) => { const d = gatewayLastRun(g); return d ? d.getTime() : null; }, // newer = larger ms
-  age: (g) => (g.first_commit ? new Date(g.first_commit).getTime() : null), // older = smaller ms
+  // An unparseable date is a missing one: NaN would break the null-sinks-last rule and the comparator.
+  age: (g) => { const t = g.first_commit ? new Date(g.first_commit).getTime() : NaN; return Number.isFinite(t) ? t : null; }, // older = smaller ms
   stars: (g) => (g.stars == null ? null : g.stars),
-  // First-party rows sort last in either direction, so outside contributors cluster at the top.
-  contrib: (g) => { const cs = g.contributed_by || []; return cs.length ? cs[0].handle.toLowerCase() : null; },
+  cls: (g) => (g.cls || "Gateway").toLowerCase(),
+  contrib: (g) => g.contributed_by?.[0]?.handle?.toLowerCase() ?? null,
 };
 const rosterRows = (gateways) => {
   const key = ROSTER_KEY[rosterSort.col] || ROSTER_KEY.name;
@@ -3895,8 +5041,9 @@ const rosterRows = (gateways) => {
     if (ka == null && kb == null) return a.display.toLowerCase().localeCompare(b.display.toLowerCase());
     if (ka == null) return 1;
     if (kb == null) return -1;
-    let r = typeof ka === "number" ? ka - kb : String(ka).localeCompare(String(kb));
-    if (r === 0) r = a.display.toLowerCase().localeCompare(b.display.toLowerCase()); // stable by name
+    const r = typeof ka === "number" ? ka - kb : String(ka).localeCompare(String(kb));
+    // The name tiebreak stays ascending in both directions (the rowComparator rule).
+    if (r === 0) return a.display.toLowerCase().localeCompare(b.display.toLowerCase());
     return r * dir;
   };
   return gateways.slice().sort(cmp);
@@ -3904,8 +5051,9 @@ const rosterRows = (gateways) => {
 /* Star counts render compact: 12345 -> "12.3k", below 1000 the full int. Null (no
    snapshot entry) stays null; the cell renders it muted. */
 const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v)));
-// Contributors cell: `@handle` chips linking to GitHub profiles (url pre-validated https-only in
-// gen-data). First-party entrant has no contributor and renders a muted dash.
+/* Project age from the repo's first-commit date, in ONE simple floored unit: "11+ years",
+   "7+ months", "3+ weeks". Context for the star counts and scores - a decade-old project and a
+   three-week-old one earn them differently. Null (no snapshot) renders muted. */
 function contribCell(g) {
   const cs = g.contributed_by || [];
   if (!cs.length) return `<span class="muted" title="first-party entrant">&mdash;</span>`;
@@ -3917,24 +5065,28 @@ function contribCell(g) {
       : `<span class="contrib-link" title="${title}">${chip}</span>`;
   }).join(" ");
 }
-// Project age from first-commit date, one floored unit ("11+ years", "7+ months"). Null renders muted.
 const fmtProjectAge = (firstCommit) => {
   if (!firstCommit) return null;
-  const days = Math.max(0, (Date.now() - new Date(firstCommit).getTime()) / 86400e3);
-  // Floored so the "+" is honest: 11.7 years reads "11+ years".
+  const t = new Date(firstCommit).getTime();
+  if (!Number.isFinite(t)) return null; // "NaN days" is not an age; render n/a
+  const days = Math.max(0, (Date.now() - t) / 86400e3);
+  // Floored, so the "+" is honest: 11.7 years reads "11+ years".
   if (days >= 365) return `${Math.floor(days / 365)}+ year${days >= 730 ? "s" : ""}`;
   if (days >= 30.44) return `${Math.floor(days / 30.44)}+ month${days >= 61 ? "s" : ""}`;
   if (days >= 7) return `${Math.floor(days / 7)}+ week${days >= 14 ? "s" : ""}`;
   return `${Math.max(1, Math.floor(days))} days`;
 };
 
-// gatewayBuild reads the stamp of what is shown: the matrix, falling back to a projected record's
-// source.build. `g[l.key]` is a raw suite object the emit step deletes, not a valid source here.
+/* gatewayBuild reads the stamp of what is SHOWN: the matrix (the sole source of every projected number),
+   falling back to a projected record's own source.build. `g[l.key]` (g.perf / g.stream / g.xlate) is a
+   raw suite object the emit step DELETES from the bundle, not a valid source here. */
 const displayedRecords = (g) => [g.best_cell, g.translation_cell, g.streaming, g.memory_read].filter(Boolean);
-/* Build stamp of what actually ran, null for a gateway with no run. Split from gatewayBuild (which
-   falls back to the manifest pin) because the Version column needs to distinguish "measured" from
-   "pinned, not yet measured" rather than caption an unmeasured row as though its pin were a launch
-   stamp. */
+/* measuredBuild(g): the build stamp of WHAT ACTUALLY RAN, and nothing else - null for a gateway with no run.
+   Split out of gatewayBuild because gatewayBuild deliberately falls back to the manifest pin, and a caller
+   that needs to tell those two apart cannot. The Version column is exactly that caller: it has to say
+   "measured running apache/apisix:3.17.0-debian" for one row and "pinned in the manifest, not yet measured"
+   for another, and with the fallback folded in it captioned every unmeasured row as though its pin were a
+   launch stamp ("Launched as: v0.5.0"). */
 const measuredBuild = (g) => {
   if (g && g.matrix && g.matrix.build) return g.matrix.build;
   const rec = displayedRecords(g || {}).find((r) => r.source && r.source.build);
@@ -3943,20 +5095,28 @@ const measuredBuild = (g) => {
 const gatewayBuild = (g) => {
   const measured = measuredBuild(g);
   if (measured) return measured;
-  // Not-yet-measured is not not-known: a gateway awaiting its first run still has g.version, the
-  // manifest pin, so the field always lists what it runs even before "last benchmarked" is filled in.
+  // NOT-YET-MEASURED IS NOT NOT-KNOWN. Above this line the build is the stamp of what was actually
+  // run, which is the right authority for a row carrying numbers and stays first. But a gateway
+  // awaiting its first run has no stamp at all, and the row rendered a bare "n/a" in every column -
+  // a page that reads as "we know nothing about this project" when the manifest pins the exact
+  // version we would measure. `g.version` is that pin, so the field is always listed with what it
+  // runs; "last benchmarked" stays honestly n/a, because that part really is unknown.
   return (g && g.version) || null;
 };
-// Hardware the displayed numbers were measured on: the matrix stamp (sole source).
+/* The hardware the DISPLAYED numbers were measured on: the matrix stamp (sole source). */
 const gatewayHardware = (g) => (g && g.matrix && g.matrix.hardware) || null;
 const gatewayArch = (g) => (g && g.matrix && g.matrix.arch) || null;
-/* How the gateway was run: official Docker image vs native/source binary, inferred from the build
-   stamp. Real context - base image, fd limits, and startup differ between the two. Null if unstamped. */
+/* HOW the gateway was run for the benchmark: its official Docker image vs a native/source binary.
+   Inferred from the build stamp - an image ref (registry/repo:tag or an @sha256 digest) is docker;
+   a bare version/commit ("...@9649b27 (source build)") is a native binary. This is real context, not
+   decoration: a containerised gateway and a native one differ in base image, fd limits, and startup,
+   so the reader deserves to see which each number was measured under. Null when no build is stamped. */
 const runMode = (g) => {
   const b = gatewayBuild(g); if (!b) return null;
   return (/@sha256:/.test(b) || /[\w.\-]+\/[\w.\-]+:[\w.\-]+/.test(b)) ? "docker" : "binary";
 };
-// Compact monochrome run-mode marks; tooltip carries the words. docker = whale; binary = shell prompt.
+/* Compact monochrome run-mode marks (currentColor, so they sit muted beside the date); the tooltip
+   carries the words. docker = container/whale; binary = a terminal with a shell prompt. */
 const RUNMODE_ICON = {
   docker: '<svg class="rm-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 10h3v3H4zm4 0h3v3H8zm4 0h3v3h-3zM8 6h3v3H8zm4 0h3v3h-3z"/><path d="M23 12.3c-.6-.4-1.8-.6-2.8-.4-.1-.9-.7-1.8-1.6-2.4l-.5-.3-.3.5c-.4.7-.6 1.6-.1 2.4-.3.2-1 .4-1.7.4H2c-.2 1.4.1 2.9.9 4.1C4 18.9 6.6 20 10 20c6.9 0 12-3.2 14.3-9 .9.1 2.2 0 2.7-1.4-1.6-.9-3.7-.6-4-.3z" transform="translate(-2 0)"/></svg>',
   binary: '<svg class="rm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M6.5 9.5l3 2.5-3 2.5M13 15h4.5"/></svg>',
@@ -3966,9 +5126,16 @@ const runModeCell = (g) => {
   const label = m === "docker" ? "Measured running its official Docker image" : "Measured as a native / source-built binary";
   return `<span class="runmode ${m}" title="${label}" aria-label="${label}">${RUNMODE_ICON[m]}</span>`;
 };
-/* Version token a build stamp identifies, or null when it identifies none (e.g. a compiler output
-   path or binary name for a source build). Split from fmtBuild so the caller can fall back to the
-   manifest pin (versionToken) instead of dressing a path up as a release. */
+/* parseBuildVersion(full): the VERSION TOKEN a build stamp identifies, or NULL when it identifies none.
+   "ghcr.io/x/y:v1.3.1" -> "v1.3.1"; "somepkg==1.93.0" -> "1.93.0"; "repo@9649b27..." -> "@9649b27";
+   "somegateway 1.4.1" -> "1.4.1".
+   THE NULL RETURN IS THE POINT, AND IT IS WHY THIS IS SPLIT OUT OF fmtBuild. A build stamp is whatever the
+   engine recorded for how the gateway was launched, and for a source build that is a PATH, not a version:
+   the live board showed Helicone's Version as "target/release/ai-gat…" and LiteLLM · Rust's as
+   "litellm-ai-gateway". Those are a compiler output path and a binary name. fmtBuild's four recognisers
+   (":tag", "==ver", "@ref", trailing " vN") all declined them, and fmtBuild's fallback then printed the raw
+   head anyway - so the column asserted a version it had explicitly failed to find. Returning null lets the
+   caller fall back to the manifest's own pin (versionToken) instead of dressing a path up as a release. */
 function parseBuildVersion(full) {
   const head = String(full).split(" (")[0].trim();
   const first = head.split(/\s+/)[0];
@@ -3984,17 +5151,24 @@ function parseBuildVersion(full) {
   if (tail) return tail[1];
   return null;
 }
-// Short form of a build stamp for display; when no version parses, shows the truncated stamp. The
-// Version column doesn't use this - it goes through versionToken.
+/* fmtBuild(full): the short form of a build stamp for display. Unchanged behaviour - when no version can be
+   parsed it still shows the (truncated) stamp - because there are places where the stamp itself is the
+   honest thing to show. The VERSION COLUMN is not one of them; it goes through versionToken. */
 const fmtBuild = (full) => {
   const v = parseBuildVersion(full);
   if (v != null) return v;
   const head = String(full).split(" (")[0].trim();
   return head.length > 24 ? head.slice(0, 21) + "..." : head;
 };
-/* What version of this gateway was measured, or null. Prefers the build stamp of what actually ran;
-   falls back to g.version (the manifest pin, rendered as "@sha" for a bare commit). Never falls
-   through to the build stamp's raw text - a filesystem path under "Version" would be a false claim. */
+/* versionToken(g): WHAT VERSION OF THIS GATEWAY WAS MEASURED, or null when nothing published says.
+   Two sources, in this order and for this reason:
+     1. the build stamp of what actually ran, when it names a version (an image tag, a pinned package, a
+        commit ref) - that is the strongest evidence, because it is what the process reported;
+     2. otherwise `g.version`, the manifest's own pin. For a source build that is the commit the harness
+        checked out, which IS the version - Helicone pins 9649b27 and LiteLLM · Rust 6980723 - and rendering
+        it as "@9649b27" marks it as a commit rather than letting a bare hex string read as a release name.
+   Null when neither exists, and the cell then says so in words. It must never fall through to the build
+   stamp's raw text: a filesystem path in a column headed "Version" is a false claim, not a partial one. */
 function versionToken(g) {
   const build = measuredBuild(g);
   const parsed = build ? parseBuildVersion(build) : null;
@@ -4003,20 +5177,28 @@ function versionToken(g) {
   if (!pin) return null;
   return /^[0-9a-f]{7,40}$/i.test(pin) ? "@" + pin.slice(0, 7) : pin;
 }
-// Where the Version cell's token came from, as its tooltip: three distinct states (parsed from
-// launch stamp; stamp names no version so this is the pin; pinned but not yet measured).
+/* versionBasis(g): WHERE the Version cell's token came from, as the cell's tooltip.
+   Three distinct answers, and they are three different epistemic states a reader is entitled to tell apart:
+   the full launch stamp when the token was parsed out of it; "the stamp names no version, here is the pin"
+   when the gateway ran from a source build (Helicone's stamp is `target/release/ai-gateway`, a compiler
+   output path); and "pinned, not yet measured" for a gateway still awaiting its first run. */
 function versionBasis(g) {
   const build = measuredBuild(g);
   if (build && parseBuildVersion(build) != null) return `Measured running: ${build}`;
-  if (build) return `Launched as: ${build} - that stamp names no version (it is a source build), so this is the commit pinned in the gateway's manifest, which is what the harness built.`;
+  // NOT "what the harness built": for a source build the run records no commit (build is a binary path),
+  // and this version is read from the gateway's CURRENT build.sh when the board is generated, so the
+  // artifact cannot prove it matches the run. Say exactly that.
+  if (build) return `Launched as: ${build} - that stamp names no version (it is a source build), so this is the ref pinned in the gateway's build.sh when this board was generated. The run itself recorded no commit, so the artifact does not prove this is the build that was measured.`;
   if (versionToken(g)) return "The version pinned in the gateway's manifest, which is what the harness builds. This gateway has not been measured on the current benchmark yet, so there is no launch stamp to read instead.";
   return "Nothing published for this gateway names a version: neither a build stamp of what ran nor a pin in its manifest.";
 }
 
-/* When that gateway was last benchmarked, for the roster cell + sort. Prefers g.measured_at (same
-   per-row freshness basis as the "measured Nd ago" badge), so a standalone legacy re-run can't date
-   the row fresher than the matrix numbers actually shown. Falls back to the newest lane-suite
-   timestamp only when there's no matrix stamp. */
+/* WHEN that gateway was last benchmarked, for the roster "last benchmarked" cell + sort. Prefers
+   g.measured_at, the matrix-preferring stamp gen-data emits (displayedMeasuredMs) and the SAME per-row
+   freshness basis the "measured Nd ago" badge + the freshness guard use, so a standalone legacy suite
+   re-run cannot date the row fresher than the matrix numbers the board actually shows. Falls back to the
+   newest timestamp across lane suites only when there is no matrix stamp (a legacy-only row aged by
+   that stamp). */
 function gatewayLastRun(g) {
   if (g && g.measured_at) { const ms = new Date(g.measured_at).getTime(); if (ms > 0) return new Date(ms); }
   let newest = 0;
@@ -4026,7 +5208,8 @@ function gatewayLastRun(g) {
   }
   return newest ? new Date(newest) : null;
 }
-// Newest `measured_at` across every gateway's suites: when the field was last benchmarked.
+/* The newest `measured_at` across every gateway's suites: WHEN the field was last benchmarked.
+   Honest label for the board — a single clock for "how fresh is this data". Null if none stamped. */
 function lastBenchmarkRun(gateways) {
   let newest = null;
   for (const g of gateways) {
@@ -4035,7 +5218,8 @@ function lastBenchmarkRun(gateways) {
   }
   return newest;
 }
-// Per-gateway last-benchmarked date for the roster cell: plain UTC date; full timestamp in tooltip.
+/* Per-gateway last-benchmarked date for the roster cell: a plain UTC date (YYYY-MM-DD); the full
+   timestamp rides the tooltip. Null renders muted. */
 const fmtLastRun = (d) => (d ? d.toISOString().slice(0, 10) : null);
 
 function renderGateways() {
@@ -4047,18 +5231,21 @@ function renderGateways() {
     thead.dataset.wired = "1";
     thead.querySelectorAll("th[data-sort]").forEach((th) => {
       th.classList.add("sortable");
-      th.addEventListener("click", () => {
+      th.setAttribute("tabindex", "0");
+      const sortBy = () => {
         const col = th.dataset.sort;
         if (rosterSort.col === col) rosterSort.dir = rosterSort.dir === "asc" ? "desc" : "asc";
         else rosterSort = { col, dir: "asc" };
         renderGateways();
-      });
+      };
+      th.addEventListener("click", sortBy);
+      th.addEventListener("keydown", (ev) => { if (isActivateKey(ev)) { ev.preventDefault(); sortBy(); } });
     });
   }
   if (thead) {
     thead.querySelectorAll("th[data-sort]").forEach((th) => {
       const active = th.dataset.sort === rosterSort.col;
-      th.setAttribute("aria-sort", active ? (rosterSort.dir === "asc" ? "ascending" : "descending") : "none");
+      th.setAttribute("aria-sort", ariaSortFor(active, rosterSort.dir === "desc"));
       th.dataset.dir = active ? rosterSort.dir : "";
     });
   }
@@ -4071,7 +5258,7 @@ function renderGateways() {
     const age = fmtProjectAge(g.first_commit);
     const lastRun = gatewayLastRun(g);
     const lastRunTxt = fmtLastRun(lastRun);
-    return `<tr data-gw="${esc(g.key)}" class="rowlink">
+    return `<tr data-gw="${esc(g.key)}" class="rowlink" tabindex="0">
       <td class="name">${name}</td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${version
@@ -4083,12 +5270,14 @@ function renderGateways() {
       <td class="contrib">${contribCell(g)}</td>
     </tr>`;
   }).join("");
-  // Row click opens the per-gateway drawer; a click on the repo link opens the repo instead.
+  // Row click opens the per-gateway drawer (same as the perf tabs) — /gateways rows are clickable too.
+  // A click on the repo link (<a>) opens the repo, not the drawer.
   tbody.querySelectorAll("tr[data-gw]").forEach((tr) => {
     tr.addEventListener("click", (ev) => {
       if (ev.target.closest("a")) return;
       openDrawer(tr.dataset.gw, true);
     });
+    wireRowKeys(tr);
   });
   // "as of" disclosure for the star snapshot: the newest snapshot date in the bundle.
   const asOf = rows.map((g) => g.stars_as_of).filter(Boolean).sort().pop();
@@ -4105,8 +5294,10 @@ function renderGateways() {
 }
 
 /* ---- home landing page ------------------------------------------------------
-   Site root is a designed landing page: hero, pitch, neutrality line, and one CTA card per
-   category. Pure HTML builder exported for the node smoke test. */
+   The site root (/) is a designed landing page, not a data dump: hero, pitch,
+   neutrality line, and one CTA card per CATEGORY (the extension seam: a new
+   category entry gets its card automatically). Pure HTML builder exported for
+   the node smoke test. */
 function homeCardsHtml(data) {
   // Live entrant count for the category whose bundle is loaded (gateways today).
   const counts = { gateways: data && Array.isArray(data.gateways) ? data.gateways.length : null };
@@ -4123,11 +5314,20 @@ function homeCardsHtml(data) {
   return cards.join("");
 }
 
+/* navFailed(err): a navigation whose fetch or render threw. State and URL have already moved, so a silent
+   unhandled rejection left a stale page under a new address with no message; say so instead. */
+function navFailed(err) {
+  console.error(err);
+  const main = typeof document !== "undefined" && document.querySelector("main");
+  if (main) main.insertAdjacentHTML("afterbegin",
+    `<p class="muted" role="alert">This view could not be loaded (${esc(err && err.message)}). Reload the page to try again.</p>`);
+}
+
 /* SPA navigation to any internal path (home cards, brand link, method link). */
 function navigateTo(path) {
   applyState(decodeUrl(path, "", ""));
   syncUrl(true);
-  ensureData().then(renderAll);
+  ensureData().then(renderAll).catch(navFailed);
 }
 function wireNav(el) {
   el.addEventListener("click", (ev) => {
@@ -4176,7 +5376,7 @@ function renderCatNav() {
     fresh.category = a.dataset.cat;
     applyState(fresh);
     syncUrl(true);
-    ensureData().then(renderAll);
+    ensureData().then(renderAll).catch(navFailed);
   }));
   const tagline = document.getElementById("tagline");
   const cat = CATEGORIES[state.category] || CATEGORIES[DEFAULT_CATEGORY];
@@ -4195,27 +5395,33 @@ function showView(view) {
      URL named. */
   const leaving = modeFamily(state.view);
   state.view = view;
-  // Memory's data-derived Same default is seeded on arrival at memory, not globally at boot, so other
-  // tabs keep the dialect default they declare (see seedMemorySameDialect).
+  // Memory's data-derived Same default is seeded on ARRIVAL at memory, not once globally at boot, so
+  // the other tabs keep the dialect default they declare (see seedMemorySameDialect).
   seedMemorySameDialect();
   const nx = modeOnArrival(leaving, view, state.mode, state.modeMemo);
   state.mode = nx.mode;
   state.modeMemo = nx.memo;
-  // Category header/tab bar belong to the category view only; a body class hides them on home.
+  // Home is the root above the category nav: the header's category row, tab bar
+  // and category tagline belong to the category view only, so a body class hides
+  // them (style.css) while the home hero carries the brand treatment instead.
   document.body.classList.toggle("home", view === HOME_VIEW);
-  // Performance/Streaming/Memory share one table container; matrix/method have their own.
+  // Performance/Streaming/Memory share one table container (#view-table); matrix/method
+  // have their own; home renders #view-home.
   const containerId = TABLE_VIEWS.has(view) ? "view-table" : `view-${view}`;
   document.querySelectorAll(".tab").forEach((x) => {
     x.classList.toggle("active", x.dataset.view === view);
     x.setAttribute("href", viewPath(state.category, x.dataset.view));
   });
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== containerId));
-  // Cell chooser appears on memory only once the bundle carries per-cell windows (else all four
-  // modes would show the same number).
+  // The cell chooser belongs to every chooser-driven tab. On MEMORY it appears only once the bundle
+  // carries per-cell windows: offering Min | Max | Same | Custom over a run that measured one cell per
+  // gateway would be four controls that all show the same number.
   const chooser = document.getElementById("cell-chooser");
   if (chooser) chooser.classList.toggle("hidden",
     !CHOOSER_VIEWS.has(view) || (view === "memory" && !hasPerCellMemory(state.data)));
-  // Bound selector belongs only to tabs whose numbers are read at a bound.
+  // The bound selector belongs only to the tabs whose numbers are READ AT a bound. Offering it over the
+  // streaming or memory columns would imply those figures had a tail-latency bound too, which is the exact
+  // class of claim - a surface implying a bound it did not use - that the frontier exists to end.
   const bound = document.getElementById("bound-chooser");
   if (bound) bound.classList.toggle("hidden", !BOUND_VIEWS.has(view));
   // Switching between table tabs changes columns/caption/filtering, so re-render the table.
@@ -4235,18 +5441,32 @@ function applyState(st) {
   Object.assign(state, {
     category: st.category, view: st.view, q: st.q, sortCol: st.sortCol, sortDesc: st.sortDesc,
     needStream: st.needStream, needXlate: st.needXlate,
-    // A missing/invalid decoded ?bound= leaves the default in place, never undefined.
+    // The bound travels with the rest of the shareable state; a decoded ?bound= that is missing leaves the
+    // default in place (newState), never undefined - selectedBound() would coerce it back anyway, but a
+    // state field that means "unbounded" when absent is exactly the confusion this board is removing.
     bound: st.bound === null || FRONTIER_BOUNDS_MS.includes(st.bound) ? st.bound : DEFAULT_BOUND_MS,
     mode: st.mode, sameDialect: st.sameDialect, sameDialectPinned: st.sameDialectPinned,
     xlateIn: st.xlateIn, xlateOut: st.xlateOut,
     cmp: st.cmp, cmpOpen: st.cmpOpen, drawer: st.drawer,
+    // THE PINNED RUNG IS SHAREABLE STATE TOO. decodeUrl parses ?conc= and encodeUrl writes it; leaving it
+    // off this list dropped a pinned link on load and let a stale rung survive popstate/navigateTo, so the
+    // board ranked at a concurrency the address bar did not name.
+    conc: st.conc ?? null,
   });
 }
 
-/* Seed the Same dialect from the data (the identity cell the most gateways serve) for the memory tab
-   specifically, not the whole state at boot - otherwise a deep link into performance/streaming (which
-   share this dialect field) would have its dialect silently rewritten before rendering. A ?d= in the
-   URL wins. Seeded on arrival at memory. */
+/* seedMemorySameDialect(): seed the Same dialect from the DATA - the identity cell the most gateways
+   serve - FOR THE TAB THAT ASKS FOR IT. Memory's Same mode defaults to it (only Same/Custom are
+   like-for-like, so the default has to be the cell the widest slice of the field can actually be
+   compared on), and it is computed, never named: no protocol is special-cased anywhere in this engine.
+   A ?d= in the URL wins.
+
+   IT IS A MEMORY-TAB DEFAULT, SO IT IS SEEDED FOR THE MEMORY TAB. Seeding it for the whole state at
+   boot meant a deep link into performance or streaming - tabs that share this one dialect field and
+   whose own default is the declared one, which is exactly why syncUrl only omits ?d= on memory - had
+   its dialect silently rewritten from the data before it rendered a single row. The seed now happens on
+   arrival at memory (and at boot when memory IS the arrival tab), so a tab gets the default it declares
+   rather than another tab's. */
 function seedMemorySameDialect() {
   if (state.view !== "memory" || state.sameDialectPinned || !state.data) return;
   const w = widestDialect(state.data);
@@ -4269,8 +5489,9 @@ function renderAll() {
   showView(state.view);
   renderHome();
   renderGateways();
-  renderFilters();
-  renderTable();
+  // showView() already rendered the filters and the table for a table view; rendering them again doubled
+  // the most expensive step of every renderAll (theme toggle, navigation, popstate).
+  if (!(TABLE_VIEWS.has(state.view) && state.data)) { renderFilters(); renderTable(); }
   renderCompareBar();
   renderMatrix();
   renderCharts();
@@ -4308,8 +5529,13 @@ async function restorePublicationViews() {
 }
 function boot() {
   applyState(decodeUrl(location.pathname, location.search, location.hash));
-  // Title the page from the URL before the fetch: state is fully decoded above, so the title is
-  // knowable immediately rather than waiting on data.json (and staying generic on the failure path).
+  /* TITLE THE PAGE FROM THE URL, BEFORE THE FETCH.
+     The title was only ever written from inside showView, which runs in renderAll, which runs after
+     data.json resolves - three quarters of a megabyte. Until then every deep link showed index.html's
+     static <title>, so a tab opened in the background, a link preview, and anything that read the document
+     before the fetch landed all reported the generic site title for a specific view; on the failure path
+     (the .catch below) it stayed generic forever. The state is fully decoded one line above this, so the
+     title is knowable immediately and there is no reason to make it wait on a network round trip. */
   updateTitle();
   restorePublicationViews().then(ensureData)
     .then(() => {
@@ -4323,6 +5549,7 @@ function boot() {
       document.getElementById("backdrop").addEventListener("click", closeDrawer);
       document.getElementById("drawer-close").addEventListener("click", closeDrawer);
       document.getElementById("compare-close").addEventListener("click", () => closeCompare());
+      document.addEventListener("keydown", trapDrawerTab);
       document.addEventListener("keydown", (ev) => {
         if (ev.key !== "Escape") return;
         if (state.drawer) closeDrawer();
@@ -4335,11 +5562,12 @@ function boot() {
           if (!state.drawer) { document.getElementById("drawer").classList.add("hidden"); document.getElementById("backdrop").classList.add("hidden"); }
           if (!state.cmpOpen) document.getElementById("compare-panel").classList.add("hidden");
           renderAll();
-        });
+        }).catch(navFailed);
       });
     })
     .catch((err) => {
-      // View still titles itself on the failure path.
+      // The view still titles itself on the failure path: the reader's tab should say which view they asked
+      // for even when its numbers could not be loaded.
       updateTitle();
       // This catch spans the fetch AND the first render, so the message must not blame a missing data.json
       // for a render-time throw on valid data - and the stack must reach the console to be diagnosable.
@@ -4384,25 +5612,34 @@ if (NODE) {
     idleStatic, memShape, memGrowing, memShaped,
     hasMatrixGrid, matrixFailureReason, matrixRoster, hasCost, costWindowConc, SHOW_GROWTH_VERDICT, selectedConc, concChoices, rungAt, rigResolutionPct, indistinguishable, tiedRuns, costSaturation, CHART_METRICS, chartRows,
     laneRecord, lanePathNote, perfSweepSeries, concAt,
-    // Frontier: constants (mirrored from seal.mjs), the readers every surface goes through, and the
-    // two renderers that make the curve's shape legible. Exported so the shape (the headline finding)
-    // stays test-reachable.
+    // THE FRONTIER: the constants (mirrored from seal.mjs and checked against it), the readers every
+    // surface goes through, and the two renderers that make the curve's SHAPE legible. Exported because the
+    // shape is the headline finding and a renderer no test can reach is a renderer that can be deleted
+    // without anything going red - which is how the retired scalars' captions came to describe a test that
+    // never ran. `sustainedChooserCell` / `maxProxyChooserCell` are GONE with the two metrics they read.
     FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, BOUND_CHOICES, BOUND_VIEWS, SORT_ALIASES,
     boundLabel, boundClause, boundColLabel, boundColId, selectedBound, fmtTail,
     frontierOf, frontierAt, frontierCell, frontierHeld, frontierFullRate, heldPct, frontierSpark, frontierBlock, boardFrontierScale,
     frontierChooserCell, frontierBoundCell, frontierShapeCell, frontierShapeTd, frontierCaption, selectBound,
-    // #4: the gain factor's sort key and reference prose - exported so a test can distinguish
-    // findings that used to render identically.
+    // #4: the ×N gain factor's sort key and the reference prose that says what the ratio is OF. Exported
+    // because "×1.0 from 1 ms" and "×1.0 from 50 ms" are opposite findings that used to render identically,
+    // and a guard no test can reach is a guard that can be deleted without anything going red.
     heldSortKey, HELD_NOTHING_INDEX, HELD_REFERENCE, BOUND_GROUP_LABEL, theadHtml, colgroupHtml, colWidth, COL_WIDTHS,
     // #1: the lead/notes split, its flattener, and the dispatch every renderer goes through.
     captionText, captionFor, notesFold,
-    // #6: version column's two halves - parseBuildVersion returns null for a stamp naming no version.
+    // #6: the version column's two halves. parseBuildVersion returns NULL for a build stamp that names no
+    // version (a source build's binary path), which is the whole fix; versionToken is what the cell renders.
     parseBuildVersion, versionToken, versionBasis, measuredBuild, ROSTER_KEY,
-    // #7: per-view document title, pure so checkable without a document.
+    // #7: the per-view document title, pure so it is checkable without a document.
     pageTitle, SITE_TITLE,
-    // #5: idle axis floor, so the "flat must render flat" guard asserts against the real constant.
+    // #5: the idle axis floor, so the "flat must render flat" guard can assert against the real constant.
     IDLE_AXIS_MIN_SPAN, rssCurves, fmt2,
-    // Memory tab's labelling + row-height helpers.
+    /* THE MEMORY TAB'S LABELLING + ROW-HEIGHT WORK. Exported because every one of these was a case of a
+       CORRECT number placed so as to look wrong, and a guard that cannot reach the composed sentence cannot
+       stop the wording sliding back: idleShapeNote (a span is not a rate), recoveryTail (two windows, not two
+       facts), releaseMark (released nothing vs released most, drawn), rssLifecycle (one process, one line,
+       with the axis break SHOWN) and memCurveSummary (the reachability guarantee - every folded figure, on a
+       focusable control's accessible name). */
     idleShapeNote, recoveryTail, releaseMark, rssLifecycle, memCurveSummary, LIFECYCLE_IDLE_FRAC,
     definitionsFor, definitionsFold, DEFINITION_PREFIXES, LANE_DEFINITION_PREFIXES, METRIC_NOTES,
     colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
@@ -4412,13 +5649,20 @@ if (NODE) {
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
     metricTd,
-    // Pure functions the suite drives directly, each previously unreachable inside a renderer.
+    // The roster's row order, the compare row's tied-best set, the lane served predicate and the
+    // memory-tab dialect seed: pure functions the suite drives directly, because each of them was a
+    // defect that no DOM-free test could reach while it lived inside a renderer.
     rowComparator, VIEW_TIEBREAK, matrixDiagonal, bestIndex, laneServed, seedMemorySameDialect,
-    // audit #21: rig-provenance footer stamp + the live state it reads.
-    rigStamp, benchmarkVersionStamp, state,
-    // Surfaces previously unreachable from a DOM-free suite: the drawer, the compare panel body, and
-    // the one place a gateway's repo URL reaches an href.
+    // audit #21: the rig-provenance footer stamp + the live state it reads, so the class test can drive it.
+    rigStamp, benchmarkVersionStamp, state, applyState,
+    // THE SURFACES THAT WERE UNREACHABLE FROM A DOM-FREE SUITE, and were therefore covered by nothing:
+    // the drawer (drawerHtml was called by no test at all - deleting the clause that keeps a MEASURED
+    // FAILURE visible in it broke no test), the compare panel's whole body (extracted from renderCompare
+    // for exactly this reason), and the one place a gateway's repo URL reaches an href.
     drawerHtml, compareBodyHtml, gwLink, recordShowsValues,
+    // F1-72: keyboard and screen-reader access (sortable headers, row -> drawer, dialog focus, chart text).
+    isActivateKey, ariaSortFor, focusTrapNext, chartDataTable, rankedBarsAlt, sweepChartAlt, sweepChartsHtml,
+    sweepRpsSeries, sweepP99Series,
   };
 } else {
   boot();

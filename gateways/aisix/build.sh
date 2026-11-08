@@ -18,7 +18,7 @@ GW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # PINNED. A revision, not a branch: a moving ref would make two runs weeks apart incomparable while
 # reporting the same build string. Overridable for a local experiment, never in the field.
 REPO="${AISIX_REPO:-https://github.com/api7/aisix}"
-COMMIT="${AISIX_COMMIT:-e8d0e04129deba6eb40b4960fb19b8ffb0992c1e}"   # tag v0.10.0
+COMMIT="${AISIX_COMMIT:-7e070f0bde3f653c3b197ed18c5b9205b866a4c5}" # v1.9.0
 SRC="$GW_DIR/src"
 
 # Prerequisites. Unconditionally, because apt-get install is already idempotent and already

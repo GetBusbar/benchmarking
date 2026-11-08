@@ -3,10 +3,11 @@
 # Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
 workflow:
   rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
-      changes: [site/**/*, .gitlab-ci.yml]
+      changes: [site/**/*, engine/**/*, mock/**/*, .gitlab-ci.yml]
     - when: never
 
 stages: [verify, publish]
@@ -36,7 +37,7 @@ verify-website:
     - node site/check-consistency.mjs site/data.json
     - node site/test-coverage.mjs
     - node site/test.mjs
-    - node site/build.mjs "$verify_dir" "$verify_dir/publication"
+    - node --max-old-space-size=256 site/build.mjs "$verify_dir" "$verify_dir/publication"
     - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs
 
 refresh-gateway-stars:
@@ -65,4 +66,40 @@ refresh-gateway-stars:
     - node site/test-coverage.mjs
     - node site/test.mjs
     - npm ci --prefix site --ignore-scripts
-    - node site/publish.mjs
+    - node --max-old-space-size=256 site/publish.mjs
+
+# Build the immutable instrument separately from website publication.
+verify-engine:
+  stage: verify
+  tags: [onthebench-production]
+  image: rust:1.98-bookworm
+  timeout: 60m
+  rules:
+    - if: '$VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes: [engine/**/*, mock/**/*, Cargo.lock, Cargo.toml, .gitlab-ci.yml]
+  variables:
+    REFRESH_GATEWAY_STARS: "1"
+  script:
+    - export VERIFY_ENGINE_REF="${VERIFY_ENGINE_REF:-$CI_COMMIT_SHA}"
+    - git fetch origin "$VERIFY_ENGINE_REF"
+    - git checkout --detach "$VERIFY_ENGINE_REF"
+    - export CARGO_HOME="$CI_PROJECT_DIR/.ci-cargo" RUSTUP_HOME="$CI_PROJECT_DIR/.ci-rustup"
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$CI_PROJECT_DIR/rustup-init.sh"
+    - sh "$CI_PROJECT_DIR/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain 1.98.0 --component rustfmt --component clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    # Library qualification tests spawn the CLI; clippy does not build that executable.
+    - cargo build --workspace --bins --locked
+    - RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN="$CI_PROJECT_DIR/target/debug/otb" cargo test --workspace --locked
+    - rustup target add aarch64-unknown-linux-musl
+    - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
+    - mkdir -p rig
+    - cp target/aarch64-unknown-linux-musl/release/otb rig/otb-arm64
+    - cp target/aarch64-unknown-linux-musl/release/mock rig/mock-arm64
+    - printf '%s\n' "$VERIFY_ENGINE_REF" > rig/engine-commit
+    - sha256sum rig/otb-arm64 rig/mock-arm64 > rig/SHA256SUMS
+  artifacts:
+    paths: [rig/]
+    expire_in: 90 days

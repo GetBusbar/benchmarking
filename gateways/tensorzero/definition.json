@@ -27,7 +27,7 @@
       "--config-file",
       "config/tensorzero.toml"
     ],
-    "image": "tensorzero/gateway:2026.6.0",
+    "image": "tensorzero/gateway:2026.6.0@sha256:9133135ccdaa23c0fffc2965f20b2a89b077ea3ad9a86a6f15b2a641bff67c89",
     "kind": "docker",
     "mounts": [
       {
@@ -37,15 +37,6 @@
       }
     ]
   },
-  "matrix": [
-    "111001",
-    "000000",
-    "000000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "TensorZero 2026.6.0 has no Cohere provider type; that cell is grey by that capability limit (model.rs)",
   "model": "tensorzero::model_name::mock-openai",
   "name": "tensorzero",
   "path": "/openai/v1/chat/completions",

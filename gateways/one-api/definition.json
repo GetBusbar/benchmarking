@@ -16,19 +16,10 @@
   "lang": "Go",
   "launch": {
     "args": [],
-    "image": "justsong/one-api:v0.6.10",
+    "image": "justsong/one-api:v0.6.10@sha256:af6b361630bdf408b86fce7aa8fc131b37ea5177ae866d121ba7c002e773e477",
     "kind": "docker",
     "mounts": []
   },
-  "matrix": [
-    "100000",
-    "000000",
-    "000000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "One-API v0.6.10 has no OpenAI-Responses relay mode and its Cohere channel emits the Cohere v1 /v1/chat shape, not the v2 dialect this suite probes (relay/channeltype/define.go, relay/adaptor/cohere/adaptor.go GetRequestURL); those cells are grey by that capability limit. The anthropic and gemini cells are grey for a different reason: this harness has never got their channels to route. They were previously DECLARED and simultaneously marked untestable, which is the harness claiming a capability and admitting it could not show it, in the same file. A declaration is a claim that the gateway does the thing, so the honest state for a capability we have not observed is to not declare it. See `why` for what was tried.",
   "model": "gpt-4o-mini",
   "name": "one-api",
   "path": "/v1/chat/completions",

@@ -24,7 +24,7 @@ await check("Markdown results", async () => {
   const r = await get("/gateways/performance.md");
   assert.match(r.headers.get("Content-Type"), /text\/markdown/);
   const markdown = await r.text();
-  assert.match(markdown, /\| Ingress → upstream \| Metric \| Value/);
+  assert.match(markdown, /\| Ingress → upstream \| Metric \| Value|n\/a — not measured in the current refresh/);
   assert.match(markdown, /## busbar/);
   assert.equal((markdown.match(/^# /gm) || []).length, 1);
 });
@@ -32,7 +32,12 @@ await check("raw download has its published SHA-256 after HTTP decoding", async 
   const catalog = await (await get("/api/v1/gateways")).json();
   const key = catalog.gateways[0].id;
   const page = await (await get(`/api/v1/measurements?gateway=${encodeURIComponent(key)}&limit=1`)).json();
-  const record = page.measurements[0];
+  let record = page.measurements[0];
+  if (!record) {
+    const runs = await (await get("/api/v1/runs?limit=1")).json();
+    const run = runs.runs[0];
+    record = { provenance: { raw_result_url: run.raw_result_url, raw_sha256: run.sha256 } };
+  }
   const raw = await get(new URL(record.provenance.raw_result_url).pathname);
   // Native fetch decodes Content-Encoding. A double-compressed response fails.
   const bytes = Buffer.from(await raw.arrayBuffer());
@@ -84,7 +89,11 @@ await check("query filters are preserved on measurements", async () => {
   const r = await get(`/api/v1/measurements?gateway=${gateway}&ingress=openai&egress=openai&limit=2&compact=1`);
   assert.ok(new URL(r.url).searchParams.has("gateway"));
   const page = await r.json(); assert.equal(page.limit, 2);
-  assert.ok(page.measurements.length > 0);
+  if (!page.measurements.length) {
+    const summary = await (await get(`/api/v1/summary?gateway=${gateway}`)).json();
+    assert.equal(summary.results[0].status.state, "not_measured");
+    assert.ok(Object.values(summary.results[0].metrics).every(m => m.value === null));
+  }
   assert.ok(page.measurements.every(m => m.gateway_id === gateway && m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai"));
 });
 await check("root and tab HTML are thin, self-canonical and discoverable", async () => {

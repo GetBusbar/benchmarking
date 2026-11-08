@@ -1,0 +1,45 @@
+{
+  "run_id": "otb-20261108T202321Z",
+  "source_commit": "abb1f02e6926c169ff99ed9e81874eb59a8c32f7",
+  "engine_commit": "f713bb0bfe523200d2aae76ae5189648b7992028",
+  "placement": "cheapest",
+  "assignments": [
+    {
+      "region": "ap-south-1",
+      "instance_type": "m7g.4xlarge",
+      "instance_hour_usd": 0.4666,
+      "gp3_gb_month_usd": 0.0912,
+      "ipv4_hour_usd": 0.005,
+      "estimated_hour_usd": 0.4790958904109589,
+      "disk_gb": 60,
+      "checked_at": "2026-11-08T20:23:18.547610+00:00",
+      "source": "AWS Price List Query API",
+      "excludes": "taxes and variable data transfer; gp3 monthly rate converted using 730 hours",
+      "gateway": "bifrost",
+      "zone": "ap-south-1a",
+      "placement_mode": "cheapest"
+    },
+    {
+      "region": "ap-south-1",
+      "instance_type": "m7g.4xlarge",
+      "instance_hour_usd": 0.4666,
+      "gp3_gb_month_usd": 0.0912,
+      "ipv4_hour_usd": 0.005,
+      "estimated_hour_usd": 0.4790958904109589,
+      "disk_gb": 60,
+      "checked_at": "2026-11-08T20:23:18.547610+00:00",
+      "source": "AWS Price List Query API",
+      "excludes": "taxes and variable data transfer; gp3 monthly rate converted using 730 hours",
+      "gateway": "litellm-python",
+      "zone": "ap-south-1a",
+      "placement_mode": "cheapest"
+    }
+  ],
+  "images": {
+    "ap-south-1": {
+      "ami_id": "ami-072d8688e7b3aba7a",
+      "name": "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20261023",
+      "owner_id": "099720109477"
+    }
+  }
+}

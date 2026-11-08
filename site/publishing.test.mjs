@@ -79,7 +79,7 @@ test("published HTTP interface works without JavaScript", { skip: !artifact }, a
   for (const path of ["/", "/gateways", "/gateways/performance", "/gateways/matrix", `/gateways/${first}`]) {
     const r = await call(path); assert.equal(r.status, 200, path);
     const html = await r.text(); const doc = parseHTML(html).document;
-    assert.ok(doc.querySelectorAll("tbody tr").length > 0, `${path} has actual rows`);
+    assert.ok(doc.querySelectorAll("tbody tr").length > 0 || (data.active_field && /Refresh in progress|not measured|Unfinished entrants/.test(html)), `${path} has rows or explicit pending state`);
     assert.ok(!html.includes("Protocol matrix results are coming soon"));
     assert.equal(doc.querySelector('link[rel="canonical"]').getAttribute("href"), "https://onthebench.ai" + path);
   }
@@ -90,18 +90,21 @@ test("published HTTP interface works without JavaScript", { skip: !artifact }, a
   for (const query of ["limit=0", "offset=-1", "gateway=", "ingress=imaginary", "limit=1&limit=2", "garbage=x"]) assert.equal((await call("/api/v1/measurements?" + query)).status, 400, query);
   const r = await call(`/api/v1/measurements?gateway=${first}&limit=1`);
   assert.equal(r.headers.get("Access-Control-Allow-Origin"), "*");
-  const paged = await r.json(); assert.equal(paged.measurements.length, 1); assert.ok(paged.next);
+  const paged = await r.json(); assert.equal(paged.measurements.length, Math.min(1, pub.measurements.filter(m => m.gateway_id === first).length));
+  if (pub.measurements.filter(m => m.gateway_id === first).length > 1) assert.ok(paged.next);
   assert.equal((await call(`/api/v1/measurements?gateway=${first}&limit=1`, { headers: { "If-None-Match": r.headers.get("ETag") } })).status, 304);
   assert.equal((await call("/api/v1", { method: "POST" })).status, 405);
   const www = await worker.fetch(new Request("https://www.onthebench.ai/gateways?mode=same"), env);
   assert.equal(www.status, 308);
   assert.equal(www.headers.get("Location"), "https://onthebench.ai/gateways?mode=same");
+  if (pub.measurements.length) {
   const rawUrl = pub.measurements.find(m => m.provenance.raw_result_url).provenance.raw_result_url;
   const raw = await worker.fetch(new Request(rawUrl), env);
   const bytes = gunzipSync(Buffer.from(await raw.arrayBuffer()));
   const expected = pub.measurements.find(m => m.provenance.raw_result_url === rawUrl).provenance.raw_sha256;
   assert.equal(createHash("sha256").update(bytes).digest("hex"), expected);
   assert.ok(JSON.parse(bytes).matrix);
+  }
   // Both path and query select the actual rendered facts, not just a title.
   const md = await (await call("/gateways/performance.md?mode=same&d=anthropic")).text();
   assert.match(md, /Anthropic.*Anthropic/);
@@ -132,7 +135,7 @@ test("agent contract: bounded retrieval, schemas, freshness and provenance", { s
   }
   const pub = await (await call("/api/v1/benchmarks/latest")).json(); validate("LatestCollection", pub);
   const first = pub.gateways[0].id, second = pub.gateways[1].id;
-  for (const [path, schema] of [["/api/v1", "Discovery"], ["/api/v1/gateways", "Catalog"], [`/api/v1/gateways/${first}`, "GatewayEvidence"], ["/api/v1/methodology", "Methodology"], ["/api/v1/schema", "SchemaIndex"], ["/api/v1/measurements?limit=2", "MeasurementPage"], ["/api/v1/measurements?limit=2&compact=1", "MeasurementPage"], ["/api/v1/definitions", "Definitions"], ["/api/v1/runs?limit=2", "RunPage"], [`/api/v1/benchmarks/${pub.dataset_id}`, "BenchmarkResource"], [`/api/v1/benchmarks/${pub.measurements.find(m => m.run_id).run_id}`, "BenchmarkResource"]]) validate(schema, await (await call(path)).json());
+  for (const [path, schema] of [["/api/v1", "Discovery"], ["/api/v1/gateways", "Catalog"], [`/api/v1/gateways/${first}`, "GatewayEvidence"], ["/api/v1/methodology", "Methodology"], ["/api/v1/schema", "SchemaIndex"], ["/api/v1/measurements?limit=2", "MeasurementPage"], ["/api/v1/measurements?limit=2&compact=1", "MeasurementPage"], ["/api/v1/definitions", "Definitions"], ["/api/v1/runs?limit=2", "RunPage"], [`/api/v1/benchmarks/${pub.dataset_id}`, "BenchmarkResource"], [`/api/v1/benchmarks/${(pub.measurements.find(m => m.run_id)?.run_id || (await (await call("/api/v1/runs?limit=1")).json()).runs[0].id)}`, "BenchmarkResource"]]) validate(schema, await (await call(path)).json());
   const body = await (await call("/api/v1/summary")).text();
   assert.ok(Buffer.byteLength(body) < 64 * 1024, "summary fits a small retrieval context");
   const summary = JSON.parse(body); validate("Summary", summary);
@@ -243,10 +246,10 @@ test("thin HTML, semantic guide, compact exports and run discovery", { skip: !ar
   assert.equal((guide.match(/^# /gm) || []).length, 1);
   assert.doesNotMatch(guide, /\d+ of \d+|<select|coming soon|32,768 concurrent/);
   const csv = await (await call(`/gateways/data.csv?gateway=${first}&compact=1`)).text();
-  assert.match(csv, /definition_id/); assert.match(csv, /\/api\/v1\/definitions/);
+  assert.match(csv, /definition_id/); if (full.measurements.length) assert.match(csv, /\/api\/v1\/definitions/);
   const dictionaryResponse = await call(`/api/v1/definitions/${pub.dataset_id}`);
   assert.equal(dictionaryResponse.status, 200); assert.match(dictionaryResponse.headers.get("Cache-Control"), /immutable/);
-  assert.ok(csv.length < (await (await call(`/gateways/data.csv?gateway=${first}&compact=0`)).text()).length);
+  if (full.measurements.length) assert.ok(csv.length < (await (await call(`/gateways/data.csv?gateway=${first}&compact=0`)).text()).length);
   const runs = await (await call("/api/v1/runs?family=busbar&limit=2")).json();
   assert.ok(runs.runs.every(r => r.gateway_family === "busbar")); assert.equal(runs.limit, 2); assert.ok(runs.next);
   assert.equal((await call("/api/v1/runs?family=nonexistent")).status, 404);

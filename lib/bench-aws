@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${OTB_AWS_PYTHON:-python3}" "$(dirname "$0")/aws_sdk.py" "$@"

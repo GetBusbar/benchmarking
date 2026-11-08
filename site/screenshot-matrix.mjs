@@ -1,21 +1,34 @@
 #!/usr/bin/env node
 /* screenshot-matrix.mjs — every page × every control combination × three widths, as full-page PNGs.
-   Layout defects here are combinatorial, not per-page (e.g. a translation-path pill only overflows in
-   some modes), so enumerating the product finds what spot-checking a few pages can't.
+
+   WHY THIS EXISTS: the board's layout defects are combinatorial, not per-page. "Tested on is huge"
+   is true only in the modes whose pill renders a TRANSLATION path (`OpenAI→Bedrock Converse`), and
+   the header-wrap and column-crush problems appear at one width and not another. Reviewing the four
+   pages a human happens to open cannot find those; enumerating the product can.
 
    RUN:
-     cd site && python3 -m http.server 8899 &
-     NODE_PATH="$(npm root -g)" node site/screenshot-matrix.mjs
-   Playwright isn't a repo dependency (dev tool only; the site ships zero runtime deps), so it resolves
-   via NODE_PATH - point it at wherever playwright is installed if `npm root -g` doesn't hold it.
-   Loaded through createRequire rather than a bare `import`: NODE_PATH is a CommonJS-only resolution
-   mechanism, and playwright ships a CJS entry point, so a bare ESM import can't find it.
+     python3 -m http.server 8899 --directory site &
+     NODE_PATH="$(npm root -g)" node site/screenshot-matrix.mjs     (both from the repo root)
+   Playwright is not a repo dependency (this script is a development tool, not part of the deployed
+   site, and the site ships zero runtime dependencies on purpose), so it resolves from wherever it is
+   installed via NODE_PATH. If `npm root -g` does not hold it, point NODE_PATH at the directory that
+   does (e.g. NODE_PATH=/private/tmp/node_modules).
 
-   Targets localhost, not production, so it photographs the working tree's CSS.
-   URLs use the ?view= query form (python3's http.server has no SPA fallback for clean paths);
-   decodeUrl() accepts that form and boot() rewrites the address bar to path form without reloading. */
+   PLAYWRIGHT IS LOADED THROUGH createRequire, NOT A BARE `import`. NODE_PATH is consulted by CommonJS
+   resolution only - ESM ignores it entirely - so `import { chromium } from "playwright"` fails with
+   "Cannot find package" even when NODE_PATH is set correctly. createRequire gets the CJS resolver,
+   which honours it, and playwright ships a CJS entry point.
+
+   IT TARGETS localhost, NOT PRODUCTION, so it photographs the working tree's CSS. Screenshotting the
+   deployed board would silently review the previous release.
+
+   URLS USE THE ?view= QUERY FORM, not the clean /gateways/<view> path form. python3 -m http.server has
+   no SPA fallback, so a clean path 404s; decodeUrl() accepts `view` as a query param for exactly this
+   reason (it is the pre-path-routing link form the app still honours), and boot() then rewrites the
+   address bar to path form without reloading. The rendered state is identical either way. */
 import { createRequire } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 const { chromium } = createRequire(import.meta.url)("playwright");
 
@@ -23,18 +36,34 @@ const BASE = process.env.BASE_URL || "http://localhost:8899";
 const OUT = process.env.OUT_DIR || path.resolve(import.meta.dirname, "../results/screenshots");
 
 /* Mirrors of app.js's own constants. Kept as literals rather than imported because app.js is a
-   browser script with top-level side effects; the assertion below is what keeps them honest. */
-const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "method"];
+   browser script with top-level side effects; assertMirrors() below is what keeps them honest (it did
+   not exist, and the mirror had already drifted: no `charts` in VIEWS or BOUND_VIEWS). */
+const VIEWS = ["gateways", "memory", "performance", "frontier", "streaming", "matrix", "charts", "method"];
 const TABLE_VIEWS = new Set(["performance", "frontier", "streaming", "memory"]);
-// The bound selector renders on these two ONLY (app.js BOUND_VIEWS): nothing on Streaming or Memory
-// is read at a tail-latency bound, so a bound combo there would photograph a control that is not there.
-const BOUND_VIEWS = new Set(["performance", "frontier"]);
+// The bound selector renders on these ONLY (app.js BOUND_VIEWS): nothing on Streaming or Memory is read
+// at a tail-latency bound, so a bound combo there would photograph a control that is not there.
+const BOUND_VIEWS = new Set(["performance", "frontier", "charts"]);
+function assertMirrors() {
+  const src = readFileSync(path.join(import.meta.dirname, "app.js"), "utf8");
+  const list = (re) => { const m = src.match(re); if (!m) throw new Error(`screenshot-matrix: cannot find ${re} in app.js`); return JSON.parse(m[1]); };
+  const want = {
+    VIEWS: list(/^const VIEWS = (\[[^\]]*\]);/m),
+    TABLE_VIEWS: list(/^const TABLE_VIEWS = new Set\((\[[^\]]*\])\);/m),
+    BOUND_VIEWS: list(/^const BOUND_VIEWS = new Set\((\[[^\]]*\])\);/m),
+  };
+  const have = { VIEWS, TABLE_VIEWS: [...TABLE_VIEWS], BOUND_VIEWS: [...BOUND_VIEWS] };
+  for (const k of Object.keys(want))
+    if (JSON.stringify(have[k]) !== JSON.stringify(want[k]))
+      throw new Error(`screenshot-matrix: ${k} mirror ${JSON.stringify(have[k])} has drifted from app.js ${JSON.stringify(want[k])}`);
+}
+assertMirrors();
 // `peak` is a URL CONTRACT whose control now reads "Own cell". The token must stay `peak` in these URLs.
 const PERF_MODES = ["peak", "same", "custom"];
 const MEM_MODES = ["min", "max", "same", "custom"];
 const BOUNDS = ["1", "5", "10", "50", "100", "none"];
-// 1440 desktop / 1024 narrow desktop / 768 tablet. 1024 matters most: wide enough to avoid the
-// mobile table treatment, narrow enough that a column sized by its widest pill starves the others.
+/* 1440 desktop / 1024 narrow desktop / 768 tablet. 1024 is the width that matters most here: it is
+   wide enough that the table does not collapse to its mobile treatment, and narrow enough that a
+   column sized by its widest pill starves the numeric columns. */
 const WIDTHS = [1440, 1024, 768];
 
 function modesFor(view) { return view === "memory" ? MEM_MODES : PERF_MODES; }
@@ -63,10 +92,15 @@ function urlFor({ view, mode, bound }) {
 const name = ({ view, mode, bound }, w) => `shot-${view}-${mode || "na"}-${bound || "na"}-${w}.png`;
 
 /* geometryAudit(page, view): does this view's column geometry depend on its CONTENT?
-   Rather than comparing widths across filter combos (which only differs when data happens to vary
-   enough), stuff every cell with an oversized string and re-measure: under `table-layout: fixed` the
-   widths are unchanged, under auto layout they shift. Destructive to the DOM, so it runs on its own
-   page load with nothing screenshotted after. */
+
+   The owner's complaint was "changing filters shouldn't change column widths", and the obvious check - measure
+   under two filter combos, compare - only fires when the board HAS data wide enough to differ. This measures
+   the underlying property instead: take the widths, replace every body cell's text with a string far wider
+   than any real value, take them again. Under auto table layout the second measurement is different by
+   construction; under declared geometry (table-layout: fixed + the colgroup renderTable emits) it is
+   identical, and no filter, no future value and no thin data.json can move a column sideways.
+   It is deliberately destructive to the DOM, so it runs on its own page load and nothing is screenshotted
+   after it. */
 async function geometryAudit(page, view) {
   return page.evaluate(() => {
     const table = document.querySelector("#results-table");
@@ -130,6 +164,8 @@ async function main() {
     JSON.stringify({ base: BASE, widths: WIDTHS, geometry, shots: combos().flatMap((c) => WIDTHS.map((w) => ({ file: name(c, w), width: w, url: urlFor(c) }))), problems }, null, 2));
   console.log(`${shots.length} screenshots -> ${OUT}`);
   for (const p of problems) console.log(`PROBLEM ${p}`);
+  // Screenshots of broken or empty pages are not a review: say so in the exit status.
+  if (problems.length) process.exitCode = 1;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

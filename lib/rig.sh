@@ -9,7 +9,7 @@
 # set RIG_ALLOW_SOURCE=1 (local dev only) to permit building from the local tree.
 #
 # RIG PROVENANCE: the measurement instrument must describe itself. `rig` is a moving tag:
-# .github/workflows/bench-rig.yml force-pushes it on every mock/ or loadgen/ change, so two runs weeks
+# .github/workflows/bench-rig.yml re-uploads it on every mock/ or engine/ change, so two runs weeks
 # apart can silently use different binaries under the same URL, changing cell verdicts between runs of
 # an otherwise identical harness with nothing in either run's output recording which instrument
 # produced it. So every run now records what it actually executed: a sha256 of the mock binary, the
@@ -53,18 +53,23 @@ _rig_asset_updated_at(){
 # so an unmeasurable field can never be emitted as "" (which downstream would read as a real value).
 _rig_json_str(){ if [ -z "${1:-}" ]; then printf 'null'; else printf '"%s"' "$1"; fi; }
 
-# BOX QUALIFICATION PROVENANCE: the box a rig runs on is as much part of the instrument as the
-# binaries, and a contaminated box can produce a fake gateway regression even while its absolute
-# numbers look inside the healthy range. So qualification data is recorded in this same provenance
-# block rather than a second store.
+# BOX QUALIFICATION PROVENANCE: the same idea, one step further out. The rig binaries are one half of
+# the instrument; the box they run on is the other, and a contaminated box can publish a fake gateway
+# regression just as a silently-rebuilt mock can, even when its absolute numbers still look inside the
+# healthy range. So the box's qualifying measurement (the no-gateway floor median + jitter stats, the
+# gateway's own peak replay, and the computed drift percentages and bands they were judged against) is
+# recorded inside this same provenance block rather than in a second store: one place to look when two
+# runs disagree, and one place to query when the bands get recalibrated from repeat runs.
 #
 # NOTHING WRITES $BOX_QUALIFY_FILE. The qualification verdict is produced by the ENGINE: `otb run`
-# qualifies the box against OTB_QUALIFY_BASELINE (median observed_rps across prior snapshots, computed
-# in run-on-ec2.sh and exported into the box's run script) and publishes it as `rig.box_qualify`
-# inside the snapshot. The path below is an unpopulated fallback kept in case an out-of-band verdict
-# file ever appears. Best-effort: no file -> key absent, never fabricated. Content is emitted only
-# after python confirms it parses as a JSON object, so a truncated/garbage file can't corrupt the
-# snapshot it's folded into.
+# qualifies the box against OTB_QUALIFY_BASELINE (the median of observed_rps across prior snapshots,
+# computed in run-on-ec2.sh and exported into the box's run script) and publishes it as
+# `rig.box_qualify` inside the snapshot. The path below is a fallback that has never been populated,
+# kept only so an out-of-band verdict file would still be read if one ever appeared. This comment used
+# to state the write as fact, which reads as though that file were the source of truth. Wholly
+# best-effort: no file (a local run, an older harness) -> the key is simply absent, never fabricated.
+# The content is emitted only after python confirms it PARSES as a JSON object, so a truncated or
+# garbage file can never corrupt the snapshot it is folded into.
 _rig_box_qualify_json(){
   local f="${BOX_QUALIFY_FILE:-${RIG_ROOT:-.}/results/box-qualify/qualification.json}"
   [ -r "$f" ] || return 0
@@ -149,11 +154,21 @@ fetch_rig() { # <repo-root>
   MOCK="$root/bin/mock-$arch"
   if [ -x "$MOCK" ]; then RIG_MOCK_ORIGIN="cached"; _rig_log "mock: reusing cached $MOCK"; fi
   if [ ! -x "$MOCK" ]; then
-    err="$(curl -fsSL "$RIG_URL/mock-$arch" -o "$MOCK" 2>&1)"
-    if [ $? -eq 0 ] && [ -s "$MOCK" ]; then
-      chmod +x "$MOCK"; RIG_MOCK_ORIGIN="release"; _rig_log "mock: prebuilt mock-$arch ($RIG_URL/mock-$arch)"
-    elif [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] && ( cd "$root/mock" && cargo build --release >/dev/null 2>&1 ); then
-      cp "$root/mock/target/release/mock" "$MOCK"
+    # Download to a private temp name and rename into place, so a concurrent fetch on the same root
+    # (or an interrupted one) can never leave a half-written binary at the path that gets executed
+    # and hashed.
+    local tmp="$MOCK.part.$$"
+    err="$(curl -fsSL "$RIG_URL/mock-$arch" -o "$tmp" 2>&1)"
+    if [ $? -eq 0 ] && [ -s "$tmp" ] && chmod +x "$tmp" && mv -f "$tmp" "$MOCK"; then
+      RIG_MOCK_ORIGIN="release"; _rig_log "mock: prebuilt mock-$arch ($RIG_URL/mock-$arch)"
+    elif rm -f "$tmp"; [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] && ( cd "$root/mock" && cargo build --release >/dev/null 2>&1 ); then
+      # The mock is a WORKSPACE MEMBER, so cargo writes it to the workspace target dir, not
+      # mock/target (bench-rig.yml copies from the same place). A failed copy is fatal: reporting a
+      # source build of a binary that is not there would be provenance for nothing.
+      if ! cp "$root/target/release/mock" "$MOCK"; then
+        _rig_log "FATAL mock: source build finished but $root/target/release/mock could not be copied to $MOCK"
+        return 1
+      fi
       RIG_MOCK_ORIGIN="source-build"
       _rig_log "mock: FELL BACK to local cargo build (RIG_ALLOW_SOURCE=1) - NOT the pinned rig"
     else
@@ -161,5 +176,13 @@ fetch_rig() { # <repo-root>
       [ "${RIG_ALLOW_SOURCE:-0}" = 1 ] || _rig_log "  (source fallback is opt-in: set RIG_ALLOW_SOURCE=1 for local dev)"
       return 1
     fi
+  fi
+  if [ -n "${BENCH_ENGINE_COMMIT:-}" ]; then
+    local actual
+    actual="$("$MOCK" engine-commit 2>/dev/null)" || { _rig_log "FATAL mock: cannot read instrument stamp"; return 1; }
+    [ "$actual" = "$BENCH_ENGINE_COMMIT" ] || {
+      _rig_log "FATAL mock: stamp '$actual' differs from required '$BENCH_ENGINE_COMMIT'"
+      return 1
+    }
   fi
 }

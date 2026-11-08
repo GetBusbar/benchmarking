@@ -2,67 +2,97 @@
 // SPDX-License-Identifier: Apache-2.0
 // gen-data.mjs: build the static data bundle for the results site. No dependencies.
 //
-// The site (onthebench.ai) is category-based; this emits the GATEWAYS category bundle
-// (site/data.json). CATEGORY SEAM: a second category (e.g. models) should get its own bundle under
-// site/data/<category>.json, registered in CATEGORIES in app.js - the emitted `category` field names
-// which bundle this is.
+// The site (onthebench.ai) is a category-based benchmark platform; this script emits the
+// data bundle for the GATEWAYS category, today served as site/data.json. CATEGORY SEAM:
+// when a second category lands (e.g. models), give each category its own bundle under
+// site/data/<category>.json (a per-category generator or a section here), and register it
+// in CATEGORIES in app.js; the emitted `category` field names which bundle this is.
 //
-// Scans gateways/*/definition.json (display/lang/class/repo) plus
-// results/{perf,memory,stream,streamcpu,xlate,matrix}/<gateway>.json, and emits site/data.json. Also
-// copies results/*.png into site/charts/ and assets/fonts into site/fonts/ so site/ is a
-// self-contained Pages artifact, and writes 404.html so hosts without _redirects support (GitHub
-// Pages) still deep-link into /gateways/<view> paths.
+// Scans gateways/*/definition.json (the manifest the engine runs from: display, lang, class, repo)
+// plus results/{perf,memory,stream,streamcpu,xlate,matrix}/<gateway>.json, and emits
+// site/data.json. Also copies the generated chart PNGs (results/*.png) into site/charts/
+// and the bundled Inter fonts (assets/fonts) into site/fonts/ so the site/ directory is a
+// self-contained Pages artifact, and writes 404.html (a copy of the app shell) so hosts
+// without _redirects support (GitHub Pages) still deep-link into /gateways/<view> paths.
 //
 //   node site/gen-data.mjs [repoRoot] [outDir]
 //
 // Defaults: repoRoot = the directory above this script, outDir = this script's directory.
-// Absent suites, gateways and charts are handled cleanly: the site renders "not measured" for gaps.
+// Absent suites, absent gateways and absent charts are all handled cleanly: the site reads
+// whatever this emits and renders "not measured" for the gaps.
 
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
+import { absentEntryFor, sealMatrixCellsInPlace, sealPerfCell, sealStreaming, cpuFpsSourceFor, matrixHasCellMemory } from "./seal-matrix.mjs";
+import { snapshotCellCoords, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
 import { instrumentOf } from "./check-consistency.mjs";
 import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
 const OUT = process.argv[3] || HERE;
+const activeFieldPath = join(ROOT, "results", "active-field.json");
+const activeField = existsSync(activeFieldPath) ? JSON.parse(readFileSync(activeFieldPath, "utf8")) : null;
+if (activeField && (!/^[a-f0-9]{40}$/.test(activeField.engine_commit) || !Number.isFinite(Date.parse(activeField.started_at)))) {
+  throw new Error("Invalid active field engine or start timestamp");
+}
 
-// GOVERNANCE RETIRED (matrix-sole-source): the governed suite was busbar-only and is retired, so
-// governance is not scanned or measured on the board (`governed/run.sh` stays on disk, unused). See app.js.
-// "memory" is intentionally NOT scanned: the retired standalone memory suite wrote synthetic burst
-// numbers mislabelled as 6x6 provenance. Memory now comes SOLELY from the matrix's PER-CELL windows
-// (matrix.upstreams[egress].cells[ingress].memory, sealed below) - no fallback, no per-gateway scalar,
-// since there is no single cell to project one from without the harness silently SELECTING one.
+// GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board - the governed
+// suite was busbar-only and is retired. `governed/run.sh` stays on disk (unused) but the suite is
+// no longer scanned into the bundle and no governed column/derivation is emitted. See app.js.
+// NOTE: "memory" is intentionally NOT scanned. The retired standalone memory suite wrote synthetic
+// burst numbers (conc=1500, 150KB payload, 120s) that mislabelled as 6x6 provenance; memory now comes
+// SOLELY from the matrix's PER-CELL windows (matrix.upstreams[egress].cells[ingress].memory, sealed
+// below). No fallback, and NO per-gateway memory scalar: there is no cell to project one from that the
+// harness would not have had to SELECT, which is the defect per-cell measurement exists to remove.
 const SUITES = ["perf", "stream", "streamcpu", "xlate", "matrix"];
 // The ungated (non-honesty-gated) latency-shaped metrics on a perf cell: always certified when present.
 // Imported from seal.mjs - the ONE vocabulary check-consistency also imports, so the two can never lag
 // each other. RSS fields are sealed BY DISCOVERY (RSS_FIELD_RE), never from a whitelist (audit #11).
 const UNGATED_LAT = UNGATED_LAT_FIELDS;
 
-// us-east-1 on-demand price for the 4-core slice the gateway under test is pinned to, disclosed here and
-// rendered in every dollar caption so a reader on different pricing can rescale. Override with
-// GATEWAY_HOURLY_USD. Moved here from the retired charts.py pipeline: the derivation is the board's, not
-// a chart's.
+/* THE PRICE, AS A NUMBER RATHER THAN A PHRASE.
+   us-east-1 on-demand for the 4-core slice the gateway under test is pinned to. It is disclosed here
+   and rendered in every caption that shows a dollar figure, so a reader on different pricing can
+   rescale rather than having to trust the word "cheap". Override with GATEWAY_HOURLY_USD.
+
+   Moved here from charts.py when the static chart pipeline was retired: the derivation is the board's,
+   not a chart's, and leaving it in a script that only ran to draw PNGs meant deleting the PNGs would
+   have silently deleted the metric. */
 const GATEWAY_HOURLY_USD = Number(process.env.GATEWAY_HOURLY_USD || 0.1632);
 
-/* costLanes(cell): req/s per $/hr and $ per 1M requests, from the frontier reading AT THE DEFAULT BOUND,
-   so the dollar figures and the throughput column describe the SAME operating point. Cost inherits
-   whatever qualification the rate carried, so the bound is named on every surface that shows it.
+/* costLanes(cell): req/s per $/hr and $ per 1M requests, from the frontier reading AT THE DEFAULT
+   BOUND - so the dollar figures and the throughput column describe the SAME operating point.
 
-   `cost_per_million` is ABSENT at rate 0, not 0: at zero the quotient is undefined, and 0 would be the
-   CHEAPEST (best) value on a lower-is-better axis, making "held nothing" look free. `rps_per_dollar`
-   keeps its 0 because zero requests per dollar genuinely is zero - 0 is a number, n/a is not. */
+   Cost is a rate divided by a price, so it inherits whatever qualification the rate carried. The
+   bound is therefore named on every surface that shows the result; a dollar figure must never imply
+   a tail it was not computed at.
+
+   `cost_per_million` is ABSENT at rate 0, not 0. At zero the quotient is undefined, and 0 is the
+   CHEAPEST value on a lower-is-better axis - so a gateway that held nothing under the bound would
+   render as free, the best possible result, while ranking last. `rps_per_dollar` keeps its 0 because
+   zero requests per dollar genuinely is zero. 0 is a number; n/a is not. */
 function costLanes(cell) {
   const r = frontierAt((cell || {}).frontier, DEFAULT_BOUND_MS);
-  /* AN ABSENT RATE IS NOT A ZERO RATE. `rate` used to collapse "no measurement" into the same 0 as
-     "measured zero" and pass it through `sealMetric` with no absence reason, emerging CERTIFIED - on
-     the 2026-07-31 board three gateways with `rps.reason = "below_resolution"` published
-     `rps_per_dollar: {value: 0, certified: true}`, asserting as measurement that they deliver zero
-     requests per dollar. Neither lane was in seal.mjs's vocabulary, so check-consistency never caught
-     it. Both lanes now carry the RATE's own reason/detail instead of a hardcoded `not_measured`. */
+  /* AN ABSENT RATE IS NOT A ZERO RATE, AND BOTH LANES USED TO SAY IT WAS.
+     `rate` collapsed "no measurement" into the same 0 as "measured zero", and that 0 went through
+     `sealMetric` with no absence - emerging CERTIFIED. On the 2026-07-31 board one-api, plano and
+     tensorzero each carried `rps.reason = "below_resolution"` at the 10ms bound and published
+     `rps_per_dollar: {value: 0, certified: true}` beside it: the board asserting, as a measurement,
+     that three competitors deliver zero requests per dollar, and ranking them last on a
+     higher-is-better axis for it. Neither lane is in seal.mjs's vocabulary, so `isMetricField` is
+     false for them and check-consistency never compared either against the raw artifact - which is
+     why it shipped.
+
+     The paragraph above is still right about a MEASURED zero: 0 requests per dollar genuinely is 0,
+     and n/a is not. The defect was never the zero, it was treating absence as one.
+
+     Both lanes now carry the RATE's own reason and detail. `cost_per_million_usd` used to stamp a
+     hardcoded `not_measured` over it, flattening "measured, and it could not hold the bound" into
+     "nothing was measured here" - the exact reason-flattening seal.mjs exists to prevent, and the
+     reading that flatters the gateway. */
   const rateEnv = r && r.rps;
   const rate = rateEnv && typeof rateEnv.value === "number" ? rateEnv.value : null;
   const rateAbsent = rate == null
@@ -77,7 +107,14 @@ function costLanes(cell) {
     cost_per_million_usd: sealMetric(
       rate > 0 ? (GATEWAY_HOURLY_USD / (rate * 3600)) * 1e6 : null,
       {
-        absent: rateAbsent
+        /* EXCEPT below_resolution, which every reader ranks as 0 ("≈0", equal-best). On the rate that is
+           the frontier's "no rung held this tail"; inherited by a lower-is-better DOLLAR lane it read as
+           "$0 per million", the cheapest gateway on the board, for a gateway that carried nothing under
+           the bound. A cost with no rate is undefined, exactly like the measured-zero case below. */
+        absent: (rateAbsent && rateAbsent.reason === "below_resolution"
+          ? { reason: "not_applicable",
+              detail: `${rateAbsent.detail} - so cost per request at the ${DEFAULT_BOUND_MS} ms bound is undefined, not $0` }
+          : rateAbsent)
           || (rate === 0
             ? { reason: "not_applicable", detail: "the gateway carried zero throughput at this bound, so cost per request is undefined rather than infinite" }
             : null),
@@ -89,12 +126,14 @@ function costLanes(cell) {
 }
 
 // ---- gateway manifests ------------------------------------------------------
-// The version a manifest pins, as a short human string: image tag for a container gateway, short
-// commit for one built from source. `null` when the manifest pins neither (renders as nothing, not a guess).
+// The version a manifest pins, as a short human string. Image tag for a container gateway, short
+// commit for one built from source. `null` when the manifest pins neither, which is a real state and
+// renders as nothing rather than as a guess.
 function declaredVersion(d) {
   const img = d?.launch?.image;
   if (typeof img === "string" && img.includes(":")) {
-    const tag = img.slice(img.lastIndexOf(":") + 1);
+    const reference = img.split("@")[0];
+    const tag = reference.slice(reference.lastIndexOf(":") + 1);
     if (tag && tag !== "latest") return tag;
   }
   const commit = d?.launch?.commit;
@@ -102,8 +141,10 @@ function declaredVersion(d) {
   return null;
 }
 
-// A gateway built from source pins its ref in its own build.sh (`COMMIT="${SOME_COMMIT:-<sha>}"`,
-// optionally with a `# tag vX.Y.Z`), since there's no image to name a version off of.
+// A gateway built from source pins its ref in its own build.sh rather than in the manifest's launch
+// block, because there is no image to name. Read it from there so those three rows carry a version
+// too: `COMMIT="${SOME_COMMIT:-<sha>}"`, optionally followed by a `# tag vX.Y.Z` the pin came from,
+// which is the more useful thing to show when it exists.
 function builtFromSourceVersion(key) {
   const path = join(gatewaysDir, key, "build.sh");
   if (!existsSync(path)) return null;
@@ -113,28 +154,41 @@ function builtFromSourceVersion(key) {
   if (!line) return null;
   const tag = line.match(/#\s*tag\s+(\S+)/);
   if (tag) return tag[1];
-  const sha = line.match(/:-([0-9a-f]{7,40})\}/i);
+  const sha = line.match(/:-([0-9a-f]{7,40})\}/i) || line.match(/COMMIT=["']?([0-9a-f]{7,40})/i);
   return sha ? sha[1].slice(0, 7) : null;
 }
 
 function parseManifest(text) {
-  // ONE manifest per gateway - the one the engine runs from (definition.json), not a shell file the
-  // engine no longer reads. `cls` is each project's OWN self-description (its README/tagline), never
-  // our editorial classification; missing/unknown falls back to the neutral "Gateway".
+  // ONE manifest per gateway, and it is the one the engine runs from. This used to scrape
+  // GW_DISPLAY/GW_LANG/GW_CLASS/GW_REPO out of a shell file that the Rust engine had already
+  // stopped reading, so the board's labels came from a different file than the measurements - and
+  // a gateway carrying only a definition.json was invisible to every shell-side caller.
+  //
+  // `cls` is each project's OWN self-description (its README/site tagline: "control plane", "LLM
+  // gateway", "API gateway", ...), never our editorial classification. Missing/unknown falls back
+  // to the neutral "Gateway".
   let d = {};
-  try { d = JSON.parse(text); } catch { return { display: null, lang: null, repo: null, cls: null, version: null }; }
+  // A manifest that does not parse is not a gateway with no metadata: publishing it under its directory
+  // name with "Other"/"Gateway" and no repo or version would mislabel a real entrant. Fail loudly.
+  try { d = JSON.parse(text); } catch (e) { throw new Error(`gen-data: a gateway definition.json is not valid JSON (${e.message})`); }
   return {
     display: d.display ?? null,
     lang: d.lang ?? null,
     repo: d.repo ?? null,
     cls: d.class ?? null,
-    // The declared pin, known without having measured anything - so a gateway awaiting its first run
-    // still shows WHAT would be measured rather than an empty row. A row WITH numbers is instead
-    // authoritatively versioned by `build`, the version the engine actually built for that run.
+    // THE VERSION WE PIN, WHICH IS KNOWN WITHOUT HAVING MEASURED ANYTHING.
+    //
+    // The engine stamps the version it ACTUALLY built into every run (`build`), and that stays the
+    // authority for a row that has numbers. But it only exists once a run has happened, so a gateway
+    // awaiting its first measurement rendered as a name and nothing else - no version, no upstream,
+    // an empty row that reads as "we know nothing about this" when the manifest names the exact
+    // image. This is the declared pin, so /gateways can always say WHAT would be measured even when
+    // "last benchmarked" is honestly n/a.
     version: declaredVersion(d),
   };
 }
 
+const contributorsBook = existsSync(join(HERE,"contributors.json")) ? JSON.parse(readFileSync(join(HERE,"contributors.json"),"utf8")) : {};
 const gatewaysDir = join(ROOT, "gateways");
 const gatewayKeys = existsSync(gatewaysDir)
   ? readdirSync(gatewaysDir).filter((d) => {
@@ -145,33 +199,28 @@ const gatewayKeys = existsSync(gatewaysDir)
   : [];
 
 // snapshotDegradedMode(m): the phases this run was told NOT to measure, as a human string, or "" when it
-// ran everything. Reads the producer's own mode flags (cell_perf_sweep / cell_stream / cell_memory) - how
-// the run was CONFIGURED, never how it turned out. An absent flag (predates it) is treated as ON.
+// ran everything. Reads the producer's OWN mode flags (matrix/run.sh emits cell_perf_sweep / cell_stream /
+// cell_memory), so it describes how the run was CONFIGURED, never how it turned out. A flag that is absent
+// (an older result predating it) is treated as ON: only an explicit `false` is a switched-off phase.
 function snapshotDegradedMode(m) {
   if (!m || typeof m !== "object") return "";
   const off = ["cell_perf_sweep", "cell_stream", "cell_memory"].filter((k) => m[k] === false);
   return off.length ? off.join("=false, ") + "=false" : "";
 }
 
+// A CORRUPT FILE STILL DEGRADES TO null (the snapshot ingest is deliberately null-safe: a corrupt sibling
+// must not blank a row that has a good artifact - test.mjs #25(d)), BUT IT IS SAID OUT LOUD. It used to be
+// indistinguishable from "never measured", so a gateway's newest run could vanish from the board, or an
+// older one take its place, with nothing in the build log.
 function readJson(path) {
-  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+  if (!existsSync(path)) return null;
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch (e) {
+    console.warn(`gen-data: WARNING: ${path} exists but is not valid JSON (${e.message}) - skipped as if absent; fix or remove it`);
+    return null;
+  }
 }
 
-// newestSnapshot(key): the newest results/snapshots/result_<key>_<ts>.json by its own measured_at.
-// Returns the parsed snapshot or null (no snapshot yet).
 const SNAP_DIR = join(ROOT, "results", "snapshots");
-function newestSnapshot(key) {
-  if (!existsSync(SNAP_DIR)) return null;
-  let best = null, bestMs = -1;
-  for (const f of readdirSync(SNAP_DIR)) {
-    if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
-    const snap = readJson(join(SNAP_DIR, f));
-    if (!snap) continue;
-    const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
-    if (ms > bestMs) { bestMs = ms; best = snap; best.__file = f; }
-  }
-  return best;
-}
 
 /* The snapshot the board should render for `key`: the newest FULL run, with every strictly-scoped
    newer run layered over it oldest-first (so the newest measurement of any cell wins). */
@@ -184,6 +233,10 @@ function resolvedSnapshot(key) {
     if (!snap) continue;
     snap.__file = f;
     snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
+    // An unparseable stamp cannot be ordered: NaN compares false against everything, so a scoped re-run
+    // carrying one was silently never layered and the sort below became order-dependent. Refuse it.
+    if (!Number.isFinite(snap.__ms))
+      throw new Error(`gen-data: ${f} has an unparseable measured_at (${JSON.stringify(snap.measured_at)}); a snapshot that cannot be dated cannot be ordered against the others. Fix or remove it.`);
     snap.__coords = snapshotCellCoords(snap.matrix);
     snaps.push(snap);
   }
@@ -191,21 +244,29 @@ function resolvedSnapshot(key) {
   snaps.sort((a, b) => a.__ms - b.__ms);
   const widest = snaps.reduce((m, s) => (s.__coords.size > m.__coords.size ? s : m), snaps[0]);
   // The base is the newest run that is NOT a strict subset of the widest - i.e. a full run.
-  const fulls = snaps.filter((s) => !isStrictSubset(s.__coords, widest.__coords));
+  // The base is the newest run that is not a SCOPED re-run of the widest grid (isScopedRelativeTo).
+  const fulls = snaps.filter((s) => !isScopedRelativeTo(s.__coords, widest.__coords));
   const base = fulls[fulls.length - 1];
-  // Subset of the BASE, not of the widest: subset-ness only means anything relative to the run being
-  // layered onto. Testing against `widest` misclassified a re-run touching a coordinate the widest run
-  // lacked (e.g. a new dialect) as a "full" run by exclusion, which became the base by recency and
-  // silently deleted every other measured cell.
-  const scopedNewer = snaps.filter((s) => isStrictSubset(s.__coords, base.__coords) && s.__ms >= base.__ms);
+  /* SUBSET OF THE BASE, NOT OF THE WIDEST. Subset-ness only means anything relative to the run being
+     layered ONTO: a scoped re-run is a subset of the GRID, not necessarily of some historical
+     snapshot. Testing against `widest` misclassified any re-run that touched a coordinate the widest
+     run lacked - add a 7th dialect, re-run `OTB_DIALECTS=openai,vertex`, and its 4 cells contain
+     `vertex|openai`, which the old 36-cell run never had. Not a subset of `widest`, so it landed in
+     `fulls`, became the base by recency, and 33 measured cells vanished from the board. That is the
+     exact failure this module was written to prevent, arriving through the door next to the one it
+     was watching. */
+  const scopedNewer = snaps.filter((s) => isScopedRelativeTo(s.__coords, base.__coords) && s.__ms >= base.__ms);
   if (!scopedNewer.length) return base;
   const out = structuredClone(base);
   out.__file = base.__file;
   let m = base.matrix;
   for (const sc of scopedNewer) {
-    // Screen each scoped run on ITS OWN mode flags, not the layered result's (which carries the base
-    // run's flags after `layerScopedMatrix` copies in only cells) - otherwise a degraded smoke run
-    // could replace a clean field run's cells while the guard read the base's flags and stayed silent.
+    /* AND EACH SCOPED RUN IS SCREENED ON ITS OWN FLAGS. The degraded-mode refusal below reads
+       `snap.matrix`, which by then is the LAYERED result carrying the BASE run's mode flags -
+       `layerScopedMatrix` copies cells and nothing else. So every scoped snapshot that layered in was
+       exempt from the guard, and a `verify-local` smoke run with `cell_perf_sweep: false` could
+       replace the headline cell of a clean field run while the guard read the base's `true` and threw
+       nothing. Screening here, per run, is the only place the scoped run's own flags still exist. */
     const degraded = snapshotDegradedMode(sc.matrix);
     if (degraded) {
       throw new Error(
@@ -221,21 +282,16 @@ function resolvedSnapshot(key) {
   return out;
 }
 
-// GitHub star snapshot for the Gateways overview: a COMMITTED build-time file (gateways/stars.json,
-// refreshed by `node gateways/fetch-stars.mjs`), never a live API call, so the bundle stays reproducible
-// and CI needs no network. Absent file or key degrades to null; the site renders those muted.
+// GitHub star snapshot for the Gateways overview: a COMMITTED build-time file
+// (gateways/stars.json, refreshed by `node gateways/fetch-stars.mjs`), never a live
+// API call, so the bundle stays reproducible and CI needs no network. Absent file or
+// absent key degrades to null; the site renders those muted.
 const starsSnap = readJson(join(gatewaysDir, "stars.json")) || {};
 
-// OUTSIDE CONTRIBUTORS, keyed by gateway. Kept in a SITE-ONLY file the engine never parses, since the
-// engine is a frozen instrument (ENGINE_PIN) and adding a contributor field to definition.json would
-// force a board-wide re-run for a purely editorial credit.
-// Shape: { "<gatewayKey>": [ { "handle": "...", "name": "...", "url": "https://..." }, ... ] }.
-const contributorsBook = readJson(join(HERE, "contributors.json")) || {};
-
-// snapshotDefinitionsByKey: gateway key -> the metric-definitions map off the SAME snapshot that became
-// that gateway's g.matrix (captured below). Kept out of the gateway object itself - definitions are a
-// board-level projection (data.definitions), not a per-row field - as a private side table never
-// emitted raw.
+// snapshotDefinitionsByKey: gateway key -> the metric-definitions map off the SAME snapshot that
+// became that gateway's g.matrix (see the capture below). Kept OUT of the gateway object itself -
+// the per-gateway records are the public bundle shape and definitions are a board-level projection
+// (data.definitions), not a per-row field - so this stays a private side table, never emitted raw.
 const snapshotDefinitionsByKey = new Map();
 const allGateways = gatewayKeys.map((key) => {
   const meta = parseManifest(readFileSync(join(gatewaysDir, key, "definition.json"), "utf8"));
@@ -244,24 +300,18 @@ const allGateways = gatewayKeys.map((key) => {
     display: meta.display || key,
     lang: meta.lang || "Other",
     cls: meta.cls || "Gateway",
-    // Sanitised the same way g.repo is: app.js interpolates url RAW into an href, so only https://
-    // profile URLs survive - a bad/missing url drops to null and renders as plain text.
-    contributed_by: (Array.isArray(contributorsBook[key]) ? contributorsBook[key] : [])
-      .filter((c) => c && typeof c.handle === "string" && c.handle.trim())
-      .map((c) => ({
-        handle: c.handle,
-        name: (typeof c.name === "string" && c.name.trim()) ? c.name : c.handle,
-        url: (typeof c.url === "string" && /^https:\/\/[^\s"'<>]+$/.test(c.url)) ? c.url : null,
-      })),
-    // Only accept an https:// repo URL: app.js interpolates g.repo RAW into href="${g.repo}" (unescaped),
-    // so an unvalidated manifest field could inject a `javascript:` scheme onto the public board (audit R2-L2).
+    // Only accept an https:// repo URL. app.js interpolates g.repo RAW into href="${g.repo}" at four
+    // render sites (display is esc()'d, href is not), so a manifest GW_REPO like
+    // `x" onfocus=alert(...) autofocus="` or a `javascript:` scheme would inject on the public board.
+    // Validating the scheme/format here (reject to null otherwise) closes that sink (audit R2-L2).
     repo: (typeof meta.repo === "string" && /^https:\/\/[^\s"'<>]+$/.test(meta.repo)) ? meta.repo : null,
     // The pinned version, present whether or not this gateway has ever been measured.
     version: meta.version ?? builtFromSourceVersion(key),
     stars: starsSnap[key]?.stars ?? null,
     stars_as_of: starsSnap[key]?.as_of ?? null,
-    // The repo's FIRST-commit date, not created_at (which resets on renames): 43k stars over 10 years
-    // and 100 over 3 weeks are different statements.
+    // Project age context: the repo's FIRST-commit date (not created_at, which resets on
+    // renames). Rendered as a simple relative age - 43k stars over 10 years and 100 over 3
+    // weeks are different statements.
     first_commit: starsSnap[key]?.first_commit ?? null,
   };
   for (const suite of SUITES) {
@@ -270,22 +320,34 @@ const allGateways = gatewayKeys.map((key) => {
   }
   // ---- snapshot artifact (task #65): the SINGLE self-describing per-gateway run ------------------
   // Prefer the NEWEST snapshot (results/snapshots/result_<key>_<measured_at>.json) as the source of the
-  // matrix + config: config lives INSIDE the same file as the numbers it produced, killing the
-  // config-drift class. A gateway with no snapshot yet keeps the per-suite read path above.
+  // matrix + config: config lives INSIDE the same file as the numbers it produced, killing the config-
+  // drift class. A gateway with no snapshot yet keeps the per-suite read path above (transition; null-
+  // safe). The snapshot's matrix carries the SAME sealed-envelope-producing cells, so projection is
+  // unchanged. Its inline config.files replace the config/<gw>.txt sidecar read.
   const snap = resolvedSnapshot(key);
   if (snap) {
-    // RECENCY, not existence (audit #5): an older snapshot must never shadow a newer
-    // results/matrix/<gw>.json (a matrix-only re-run can leave the snapshot archive trailing it).
+    // RECENCY, not existence (audit #5). An older snapshot must NEVER shadow a newer results/matrix/<gw>.json
+    // (a matrix-only re-run writes the per-suite file; the snapshot archive can trail it). Compare the two
+    // stamps and take the NEWER; a snapshot with no stamp loses to any stamped matrix, and wins only when
+    // there is no per-suite matrix at all.
     const snapAt = snap.matrix && snap.measured_at ? Date.parse(snap.measured_at) : NaN;
     const diskAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : NaN;
     const snapMs = Number.isFinite(snapAt) ? snapAt : -1;
     const diskMs = Number.isFinite(diskAt) ? diskAt : -1;
     if (snap.matrix && (!g.matrix || snapMs >= diskMs)) {
-      // A degraded-mode run (a local smoke run with cell_perf_sweep/cell_stream/cell_memory turned off
-      // to finish in minutes) must never become the board's source just by being newer - it was TOLD
-      // NOT TO MEASURE, so refusing it is a statement about the run's MODE, not its numbers. This
-      // applies even when there's no fuller file to shadow (a gateway whose only artifact is a smoke
-      // run): a run that wasn't told to measure still isn't a measurement.
+      // A DEGRADED-MODE RUN MUST NOT BECOME THE BOARD'S SOURCE JUST BY BEING NEWER. The producer records
+      // which phases it was told to run (cell_perf_sweep / cell_stream / cell_memory); a local smoke run
+      // turns them off to finish in minutes and its snapshot lands in the SAME results/snapshots/
+      // directory as a field run, so recency alone would let a probe-only run silently outrank and
+      // shadow a complete one. This is NOT the "fewer served cells" case (a re-run that finds less IS
+      // the new truth); it is the case where the producer was TOLD NOT TO MEASURE, so refusing it is a
+      // statement about the run's MODE, never about its numbers.
+      // SHADOWING WAS NEVER THE DEFECT; BECOMING THE BOARD'S SOURCE IS. The guard only fired when a
+      // degraded snapshot was newer than a COMPLETE results/matrix/<gw>.json, so the case with nothing
+      // to shadow - a gateway whose ONLY artifact is a local smoke run - walked straight through and
+      // published as that gateway's board result, which is the exact outcome the guard's own message
+      // describes as unacceptable. A run that was TOLD NOT TO MEASURE is not a measurement whether or
+      // not a real one exists beside it; the presence of a fuller file changes the remedy, not the rule.
       const degraded = snapshotDegradedMode(snap.matrix);
       if (degraded) {
         const diskFull = g.matrix && !snapshotDegradedMode(g.matrix);
@@ -313,7 +375,12 @@ const allGateways = gatewayKeys.map((key) => {
       // Older snapshots predate the field entirely; absent here just means absent (handled below).
       if (snap.definitions && typeof snap.definitions === "object") snapshotDefinitionsByKey.set(key, snap.definitions);
     }
-    const files = snap.config && snap.config.files;
+    // THE CONFIG BELONGS TO THE RUN THAT BECAME THE MATRIX, exactly like the definitions above. When the
+    // per-suite results/matrix/<gw>.json was newer and won, the snapshot's config is an OLDER run's: shown
+    // beside the newer numbers it is a config the measured process did not boot on. Fall through to the
+    // sidecar path below instead. (A snapshot with NO matrix still supplies its config: nothing lost to it.)
+    const lostToNewerMatrix = !!snap.matrix && g.matrix_from_snapshot !== true;
+    const files = !lostToNewerMatrix && snap.config && snap.config.files;
     if (files && typeof files === "object") {
       const parts = Object.entries(files).map(([name, body]) =>
         Object.keys(files).length > 1 ? `# ${name}\n${body}` : String(body));
@@ -349,45 +416,67 @@ const allGateways = gatewayKeys.map((key) => {
   }
   if (g.matrix) {
     normalizeMatrix(g.matrix);
-    // CANONICAL RULE: the per-cell MATRIX sweep is the single source of truth for passthrough +
-    // translation perf; the standalone perf/xlate suites are a live deferred fallback. g.best_cell /
-    // g.translation_cell are the ONE canonical record every surface reads. Every metric is SEALED here
-    // (seal.mjs): the raw scalar is consumed, never re-emitted, and the cell's `source` stamp drives
-    // every caption. See seal.mjs / Design E.
+    // CANONICAL RULE: the per-cell MATRIX sweep is the single source of truth for all passthrough +
+    // translation perf; the standalone perf/xlate suites are a LIVE deferred FALLBACK (a gateway with
+    // no matrix sweep for that path). g.best_cell / g.translation_cell are the ONE canonical record
+    // every surface reads (table, drawer, compare, charts.py). Every metric is SEALED here into an
+    // envelope (seal.mjs): the raw scalar + its _mock_bound flag are CONSUMED, never re-emitted - a
+    // render site has no ungated field to leak. The cell's `source` stamp discloses provenance and
+    // drives every caption (no hard-coded source string can drift). See seal.mjs / Design E.
     const build = g.matrix.build ?? null, at = g.matrix.measured_at ?? null;
     // Per-cell perf (matrix v2 + sweep): the gateway's OPENAI diagonal when it serves one, else the
-    // lowest-added-p99 diagonal it does serve - NOT "best by sustained RPS @20ms". Comparing every
-    // gateway on the SAME cell is fairer than each on whichever cell flatters it most, even though for
-    // some gateways their openai diagonal isn't their fastest one.
+    // lowest-added-p99 diagonal it does serve. NOT "best by sustained RPS @20ms", which this comment
+    // claimed and `bestCell` has never done - it takes the openai cell unconditionally and only ranks
+    // when there is none.
+    //
+    // And that is the right rule, which is why the CODE stayed and the labels changed: comparing every
+    // gateway on the SAME cell is fairer than comparing each on whichever cell flatters it most. But
+    // three chart subtitles said "best same-dialect passthrough", and for apisix, agentgateway and
+    // plano the openai diagonal is not their best one (apisix's openai-responses cell sustains 5.7%
+    // more), so the word "best" was false on the board even though the number beside it was right.
+    /* A LAYERED CELL IS STAMPED WITH THE RUN THAT MEASURED IT. On a board with a scoped re-run layered
+       over the base, g.matrix carries the BASE run's build/measured_at while the cell itself came from
+       the re-run (layerScopedMatrix stamps it `__run`); dating the projected record by the base claimed
+       a measurement from a run that never took it. */
+    const stampOf = (egress, ingress) => {
+      const r = g.matrix.upstreams?.[egress]?.cells?.[ingress]?.__run;
+      return r ? [r.build ?? null, r.measured_at ?? null] : [build, at];
+    };
     const bc = bestCell(g.matrix);
     if (bc) g.best_cell = sealPerfCell(bc, { ingress: bc.dialect, egress: bc.dialect, dialect: bc.dialect },
-      makeSource("matrix", SWEEP.DIAGONAL, build, at), bc.absences);
-    // The dollar lanes ride on the canonical cell's frontier reading at the default bound - the same
-    // operating point the throughput column ranks - so the two can never describe different runs.
+      makeSource("matrix", SWEEP.DIAGONAL, ...stampOf(bc.dialect, bc.dialect)), bc.absences);
+    // THE DOLLAR LANES RIDE ON THE CANONICAL CELL, derived from its frontier reading at the default
+    // bound - the same cell and the same operating point the throughput column ranks, so the two can
+    // never describe different runs of the same gateway.
     if (g.best_cell) Object.assign(g.best_cell, costLanes(g.best_cell));
     // The gateway's TRANSLATION cell (openai in -> best non-openai egress).
     const tc = translationCell(g.matrix);
     if (tc) g.translation_cell = sealPerfCell(tc, { ingress: tc.ingress, egress: tc.egress },
-      makeSource("matrix", SWEEP.TRANSLATION, build, at), tc.absences);
-    // STREAMING projection: the BEST DIAGONAL cell's streaming (same cell the headline perf projects
-    // from), only when it actually streamed (stream_served===true); otherwise g.streaming stays absent.
+      makeSource("matrix", SWEEP.TRANSLATION, ...stampOf(tc.egress, tc.ingress)), tc.absences);
+    // STREAMING projection (matrix single source): the BEST DIAGONAL cell's streaming - the SAME
+    // (ingress==egress) cell the headline perf is projected from (one source of truth). Only when the
+    // diagonal ACTUALLY STREAMED (stream_served===true); a non-streaming cell leaves g.streaming absent.
     if (bc) {
       const cell = g.matrix.upstreams?.[bc.dialect]?.cells?.[bc.dialect];
       if (cell && cell.stream && cell.stream.stream_served === true) {
         g.streaming = sealStreaming(cell.stream, bc.dialect,
-          makeSource("matrix", SWEEP.STREAM_DIAGONAL, build, at), cell.absences);
+          makeSource("matrix", SWEEP.STREAM_DIAGONAL, ...stampOf(bc.dialect, bc.dialect)), cell.absences);
       }
     }
-    // MEMORY: NOT projected to a per-gateway scalar. It stays per cell all the way to the reader; the
-    // memory lane picks a cell through the same chooser (Min/Max/Same/Custom) every other lane uses,
-    // rather than the harness silently selecting one. Windows are sealed in place below.
-    // Seal every matrix cell in-place (AFTER selection/projection, which read raw): the matrix popup +
-    // Protocol view read cell.perf/cell.stream directly, so those must be envelopes too (invariant C1).
+    // MEMORY: NOT projected. Memory is measured per cell (its own cold-started, plateau-terminated
+    // window on EVERY served cell) and stays per cell all the way to the reader - the board's memory lane
+    // chooses a cell through the same chooser every other lane uses (Min | Max | Same | Custom) and says
+    // which. A per-gateway scalar cannot exist without the harness selecting a cell silently, which is
+    // exactly the defect the per-cell design removes. The windows are sealed in place below.
+    // SEAL every matrix cell in-place (AFTER selection/projection, which read raw). The matrix popup +
+    // Protocol view read cell.perf / cell.stream directly, so those must be envelopes too - otherwise a
+    // raw ungated scalar survives in the bundle (invariant C1).
     sealMatrixCellsInPlace(g.matrix);
   }
-  // LIVE DEFERRED FALLBACKS (stay until the field run folds them into the matrix): each is sealed with
-  // its own honest `source` stamp. No memory fallback - the retired synthetic burst suite mislabelled
-  // as 6x6 provenance and is neither scanned nor read.
+  // LIVE DEFERRED FALLBACKS (stay until the field run folds them into the matrix; DO NOT break them).
+  // Each is sealed with its OWN honest `source` stamp (stream-suite / perf-suite / xlate-suite), so the
+  // envelope is correct NOW and captions tell the truth about provenance. There is NO memory fallback -
+  // the retired synthetic burst suite mislabelled as 6x6 provenance and is neither scanned nor read.
   if (!g.streaming && g.stream && g.stream.stream_served === true) {
     // Stamp the dialect the STREAM SUITE ACTUALLY USED (derived from the endpoint it probed), not the
     // matrix's passthrough diagonal: the two can differ, and stamping the diagonal would claim
@@ -400,14 +489,19 @@ const allGateways = gatewayKeys.map((key) => {
       added_gap_p99_us: g.stream.stream_added_gap_p99_us,
       streams_sustained: g.stream.stream_sustained_streams,
       streams_sustained_fps: g.stream.stream_sustained_fps,
-      // The legacy stream suite predates both the flag and these fields, so no ceiling/fraction to state.
+      // The legacy stream suite predates both the flag and these fields, so there is no ceiling to
+      // state and no fraction - which now costs the headroom and not the number.
       streams_sustained_mock_ceiling: g.stream.stream_mock_ceiling ?? null,
       streams_sustained_headroom: g.stream.stream_headroom ?? null,
 
     }, dia, makeSource("stream-fallback", SWEEP.STREAM_SUITE, g.stream.build ?? null, g.stream.measured_at ?? null),
     null,
-    // cpu_fps comes from the SEPARATE streamcpu suite (own cadence), so it needs its own stamp rather
-    // than the record's stream-suite one - only carried when the two genuinely disagree.
+    // cpu_fps CAME FROM THE OTHER SUITE, SO IT CARRIES THE OTHER SUITE'S STAMP. The record's own stamp
+    // is the stream suite's build + measured_at; cpu_fps is produced by the SEPARATE streamcpu suite,
+    // which runs on its own cadence, so stamping it with the record's provenance dated a number to a
+    // run that never produced it. It is only carried when the two genuinely disagree - on a row where
+    // both suites ran together the record's stamp already tells the truth, and repeating it on the
+    // envelope would be bundle bloat for no added disclosure.
     cpuFpsSourceFor(g));
   }
   if (!g.best_cell && g.perf && g.perf.served === true && g.perf.added_latency_p99_us != null) {
@@ -417,9 +511,12 @@ const allGateways = gatewayKeys.map((key) => {
     g.best_cell = sealPerfCell({
       added_latency_p50_us: g.perf.added_latency_p50_us,
       added_latency_p99_us: g.perf.added_latency_p99_us,
-      // The legacy perf suite recorded no per-rung tail latencies, so there's no frontier to read off -
-      // publishing its scalar in a bound's column would mislabel a differently-defined measurement.
-      // Latency figures stay (comparable); throughput shows none until a matrix run replaces it.
+      // NO FRONTIER FROM THE LEGACY PERF SUITE. It measured a single throughput scalar under one
+      // chosen latency ceiling and recorded no per-rung tail latencies, so there is nothing to read a
+      // frontier off. Publishing its old number in one bound's column would put a differently-defined
+      // measurement in a column that names a definition it does not meet - which is the exact class of
+      // mislabelling this whole change removes. The cell keeps its latency figures, which ARE comparable,
+      // and shows no throughput until a matrix run replaces it.
       frontier: [],
       sweep_max_proxy: g.perf.sweep_max_proxy ?? null,
       sweep_sustained_20ms: g.perf.sweep_sustained_20ms ?? null,
@@ -432,230 +529,120 @@ const allGateways = gatewayKeys.map((key) => {
     g.translation_cell = sealPerfCell({
       added_latency_p50_us: g.xlate.xlate_added_latency_p50_us,
       added_latency_p99_us: g.xlate.xlate_added_latency_p99_us,
-      // Same as the perf fallback above: no per-rung tails, so no frontier is published.
+      // Same as the perf fallback above: the legacy xlate suite has no per-rung tails to read a
+      // frontier from, so it publishes none rather than mislabelling its scalar as one bound's reading.
       frontier: [],
     }, { ingress: "anthropic", egress: "openai" },
       makeSource("xlate-fallback", SWEEP.XLATE_SUITE, g.xlate.build ?? null, g.xlate.measured_at ?? null));
   }
-  // GOVERNANCE RETIRED: no `supports_governed` derivation (the governed suite was busbar-only and is retired).
+  // GOVERNANCE RETIRED: no `supports_governed` derivation. Under matrix-sole-source governance is not
+  // a board metric (the governed suite was busbar-only and is retired), so the board neither emits a
+  // governed column nor a supports_governed capability flag.
   //
   // PER-GATEWAY freshness stamp: each gateway carries its OWN newest measurement so the board can show
-  // an independent "measured Nd ago" per row (honest on a living board where any gateway can be re-run
-  // alone). LOW-R3-3: must age the DISPLAYED numbers (g.matrix-preferring via displayedMeasuredMs, a
-  // hoisted fn below), not the max across all suites - otherwise a stale ad-hoc legacy re-run could
-  // overstate freshness for numbers the board isn't even showing. Drives the app.js badge, not a build failure.
+  // an independent "measured Nd ago" per row and flag a row that has aged past MAX_GATEWAY_AGE_DAYS.
+  // measured_at legitimately differs per gateway (one today, another 3 weeks ago), and that
+  // is honest on a living board where any one gateway can be re-run alone. The staleness flag drives a
+  // per-row badge in app.js; it is NOT a build failure (see the freshness guard below).
+  // LOW-R3-3: the badge stamp must reflect the age of the DISPLAYED numbers, which are projected from
+  // g.matrix ONLY (best_cell / streaming / the per-cell memory windows). Deriving it from the MAX across all suites let a
+  // newer legacy results/perf/<gw>.json (reachable via an ad-hoc SUITES=perf re-run) drive a "measured 5d
+  // ago" badge while the shown matrix numbers were 90d old - the badge overstating freshness. Prefer the
+  // matrix stamp; fall back to the newest-across-suites only when there is no matrix (a legacy-only row
+  // whose numbers age by that stamp anyway). The staleness flag below is re-derived on the same basis.
+  // LOW-R3-3 / MED-1: the per-row badge stamp ages the DISPLAYED (matrix-preferring) numbers - the SAME
+  // shared basis the board-level footer + wholesale-stale floor now use (displayedMeasuredMs). Hoisted
+  // function declaration, so it is callable here even though it is defined below.
   const gAtMs = displayedMeasuredMs(g);
   g.measured_at = gAtMs > 0 ? new Date(gAtMs).toISOString() : null;
-  // AUDIT #8: a PER-LANE freshness stamp, since a whole displayed TAB can project from a never-refreshed
-  // legacy suite (ageing it by the matrix stamp would overstate that tab's freshness). Each lane carries
-  // the measured_at of the record it actually shows; app.js renders the age from this.
+  // AUDIT #8: a PER-LANE freshness stamp. The row badge ages the matrix, but a whole displayed TAB can
+  // project from a never-refreshed legacy suite (every streaming column today comes from the stream
+  // suite), so ageing it by the matrix stamp OVERSTATES that tab's freshness. Each lane therefore
+  // carries the measured_at of THE RECORD IT ACTUALLY SHOWS; app.js renders the age from this.
   g.lane_measured_at = {};
   for (const [lane, rec] of [["perf", g.best_cell], ["xlate", g.translation_cell],
     ["stream", g.streaming]]) {
     const at = rec && rec.source && rec.source.measured_at;
     if (at) g.lane_measured_at[lane] = at;
   }
-  // The memory lane has no per-gateway record/`source`, so it ages by the matrix that produced its
-  // windows directly - only stamped when a served cell actually carries one.
+  // The memory lane projects no per-gateway record, so it has no `source` to age by. It reads the matrix
+  // cells directly, so it ages by the matrix that produced them - and only when a served cell actually
+  // carries a window, so a matrix with no memory data leaves the lane unstamped rather than claiming a
+  // freshness for numbers that are not there.
   if (matrixHasCellMemory(g.matrix) && g.matrix.measured_at) g.lane_measured_at.memory = g.matrix.measured_at;
   // ---- RIG PROVENANCE: WHICH measurement instrument produced this row -------------------------------
   // The mock + loadgen come from a MOVING GitHub release tag, so an identical harness can produce
-  // different cell verdicts across runs purely because the instrument was rebuilt between them.
-  // Null-safe: a snapshot with no rig block renders "not recorded", never a fabricated digest.
+  // DIFFERENT cell verdicts across runs purely because the instrument was rebuilt between them.
+  // Surfacing it here makes an instrument change legible at a glance on any cross-run comparison.
+  // NULL-SAFE: a snapshot with no rig block renders "not recorded", never a fabricated digest.
   g.rig = (g.matrix && g.matrix.rig) || null;
+  g.contributed_by = contributorsBook[g.key] || [];
   return g;
 })
-/* A GATEWAY NOBODY HAS MEASURED IS NOT A ROW. Every gateway with a definition used to become a row
-   regardless, which read as an implication (nothing to show) rather than a disclosure (nobody has run
-   it yet) for a freshly-added gateway. A gateway REJOINS the board the moment a snapshot lands. */
+/* A GATEWAY NOBODY HAS MEASURED IS NOT A ROW.
+   Every gateway with a definition became a row, measured or not, which was harmless while the only
+   definitions were the fourteen on the board. Adding busbar-150 changed that: its manifest has to be
+   pushed for the boxes to fetch it, so the moment it existed the public board grew a row reading
+   "Busbar 1.5.0" with no matrix, no best_cell and no snapshot behind it.
+
+   An empty row is not a disclosure, it is an implication - a reader sees a gateway that apparently
+   has nothing to show, when the truth is nobody has run it yet. The board's rule is that an absence
+   carries a reason; a gateway with no measurement at all has no absence to explain, because there is
+   no cell to be absent.
+
+   A gateway REJOINS the board the moment a snapshot lands for it. Nothing here decides what may be
+   published - it decides what has been measured. */
   ;
 const wasMeasured = (g) => Boolean(g.matrix || g.snapshot_file || g.perf || g.stream || g.memory);
-// ...BUT AN ALL-EMPTY BOARD KEEPS ITS DECLARED ROWS: an unmeasured row only misleads by comparison to
-// rows that DO have data; a board where nothing has been measured is just the honest empty bundle a
-// fresh checkout produces (no snapshots committed), and the site test suite depends on gen-data
-// emitting that rather than throwing.
-// POLICY (2026-08-26): a declared entrant appears the moment its definition lands, before its first
-// measurement, with n/a on every lane - the roster shows what's ON the bench, not just what has
-// finished running. wasMeasured is retained for the lane-freshness/audit paths that still need it.
-void wasMeasured;
-const gateways = allGateways;
+// ...BUT AN ALL-EMPTY BOARD KEEPS ITS DECLARED ROWS. The two situations are not the same shape.
+// An unmeasured row misleads by COMPARISON - it only reads as "this gateway has nothing to show"
+// because it sits beside rows that do. A board where nothing at all has been measured draws no
+// comparison; it is the honest empty bundle a fresh checkout produces, with n/a on every row, and
+// the site suite itself depends on gen-data emitting it rather than throwing (a clean clone commits
+// no snapshots, so this file would otherwise die at its own gen-data call before its first
+// assertion - a suite that gates nothing while reading as an unrelated failure).
+// A refresh explicitly retains every entrant, withholding all earlier runs.
+if (activeField) for (const g of allGateways) {
+  const current = g.rig?.engine?.commit === activeField.engine_commit &&
+    displayedMeasuredMs(g) >= Date.parse(activeField.started_at);
+  if (current) continue;
+  const identity = new Set(["contributed_by", "key", "display", "lang", "cls", "repo", "stars", "stars_as_of", "first_commit"]);
+  for (const key of Object.keys(g)) if (!identity.has(key)) g[key] = null;
+  g.version = parseManifest(readFileSync(join(gatewaysDir, g.key, "definition.json"), "utf8")).version || builtFromSourceVersion(g.key);
+  g.awaiting_engine = activeField.engine_commit.slice(0, 7);
+}
+const gateways = !activeField && allGateways.some(wasMeasured)
+  ? allGateways.filter((g) => {
+      if (wasMeasured(g)) return true;
+      console.log(`gen-data: skipping ${g.key} - no snapshot, no suite result, nothing measured yet`);
+      return false;
+    })
+  : allGateways;
 
-// Matrix v1 carries one upstream shape (fixed openai) as top-level `cells`; v2 carries the full 6x6
-// under `upstreams.<egress>.cells` plus the same top-level compat row. Normalize v1 into the v2 shape:
-// the one measured egress column becomes `upstreams`, columns v1 never probed stay absent/"not measured".
-// The gateway's BEST passthrough cell for the Passthrough tab: its same-dialect diagonal (ingress ===
-// egress), the canonical `openai` diagonal when served, else the fastest NATIVE diagonal by lowest added
-// latency. BEST-OF rather than strict-openai, so every gateway appears on its best passthrough.
-// `dialect` (== ingress == egress) is the label the tab's "Tested on" pill shows.
+// Matrix v1 results carry one upstream shape (fixed openai) as top-level `cells`; v2 carries the
+// full 6x6 under `upstreams.<egress>.cells` plus the same top-level compat row. Normalize v1 into
+// the v2 shape so the site renders exactly one structure: the one measured egress column becomes
+// `upstreams`, and the columns v1 never probed stay absent (the site renders them "not measured",
+// which is the honest reading of a v1 run: unmeasured, not "not configurable").
+// The gateway's BEST passthrough cell for the Passthrough tab (BEST-OF): its same-dialect diagonal
+// (ingress === egress, pure forwarding, no translation), chosen deterministically as the canonical
+// `openai` diagonal when served (every gateway on the identical fair workload), else the gateway's
+// fastest NATIVE diagonal by lowest added latency (e.g. one gateway -> anthropic). BEST-OF, not
+// strict-openai, so EVERY gateway appears on its best passthrough; filtering a competitor out reads
+// as hiding it. `dialect` (== ingress == egress) is the label the tab's "Tested on" pill shows.
 // ---- envelope sealers (Design E §2): raw cell -> sealed, envelope-carrying record ----------
 // The projected record carries `path` (ingress/egress/dialect), `source` (the provenance stamp), and one
 // SEALED envelope per metric under its own field name. The raw scalar is consumed here and never
 // re-emitted, so no ungated field survives for a render site to leak (invariant P1).
 // absentEntryFor: the engine's `absences` entry for one field, tolerant of the block-prefixed key
 // shape the cell publishes ("perf.added_latency_p50_us") and the bare one a projected record carries.
-function absentEntryFor(absences, prefix, k) {
-  if (!absences || typeof absences !== "object") return null;
-  return absences[`${prefix}.${k}`] || absences[k] || null;
-}
-// sealPerfCellPerf: a raw perf object -> {<sealed metrics>} (no path/source; the caller stamps those).
-// Used BOTH for the canonical best_cell/translation_cell AND to seal every matrix cell in-place, so the
-// matrix popup reads envelopes, never raw scalars (invariant C1: no ungated field survives in the bundle).
-// `absences` is the raw CELL's sibling reason map; an absent metric now emits an envelope CARRYING that
-// reason instead of no key at all - a missing key was how "below rig resolution" rendered as a bare n/a.
-function sealPerfCellPerf(perf, absences = null) {
-  const rec = {};
-  for (const k of UNGATED_LAT)
-    rec[k] = sealMetric(perf[k], { absent: absentEntryFor(absences, "perf", k) });
-  // What the cell COST. Sealed exactly like the latency fields, for the same reason: an absent cost
-  // must carry WHY (a bare 0 would make a never-measured gateway look infinitely efficient).
-  for (const k of UNGATED_COST_FIELDS)
-    rec[k] = sealMetric(perf[k], { absent: absentEntryFor(absences, "perf", k) });
-  // One throughput reading per declared tail-latency bound, off one sweep. Replaces `sealThroughput`
-  // and its two scalars (`rps_sustained_20ms`/`rps_max_proxy`), which could invert against each other
-  // since two different algorithms summarised the same windows. See seal.mjs / engine's `frontier.rs`.
-  rec.frontier = sealFrontier(perf.frontier, absences);
-  // The rungs every reading was taken from, so a reader can re-derive the frontier rather than trust it.
-  // Plain field: evidence, not a metric.
-  if (Array.isArray(perf.sweep_max_proxy) && perf.sweep_max_proxy.length) {
-    rec.sweep = perf.sweep_max_proxy;
-    // The same rungs as a SEALED reading, so the board can compare at one concurrency instead of each
-    // gateway's own peak - `sweep` above is evidence, this is the metric the concurrency selector ranks on.
-    rec.rungs = sealRungs(perf.sweep_max_proxy);
-  }
-  if (perf.egress_reverified != null) rec.egress_reverified = perf.egress_reverified;
-  // egress_reverified: the fairness guard's boolean (did this gateway actually TRANSLATE to the egress
-  // dialect, or just proxy the ingress request verbatim - which the mock would otherwise score as a
-  // capability it doesn't have). reverify_note is the reason behind it; a FALSE reverify is an
-  // accusation, so it always ships with its basis. Neither is a sealed metric - both are plain fields.
-  if (perf.reverify_note != null) rec.reverify_note = perf.reverify_note;
-  return rec;
-}
-// sealPerfCell: a matrix/fallback perf object -> the canonical {path, source, <sealed metrics>} record.
-function sealPerfCell(perf, path, source, absences = null) {
-  return { path: { ...path }, source, ...sealPerfCellPerf(perf, absences) };
-}
-// sealStreamRecord: a raw stream record -> {<sealed metrics>} (no path/source). Used for the canonical g.streaming AND
-// for sealing every matrix cell's own .stream in-place (so the popup reads envelopes).
-// `cpuSource`: the provenance stamp for cpu_fps ALONE, when that number came from a different run than
-// the rest of the record (the legacy stream-suite fallback below reads it from the SEPARATE streamcpu
-// suite). Null on every matrix path, where one cell produced the whole record.
-function sealStreamRecord(s, absences = null, cpuSource = null) {
-  const rec = {};
-  const abs = (k) => absentEntryFor(absences, "stream", k);
-  for (const k of UNGATED_STREAM_FIELDS)
-    rec[k] = sealMetric(s[k], { absent: abs(k) });
-  // streams_sustained_fps and streams_sustained are the SAME bisect's rate and count, so they share a
-  // ceiling and headroom (audit #11: sealing the rate ungated beside a gated count let the rate publish
-  // while its count was suppressed - neither is suppressed now).
-  // The ceiling is DERIVED, not measured (`run::mock_frame_ceiling_fps`, from the mock's own declared
-  // frame count/pacing) - a gateway at ~1.0 of it forwarded every frame as it arrived, the best outcome
-  // a proxy of a paced upstream can have.
-  // zeroNoteFor (seal.mjs) is the ONE place the zero-note mapping lives, so this and the independent
-  // oracle can never disagree about the note.
-  const streamCeiling = s.streams_sustained_mock_ceiling ?? null;
-  const streamHeadroom = s.streams_sustained_headroom ?? null;
-  rec.streams_sustained_fps = sealMetric(s.streams_sustained_fps, {
-    headroom: streamHeadroom, ceiling: streamCeiling,
-    zeroNote: zeroNoteFor("streams_sustained_fps"),
-    absent: abs("streams_sustained_fps") });
-  // AUDIT #3: streaming counts - a 0 is a MEASURED FAILURE (offered stream load, sustained none), NOT
-  // "not measured". Only a null (absent field) is not-measured. The note names which, and every surface
-  // renders the two apart.
-  rec.streams_sustained = sealMetric(s.streams_sustained, {
-    headroom: streamHeadroom, ceiling: streamCeiling,
-    zeroNote: zeroNoteFor("streams_sustained"),
-    absent: abs("streams_sustained") });
-  // NO cpu_fps: retired. Of the 16 cells that published it alongside `streams_sustained_fps`, several
-  // inverted below the delivery boundary or were measured while dropping frames. See engine's `run.rs`.
-  void cpuSource;
-  return rec;
-}
-function sealStreaming(s, dialect, source, absences = null, cpuSource = null) {
-  return { path: { dialect }, source, stream_served: true, ...sealStreamRecord(s, absences, cpuSource) };
-}
-// cpuFpsSourceFor(g): the provenance stamp cpu_fps needs OF ITS OWN on the legacy stream-suite fallback
-// row, or null when the record's own stamp already describes it. cpu_fps is measured by the streamcpu
-// suite and the rest of the record by the stream suite; they are separate runs with separate build +
-// measured_at, so the record's single stamp is the truth for one of them and a fabrication for the other
-// whenever they differ. Hoisted, so the per-gateway pass above can call it.
-function cpuFpsSourceFor(g) {
-  if (!g.streamcpu || g.streamcpu.streamcpu_frames_per_sec == null) return null;
-  const build = g.streamcpu.build ?? null, at = g.streamcpu.measured_at ?? null;
-  const sameRun = build === (g.stream.build ?? null) && at === (g.stream.measured_at ?? null);
-  return sameRun ? null : makeSource("stream-fallback", SWEEP.STREAM_SUITE, build, at);
-}
-// matrixHasCellMemory(m): does this matrix carry a per-cell memory window on any served cell? The memory
-// lane's freshness stamp ages by the matrix that produced those windows, so the lane must know whether it
-// has anything to age. Hoisted, so the per-gateway pass above can call it.
-function matrixHasCellMemory(m) {
-  if (!m || typeof m !== "object") return false;
-  const cellGroups = [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)];
-  for (const cells of cellGroups) {
-    if (!cells || typeof cells !== "object") continue;
-    for (const cell of Object.values(cells)) {
-      if (cell && cell.served === true && cell.memory && typeof cell.memory === "object") return true;
-    }
-  }
-  return false;
-}
-// sealMatrixCellsInPlace: replace every served cell's raw perf/stream AND the top-level memory block's raw
-// RSS with SEALED envelopes, so the matrix popup + Protocol view + the embedded/snapshot matrix carry
-// envelopes, never raw scalars - NO ungated metric field survives anywhere in the bundle (invariant C1).
-// Non-metric fields (served/status/path/verdict_note/load_cell/rss_series/…) are untouched.
-function sealMatrixCellsInPlace(m) {
-  const seen = new Set();   // v1 shares m.cells with upstreams[shape].cells (same refs) - seal once.
-  const cellGroups = [m.cells, ...Object.values(m.upstreams || {}).map((u) => u && u.cells)];
-  for (const cells of cellGroups) {
-    if (!cells || typeof cells !== "object") continue;
-    for (const cell of Object.values(cells)) {
-      if (!cell || typeof cell !== "object" || seen.has(cell)) continue;
-      seen.add(cell);
-      if (cell.perf) cell.perf = sealPerfCellPerf(cell.perf, cell.absences);
-      // stream_served is `true`/`false`/a status string ("not_measured", "untestable", "not_probed" -
-      // record.rs), almost NEVER the literal boolean true in real data - so gating the seal on `=== true`
-      // left every other case's raw object (and unconsumed _mock_bound flags) untouched (invariant C1).
-      // Seal whenever a stream object exists at all; app.js still gates display on stream_served === true
-      // itself, so this changes nothing shown.
-      if (cell.stream && typeof cell.stream === "object") {
-        cell.stream = {
-          stream_served: cell.stream.stream_served,
-          stream_error: cell.stream.stream_error ?? null,
-          // `reason` is the machine token for why stream_served came out that way (Absent vocabulary),
-          // `stream_error` its prose, `stream_c1_note` the c=1 leg's own note. Rebuilding this object
-          // from a fixed key list once silently dropped reason/stream_c1_note - a cell can publish
-          // stream_served:true WITH a reason on the TTFT leg, so carrying all three is load-bearing.
-          // None is a sealed metric (prose/vocabulary, not numbers); app.js maps the token, never prints
-          // it verbatim.
-          reason: cell.stream.reason ?? null,
-          stream_c1_note: cell.stream.stream_c1_note ?? null,
-          ...sealStreamRecord(cell.stream, cell.absences),
-        };
-      }
-      // PER-CELL MEMORY: its own cold-started, plateau-terminated window. The memory tab reads these
-      // directly off the matrix cell, sealed BY DISCOVERY (any RSS field) plus the non-RSS vocabulary
-      // (growth rate, time to plateau).
-      if (cell.memory && typeof cell.memory === "object") {
-        for (const k of Object.keys(cell.memory))
-          if (isMetricField(k))
-            cell.memory[k] = sealMetric(cell.memory[k], { absent: absentEntryFor(cell.absences, "memory", k) });
-      }
-    }
-  }
-  // A LEGACY top-level memory block (pre-per-cell, no longer read by anything) still travels embedded in
-  // g.matrix/the snapshot; seal its metrics so no bare ungated field survives. Same vocabulary and same
-  // absences handling as a per-cell window (audit #11) - testing only RSS_FIELD_RE here once shipped the
-  // non-RSS memory metrics as bare scalars, and passing `{}` for opts discarded absence reasons.
-  if (m.memory && typeof m.memory === "object") {
-    for (const k of Object.keys(m.memory))
-      if (isMetricField(k))
-        m.memory[k] = sealMetric(m.memory[k], { absent: absentEntryFor(m.absences, "memory", k) });
-  }
-}
-
-// addedP99Rank(rec): the rank a candidate cell's added-latency p99 sorts by (lower is better). A
-// measured number ranks as itself; a null whose absences entry says "below_resolution" ranks as 0 (the
-// engine's BEST outcome, not a hole - Infinity there once turned a win into a last-place sort). Any
-// other null still sorts last. `rec` carries the raw perf fields plus the cell's `absences` map.
+// addedP99Rank(rec): the rank a candidate cell's added-latency p99 sorts by (lower is better).
+// A measured number ranks as itself. A null whose absences entry says "below_resolution" ranks as 0:
+// the comparison RAN and the difference was at or under what the rig can resolve, which is the
+// engine's BEST outcome, not a hole - Infinity here turned a win into a last-place sort (and, in
+// translationCell, let the legacy xlate fallback shadow a measured matrix cell). Any other null
+// (not measured, suppressed, ...) still sorts last. `rec` is a candidate record carrying the raw
+// perf fields plus the cell's `absences` map, so absentEntryFor resolves the block-prefixed key.
 function addedP99Rank(rec) {
   if (rec.added_latency_p99_us != null) return rec.added_latency_p99_us;
   const abs = absentEntryFor(rec.absences, "perf", "added_latency_p99_us");
@@ -667,10 +654,16 @@ function bestCell(m) {
   const diag = [];
   for (const [egress, up] of Object.entries(m.upstreams)) {
     const cell = up && up.cells && up.cells[egress];        // ingress === egress
-    // Added latency RANKS this choice; it does not QUALIFY the cell. Requiring a c=1 latency reading as
-    // a precondition once dropped whole rows to n/a in Peak mode while Same mode (reading the cell
-    // directly) showed the same numbers fine. A cell qualifies by being SERVED and carrying perf;
-    // latency then orders the candidates, and a cell without one sorts last rather than being struck.
+    // ADDED LATENCY RANKS THIS CHOICE; IT DOES NOT QUALIFY THE CELL.
+    //
+    // It used to be a precondition, and that quietly deleted whole rows. A gateway with a measured
+    // throughput curve but no c=1 latency reading produced NO best_cell, so its entire Peak row read
+    // n/a - while Same mode, which reads the cell directly, showed the same numbers fine. One-API
+    // published 40 rps @ c16 and Plano 85 @ c512 on the 2026-07-29 board and both vanished from Peak,
+    // which is the board disagreeing with itself about a cell it measured.
+    //
+    // A cell qualifies by having been SERVED and carrying perf. Latency then orders the candidates,
+    // and a cell without one sorts last rather than being struck from the list.
     if (cell && cell.served === true && cell.perf)
       diag.push({ ingress: egress, egress, dialect: egress, absences: cell.absences ?? null, ...cell.perf });
   }
@@ -684,10 +677,15 @@ function bestCell(m) {
 
 // The gateway's TRANSLATION cell for the Translation tab: openai INGRESS (fixed fair input) translated
 // to its best non-openai EGRESS. "Best" = LOWEST added latency p99 (a proxy's quality is its overhead;
-// RPS is capacity-bound and noisier). Returns {ingress:"openai", egress, ...perf} or null.
-// Selection is two-tier: FAIR (openai ingress) first, else ANY served cross-dialect cell the matrix
-// measured - so a matrix measuring translation only in the other direction still wins over the legacy
-// xlate suite's stale number. The legacy fallback fires only when the matrix has NO translation cell at all.
+// RPS is capacity-bound and noisier). Fixing ingress to openai keeps the input side identical across
+// gateways; the egress varies and is shown as the row's path pill. Returns {ingress:"openai", egress,
+// ...perf} or null when the gateway serves no openai-in translation path.
+// The MATRIX WINS whenever it measured ANY translation cell, not only an openai-ingress one: a gateway
+// whose matrix measured translation in the other direction (anthropic in -> openai out) must not fall
+// through to the legacy xlate suite's stale number just because it lacks the fair-tier direction.
+// Selection is two tiers: the FAIR tier first (openai ingress, identical input side across gateways),
+// and only when the matrix has none of those, ANY served cross-dialect cell it did measure. The legacy
+// fallback fires only when the matrix genuinely has NO translation cell at all.
 function translationCell(m) {
   if (!m.upstreams) return null;
   const fair = [], any = [];
@@ -749,29 +747,44 @@ for (const g of gateways) {
     const j = g[suite];
     if (!j) continue;
     if (j.hardware) hwCounts.set(j.hardware, (hwCounts.get(j.hardware) || 0) + 1);
-    // Compare parsed epoch ms, not ISO strings lexicographically: a mixed-precision compare mis-orders
-    // sibling stamps ('...06Z' sorts above '...06.5Z' since 'Z' > '.'), which could under-select the
-    // true-newest instant the future-date hard-fail below relies on.
+    // NIT-R2-3: pick the newest instant by PARSED epoch ms, not a lexicographic ISO-string compare.
+    // A mixed-precision compare mis-orders sibling stamps ('...06Z' sorts above '...06.5Z' because
+    // 'Z' > '.'), which could under-select the true-newest instant the future-date hard-fail (:313)
+    // then relies on. Match the Date.parse comparison used everywhere else (:300-302/313/340/376/392).
     if (j.measured_at && (!latest || Date.parse(j.measured_at) > Date.parse(latest))) latest = j.measured_at;
   }
 }
 const hardware = [...hwCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-// MED-1: the board footer must reflect the DISPLAYED numbers (matrix-preferring), not the max across
-// all suites (which would fold in a never-displayed legacy re-run and overstate freshness). `latest`
-// above still folds all suites, for the future-date corruption hard-fail only.
+// MED-1: the board footer "Latest measurement: Nd ago" must reflect the DISPLAYED numbers (matrix-
+// preferring), NOT the max across all suites (which folds a never-displayed legacy re-run and overstates
+// freshness). `latest` above still folds all suites for the future-date corruption hard-fail (:324) -
+// a future-dated legacy stamp is still corruption - but the PUBLISHED footer uses the displayed basis.
 const latestDisplayedMs = Math.max(...gateways.map(displayedMeasuredMs), 0);
 const latestDisplayed = latestDisplayedMs > 0 ? new Date(latestDisplayedMs).toISOString() : null;
 
 // The newest embedded measurement across a gateway's own suites, in epoch ms (0 when it has none).
+// A stamp that is present but unparseable is a hard error, never a silent 0 or NaN: NaN poisoned the
+// Math.max below into NaN, and every board-wide freshness guard compares false against NaN, so one
+// garbage stamp disabled the undatable-board and 180-day checks for the whole board.
+function stampMs(at, where) {
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms)) throw new Error(`gen-data: ${where} has an unparseable measured_at ${JSON.stringify(at)}; a measurement that cannot be dated cannot be aged`);
+  return ms;
+}
 function newestMeasuredMs(g) {
-  return Math.max(...SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean).map((a) => Date.parse(a)).concat([0]));
+  return Math.max(...SUITES.map((s) => g[s] && g[s].measured_at ? stampMs(g[s].measured_at, `${g.key}.${s}`) : null)
+    .filter((v) => v != null).concat([0]));
 }
 
-// MED-1 / MED-2: the stamp that drives what the board DISPLAYS, in epoch ms (0 when none) - the matrix
-// stamp when present, else the newest-across-suites for a legacy-only row. Folding in retired legacy
-// timestamps unconditionally let a never-displayed ad-hoc re-run make a stale matrix board look fresh.
+// MED-1 / MED-2: the stamp that actually drives what the board DISPLAYS, in epoch ms (0 when none).
+// EVERY displayed number now comes from g.matrix ONLY (best_cell / streaming / the per-cell memory windows), so the
+// board-level freshness footer AND the wholesale-stale hard-fail must age those displayed numbers - the
+// matrix stamp when present, falling back to the newest-across-suites only for a legacy-only row (whose
+// numbers legitimately age by that stamp). This is the SAME basis the per-gateway ageBasisMs (:415) uses.
+// Folding retired legacy suite timestamps in (newestMeasuredMs) let a never-displayed ad-hoc SUITES=perf
+// re-run make a wholesale-stale matrix board look fresh (MED-1) or slip past the 180-day floor (MED-2).
 function displayedMeasuredMs(g) {
-  const matrixAt = g.matrix && g.matrix.measured_at ? Date.parse(g.matrix.measured_at) : 0;
+  const matrixAt = g.matrix && g.matrix.measured_at ? stampMs(g.matrix.measured_at, `${g.key}.matrix`) : 0;
   return matrixAt > 0 ? matrixAt : newestMeasuredMs(g);
 }
 
@@ -788,27 +801,58 @@ if (latest && Date.parse(generatedAt) < Date.parse(latest)) {
     `a raw result is future-dated (rig clock skew?). Refusing to emit a bundle that would read stale.`);
 }
 
-// FRESHNESS MODEL: a gateway's ENTIRE benchmark is ONE atomic matrix run that legitimately takes hours,
-// and gateways publish INDEPENDENTLY, so differing measured_at across rows is honest. No cross-gateway
-// lag check; only a generous intra-row sanity cap to catch a corrupt/future-dated timestamp.
-// The wholesale-stale floor: if the newest measurement ANYWHERE is older than MAX_BOARD_AGE_DAYS, the
-// whole board is stale and must not publish generated_at=now. The per-gateway MAX_GATEWAY_AGE_DAYS is a
-// `stale` badge signal only, never a build failure.
+// FRESHNESS MODEL: a gateway's ENTIRE benchmark is ONE atomic matrix run that legitimately takes HOURS
+// (busbar ~5h), and gateways publish INDEPENDENTLY (one gateway's row can be hours old while another's
+// is weeks old). There is no intra-row span hard-fail beyond a generous sanity cap
+// (MAX_ROW_SPAN_SANITY_H, far above any real run) that exists only to catch a corrupt/future-dated
+// timestamp, and no cross-gateway lag check: on a living board with per-gateway cadences, differing
+// measured_at values across gateways are honest and expected.
+// The wholesale-stale ABSOLUTE floor (soft anchor): if the newest measurement ANYWHERE on the board is
+// older than MAX_BOARD_AGE_DAYS, the WHOLE board is stale and the bundle must not publish
+// generated_at=now over it.
+// A PER-GATEWAY absolute age SIGNAL: a gateway whose own newest measurement is older than
+// MAX_GATEWAY_AGE_DAYS gets a per-row `stale` flag (drives the app.js badge), not a build failure.
 const MAX_ROW_SPAN_SANITY_H = 12;  // sanity-only: one atomic matrix run is hours; >12h means a corrupt/skewed stamp
 const MAX_GATEWAY_AGE_DAYS = 60;   // per-gateway staleness SIGNAL (badge), never a build failure
 const MAX_BOARD_AGE_DAYS = 180;    // wholesale-stale floor (soft anchor): the whole board older than this = hard fail
 // MED-2: base the wholesale-stale floor on the DISPLAYED (matrix-preferring) stamps, not the max across
-// all suites - otherwise an untouched legacy re-run could make a stale matrix board's `boardNewest` look
-// fresh and slip past the 180-day floor. Same basis as MED-1's footer and the per-row badge.
+// all suites. Otherwise a single untouched results/perf/<gw>.json re-run yesterday makes boardNewest =
+// yesterday while every DISPLAYED matrix number is 179d old - the 180-day hard-fail (the one absolute
+// guard the rewrite KEPT) never fires and a wholesale-stale matrix board publishes generated_at=now.
+// The floor now ages exactly what the board shows (same basis as MED-1's footer + the per-row badge).
 const boardNewest = Math.max(...gateways.map(displayedMeasuredMs), 0);
-// A board whose age cannot be established must not publish as fresh - but "undatable" and "empty" are
-// different boards. A board carrying measurements with no resolvable stamp is genuinely undatable and
-// must not ship. A board where NO gateway has been benchmarked yet is unambiguous: nothing to date, and
-// the honest bundle says so on every row (app.js/site suite already treat this as first-class). Once,
-// conflating the two meant a clean checkout (no committed snapshots) threw before the site test suite
-// reached a single assertion, so CI gated nothing.
-// The distinction is EVIDENCE OF MEASUREMENT: a gateway is "measured" if it carries any suite artifact
-// or projected record. If even one does and the board still can't be dated, it's a hard failure.
+// A BOARD WHOSE AGE CANNOT BE ESTABLISHED IS NOT A FRESH BOARD.
+//
+// This guard only ran `if (boardNewest > 0)`, so the one situation it could not judge - no gateway
+// carrying a resolvable displayed stamp - was the one it let straight through. That is the same
+// shape as every other guard that turned out to be doing nothing today: the retry budget nothing
+// called, the box qualification that always seeded, the history appender scanning directories the
+// engine stopped writing. Each was silent rather than wrong, which is why none of them were noticed.
+//
+// Publishing generated_at=now over a board we cannot date is exactly what the 180-day floor exists
+// to refuse, so an unresolvable board is a hard failure with its own reason rather than a pass.
+//
+// BUT: "UNDATABLE" AND "EMPTY" ARE NOT THE SAME BOARD, AND ONLY ONE OF THEM IS A DEFECT.
+//
+// The guard as first written asked only "is boardNewest 0", which is true of BOTH a board carrying
+// numbers nobody can date AND a board carrying nothing at all. Those are opposite situations. A board
+// that publishes measurements with no resolvable stamp is genuinely undatable and must not ship - that
+// is the case this guard was written for. A board where NO gateway has been benchmarked yet is not
+// ambiguous in the slightest: nothing has been measured, there is nothing to date, and the honest
+// bundle is one that says so on every row. app.js and the site suite already treat that as a first-
+// class state and say so at length (BOARD_HAS_DATA, testWithData, testWithMatrixDonor).
+//
+// Conflating the two cost more than a bad error message. A clean checkout has an empty
+// results/snapshots/ - no artifacts are committed - so gen-data THREW on every fresh clone, which
+// meant `node site/test.mjs` died at its own line ~167 (it runs gen-data for real into a temp dir)
+// before reaching a single assertion: zero ok lines, zero FAIL lines, exit non-zero for a reason that
+// had nothing to do with the code under test. Its documented fallback to a committed site/data.json
+// cannot rescue it either, because that file is gitignored. So the whole site suite gated nothing in
+// CI, and the deploy workflows failed three steps before they ever reached a site test.
+//
+// The distinction is made on EVIDENCE OF MEASUREMENT, not on gateway count: a gateway is "measured" if
+// it carries any suite artifact or any projected record at all. If even one does and the board still
+// cannot be dated, the original hard failure stands, exactly as strict as before.
 const measuredGateways = gateways.filter((g) =>
   SUITES.some((s) => g[s] != null) || !!g.best_cell || !!g.translation_cell || !!g.streaming || !!g.memory_read);
 if (boardNewest <= 0 && measuredGateways.length > 0) {
@@ -834,9 +878,11 @@ if (boardNewest > 0) {
 const nowMs = Date.parse(generatedAt);
 for (const g of gateways) {
   g.stale = false;
-  // Per-gateway future-date sanity check: the board-wide floor above only checks the max, so a lone
-  // clock-skewed future stamp on one gateway could still render a negative "measured Nd ago" badge.
-  // Skip any future suite stamp for this gateway's freshness computation.
+  // PER-GATEWAY future-date sanity assert (HIGH-3 sibling / NIT): a single gateway's own measured_at
+  // must never be in the FUTURE. The board-wide floor above only checks the max; a lone clock-skewed
+  // future stamp on one gateway would slip past it and render as a NEGATIVE "measured Nd ago" badge.
+  // Skip any future suite stamp so a skewed row can never post a negative age (matrix run is atomic;
+  // one bad stamp is corruption, not a legitimate run).
   let sawFuture = false;
   for (const s of SUITES) {
     const at = g[s] && g[s].measured_at;
@@ -846,23 +892,39 @@ for (const g of gateways) {
         `clock skew on the rig. Skipping this stamp for the freshness/age computation so the badge never reads negative.`);
     }
   }
-  // Sanity-only span cap: restrict the span computation to the MATRIX suite's own measured_at, since
-  // the retired legacy suites are fallback-only and never refreshed by a matrix-only re-run - folding
-  // their weeks-old stamps in would trip the >12h cap on an honest matrix-only re-run.
+  // SANITY-ONLY span cap (HIGH-3): the span the cap bounds is ONE atomic matrix run. Restrict the span
+  // computation to the MATRIX suite's measured_at ONLY. The retired legacy suites (perf/stream/streamcpu/
+  // memory) are fallback-only and are NEVER refreshed by a matrix-only re-run, so they carry weeks-old
+  // stamps; folding them into the span made an honest matrix-only re-run (matrix=today, legacy=weeks ago)
+  // trip the >12h cap and abort the deploy - defeating incremental publish. The matrix is the single
+  // source; only its own timestamps define the run this cap sanity-checks.
   const matrixAt = g.matrix && g.matrix.measured_at && Date.parse(g.matrix.measured_at) <= nowMs
     ? Date.parse(g.matrix.measured_at) : null;
   // The staleness SIGNAL below still considers every suite's newest (non-future) stamp, so a gateway
   // whose ONLY data is a legacy suite still ages correctly; the SPAN cap is what is matrix-scoped.
   const ats = SUITES.map((s) => g[s] && g[s].measured_at).filter(Boolean)
     .map((a) => Date.parse(a)).filter((ms) => ms <= nowMs);
-  // Re-derive the badge stamp from non-future ats when sawFuture, so a skewed stamp never posts a
-  // negative age. Defense-in-depth: the board-wide future-date hard-fail above already throws first.
+  // NIT-R2-4 / NIT-R5-4 (comment accuracy): actually PERFORM the skip the warn loop promises. g.measured_at
+  // was assigned from the future-INCLUSIVE newestMeasuredMs (:227), so a lone skewed-future stamp would
+  // otherwise drive a NEGATIVE "measured Nd ago" badge; re-derive the badge stamp from the non-future ats
+  // only. HONEST SCOPE: this is DEFENSE-IN-DEPTH, not a live guard. ANY future stamp (matrix OR legacy -
+  // the loop at :306 folds every suite into `latest`) already trips the board-wide future-date hard-fail
+  // at :343, which THROWS before this line is reached, so no bad badge can ship today. This re-derivation
+  // only becomes reachable if that :343 hard-fail is ever weakened/removed; it is retained as a belt-and-
+  // suspenders backstop for the per-row badge, NOT because a live path reaches it.
   if (sawFuture) g.measured_at = ats.length ? new Date(Math.max(...ats)).toISOString() : null;
-  // A served matrix row whose DISPLAYED numbers project from g.matrix but carries no valid matrix
-  // measured_at is CORRUPT (run.sh always stamps a matrix via `date -u`) - left unguarded it would
-  // bypass every other freshness check and publish FRESH with no badge. Flag it stale instead.
-  // Memory joins this test through the matrix cells it's read from (a matrix with per-cell windows
-  // displays numbers just as much as one with a best_cell), not through a projected record.
+  // LOW-2: a served matrix row whose DISPLAYED numbers project from g.matrix (best_cell / streaming /
+  // translation_cell, source:"matrix", or a per-cell memory window) but that carries NO valid (non-future) matrix
+  // measured_at is CORRUPT: run.sh:1145 ALWAYS writes measured_at via `date -u`, so a null/absent matrix
+  // stamp is only reachable via truncation / hand-edit / producer bug. Left unguarded such a row bypasses
+  // EVERY freshness guard - best_cell still projects and ranks, `latest` (:306) skips it so the future-
+  // date hard-fail never sees it, displayedMeasuredMs returns 0 so it is exempt from the 180d floor, and
+  // ats.length<1 hits the `continue` below BEFORE g.stale is set, so it publishes FRESH with no badge. A
+  // stamp-less served matrix row must never publish clean: flag it stale (drives the app.js badge) and
+  // warn, consistent with treating a null matrix stamp as corruption rather than a legitimate reading.
+  // Memory joins this test through the matrix cells it is read from, not through a projected record:
+  // a matrix carrying per-cell windows displays numbers just as much as one carrying a best_cell, so a
+  // stamp-less matrix must be caught either way.
   const matrixProjected = (g.best_cell || g.translation_cell || g.streaming || matrixHasCellMemory(g.matrix)) &&
     ([g.best_cell, g.translation_cell, g.streaming].some((r) => r && r.source && r.source.kind === "matrix")
       || matrixHasCellMemory(g.matrix));
@@ -873,9 +935,12 @@ for (const g of gateways) {
     g.stale = true;
   }
   if (ats.length < 1) continue;
-  // INERT PLACEHOLDER: a matrix row carries at most one matrix stamp, so this `>= 2` gate never fires
-  // today. Retained (null-safe) so the span check reactivates automatically if a future matrix result
-  // ever embeds multiple internal timestamps.
+  // NIT-R2-2 / NIT-R5-2: INERT PLACEHOLDER - dead code today, NOT a live safeguard. A matrix row carries
+  // at most ONE matrix stamp, so matrixSpanAts is length 0 or 1 and the `>= 2` gate below NEVER fires;
+  // it performs no cross-timestamp check on any current data. The live corruption/freshness guards are
+  // the board-wide future-date hard-fail (:343) and the 180-day wholesale-stale floor (:376) - NOT this
+  // block. It is retained (null-safe, matrix-scoped) purely so the span check reactivates automatically
+  // should a future matrix result ever embed multiple internal timestamps; until then it is a no-op.
   const matrixSpanAts = matrixAt != null ? [matrixAt] : [];
   if (matrixSpanAts.length >= 2) {
     const spanH = (Math.max(...matrixSpanAts) - Math.min(...matrixSpanAts)) / 3600000;
@@ -886,17 +951,21 @@ for (const g of gateways) {
     }
   }
   // PER-GATEWAY staleness SIGNAL (not a failure): flag a row whose own data has aged past the
-  // threshold so app.js can show a "stale" badge. Age the DISPLAYED numbers - matrix.measured_at when
-  // present, else the newest non-future suite stamp for a legacy-only row.
+  // threshold so app.js can show a "stale" badge. A living board with mixed cadences is fine.
+  // LOW-R3-3: age the DISPLAYED numbers - matrix.measured_at when present (best_cell/streaming/memory
+  // all project from it), so a stale matrix is flagged even if a newer legacy suite stamp is around;
+  // fall back to the newest non-future suite stamp only for a legacy-only row (no matrix).
   const ageBasisMs = matrixAt != null ? matrixAt : Math.max(...ats);
   const ageDays = (nowMs - ageBasisMs) / 86400000;
   g.stale = ageDays > MAX_GATEWAY_AGE_DAYS;
 }
 
 // ---- NO CHART PNGs ----------------------------------------------------------
-// The Charts tab draws from the board itself now (at the reader's chosen bound/cell), so there's no
-// PNG to ship. The key is REMOVED rather than emitted empty: `charts: []` would falsely imply the
-// board looked for charts and found none.
+// This copied results/*.png into site/charts/ and listed them in `data.json.charts` so the board
+// could render 25 pre-drawn images. The Charts tab draws from the board itself now, at the bound
+// and cell the reader selected, so there is no PNG to ship and no list to keep in sync. The key is
+// REMOVED rather than emitted empty: `charts: []` would tell a future reader the board has charts
+// and found none this run, which is a different and untrue statement.
 // ---- fonts: copy the repo's bundled Inter faces -----------------------------
 const fontsDir = join(ROOT, "assets", "fonts");
 if (existsSync(fontsDir)) {
@@ -905,23 +974,37 @@ if (existsSync(fontsDir)) {
 }
 
 // ---- SPA fallback for deep links (/gateways/matrix, ...) --------------------
-// The host is Cloudflare Pages, which reads site/_redirects (committed) for the /* -> /index.html 200
-// rewrite. We deliberately do NOT emit a 404.html: on CF Pages a 404.html SHADOWS the _redirects
-// rewrite (serves 404.html with a 404 status instead of the 200-rewrite), breaking every deep link.
-// GitHub Pages (which needed the 404.html fallback) is retired.
+// The host is Cloudflare Pages, which reads site/_redirects (committed) for the
+// /* -> /index.html 200 rewrite so every deep link resolves with a 200 status.
+// We deliberately DO NOT emit a 404.html: on CF Pages a 404.html SHADOWS the
+// _redirects rewrite (CF serves the 404.html with a 404 status instead of the
+// 200-rewrite), which is exactly the deep-link-404 bug. Verified on a preview:
+// with 404.html present every /gateways/* is 404; with it removed the same paths
+// are 200. GitHub Pages is retired (pages.yml dormant), so the 404.html fallback
+// it needed is no longer relevant.
 const redirects = join(HERE, "_redirects");
 if (existsSync(redirects) && OUT !== HERE) copyFileSync(redirects, join(OUT, "_redirects"));
 
 // ---- emit -------------------------------------------------------------------
-// The board's own engine, and each row's, surfaced for the reader: a row measured by an older engine
-// isn't necessarily wrong, but isn't comparable, and a reader deciding whether to trust a comparison
-// needs to see that. The board's version is the engine of the most recently measured row; a row whose
-// engine differs is marked (rendered in red).
+// THE BOARD'S OWN ENGINE, and each row's, surfaced for the reader.
 //
-// Compares by INSTRUMENT, not raw commit - the same resolution C8 uses (site/instrument-equivalence.json
-// attests which commits build byte-identical binaries), so gen-data and check-consistency can't disagree
-// about what "the same engine" means. Falls back to the raw sha for any commit the file doesn't attest
-// (an unlisted commit is its own instrument).
+// The engine commit already travelled into every row inside `rig.engine.commit`; nothing rendered
+// it, so "which harness measured this" was knowable only by opening the JSON. A row measured by an
+// older engine is not necessarily wrong, but it is not comparable to the rest, and a reader deciding
+// whether to trust a comparison needs to see that without being told.
+//
+// The board's version is the engine of the most recently measured row, which is the one a re-run
+// moves forward. A row whose engine differs from it is marked, and the site renders that in red.
+// THE INSTRUMENT, NOT THE COMMIT - the same resolution C8 uses, from the same file.
+//
+// C8 groups the board by instrument: commits whose BUILT BINARIES are byte-identical are one
+// instrument, attested in site/instrument-equivalence.json. This function compared raw shas, so
+// gen-data and check-consistency disagreed about what "the same engine" means - C8 would pass a board
+// that gen-data then marked as mixed and (under OTB_SINGLE_ENGINE) blanked. Two commits that provably
+// build the same binary cannot be a real difference in one place and not the other.
+//
+// Falls back to the raw sha for any commit the file does not attest, which is the safe default: an
+// unlisted commit is its own instrument, so silence never merges anything.
 const equivalence = (() => {
   const f = join(HERE, "instrument-equivalence.json");
   if (!existsSync(f)) return new Map();
@@ -937,7 +1020,7 @@ const engineShaOf = (g) => (g && g.rig && g.rig.engine && g.rig.engine.commit) |
 const newestRow = gateways
   .filter((g) => displayedMeasuredMs(g) > 0)
   .sort((a, b) => displayedMeasuredMs(b) - displayedMeasuredMs(a))[0];
-const boardEngine = engineOf(newestRow);
+const boardEngine = activeField?.engine_commit || engineOf(newestRow);
 for (const g of gateways) {
   // `sha` is what ran; `inst` is what it is comparable TO. A row is current when its INSTRUMENT
   // matches the board's, so two commits proven to build the same binary both read as current while
@@ -952,26 +1035,40 @@ for (const g of gateways) {
 }
 
 // ---- OTB_SINGLE_ENGINE: n/a beats a mixed board ---------------------------------------------
-// C8 refuses to publish a board whose columns were measured by different harnesses (a ranking across
-// two instruments compares the instruments as much as the gateways). Rather than re-measuring the
-// whole field or overriding the guard, this shows the gateways the CURRENT engine measured and n/a for
-// the ones it hasn't reached yet - the board stays single-instrument by construction, and a partial
-// re-run publishes as it lands instead of the whole field waiting on the slowest box.
 //
-// IDENTITY IS A WHITELIST, deliberately: blacklisting measurement fields would let every future field
-// leak through suppression by default (stale numbers from another instrument, presented as current).
-// A suppressed row keeps the same shape as a never-measured one, which the site already renders as n/a.
-// Stripped fields are set to NULL, not deleted - `rig` etc. are null-safe-by-contract, and deleting them
-// would turn "measured nothing" into "this key never existed", a different (and untested) claim.
-const SINGLE_ENGINE = process.env.OTB_SINGLE_ENGINE === "1";
+// C8 refuses to publish a board whose columns were measured by different harnesses, and it is right
+// to: a ranking across two instruments compares the instruments as much as the gateways. But the
+// only two ways out of it were both bad. Re-measure the whole field - hours and real money, to
+// republish numbers that had not changed - or override the guard, which publishes the mix anyway and
+// leaves the reader to notice a red marker.
+//
+// There is a third answer, and it is the honest one: show the gateways the CURRENT engine measured,
+// and show n/a for the ones it has not reached yet. A row measured by an older engine is not wrong,
+// but it is not comparable, and "we have not measured this on this harness yet" is a true statement
+// that a blank cell already means. The board stays single-instrument by construction rather than by
+// override, so C8 passes because there is genuinely nothing mixed - a suppressed row publishes no
+// matrix numbers, so it is not a matrix publisher, so there is no second engine to disagree about.
+//
+// This also makes a partial re-run publishable AS IT LANDS: each gateway's numbers appear the moment
+// that gateway is re-measured on the current engine, instead of the whole field waiting for the
+// slowest box.
+//
+// IDENTITY IS A WHITELIST, deliberately. Blacklisting the measurement fields would mean every future
+// field added to a row leaks through suppression by default, and the failure would be silent and
+// exactly wrong - stale numbers from another instrument, presented as current. What survives is what
+// a never-measured gateway already carries, so a suppressed row and an unmeasured one are the same
+// shape, which is the shape the site already renders as n/a.
+//
+// AND THE STRIPPED FIELDS ARE SET TO NULL, NOT DELETED. Several are null-safe-by-contract - `rig` is
+// assigned on every row precisely so provenance is EXPLICIT rather than absent (see `g.rig =` above),
+// and the render path leans on that. Deleting them turns "measured nothing" into "this key never
+// existed", which is a different claim and one the bundle's own tests refuse.
+const SINGLE_ENGINE = Boolean(activeField) || process.env.OTB_SINGLE_ENGINE === "1";
 const suppressedForEngine = [];
 if (SINGLE_ENGINE && boardEngine != null) {
   const IDENTITY = new Set([
-    "key", "display", "lang", "cls", "repo", "version",
+    "contributed_by", "key", "display", "lang", "cls", "repo", "version",
     "stars", "stars_as_of", "first_commit", "engine",
-    // Editorial identity, not a measurement: a row awaiting re-measurement still credits its
-    // contributor. Omitting this nulled the contributor on every unmeasured/suppressed row (higress).
-    "contributed_by",
   ]);
   for (const g of gateways) {
     if (g.engine.current) continue;
@@ -987,20 +1084,29 @@ if (SINGLE_ENGINE && boardEngine != null) {
       `re-measurement on ${boardEngine.slice(0, 7)}: ${suppressedForEngine.join(", ")}`);
 }
 
-// METRIC DEFINITIONS FOR THE BOARD (data.definitions): the engine's own prose for each metric,
-// generated from its own constants (engine/src/suite.rs metric_definitions) so the definition can never
-// drift from the enforcement it describes. Sourced ONLY from rows measured by boardEngine - a
-// definitions map from a different engine could describe different constants than what's on screen.
-// A board with no boardEngine, or where no boardEngine row has the field yet, publishes NO definitions
-// rather than guess.
+// METRIC DEFINITIONS FOR THE BOARD (task: project data.definitions): the engine's own prose for what
+// each metric is, generated from its own constants (engine/src/suite.rs metric_definitions) so the
+// definition displayed can never drift from the enforcement it describes - see the p99<1s-vs-20ms
+// history this exists to foreclose. Sourced ONLY from rows measured by boardEngine: the board's numbers
+// are boardEngine's numbers (per-row `current` above), and a definitions map from a DIFFERENT engine
+// may describe different constants than the ones that produced what is on screen - publishing it would
+// be the exact mislabelling class this field exists to prevent. A board with no boardEngine (nothing
+// measured) or where none of boardEngine's rows carry a snapshot new enough to have the field yet
+// publishes NO definitions rather than guess: absent must mean absent (old snapshots predate the
+// field), and there is no honest substitute for "the current engine hasn't told us yet".
 let definitions = null;
 if (boardEngine != null) {
   for (const [key, defs] of snapshotDefinitionsByKey) {
     if (engineOf(gateways.find((g) => g.key === key)) !== boardEngine) continue;
     if (definitions == null) { definitions = { ...defs }; continue; }
-    // Two rows on the SAME engine commit must produce byte-identical definitions (they're generated
-    // from the binary's own constants) - divergence means corruption (hand-edited snapshot, dirty
-    // build), so refuse loudly rather than silently picking one.
+    // TWO ROWS ON THE SAME ENGINE COMMIT DISAGREEING ABOUT WHAT A METRIC MEANS IS NOT A DATA
+    // CONDITION TO SMOOTH OVER - the definitions are generated from the engine BINARY's own
+    // constants, so two runs of the identical commit must produce byte-identical prose. Divergence
+    // here means the definitions were hand-edited, generated by a dirty tree stamped as the clean
+    // commit, or some other corruption - silently picking one would publish a definition that may
+    // not describe the metric the reader is looking at, which is the defect this field exists to
+    // remove. Refuse loudly, matching how this file treats every other "cannot publish honestly"
+    // state (e.g. the degraded-snapshot and mismatched-config-pointer throws above).
     for (const [k, v] of Object.entries(defs)) {
       if (definitions[k] !== undefined && definitions[k] !== v) {
         throw new Error(
@@ -1017,16 +1123,21 @@ if (boardEngine != null) {
 }
 
 const data = {
+  active_field: activeField,
   category: "gateways", // which category bundle this is (see CATEGORIES in app.js)
   generated_at: generatedAt,
   hardware,
   // MED-1: the DISPLAYED-number freshness stamp (matrix-preferring), not the max across all suites.
   latest_measured_at: latestDisplayed,
-  // Which harness measured the board, visible to the reader rather than known only to a build guard
-  // (C8 passing made the engine invisible, so a reader couldn't tell which harness produced the numbers).
+  // WHICH HARNESS MEASURED THE BOARD, as a thing a reader can see rather than a thing a build guard
+  // knows privately. C8 refuses to publish a board whose columns were measured by different engines,
+  // which is the right call for a ranking - but it made the engine invisible when it passed, so a
+  // reader had no way to tell WHICH harness produced the numbers or whether a row was measured by an
+  // older one. The board states its own engine, and every row states the engine that measured it.
   benchmark_version: boardEngine,
-  // Which rows are blank on purpose, so a later run can tell "nothing suppressed" (single-engine board)
-  // apart from "the flag was off" (a mix would have been refused by C8).
+  // WHICH ROWS ARE BLANK ON PURPOSE. Published so the board can say it out loud rather than leaving
+  // a reader to infer it from a field on each row, and so a later run can tell "nothing suppressed"
+  // (single-engine board) apart from "the flag was off" (a mix would have been refused by C8).
   suppressed_for_engine: SINGLE_ENGINE ? suppressedForEngine.slice().sort() : null,
   repo: "https://github.com/GetBusbar/benchmarking",
   gateways,
@@ -1035,20 +1146,29 @@ const data = {
 // `data.definitions` null-safely, and an empty object is indistinguishable from "every metric here
 // has no definition", which is not the honest reading of "the engine hasn't told us yet".
 if (definitions != null) data.definitions = definitions;
-// C1: strip the raw legacy suite objects from the emitted bundle - they were projection INPUTS (now
-// sealed into best_cell/translation_cell/streaming) and carry raw scalars + _mock_bound flags no
-// surface reads any more. Removing them is what makes "no ungated metric field in the bundle" true.
-// g.matrix stays (cells sealed in-place; top-level build/measured_at/etc drive freshness + the
-// sweep-integrity oracle).
+// C1: strip the raw legacy suite objects from the EMITTED bundle. They were projection INPUTS (their
+// values are now sealed into best_cell/translation_cell/streaming), and they carry raw scalars + their
+// _mock_bound flags - a reservoir no surface reads any more (charts.py projects from the canonical
+// records; app.js reads envelopes). Removing them from the artifact is what makes "no ungated metric
+// field exists in the bundle" true. g.matrix stays (its cells are sealed in-place; its top-level
+// build/measured_at/p99_ceiling_ms/sweep_dur drive freshness + the sweep-integrity oracle).
 for (const g of gateways) {
   for (const suite of ["perf", "stream", "streamcpu", "xlate"]) delete g[suite];
 }
-/* THINNING THE RSS SERIES FOR THE WIRE. Raw RSS samples were 5.2 MB of a 14.1 MB bundle, feeding only a
-   ~50px sparkline - every memory verdict is computed by the engine and published as its own field, and
-   the full series stays in the snapshot artifacts for auditors. This is a drawing resolution, not a
-   measurement.
-   Decimation is MIN/MAX PRESERVING per bucket, not "every Nth sample" (which would draw a spike flat if
-   it fell between strides). First/last samples are always kept so the window's own boundaries never move. */
+/* THINNING THE RSS SERIES FOR THE WIRE.
+   The bundle reached 14.1 MB, of which 5.2 MB was 156,506 raw RSS samples, and the browser paid to
+   decompress and parse every one of them before the first row appeared. They feed one thing: a
+   sparkline about fifty pixels wide. Nothing re-derives a value from them - every memory verdict
+   (steady state, growth rate, time to plateau, shape) is decided in the engine from the FULL series
+   and published as its own field, and the full series stays in the snapshot artifacts, which are what
+   an auditor reads. This is a drawing resolution, not a measurement.
+
+   Decimation is MIN/MAX PRESERVING per bucket, not "every Nth sample". Taking every Nth is how a
+   thinned curve loses the spike that was the whole finding: a gateway that touched 900 MiB for three
+   seconds would draw flat if those three seconds fell between strides. Keeping both extremes of every
+   bucket, in the order they occurred, means the drawn envelope still touches every high and low the
+   full series reached. The first and last samples are always kept so the window's own boundaries -
+   which the load/recovery rule reads - never move. */
 const RSS_DRAW_POINTS = 240;
 function thinSeries(series) {
   if (!Array.isArray(series) || series.length <= RSS_DRAW_POINTS) return series;

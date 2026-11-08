@@ -32,7 +32,7 @@
   "lang": "Rust",
   "launch": {
     "args": [],
-    "image": "getbusbar/busbar:1.5.5",
+    "image": "getbusbar/busbar:1.5.5@sha256:b4cfbc7431946204aef5b1f627616e33c654a4b1e12a13758b62a9e6f71501d3",
     "kind": "docker",
     "mounts": [
       {
@@ -45,15 +45,6 @@
       }
     ]
   },
-  "matrix": [
-    "111111",
-    "111111",
-    "111111",
-    "111111",
-    "111111",
-    "111111"
-  ],
-  "matrix_note": "busbar declares full 6x6 translation support",
   "model": "gpt-4o-mini",
   "name": "busbar",
   "path": "/v1/chat/completions",

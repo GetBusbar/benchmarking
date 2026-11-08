@@ -2,12 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2026 Busbar Inc and contributors
 #
-# RED FIXTURES for all four auditors (verify-latency, audit-every-metric, verify-frontier,
-# verify-turnover): an oracle nobody has shown can fail is an oracle nobody should believe - a typo'd
-# field name that always resolves to `None` would print PASS on every board forever, unnoticed.
+# RED FIXTURES FOR THE TWO AUDITORS THAT HAD NEITHER A TEST NOR A PLACE IN THE CI GATE.
+#
+# `verify-latency.py` and `audit-every-metric.py` were written in one sitting during a live run and
+# shipped with no test file and no CI invocation. A later audit round found that `verify-frontier.py`
+# and `verify-turnover.py` - the OLDER and more important pair, and the ones that actually re-derive
+# the frontier - had neither either, so fixing only the two newest was a half-fix. All four are
+# covered here now. That is the same shape as the defects they exist to
+# catch: an oracle nobody has shown can fail is an oracle nobody should believe. A typo'd field name
+# that always resolves to `None` would leave `checked` at 0 and print PASS on every board forever, and
+# nothing would notice.
 #
 # So each check gets a fixture that violates exactly it, and the test asserts the tool FAILS. The
-# accept side is covered too, since a checker that rejects everything is equally useless.
+# accept side is covered too, because a checker that rejects everything is equally useless.
 #
 # Run: python3 verify_tools_test.py
 
@@ -66,20 +73,27 @@ CLEAN_CELL = {
 
 
 def snapshot(cell):
+    """A one-gateway board. `cell` is one cell (published as openai>openai) or {ingress: cell}."""
+    cells = cell if "served" not in cell else {"openai": cell}
     return {
         "schema_version": 2, "gateway": "fixture", "measured_at": "2026-07-30T00:00:00Z",
         "rig": {"engine": {"commit": "0" * 12, "dirty": False}},
-        "matrix": {"upstreams": {"openai": {"cells": {"openai": cell}}}},
+        "matrix": {"upstreams": {"openai": {"cells": cells}}},
     }
 
 
-def run(tool, cell):
-    """Run one auditor over a one-cell board and return (exit_code, output).
+def run(tool, cell, extra_files=None, cwd_elsewhere=False):
+    """Run one auditor over a one-gateway board and return (exit_code, output).
 
-    verify-frontier.py parses engine/src/frontier.rs for the declared bounds rather than hardcoding
-    them, so the fixture tree has to carry that file too.
+    `verify-frontier.py` deliberately PARSES engine/src/frontier.rs for the declared bounds rather than
+    hardcoding them - so it cannot police a different axis than the one that ran, and going blind counts
+    as a failure rather than a pass. The fixture tree therefore has to carry that file too.
+
+    `extra_files` ({name: raw text}) lands beside the snapshot; `cwd_elsewhere` runs the tool from a
+    different directory, which an auditor anchored to its own file must not notice.
     """
     d = tempfile.mkdtemp()
+    elsewhere = tempfile.mkdtemp()
     try:
         os.makedirs(os.path.join(d, "results", "snapshots"))
         os.makedirs(os.path.join(d, "engine", "src"), exist_ok=True)
@@ -87,11 +101,33 @@ def run(tool, cell):
                     os.path.join(d, "engine", "src", "frontier.rs"))
         with open(os.path.join(d, "results", "snapshots", "result_fixture_2026-07-30T00-00-00Z.json"), "w") as f:
             json.dump(snapshot(cell), f)
+        for name, text in (extra_files or {}).items():
+            with open(os.path.join(d, "results", "snapshots", name), "w") as f:
+                f.write(text)
         shutil.copy(os.path.join(HERE, tool), d)
-        p = subprocess.run([sys.executable, tool], cwd=d, capture_output=True, text=True)
+        p = subprocess.run([sys.executable, os.path.join(d, tool)], cwd=elsewhere if cwd_elsewhere else d,
+                           capture_output=True, text=True)
         return p.returncode, p.stdout + p.stderr
     finally:
         shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+def _with(cell, edit):
+    """A deep copy of `cell` with `edit` applied to it."""
+    c = copy.deepcopy(cell)
+    edit(c)
+    return c
+
+
+def _undisclosed_floor():
+    """The peak at the TOP of the probed ladder, with lower_bound NOT set - verify-turnover's red case."""
+    bad = copy.deepcopy(CLEAN_CELL)
+    bad["perf"]["sweep_max_proxy"] = [{"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0}]
+    for r in bad["perf"]["frontier"]:
+        r["rps"], r["concurrency"], r["p99_us"], r["lower_bound"] = 100.0, 8, 900, False
+        r["first_disqualified_conc"] = None
+    return bad
 
 
 def mutate(**changes):
@@ -105,11 +141,14 @@ def mutate(**changes):
 FAILURES = []
 
 
-def expect(name, code, out, want_fail, needle=""):
+def expect(name, code, out, want_fail, needle="", absent=""):
     ok = (code != 0) if want_fail else (code == 0)
     if ok and needle and needle not in out:
         ok = False
         why = f"expected the message to mention {needle!r}"
+    elif ok and absent and absent in out:
+        ok = False
+        why = f"expected the message NOT to say {absent!r}"
     else:
         why = f"exit={code}, wanted {'non-zero' if want_fail else 'zero'}"
     print(f"  {'ok  ' if ok else 'FAIL'} - {name}")
@@ -121,7 +160,7 @@ def main():
     print("verify-latency.py:")
     # ACCEPT: a clean cell whose added latency really is the difference of its two legs.
     c, o = run("verify-latency.py", CLEAN_CELL)
-    expect("a cell whose legs subtract correctly passes", c, o, False)
+    expect("a cell whose legs subtract correctly passes", c, o, False, "sample COUNTS")
 
     # RED: the published difference disagrees with its own operands. This is the check's whole point,
     # and a typo'd field name would silently skip it while still printing PASS.
@@ -148,9 +187,12 @@ def main():
     c, o = run("audit-every-metric.py", mutate(memory__idle_rss_mib=-5.0))
     expect("a negative RSS FAILS", c, o, True, "negative")
 
-    # RED: a negative cost per request. The engine refuses this at the counters (a backwards counter
-    # from pid reuse becomes Absent::HarnessError), so a negative reaching the artifact means that
-    # refusal was bypassed - this check is the second line of defence.
+    # RED: a NEGATIVE cost per request. The engine already refuses this at the counters - a backwards
+    # counter (pid reuse) becomes Absent::HarnessError rather than a subtraction into a negative - so
+    # a negative reaching the artifact means that refusal was bypassed. This is the second line of
+    # defence, and it exists because a negative CPU time is an impossible number, and by this
+    # project's rule an impossible number is an ENGINE bug that must never be published as a gateway
+    # property.
     c, o = run("audit-every-metric.py", mutate(perf__cpu_us_per_request=-12.5))
     expect("a NEGATIVE cpu_us_per_request FAILS", c, o, True, "negative")
 
@@ -162,9 +204,15 @@ def main():
     c, o = run("audit-every-metric.py", mutate(memory__recovered_rss_mib=9999.0))
     expect("a recovered value above the peak FAILS", c, o, True)
 
-    # ACCEPT: guards against the removed p50<=p99 gate coming back. added_latency/added_ttft/added_gap
-    # are DIFFERENCES of two distributions' percentiles, not one population, so they don't inherit
-    # monotonicity - this fired on real, correct field data (agentgateway, 2026-07-30) before removal.
+    # ACCEPT, AND THIS ONE GUARDS AGAINST A GATE COMING BACK RATHER THAN GOING MISSING.
+    # audit-every-metric.py used to assert p50 <= p99 across added_latency / added_ttft / added_gap,
+    # under a comment claiming they were "pairs from one distribution". They are DIFFERENCES of two
+    # distributions' percentiles (gateway leg minus direct leg), and a difference does not inherit
+    # monotonicity: a constant gateway overhead under a stretching DIRECT baseline gives a smaller
+    # added figure at p99 than at p50 with no percentile anywhere out of order.
+    # It fired on the real 2026-07-30 field run - agentgateway anthropic>anthropic, added_gap p50=4us
+    # vs p99=3us - and acting on it would have meant "fixing" an engine that was computing correctly.
+    # These pin that a legitimate inverted DIFFERENCE is accepted, so the unsound rule cannot return.
     c, o = run("audit-every-metric.py", mutate(stream__added_gap_p50_us=4, stream__added_gap_p99_us=3))
     expect("an added_gap p50 above its p99 is ACCEPTED (a difference, not one distribution)", c, o, False)
     c, o = run("audit-every-metric.py", mutate(perf__added_latency_p50_us=900, perf__added_latency_p99_us=800))
@@ -179,6 +227,18 @@ def main():
     # ACCEPT: a cell whose six readings each re-derive from its own rungs.
     c, o = run("verify-frontier.py", CLEAN_CELL)
     expect("a frontier that re-derives from its rungs passes", c, o, False)
+
+    interrupted = copy.deepcopy(CLEAN_CELL)
+    interrupted["perf"]["sweep_max_proxy_interrupted"] = True
+    for reading in interrupted["perf"]["frontier"]:
+        for key in ["rps", "concurrency", "p99_us", "first_disqualified_conc"]:
+            reading[key] = None
+        reading["lower_bound"] = False
+    c, o = run("verify-frontier.py", interrupted)
+    expect("an explicit interrupted sweep withholds completed readings", c, o, False)
+    interrupted["perf"]["frontier"][-1]["rps"] = 1.0
+    c, o = run("verify-frontier.py", interrupted)
+    expect("an interrupted sweep claiming throughput FAILS", c, o, True)
 
     # RED: the published rate is not the maximum its own rungs support. This is the check that would
     # have caught the tie-break bug, and it had no test at all until now.
@@ -201,9 +261,14 @@ def main():
     expect("a frontier missing declared bounds FAILS", c, o, True)
 
     print("verify-turnover.py:")
-    # ACCEPT: a genuinely clean, strictly slower rung above the peak - a proved turnover. Using
-    # CLEAN_CELL here would classify as CLIFF-BUT-MOOT instead (its only rung above carries fail:1),
-    # leaving the PROVED branch, the tool's central classification, unexercised.
+    # ACCEPT, AND FOR THE RIGHT REASON. This fixture used to be CLEAN_CELL, whose only rung above the
+    # winner carries `fail: 1` - so verify-turnover classified it CLIFF-BUT-MOOT and NEVER entered the
+    # `proved` branch. The test passed, and the tool's central classification - the thing its entire
+    # docstring is about - was unexercised: inverting the `best < win_rps` comparison in the tool would
+    # have left all 16 fixtures green.
+    #
+    # So this one carries a genuinely CLEAN, strictly slower rung above the peak, which is what a proved
+    # turnover IS, and asserts the tool says so.
     proved = copy.deepcopy(CLEAN_CELL)
     proved["perf"]["sweep_max_proxy"] = [
         {"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0},
@@ -236,6 +301,84 @@ def main():
     c, o = run("verify-turnover.py", good)
     expect("a DISCLOSED floor passes", c, o, False, "DISCLOSED FLOOR")
 
+    print("every auditor:")
+    # A SNAPSHOT THE TOOL COULD NOT READ IS NOT COVERED BY ITS PASS. Each of these used to print one
+    # SKIP line and then PASS / exit 0 over a board with a gateway nobody had examined.
+    for tool in ("verify-latency.py", "audit-every-metric.py", "verify-frontier.py", "verify-turnover.py"):
+        c, o = run(tool, CLEAN_CELL, extra_files={"result_other_2026-07-30T00-00-00Z.json": "{truncated"})
+        expect(f"{tool}: an unreadable snapshot beside a clean one FAILS", c, o, True, "SKIP")
+        # ANCHORED TO THE TOOL, NOT THE CWD: from another directory a cwd-relative glob found nothing.
+        c, o = run(tool, mutate(perf__added_latency_p99_us=999) if tool == "verify-latency.py"
+                   else mutate(memory__idle_rss_mib=-5.0) if tool == "audit-every-metric.py"
+                   else _with(CLEAN_CELL, lambda x: x["perf"]["frontier"][-1].update(rps=9999.0))
+                   if tool == "verify-frontier.py" else _undisclosed_floor(), cwd_elsewhere=True)
+        expect(f"{tool}: run from another directory still finds (and fails) the board", c, o, True,
+               {"verify-latency.py": "its own legs give", "audit-every-metric.py": "negative",
+                "verify-frontier.py": "rps, re-derived", "verify-turnover.py": "does NOT disclose"}[tool])
+
+    print("verify-frontier.py (published tail, dropped readings):")
+    # RED: the published p99 is not the tail the winning rung measured. The old check tested the
+    # RE-DERIVED winner's tail, which is under the bound by construction and so could never fire.
+    c, o = run("verify-frontier.py", _with(CLEAN_CELL, lambda x: x["perf"]["frontier"][2].update(p99_us=1400)))
+    expect("a published tail that is not the winning rung's FAILS", c, o, True, "published p99 1400us")
+    # RED: one served cell carries a frontier and its sibling - same snapshot - does not.
+    dropped = copy.deepcopy(CLEAN_CELL)
+    del dropped["perf"]["frontier"]
+    c, o = run("verify-frontier.py", {"openai": CLEAN_CELL, "anthropic": dropped})
+    expect("a served cell that dropped its frontier beside one that has it FAILS", c, o, True, "NO frontier")
+    # ACCEPT: the engine WITHHELD it and said so (egress re-verification failed).
+    withheld = copy.deepcopy(dropped)
+    withheld["perf"]["egress_reverified"] = False
+    c, o = run("verify-frontier.py", {"openai": CLEAN_CELL, "anthropic": withheld})
+    expect("a frontier withheld with egress_reverified=false passes", c, o, False)
+
+    # RED: `SweepPoint` publishes `ok`, so the engine's exact rule applies - a rung that completed
+    # nothing (ok=0) did not serve cleanly, whatever its p99 says, and cannot be a reading's winner.
+    c, o = run("verify-frontier.py", _with(CLEAN_CELL, lambda x: x["perf"]["sweep_max_proxy"][1].update(ok=0)))
+    expect("a rung with ok=0 cannot win a reading (exact ok > 0 rule)", c, o, True, "re-derived")
+
+    print("verify-turnover.py (what counts as clean, and what 'every' may claim):")
+    # RED: a rung above the peak with NO `fail` is not proven clean, so it cannot prove a turnover.
+    unknown = _with(CLEAN_CELL, lambda x: x["perf"]["sweep_max_proxy"][2].update(fail=None))
+    c, o = run("verify-turnover.py", unknown)
+    expect("a slower rung with an ABSENT fail does not prove a turnover", c, o, False, "PROVED (0)")
+    # A clean rung above at the SAME rate is a plateau, not a "cliff that matters" at +0.0%.
+    flat = _with(CLEAN_CELL, lambda x: x["perf"]["sweep_max_proxy"][2].update(rps=120.0, ok=120, fail=0))
+    c, o = run("verify-turnover.py", flat)
+    expect("a clean equal-rate rung above the peak is a PLATEAU", c, o, False, "PLATEAU (1)")
+    # A disclosed floor established no maximum, so "every maximum is a measured turnover" is false.
+    good_floor = _undisclosed_floor()
+    for r in good_floor["perf"]["frontier"]:
+        r["lower_bound"] = True
+    c, o = run("verify-turnover.py", good_floor)
+    expect("a disclosed floor is not claimed as a MEASURED TURNOVER", c, o, False, "DISCLOSED FLOOR (1)",
+           absent="MEASURED TURNOVER: for each one")
+
+    print("audit-every-metric.py (bare holes, HWM):")
+    # RED: a null with no reason, on a field another cell on the board publishes as a number. This
+    # was printed as "ABSENT WITH NO REASON" and then the tool exited 0.
+    hole = mutate(memory__idle_rss_mib=None)
+    c, o = run("audit-every-metric.py", {"openai": CLEAN_CELL, "anthropic": hole})
+    expect("a null with NO reason in absences FAILS", c, o, True, "memory.idle_rss_mib")
+    c, o = run("audit-every-metric.py", {"openai": CLEAN_CELL, "anthropic": _with(
+        hole, lambda x: x["absences"].update({"memory.idle_rss_mib": {"reason": "harness_error"}}))})
+    expect("the same null WITH its reason passes", c, o, False)
+    # RED: a zero kernel HWM is reported, not a ZeroDivisionError.
+    c, o = run("audit-every-metric.py", mutate(memory__peak_rss_hwm_mib=0.0))
+    expect("a zero kernel HWM beside a real peak FAILS as a finding, not a crash", c, o, True,
+           "high-water mark")
+    # The TTFT sample COUNTS are numeric measurements and appear in the inventory.
+    c, o = run("audit-every-metric.py", mutate(stream__ttft_gw_samples=100))
+    expect("ttft_*_samples counts are inventoried, not skipped as sample arrays", c, o, False,
+           "stream.ttft_gw_samples")
+
+    print("run-on-ec2.sh:")
+    _bad_quotes = _test_provision_payload_has_no_apostrophe()
+    for _ln, _txt in _bad_quotes:
+        FAILURES.append(f"run-on-ec2.sh:{_ln} apostrophe inside the single-quoted ssh payload: {_txt.strip()[:90]}")
+    print(f"  {'FAIL' if _bad_quotes else 'ok  '} - the provision payload contains no apostrophe "
+          f"(it would execute locally)")
+
     print()
     if FAILURES:
         for f in FAILURES:
@@ -247,14 +390,18 @@ def main():
 
 
 # ---- run-on-ec2.sh: the provision payload is SINGLE-QUOTED, so it cannot contain an apostrophe ----
-# The payload is passed as `ssh host 'set -e ... '`, so the first apostrophe inside it closes the
-# string and everything after runs on the orchestrator instead of the box (an even count re-closes but
-# still executes the span between locally). Zero apostrophes, including in comment prose, is the only
-# safe rule - this cost a full 14-box launch on 2026-07-30.
+# This cost a full 14-box launch on 2026-07-30. The provisioning block is passed as
+# `ssh host 'set -e ... '`, so the FIRST apostrophe inside it closes the string - and everything
+# after runs on the ORCHESTRATOR instead of the box. The symptom is maximally misleading: the error
+# reads "./run-on-ec2.sh: line 907: sudoq: command not found", naming a local line number for a
+# helper that is defined and correct on the remote side, while every box reports PROVISION FAILED.
+# Parity does not save it: an even number of apostrophes re-closes the string but still executes the
+# span between them locally. The only safe rule is ZERO apostrophes in the payload, including prose
+# in comments - which is exactly where all three came from ("the gateway's", "run.sh's", "else's").
 def _test_provision_payload_has_no_apostrophe():
     import re
     src = open(os.path.join(HERE, "run-on-ec2.sh"), encoding="utf-8").read().split("\n")
-    start = next((i for i, l in enumerate(src) if "ssh $SSHOPT ubuntu@" in l and l.rstrip().endswith("'set -e")), None)
+    start = next((i for i, l in enumerate(src) if 'ssh "${SSHOPT[@]}" ubuntu@' in l and l.rstrip().endswith("'set -e")), None)
     assert start is not None, "could not find the provision ssh payload opener"
     end = next((i for i in range(start + 1, len(src)) if re.match(r"^\s*.*'\s*>>\"\$glog\"", src[i])), None)
     assert end is not None, "could not find the provision ssh payload terminator"
@@ -262,13 +409,8 @@ def _test_provision_payload_has_no_apostrophe():
     return bad
 
 
-_bad_quotes = _test_provision_payload_has_no_apostrophe()
-if _bad_quotes:
-    for _ln, _txt in _bad_quotes:
-        print(f"FAIL - run-on-ec2.sh:{_ln} apostrophe inside the single-quoted ssh payload: {_txt.strip()[:90]}")
-    print("FAIL - the provision payload must contain ZERO apostrophes (see comment above this check)")
-    sys.exit(1)
-print("ok   - run-on-ec2.sh provision payload contains no apostrophe (would execute locally)")
+# Run from main() with every other check, not at import time: a module-level sys.exit here used to
+# fire BEFORE main() and skip all sixteen auditor fixtures - ordering deciding coverage.
 
 
 if __name__ == "__main__":

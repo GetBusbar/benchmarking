@@ -169,7 +169,7 @@ export function compactSummary(publication, query = {}) {
   const keys = ["added_latency_p50_us", "added_latency_p99_us", "added_ttft_p99_us"];
   const compact = compactRecords(publication.measurements.map(m => ({ ...m, test: { ...m.test, definitions: {} }, metrics: Object.fromEntries(Object.entries(m.metrics).filter(([key]) => keys.includes(key))) })));
   return {
-    schema_version: "1.1", definitions: compact.definitions, dataset_id: publication.dataset_id, generated_at: publication.generated_at,
+    schema_version: "1.1", active_field: publication.active_field ?? null, definitions: compact.definitions, dataset_id: publication.dataset_id, generated_at: publication.generated_at,
     published_at: publication.published_at, license: publication.license, selected_protocol_pair: { ingress_protocol: ingress, upstream_protocol: egress },
     results: publication.gateways.filter(g => !query.gateway || g.id === query.gateway).map(g => {
       const m = compact.measurements.find(m => m.gateway_id === g.id && m.test.ingress_protocol === ingress && m.test.upstream_protocol === egress);

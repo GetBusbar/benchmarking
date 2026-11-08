@@ -35,10 +35,31 @@ rm -f "$tmp"
 
 check(){ local n="$1" got="$2" want="$3"; if [ "$got" = "$want" ]; then echo "ok   - $n"; else echo "FAIL - $n: got [$got] want [$want]"; fail=1; fi; }
 
-# (a) two acquire/release cycles produce DISTINCT tokens (the $$-collision the fix closes).
-publish_lock_acquire "[gwA]" echo >/dev/null; tokA="$PUBLISH_LOCK_TOKEN"; publish_lock_release
-publish_lock_acquire "[gwB]" echo >/dev/null; tokB="$PUBLISH_LOCK_TOKEN"; publish_lock_release
-if [ -n "$tokA" ] && [ -n "$tokB" ] && [ "$tokA" != "$tokB" ]; then echo "ok   - the per-publish token is UNIQUE across publishes (not a shared \$\$)"; else echo "FAIL - tokens collided: A=[$tokA] B=[$tokB]"; fail=1; fi
+# (a) the token names the ACQUIRING SUBSHELL, not the shared $$. Two `&`-style subshells of one
+# orchestrator share $$ and differ only in $BASHPID, so the assertion is on the pid field itself: the
+# random suffix alone would keep two tokens distinct and hide a $$ regression (and so did the tag, when
+# this test used two different ones). Same tag in both subshells, as two retries of one gateway would be.
+if [ -n "${BASHPID:-}" ]; then
+  for _i in 1 2; do
+    ( publish_lock_acquire "[gw]" echo >/dev/null; printf '%s %s\n' "$PUBLISH_LOCK_TOKEN" "$BASHPID"; publish_lock_release ) > "${PUBLISH_LOCK}.sub$_i"
+  done
+  read -r tokA pidA < "${PUBLISH_LOCK}.sub1"; read -r tokB pidB < "${PUBLISH_LOCK}.sub2"
+  rm -f "${PUBLISH_LOCK}.sub1" "${PUBLISH_LOCK}.sub2"
+  _pid_of(){ local t="${1%:*}"; printf '%s' "${t##*:}"; }
+  check "subshell A's token carries its own BASHPID" "$(_pid_of "$tokA")" "$pidA"
+  check "subshell B's token carries its own BASHPID" "$(_pid_of "$tokB")" "$pidB"
+  if [ "$pidA" != "$$" ] && [ "$pidB" != "$$" ] && [ "$tokA" != "$tokB" ]; then echo "ok   - the per-publish token is UNIQUE across subshells that share \$\$"; else echo "FAIL - tokens not distinguished by subshell: A=[$tokA] B=[$tokB] \$\$=$$"; fail=1; fi
+else
+  echo "skip - this bash has no BASHPID (pre-4), so the subshell-identity case cannot be constructed"
+fi
+
+# (c) a lock dir that cannot be CREATED (unwritable/missing parent) is not contention: acquire must
+# fail at once, not spin the 600 s contention budget and then blame a peer.
+_saved_lock="$PUBLISH_LOCK"; PUBLISH_LOCK="$(mktemp -u)/no-such-parent/lock"
+_t0=$SECONDS; publish_lock_acquire "[nodir]" echo >/dev/null; _rc=$?
+check "an uncreatable lock dir fails the acquire" "$_rc" "1"
+check "and fails it immediately (no contention wait)" "$([ $((SECONDS - _t0)) -lt 5 ] && echo fast || echo slow)" "fast"
+PUBLISH_LOCK="$_saved_lock"
 
 # (b) a NON-owner release must NOT delete a real holder's lockdir. Simulate: holder acquires (writes its
 # token); an impostor with PUBLISH_LOCK_OWNED=1 but a DIFFERENT token calls release - the dir must survive.

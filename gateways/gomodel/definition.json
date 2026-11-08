@@ -20,19 +20,10 @@
   "lang": "Go",
   "launch": {
     "args": [],
-    "image": "enterpilot/gomodel:0.1.82",
+    "image": "enterpilot/gomodel:0.2.2@sha256:24860e4bf777a01773ca322bf2d348700649df09b01ed798eb94eba6f5d15cef",
     "kind": "docker",
     "mounts": []
   },
-  "matrix": [
-    "101101",
-    "011000",
-    "101000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "GoModel 0.1.55 has no Cohere adapter (no COHERE_BASE_URL in the repo) and no chat-to-Responses bridge (responses_adapter.go implements ResponsesViaChat only); those cells are grey by that capability limit",
   "model": "openai/gpt-4o-mini",
   "name": "gomodel",
   "path": "/v1/chat/completions",
