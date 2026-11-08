@@ -320,7 +320,19 @@ build and targeted HTTP checks before deploying with Wrangler's configured crede
 Use `--dry-run` to build and bundle without publishing. The token needs Workers Scripts,
 Workers Routes and Workers KV write permissions for the declared account and zone.
 CI runs the existing full site suites; local verification should use the targeted publishing
-tests and the actual generated artifact.
+tests and the actual generated artifact. Website changes pushed to `dev` run verification
+automatically. An API or web pipeline on `dev` with `VERIFY_WEBSITE_REF` set to a full commit
+SHA checks that release candidate without publishing it. Production promotion still follows
+the repository's protected-branch approval policy.
+
+Default comparison pages and their JSON are also built ahead of time. Arbitrary dashboard
+query combinations use the shared renderer at request time and can exceed Workers Free's
+CPU allowance; production should use Workers Paid for reliable dynamic requests. The
+Cloudflare zone must permit automated clients (including Browser Integrity Check settings).
+Deploy authorization alone does not grant permission to edit those zone settings. A release
+must check both ordinary crawler user agents and a default HTTP-library client against the
+live domain. A descriptive user agent can work even when a default library user agent is
+blocked before the Worker executes.
 
 ## Add a gateway
 

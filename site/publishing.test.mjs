@@ -108,6 +108,9 @@ test("published HTTP interface works without JavaScript", { skip: !artifact }, a
   assert.ok(!md.includes("Protocol support matrix (6x6)"));
   const pair = await call(`/gateways/compare/${first}-vs-${pub.gateways[1].id}.md`);
   assert.equal(pair.status, 200); assert.match(await pair.text(), /Comparability:/);
+  const comparison = await (await call(`/api/v1/compare?a=${first}&b=${pub.gateways[1].id}`)).json();
+  assert.equal(comparison.comparison.gateway_a, first);
+  assert.ok((await (await call("/sitemap.xml")).text()).includes(`/gateways/compare/${first}-vs-${pub.gateways[1].id}`));
   const template = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const html = renderDashboard(template, data, "/gateways/performance", pub);
   const doc = parseHTML(html).document;
