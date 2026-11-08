@@ -155,7 +155,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   write("/llms.txt", index);
   write("/llms-full.txt", semanticGuide(publication));
   const licenseText = readFileSync(join(root, "DATA-LICENSE.md"), "utf8");
-  page("/gateways/license", renderArticle(template, { path: "/gateways/license", title: "Dataset reuse and attribution", body: `<h1>Dataset reuse and attribution</h1><pre>${esc(licenseText)}</pre><p><a href="${DATA_LICENSE}">CC BY 4.0</a> · <a href="${DATA_LICENSE}legalcode">Legal terms</a></p>` }));
+  page("/gateways/license", renderArticle(template, { path: "/gateways/license", title: "Dataset reuse and attribution", body: `<h1>Dataset reuse and attribution</h1>${licenseText.split(/\n\n/).filter(block => !block.startsWith("# ")).map(block => `<p>${esc(block).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`).join("")}<p><a href="${DATA_LICENSE}">CC BY 4.0</a> · <a href="${DATA_LICENSE}legalcode">Legal terms</a></p>` }));
   write("/DATA-LICENSE.md", licenseText);
   write("/robots.txt", `User-agent: *\nAllow: /\nDisallow: /_publication/\nSitemap: ${ORIGIN}/sitemap.xml\n`);
   // No lastmod is preferable to an invented timestamp on every metadata refresh.
