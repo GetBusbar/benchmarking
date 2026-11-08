@@ -396,7 +396,7 @@ if [ "$_NOGATE" = 0 ] && [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$BENCH_ENGINE_COMMI
     if [ "$_tree_sub" != "$_eng_sub" ]; then
       # Only these cfg(test)-gated fixtures are exempt; release source and build
       # inputs still have to match the commit recorded by the frozen binary.
-      if [ "$_sub" = engine ] && git -C "$HERE" diff --quiet "$BENCH_ENGINE_COMMIT" "$BENCH_COMMIT" -- engine ':!engine/src/tests/manifest_real_field_tests.rs' ':!engine/src/tests/suite_tests.rs'; then
+      if [ "$_sub" = engine ] && git -C "$HERE" diff --quiet "$BENCH_ENGINE_COMMIT" "$BENCH_COMMIT" -- engine ':!engine/src/tests/manifest_real_field_tests.rs' ':!engine/src/tests/suite_tests.rs' ':!engine/src/tests/run_tests.rs'; then
         echo "[pin] only cfg(test) fixtures changed; frozen release sources are unchanged"
         continue
       fi

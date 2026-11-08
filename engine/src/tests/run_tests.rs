@@ -1155,39 +1155,48 @@ fn a_late_first_frame_is_not_a_stall_but_a_late_second_one_is() {
 fn serve_sse(frames: usize, gap_ms: u64) -> SocketAddr {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = l.local_addr().expect("addr");
+    l.set_nonblocking(true).expect("nonblocking SSE fixture");
+    // The test exercises async stream lanes, not the runner's OS-thread quota.
     std::thread::spawn(move || {
-        for c in l.incoming() {
-            let Ok(mut c) = c else { continue };
-            std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("SSE fixture runtime");
+        runtime.block_on(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::from_std(l).expect("SSE listener");
+            while let Ok((mut c, _)) = listener.accept().await {
+                tokio::spawn(async move {
                 let mut b = [0u8; 4096];
-                if c.read(&mut b).unwrap_or(0) == 0 {
+                if c.read(&mut b).await.unwrap_or(0) == 0 {
                     return;
                 }
                 let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nConnection: close\r\n\r\n";
-                if c.write_all(head.as_bytes()).is_err() {
+                if c.write_all(head.as_bytes()).await.is_err() {
                     return;
                 }
                 // The role head: openai's first chunk, which carries no token.
                 let role =
                     "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n";
-                if c.write_all(role.as_bytes()).is_err() {
+                if c.write_all(role.as_bytes()).await.is_err() {
                     return;
                 }
-                let _ = c.flush();
+                let _ = c.flush().await;
                 for i in 0..frames {
                     if gap_ms > 0 {
-                        std::thread::sleep(Duration::from_millis(gap_ms));
+                        tokio::time::sleep(Duration::from_millis(gap_ms)).await;
                     }
                     let frame = format!(
                         "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"t{i}\"}}}}]}}\n\n"
                     );
-                    if c.write_all(frame.as_bytes()).is_err() {
+                    if c.write_all(frame.as_bytes()).await.is_err() {
                         return;
                     }
-                    let _ = c.flush();
+                    let _ = c.flush().await;
                 }
-            });
-        }
+                });
+            }
+        });
     });
     addr
 }
