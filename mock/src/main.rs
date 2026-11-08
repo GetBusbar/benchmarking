@@ -88,6 +88,8 @@ static ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant",
 const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
 const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
 const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
+// Cohere v1 adapters read top-level text and meta.tokens, not the v2 message envelope.
+const COHERE_V1: &[u8] = br#"{"response_id":"x","generation_id":"x","text":"ok","finish_reason":"COMPLETE","meta":{"api_version":{"version":"1"},"tokens":{"input_tokens":10,"output_tokens":2},"billed_units":{"input_tokens":10,"output_tokens":2}}}"#;
 // GET .../models - a model list, discovered at boot by gateways that register routable models by
 // calling the upstream's /models. PROVIDER-SPECIFIC (keyed off the request path, see models_for): a
 // catalog shared across providers would let a gateway that routes by bare model name register the
@@ -144,8 +146,10 @@ fn body_for(path: &str) -> &'static [u8] {
         GEMINI
     } else if path.contains("/converse") || path.contains("/model/") || path.contains("/invoke") {
         BEDROCK
-    } else if path.contains("/v2/chat") || path.contains("/v1/chat") {
+    } else if path.contains("/v2/chat") {
         COHERE
+    } else if path.contains("/v1/chat") {
+        COHERE_V1
     } else {
         OPENAI
     }

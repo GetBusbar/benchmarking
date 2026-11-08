@@ -760,3 +760,16 @@ async fn send_frame_gives_up_on_a_stalled_but_open_receiver_instead_of_blocking_
     );
     drop(rx);
 }
+
+#[test]
+fn cohere_response_matches_the_requested_api_version() {
+    let v1: serde_json::Value = serde_json::from_slice(body_for("/v1/chat")).unwrap();
+    let v2: serde_json::Value = serde_json::from_slice(body_for("/v2/chat")).unwrap();
+    assert_eq!(v1["text"], "ok");
+    assert_eq!(v1["meta"]["tokens"]["input_tokens"], 10);
+    assert!(v1.get("message").is_none());
+    assert_eq!(v2["message"]["content"][0]["text"], "ok");
+    assert_eq!(v2["usage"]["tokens"]["input_tokens"], 10);
+    assert!(v2.get("text").is_none());
+    assert_eq!(body_for("/v1/chat/completions"), OPENAI);
+}
