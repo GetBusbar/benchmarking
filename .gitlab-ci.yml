@@ -7,7 +7,7 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
-      changes: [site/**/*, .gitlab-ci.yml]
+      changes: [site/**/*, engine/**/*, mock/**/*, .gitlab-ci.yml]
     - when: never
 
 stages: [verify, publish]
@@ -76,9 +76,12 @@ verify-engine:
   timeout: 60m
   rules:
     - if: '$VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      changes: [engine/**/*, mock/**/*, Cargo.lock, Cargo.toml, .gitlab-ci.yml]
   variables:
     REFRESH_GATEWAY_STARS: "1"
   script:
+    - export VERIFY_ENGINE_REF="${VERIFY_ENGINE_REF:-$CI_COMMIT_SHA}"
     - git fetch origin "$VERIFY_ENGINE_REF"
     - git checkout --detach "$VERIFY_ENGINE_REF"
     - cargo fmt --all -- --check
