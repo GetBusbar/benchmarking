@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import families from "./gateway-families.json" with { type: "json" };
 import { ORIGIN, POLICY, compactRecords } from "./public-data.mjs";
 export const PAGE_MAX_BYTES = 1024 * 1024;
 export const DATA_LICENSE = "https://creativecommons.org/licenses/by/4.0/";
@@ -71,4 +72,4 @@ export function compactCsv(records, allRecords, datasetId) {
   const quote = value => '"' + String(value ?? "").replace(/^[=+@\-]/, "'$&").replace(/"/g, '""') + '"';
   return rows.map(row => row.map(quote).join(",")).join("\r\n") + "\r\n";
 }
-export const gatewayFamily = id => /^busbar(?:-\d+)?$/.test(id) ? "busbar" : id;
+export const gatewayFamily = id => Object.entries(families).find(([, aliases]) => aliases.includes(id))?.[0] || id;

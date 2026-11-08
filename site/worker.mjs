@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { renderDashboard, renderArticle, htmlToMarkdown, ORIGIN } from "./render.mjs";
 import { compareMeasurements, measurementsCsv, compactSummary, PROTOCOLS } from "./public-data.mjs";
+import { historyPoints, historyArticle, historicalComparison, fieldRankings, expandHistorical } from "./history.mjs";
 import { comparisonArticle } from "./evidence.mjs";
 
 import { measurementPage, compactCsv, gatewayFamily } from "./retrieval.mjs";
@@ -63,6 +64,94 @@ async function route(request, env) {
   }
   const input = inputs(env);
   const getPublication = () => input("/_publication/records.json");
+  const historyMatch = path.match(/^\/gateways\/([a-z0-9-]+)\/history(\.md)?$/);
+  const runMeasurements = path.match(/^\/api\/v1\/runs\/(run-[a-z0-9-]+-[a-f0-9]{64})\/measurements$/);
+  if (runMeasurements) {
+    const q = parameters(url, ['limit','offset']);
+    const catalog = await input('/_publication/history/catalog.json');
+    if (!catalog.runs.some(r => r.id === runMeasurements[1])) throw new URIError('Unknown run');
+    const records = expandHistorical(await input(`/_publication/history/runs/${runMeasurements[1]}.json`));
+    return json(measurementPage(records, { datasetId: catalog.catalog_id, limit: integer(q.limit,20,1,100), offset: integer(q.offset,0,0,Number.MAX_SAFE_INTEGER), url, compact: true }));
+  }
+  if (path === '/api/v1/history' || historyMatch) {
+    const q = parameters(url, ['family','ingress','egress','metric','bound','from','to','limit','offset','catalog','a','b']);
+    if (historyMatch) q.family = historyMatch[1];
+    q.ingress ||= 'openai'; q.egress ||= 'openai'; q.metric ||= 'added_latency_p99_us';
+    if (!PROTOCOLS.includes(q.ingress) || !PROTOCOLS.includes(q.egress)) throw new RangeError('Unknown protocol');
+    let catalog = await input('/_publication/history/catalog.json');
+    const archivedRevision = q.catalog && q.catalog !== catalog.catalog_id;
+    if (archivedRevision && /^catalog-[a-f0-9]{64}$/.test(q.catalog)) {
+      const stored = await env.PUBLICATIONS?.get(`history/catalogs/${q.catalog}`);
+      if (stored) catalog = JSON.parse(stored);
+    }
+    if (q.catalog && q.catalog !== catalog.catalog_id) return error(409, 'Catalog revision changed. Restart traversal; records from different revisions are never silently mixed.');
+    if (!catalog.runs.some(r => r.gateway_family === q.family)) throw new URIError('Unknown gateway family');
+    for (const key of ['from','to']) if (q[key] && (!/^\d{4}-\d{2}-\d{2}$/.test(q[key]) || !Number.isFinite(Date.parse(q[key])))) throw new RangeError('Date must be YYYY-MM-DD');
+    const shard=`families/${q.family}/${q.ingress}--${q.egress}`;
+    const records = expandHistorical(archivedRevision
+      ? JSON.parse(await env.PUBLICATIONS.get(`history/catalogs/${catalog.catalog_id}/${shard}`))
+      : await input(`/_publication/history/${shard}.json`));
+    const metrics = [...new Set(['added_latency_p50_us','added_latency_p99_us','added_ttft_p99_us','throughput_rps', ...records.flatMap(m=>Object.keys(m.metrics))])].sort();
+    if (!metrics.includes(q.metric)) throw new RangeError('Unknown historical metric');
+    if (q.bound && !['1','5','10','50','100','none'].includes(q.bound)) throw new RangeError('Unknown throughput bound');
+    if (q.from && q.to && q.from > q.to) throw new RangeError('From date must precede through date');
+    const runs = catalog.runs.filter(r=>r.gateway_family === q.family && (!q.from || (r.measured_at && r.measured_at >= q.from)) && (!q.to || (r.measured_at && r.measured_at.slice(0,10) <= q.to)));
+    const limit = integer(q.limit,20,1,100), offset = integer(q.offset,0,0,Number.MAX_SAFE_INTEGER);
+    const readings = new Map(historyPoints(records,q).map(p=>[p.run_id,p]));
+    const points = runs.slice(offset,offset+limit).map(r=>({ ...(readings.get(r.id) || { run_id:r.id,gateway_id:r.gateway_id,gateway_build:r.build,measured_at:r.measured_at,engine:r.engine,value:null,state:r.evidence_available ? 'not_measured' : 'evidence_unavailable',provenance:{run_url:r.source_url} }), disposition:r.disposition }));
+    const placementKey=`placements/${q.family}/${q.ingress}--${q.egress}`;
+    const placements=archivedRevision ? JSON.parse(await env.PUBLICATIONS.get(`history/catalogs/${catalog.catalog_id}/${placementKey}`) || '[]') : await input(`/_publication/history/${placementKey}.json`);
+    for(const point of points) point.placements=placements.filter(p=>p.run_id===point.run_id && p.metric===q.metric && (q.metric!=='throughput_rps' || p.bound===(q.bound || '10')));
+    const definitions = {};
+    for (const p of points) { if (p.definition) { let id=Object.keys(definitions).find(k=>definitions[k]===p.definition); if (!id) {id=`definition-${Object.keys(definitions).length+1}`;definitions[id]=p.definition;} p.definition_id=id;} delete p.definition; }
+    const next = new URL(url); next.searchParams.set('offset',String(offset+points.length)); next.searchParams.set('catalog',catalog.catalog_id);
+    const page = { schema_version:'1.0',catalog_id:catalog.catalog_id,projector:catalog.projector,total:runs.length,limit,offset,returned:points.length,next:offset+points.length<runs.length?next.href:null,metrics,definitions,points };
+    let comparisons = [];
+    if (q.a || q.b) {
+      const pick = id=>records.find(m=>m.run_id===id && m.test.ingress_protocol===q.ingress && m.test.upstream_protocol===q.egress);
+      const left=pick(q.a),right=pick(q.b);
+      if (!left || !right || q.a===q.b) throw new RangeError('Select two distinct runs containing this protocol pair');
+      comparisons=historicalComparison(left,right);
+    }
+    if (!historyMatch) return json({...page,comparisons});
+    const canonical=path.replace(/\.md$/,'');
+    const html=renderArticle(await input('/_publication/template.html',false),{path:canonical,title:`${q.family} benchmark history`,body:historyArticle(q.family,page,q,comparisons)});
+    return text(historyMatch[2]?htmlToMarkdown(html):html,historyMatch[2]?'text/markdown':'text/html');
+  }
+  const fieldRanks = path.match(/^\/api\/v1\/fields\/(field-[a-f0-9]{64})\/rankings$/);
+  if (fieldRanks) {
+    const q=parameters(url,['ingress','egress','metric','bound']);
+    q.ingress ||= 'openai'; q.egress ||= 'openai'; q.metric ||= 'added_latency_p99_us';
+    if (!PROTOCOLS.includes(q.ingress) || !PROTOCOLS.includes(q.egress)) throw new RangeError('Unknown protocol');
+    const fields=await input('/_publication/history/fields.json');
+    const collection=fields.some(f=>f.field_id===fieldRanks[1]) ? await input(`/_publication/history/fields/${fieldRanks[1]}.json`) : JSON.parse(await env.PUBLICATIONS?.get(`field-evidence/${fieldRanks[1]}`) || 'null');
+    if(!collection) throw new URIError('Unknown field');
+    return json({schema_version:'1.0',field_id:fieldRanks[1],...fieldRankings(collection,q)});
+  }
+  if (path === '/api/v1/releases' && env.PUBLICATIONS) {
+    const q=parameters(url,['limit','cursor']);
+    const limit=integer(q.limit,20,1,100);
+    const list=await env.PUBLICATIONS.list({prefix:'releases/',limit,...(q.cursor?{cursor:q.cursor}:{})});
+    const releases=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+    const next=new URL(url);if(list.cursor)next.searchParams.set('cursor',list.cursor);
+    return json({schema_version:'1.0',limit,next:list.list_complete?null:next.href,releases});
+  }
+  if (path === '/api/v1/fields') {
+    const q=parameters(url,['limit','offset','cursor']);
+    if (env.PUBLICATIONS) {
+      if(q.offset) throw new RangeError('Follow cursor pagination for retained fields');
+      const limit=integer(q.limit,20,1,100);
+      const list=await env.PUBLICATIONS.list({prefix:'field-index/',limit,...(q.cursor?{cursor:q.cursor}:{})});
+      const fields=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+      const next=new URL(url);if(list.cursor)next.searchParams.set('cursor',list.cursor);
+      return json({schema_version:'1.0',total:null,limit,offset:0,next:list.list_complete?null:next.href,fields});
+    }
+    const rows=await input('/_publication/history/fields.json');
+    const limit=integer(q.limit,20,1,100),offset=integer(q.offset,0,0,Number.MAX_SAFE_INTEGER);
+    const next=new URL(url);next.searchParams.set('offset',String(offset+limit));
+    return json({schema_version:'1.0',total:rows.length,limit,offset,next:offset+limit<rows.length?next.href:null,fields:rows.slice(offset,offset+limit)});
+  }
+
   if (path === "/api/v1/summary" && url.search) {
     const publication = await getPublication();
     return json(compactSummary(publication, filterQuery(url, publication, ["gateway", "ingress", "egress"])));
@@ -119,8 +208,9 @@ async function route(request, env) {
   const raw = path.match(/^\/api\/v1\/runs\/(run-[a-z0-9-]+-[a-f0-9]{64})\/raw\.json$/);
   if (raw) {
     const response = await env.ASSETS.fetch(new Request(ORIGIN + path + ".gz"));
-    if (!response.ok) return error(404, "Unknown run");
-    return new Response(response.body, { encodeBody: "manual", headers: { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Cache-Control": "public, max-age=31536000, immutable", ETag: `"${raw[1].slice(-64)}"` } });
+    const body = response.ok ? response.body : await env.PUBLICATIONS?.get(`raw/${raw[1]}`, 'arrayBuffer');
+    if (!body) return error(404, "Unknown run");
+    return new Response(body, { encodeBody: "manual", headers: { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Cache-Control": "public, max-age=31536000, immutable", ETag: `"${raw[1].slice(-64)}"` } });
   }
   const definitionsId = path.match(/^\/api\/v1\/definitions\/(dataset-[a-f0-9]{64})(?:\.json)?$/);
   if (definitionsId) {
@@ -131,11 +221,17 @@ async function route(request, env) {
   let asset = path;
   if (path === "/api/v1") asset = "/api/v1/index.json";
   else if (path === "/api/v1/schema") asset = "/api/v1/schema/index.json";
+  else if (/^\/api\/v1\/(?:fields\/field-[a-f0-9]{64}|releases)$/.test(path)) asset += ".json";
   else if (/^\/api\/v1\/(definitions|summary|gateways|methodology|benchmarks\/latest|gateways\/[a-z0-9-]+|benchmarks\/(?:dataset-[a-f0-9]{64}|run-[a-z0-9-]+-[a-f0-9]{64}))$/.test(path)) asset += ".json";
   else if (path === "/") asset = "/index.html";
   else if (!path.split("/").at(-1).includes(".")) asset += ".html";
   const response = await env.ASSETS.fetch(new Request(ORIGIN + asset));
   if (!response.ok) {
+    const field=path.match(/^\/api\/v1\/fields\/(field-[a-f0-9]{64})(?:\.json)?$/);
+    if(field && env.PUBLICATIONS) {
+      const stored=await env.PUBLICATIONS.get(`fields/${field[1]}`);
+      if(stored) return new Response(stored,{headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=31536000, immutable'}});
+    }
     const dataset = path.match(/^\/api\/v1\/benchmarks\/(dataset-[a-f0-9]{64})(?:\.json)?$/);
     if (dataset && env.PUBLICATIONS) {
       const stored = await env.PUBLICATIONS.get(`datasets/${dataset[1]}`);

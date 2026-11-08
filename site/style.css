@@ -877,3 +877,22 @@ tbody tr.tied-above > td {
 .publication-resources{margin-top:2rem;border-top:1px solid var(--border);padding-top:1rem}.publication-resources .data-links{border:0;margin:0;padding:0;font-size:.82rem;gap:.6rem 1.25rem}.publication-resources .crawler-links{margin:.65rem 0 0;color:var(--fg-mute)}.crawler-links summary{cursor:pointer}.crawler-links nav{padding:.5rem 0}.publication-article{min-width:0}.publication-article table{font-size:.82rem}.publication-article ul{padding-left:1.3rem}.publication-article p{overflow-wrap:anywhere}
 
 main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow-wrap:anywhere}.publication-article .table-scroll{max-width:100%;overflow-x:auto}#home-measurements{max-width:100%;overflow-x:auto}
+
+/* History trend direction means improvement, not numerical increase. */
+.history-trend { font-weight: 600; white-space: normal; }
+.trend-improved { color: #167341; }
+.trend-regressed { color: #b32c32; }
+.trend-flat { color: #896500; }
+.trend-not_comparable { color: var(--muted, #66717c); }
+[data-theme="dark"] .trend-improved { color: #65d899; }
+[data-theme="dark"] .trend-regressed { color: #ff9298; }
+[data-theme="dark"] .trend-flat { color: #edcf69; }
+
+.history-controls { display:flex; flex-wrap:wrap; align-items:end; gap:1rem; margin:1.5rem 0; }
+.history-controls label { display:flex; flex-direction:column; gap:.35rem; min-width:0; flex:1 1 9rem; }
+.history-controls input, .history-controls select, .history-controls button { font:inherit; padding:.5rem; border:1px solid var(--border,#b8c2ca); border-radius:.35rem; max-width:100%; }
+.history-controls select { min-width:0; width:100%; }
+.history-chart { display:block; width:100%; height:auto; }
+.table-scroll { overflow-x:auto; }
+
+.refresh-status { margin:1rem 0; padding:1rem; border:1px solid var(--border); border-radius:.5rem; color:var(--muted); }

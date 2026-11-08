@@ -6,11 +6,12 @@ import { resolve, join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, shellViews } from "./render.mjs";
-import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords } from "./public-data.mjs";
+import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords, PROTOCOLS } from "./public-data.mjs";
 import { measurementTable, gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
 
+import { historicalMeasurements, historyPoints, historyArticle, fieldRankings, metricDirection, PROJECTOR } from "./history.mjs";
 import { semanticGuide, retrievalGuide, compactCsv, DATA_LICENSE, gatewayFamily } from "./retrieval.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -46,7 +47,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     if (["/gateways/performance", "/gateways/memory", "/gateways/frontier", "/gateways/streaming", "/gateways/charts"].includes(path)) {
       const view = path.split("/").at(-1);
       const records = publication.measurements.filter(m => m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai");
-      const body = records.map(m => {
+      const body = (data.active_field ? data.gateways.filter(g => !records.some(m => m.gateway_id === g.key)).map(g => `<h2>${esc(g.key)}</h2><p>n/a — not measured in the current refresh. <a href="/gateways/${esc(g.key)}/history">Previous runs</a>.</p>`).join("") : "") + records.map(m => {
         const metrics = Object.fromEntries(Object.entries(m.metrics).filter(([key]) => view === "memory" ? /rss|memory/.test(key) : view === "streaming" ? /ttft|stream/.test(key) : /latency/.test(key)));
         return `<h2>${esc(m.gateway_id)}</h2><p>Build: ${esc(m.gateway_build)}. Measured: ${esc(m.measured_at)}. Published: ${esc(publication.published_at ?? "not recorded")}. ${esc(freshness(m.measured_at, publication.generated_at).age)}.</p>${measurementTable([{ ...m, metrics, frontier: view === "frontier" || view === "performance" ? m.frontier : [] }])}<p><a href="${esc(m.provenance.run_url)}">Run evidence and recorded definitions</a> · <a href="${esc(m.provenance.raw_result_url)}">Raw record</a></p>`;
       }).join("");
@@ -61,6 +62,12 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   // denies public /_publication requests.
   write("/_publication/template.html", template);
   json("/ui-shell.json", shellViews(template));
+  const projector = `${PROJECTOR}-${hash(['history.mjs','seal-matrix.mjs','seal.mjs','public-data.mjs','states.mjs'].map(file=>readFileSync(join(root,'site',file),'utf8')).join('\n'))}`;
+  const retention = [], deferredHistoryPages = [], placements = new Map();
+  const retain = (key, value) => retention.push({ key, value: typeof value === "string" ? value : JSON.stringify(value) });
+  const historicalRecords = new Map();
+  const families = JSON.parse(readFileSync(join(root, "site/gateway-families.json"), "utf8"));
+  const familyOf = id => Object.entries(families).find(([, aliases]) => aliases.includes(id))?.[0] || id;
   const archives = [], byFile = new Map(), byHash = new Map();
   function archive(file, bytes, current = false) {
     const snapshot = JSON.parse(bytes.toString("utf8"));
@@ -72,6 +79,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null };
       const compressed = gzipSync(bytes, { level: 9 });
       write(`/api/v1/runs/${id}/raw.json.gz`, compressed);
+      retention.push({key: `raw/${id}`, value: compressed.toString("base64"), base64: true});
       const summary = { schema_version: "1.0", ...item, raw_result_url: `${ORIGIN}/api/v1/runs/${id}/raw.json`, source_url: `${ORIGIN}/gateways/runs/${id}`, disclosure: DISCLOSURE };
       json(`/api/v1/benchmarks/${id}.json`, summary);
       page(`/gateways/runs/${id}`, renderArticle(template, {
@@ -79,6 +87,19 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
         structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${snapshot.gateway} benchmark run`, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
         body: `<h1>${esc(snapshot.gateway)} benchmark run</h1>${disclosureHtml}<p>Measured ${esc(snapshot.measured_at)}. Recorded build: ${esc(snapshot.build)}.</p><p>Hardware: ${esc(snapshot.hardware)}. Architecture: ${esc(snapshot.arch)}.</p><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p><h2>Recorded metric definitions</h2><dl>${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2><pre>${esc(JSON.stringify(snapshot.rig ?? null, null, 2))}</pre>`,
       }));
+      item.gateway_family = familyOf(snapshot.gateway);
+      item.engine = snapshot.rig?.engine?.commit ?? null;
+      item.projector = projector;
+      item.configuration_sha256 = snapshot.config ? hash(JSON.stringify(snapshot.config)) : null;
+      item.disposition = file.includes('/partial/') ? 'partial' : file.includes('/invalid/') ? 'invalid' : file.includes('/mutants/') ? 'experimental' : 'recorded';
+      item.evidence_available = true;
+      const records = historicalMeasurements(snapshot, item);
+      item.available_metrics = [...new Set(records.flatMap(m => Object.keys(m.metrics)))].sort();
+      item.measurements_url = `${ORIGIN}/api/v1/runs/${id}/measurements`;
+      item.source_url = summary.source_url; item.raw_result_url = summary.raw_result_url;
+      historicalRecords.set(id, records);
+      json(`/_publication/history/runs/${id}.json`, compactRecords(records));
+      retain(`history/${projector}/runs/${id}`,compactRecords(records));
       archives.push(item); byHash.set(sha256, item);
     }
     if (current) byFile.set(basename(file), { ...item, snapshot });
@@ -91,16 +112,62 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   if (history) {
     const shallow = git(root, ["rev-parse", "--is-shallow-repository"]).toString().trim();
     if (shallow === "true") throw new Error("Fetch full Git history before publishing immutable runs");
-    const objects = git(root, ["rev-list", "--objects", "HEAD", "--", "results/snapshots"]).toString().split("\n");
+    const objects = git(root, ["rev-list", "--objects", "HEAD", "--", "results/snapshots", "results/partial", "results/invalid", "results/evidence", "results/diagnostics"]).toString().split("\n");
     for (const line of objects) {
       const [oid, ...parts] = line.split(" "); const path = parts.join(" ");
-      if (/^results\/snapshots\/[^/]+\.json$/.test(path)) archive(path, git(root, ["cat-file", "blob", oid]));
+      if (/^results\/(snapshots|partial|invalid|evidence|diagnostics)\/.+\.json$/.test(path)) { const bytes = git(root, ["cat-file", "blob", oid]); try { archive(path, bytes); } catch (e) { if (!(e instanceof SyntaxError)) throw e; } }
+    }
+  }
+  // Archive every retained raw matrix, including partial/invalid evidence, recursively.
+  function inventory(directory) {
+    if (!existsSync(directory)) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) inventory(file);
+      else if (entry.name.endsWith('.json')) {
+        const bytes = readFileSync(file);
+        try { const raw = JSON.parse(bytes); if (raw.gateway && raw.matrix) archive(file, bytes); } catch (e) { if (!(e instanceof SyntaxError)) throw e; }
+      }
+    }
+  }
+  for (const area of ['archive', 'partial', 'invalid', 'evidence', 'diagnostics', 'mutants']) inventory(join(root, 'results', area));
+  const historyDir = join(root, 'results/history');
+  if (existsSync(historyDir)) for (const file of readdirSync(historyDir).filter(f => f.endsWith('.jsonl'))) {
+    for (const line of readFileSync(join(historyDir,file),'utf8').split('\n').filter(Boolean)) {
+      const record = JSON.parse(line), gateway = record.gateway || file.replace(/\.jsonl$/, '');
+      const measured = record.measured_at || record.timestamp || record.at || null;
+      if (archives.some(r => r.gateway_id === gateway && measured && r.measured_at === measured && r.build === (record.build ?? null))) continue;
+      const id = `record-${hash(line)}`;
+      if (archives.some(r => r.id === id)) continue;
+      json(`/api/v1/history-records/${id}.json`, record);
+      archives.push({ id, gateway_id: gateway, gateway_family: familyOf(gateway), measured_at: measured, build: record.build ?? null, engine: null, evidence_available: false, disposition: 'metadata_only', available_metrics: [], source_url: `${ORIGIN}/api/v1/history-records/${id}.json` });
     }
   }
   archives.sort((a,b) => (b.measured_at || "").localeCompare(a.measured_at || "") || a.id.localeCompare(b.id));
+  const catalogId = `catalog-${hash(JSON.stringify({archives, selection:data.gateways.map(g=>({key:g.key,snapshot_file:g.snapshot_file,matrix:g.matrix}))}))}`;
+  json('/_publication/history/catalog.json', { catalog_id: catalogId, projector, runs: archives });
+  retain(`history/catalogs/${catalogId}`, { catalog_id: catalogId, projector, runs: archives });
+  for (const family of new Set(archives.map(r => r.gateway_family))) {
+    const records = archives.filter(r => r.gateway_family === family).flatMap(r => historicalRecords.get(r.id) || []);
+    const q={ingress:'openai',egress:'openai',metric:'added_latency_p99_us'};
+    const familyRuns=archives.filter(r=>r.gateway_family===family);
+    const readings=new Map(historyPoints(records,q).map(p=>[p.run_id,p]));
+    const historyPage={catalog_id:catalogId,total:familyRuns.length,metrics:[...new Set(['throughput_rps',...records.flatMap(m=>Object.keys(m.metrics))])].sort(),points:familyRuns.slice(0,20).map(r=>({...readings.get(r.id),run_id:r.id,gateway_id:r.gateway_id,gateway_build:r.build,measured_at:r.measured_at,engine:r.engine,value:readings.get(r.id)?.value ?? null,state:readings.get(r.id)?.state || (r.evidence_available?'not_measured':'evidence_unavailable'),provenance:readings.get(r.id)?.provenance || {run_url:r.source_url}})),next:familyRuns.length>20?`${ORIGIN}/gateways/${family}/history?offset=20&catalog=${catalogId}`:null};
+    deferredHistoryPages.push(() => {
+      const entries=placements.get(`${family}/openai--openai`) || [];
+      historyPage.points=historyPage.points.map(p=>({...p,placements:entries.filter(e=>e.run_id===p.run_id && e.metric===q.metric)}));
+      page(`/gateways/${family}/history`,renderArticle(template,{path:`/gateways/${family}/history`,title:`${family} benchmark history`,body:historyArticle(family,historyPage,q)}));
+    });
+    for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) {
+      const bundle=compactRecords(records.filter(m=>m.test.ingress_protocol===ingress && m.test.upstream_protocol===egress));
+      const key=`families/${family}/${ingress}--${egress}`;
+      json(`/_publication/history/${key}.json`,bundle);
+      retain(`history/catalogs/${catalogId}/${key}`,bundle);
+    }
+  }
   let measurements = data.gateways.flatMap(g => projectMeasurements(g, byFile));
   const dates = measurements.map(m => m.measured_at).filter(Boolean).sort();
-  const evidence = { schema_version: "1.0", collection_kind: "independent_gateway_runs", measurements, disclosure: DISCLOSURE, comparison_policy: POLICY };
+  const evidence = { active_field: data.active_field ?? null, schema_version: "1.0", collection_kind: "independent_gateway_runs", measurements, disclosure: DISCLOSURE, comparison_policy: POLICY };
   const datasetId = `dataset-${hash(JSON.stringify(evidence))}`;
   measurements = measurements.map(m => ({ ...m, ...freshness(m.measured_at, data.generated_at, publishedAt) }));
   const publication = {
@@ -118,10 +185,54 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const definitionCatalog = { schema_version: "1.0", dataset_id: datasetId, definitions: compactRecords(measurements).definitions };
   json("/api/v1/definitions.json", definitionCatalog);
   json(`/api/v1/definitions/${datasetId}.json`, definitionCatalog);
-  json("/_publication/runs.json", archives.map(r => ({ ...r, gateway_family: gatewayFamily(r.gateway_id), raw_result_url: `${ORIGIN}/api/v1/runs/${r.id}/raw.json`, source_url: `${ORIGIN}/gateways/runs/${r.id}` })));
+  json("/_publication/runs.json", archives.map(r => ({ ...r, gateway_family: r.gateway_family, raw_result_url: r.raw_result_url ?? null, source_url: r.source_url })));
+  const fields = [];
+  function retainField(collection, name, published) {
+    const selected = collection.measurements.map(m => ({ gateway_id: m.gateway_id, measurement_id: m.measurement_id, run_id: m.run_id, ingress: m.test.ingress_protocol, egress: m.test.upstream_protocol }));
+    const manifest = { schema_version: '1.0', dataset_id: collection.dataset_id, roster: [...new Set(collection.gateways?.map(g=>g.id) || collection.measurements.map(m=>m.gateway_id))].sort(), selected_measurements: selected, comparison_policy: collection.comparison_policy, measured_range: collection.measured_range ?? null };
+    const id = `field-${hash(JSON.stringify(manifest))}`;
+    json(`/api/v1/fields/${id}.json`, { ...manifest, field_id: id });
+    retain(`fields/${id}`,{ ...manifest, field_id: id });
+    retain(`field-evidence/${id}`, { dataset_id: collection.dataset_id, gateways: collection.gateways ?? null, measurements: collection.measurements.map(m => {
+      const {generated_at,published_at,age,age_days,age_as_of,...record}=m; return record;
+    }) });
+    const metrics=[...new Set(['throughput_rps',...collection.measurements.flatMap(m=>Object.keys(m.metrics))])].filter(metricDirection);
+    for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) for (const metric of metrics) {
+      for (const bound of metric==='throughput_rps' ? ['1','5','10','50','100','none'] : [undefined]) {
+        const ranking=fieldRankings(collection,{ingress,egress,metric,bound});
+        for (const group of ranking.groups) for (const row of group.rankings) {
+          const key=`${familyOf(row.gateway_id)}/${ingress}--${egress}`;
+          if(!placements.has(key)) placements.set(key,[]);
+          placements.get(key).push({...row,metric,bound:bound??null,field_id:id,field_name:name,eligible:group.eligible,rostered:ranking.rostered,group:group.group});
+        }
+      }
+    }
+    const fieldLink={field_id:id,dataset_id:collection.dataset_id,name,published_at:published,url:`${ORIGIN}/api/v1/fields/${id}`};
+    retain(`field-index/${id}`, fieldLink);
+    if (published) {
+      const releaseId=`release-${hash(JSON.stringify(fieldLink))}`;
+      retain(`releases/${published}/${releaseId}`,{...fieldLink,release_id:releaseId});
+    }
+    json(`/_publication/history/fields/${id}.json`, collection);
+    if (!fields.some(f => f.field_id === id)) fields.push({ field_id: id, dataset_id: collection.dataset_id, name, published_at: published, url: `${ORIGIN}/api/v1/fields/${id}` });
+  }
+  const baselines = join(root, 'results/baselines');
+  if (existsSync(baselines)) for (const name of readdirSync(baselines)) {
+    const file = join(baselines,name,'collection.json.gz');
+    if (existsSync(file)) { const old = JSON.parse(gunzipSync(readFileSync(file))); retainField(old,name,old.published_at); }
+  }
+  retainField(publication, 'Current field', publishedAt);
+  for (const family of new Set(archives.map(r=>r.gateway_family))) for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) {
+    const key=`${family}/${ingress}--${egress}`, rows=placements.get(key)||[];
+    json(`/_publication/history/placements/${key}.json`,rows);
+    retain(`history/catalogs/${catalogId}/placements/${key}`,rows);
+  }
+  for (const render of deferredHistoryPages) render();
+  json('/_publication/history/fields.json', fields);
+  json('/api/v1/releases.json', { schema_version: '1.0', releases: fields });
   json("/api/v1/summary.json", compactSummary(publication));
   json("/api/v1/gateways.json", { schema_version: "1.0", gateways: publication.gateways, disclosure: DISCLOSURE });
-  json("/api/v1/index.json", { schema_version: "1.0", retrieval: retrievalGuide(Buffer.byteLength(JSON.stringify(publication) + "\n")), links: { runs: `${ORIGIN}/api/v1/runs`, definitions: `${ORIGIN}/api/v1/definitions`, summary: `${ORIGIN}/api/v1/summary`, gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
+  json("/api/v1/index.json", { schema_version: "1.0", retrieval: retrievalGuide(Buffer.byteLength(JSON.stringify(publication) + "\n")), links: { history: `${ORIGIN}/api/v1/history`, fields: `${ORIGIN}/api/v1/fields`, releases: `${ORIGIN}/api/v1/releases`, runs: `${ORIGIN}/api/v1/runs`, definitions: `${ORIGIN}/api/v1/definitions`, summary: `${ORIGIN}/api/v1/summary`, gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
   json("/api/v1/schema/index.json", schemaIndex());
   json("/api/v1/schema/measurement.json", measurementSchema());
   json("/openapi.json", openapi());
@@ -145,11 +256,11 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   // Retired entrants retain independently addressable history and evidence.
   for (const key of new Set(archives.map(r => r.gateway_id))) if (!data.gateways.some(g => g.key === key)) {
     const histories = archives.filter(r => r.gateway_id === key);
-    page(`/gateways/${key}`, renderArticle(template, { path: `/gateways/${key}`, title: `${key} historical benchmarks`, body: `<h1>${esc(key)} historical benchmarks</h1>${disclosureHtml}<p>This gateway is not on the current board.</p><ul>${histories.map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
+    page(`/gateways/${key}`, renderArticle(template, { path: `/gateways/${key}`, title: `${key} historical benchmarks`, body: `<h1>${esc(key)} historical benchmarks</h1>${disclosureHtml}<p>This gateway is not on the current board.</p><ul>${histories.map(r => `<li><a href="${esc(r.source_url || `/gateways/runs/${r.id}`)}">${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
     json(`/api/v1/gateways/${key}.json`, { schema_version: "1.0", gateway: { key, current: false }, measurements: [], history: histories, disclosure: DISCLOSURE });
   }
   page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", structured: { "@context": "https://schema.org", "@type": "DataCatalog", license: DATA_LICENSE, name: "On the Bench published gateway evidence", url: `${ORIGIN}/gateways/data`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, dataset: publication.gateways.map(g => ({ "@type": "Dataset", license: DATA_LICENSE, name: g.name + " measurements", url: g.url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: g.json_url } })) }, body: dataArticle(publication) }));
-  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Historical benchmark runs", body: `<h1>Historical benchmark runs</h1>${disclosureHtml}<p><a href="/api/v1/runs">Paginated run catalog</a> · <a href="/api/v1/runs?family=busbar">All Busbar versions</a>. Gateway IDs identify tested variants; gateway_family groups their history.</p><ul>${archives.slice(0, 50).map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.gateway_id)} — ${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
+  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Historical benchmark runs", body: `<h1>Historical benchmark runs</h1>${disclosureHtml}<p><a href="/api/v1/runs">Paginated run catalog</a> · <a href="/api/v1/runs?family=busbar">All Busbar versions</a>. Gateway IDs identify tested variants; gateway_family groups their history.</p><ul>${archives.slice(0, 50).map(r => `<li><a href="${esc(r.source_url || `/gateways/runs/${r.id}`)}">${esc(r.gateway_id)} — ${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
   write("/gateways/data.csv", compactCsv(measurements, measurements, datasetId));
   const index = `# On the Bench\n\n> Reproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Dataset reuse license](${ORIGIN}/gateways/license)\n- [Compact summary — start here](${ORIGIN}/api/v1/summary)\n- [Gateway catalog](${ORIGIN}/api/v1/gateways)\n- [API discovery](${ORIGIN}/api/v1)\n- [Latest dataset — large; prefer summary or paginated measurements](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Retrieval alternatives\n\nMarkdown pages also have text/plain .txt twins. Use the HTML URL without .md if your tool rejects text/markdown.\n\n- [Compact CSV](${ORIGIN}/gateways/data.csv)\n- [Schema index](${ORIGIN}/api/v1/schema)\n\n## Example workflow\n\nCompare Busbar and Bifrost: read the gateway catalog, then [compare OpenAI to OpenAI p99 added latency](${ORIGIN}/api/v1/compare?a=busbar&b=bifrost&ingress=openai&egress=openai&metric=added_latency_p99_us). Inspect comparability.status before reporting a ratio; read measured_at, definitions, and provenance.run_url. Cite both runs and methodology with the numbers and caveats.\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Measurement pages are capped at 1 MiB of UTF-8 JSON. Always follow next until null, even when fewer than limit rows are returned. Use gateway, ingress, egress and metric filters to narrow retrieval.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Distinguish measured_at from generated_at and published_at (unknown when null). Age is relative to age_as_of, not retrieval time. current_metadata contains dated repository statistics, not run-time statistics.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
   write("/llms.txt", index);
@@ -162,6 +273,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   write("/sitemap.xml", `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${routes.map(r => `<url><loc>${ORIGIN}${esc(r.path)}</loc></url>`).join("")}</urlset>\n`);
   write("/404.html", renderArticle(template, { path: "/404", title: "Page not found", body: '<h1>Page not found</h1><p><a href="/gateways">Browse published gateway benchmarks</a>.</p>' }));
   json("/_publication/routes.json", routes);
+  json("/_publication/retention.json",retention);
   console.log(`publish: ${data.gateways.length} gateways, ${measurements.length} cells, ${archives.length} immutable runs, ${routes.length} HTML pages -> ${out}`);
   return { publication, routes, archives };
 }

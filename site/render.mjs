@@ -46,6 +46,10 @@ export function renderDashboard(template, data, path, publication) {
   const app = browserApp.createApp(document);
   const state = app.renderForPublication(data, path);
   const url = new URL(path, ORIGIN);
+  if (data.active_field) {
+    const completed = data.gateways.filter(g => g.matrix).length;
+    document.querySelector("main")?.insertAdjacentHTML("afterbegin", `<aside class="refresh-status" role="status"><strong>Benchmark refresh: ${completed} of ${data.gateways.length} results published.</strong> Unfinished entrants show n/a. Results appear after validation. <a href="/gateways/runs">Previous runs remain in History</a>.</aside>`);
+  }
   // Keep the exact visual layout. Ordinary assistive links make every row an
   // independently retrievable entity without changing the existing repo links.
   for (const row of document.querySelectorAll("tr[data-gw]")) {
@@ -54,6 +58,7 @@ export function renderDashboard(template, data, path, publication) {
   }
   const empty = document.getElementById("matrix-empty");
   if (empty?.classList.contains("hidden")) empty.textContent = "";
+  else if (empty && data.active_field) empty.textContent = "Refresh in progress. Protocol measurements will appear as validated runs finish.";
   document.querySelectorAll("[data-wired]").forEach(n => n.removeAttribute("data-wired"));
   // A crawler must be able to read a protocol verdict without interpreting color
   // or relying on an aria attribute that its text extractor might discard.
@@ -91,8 +96,8 @@ export function renderDashboard(template, data, path, publication) {
   document.querySelectorAll("main > .view.hidden").forEach(n => n.remove());
   document.querySelectorAll("select option").forEach(n => { if (!n.hasAttribute("selected")) n.remove(); });
   if (url.pathname === "/") {
-    const rows = publication.measurements.filter(m => m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai");
-    document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${esc(m.gateway_id)}</a></td><td>${esc(m.metrics.added_latency_p99_us?.value ?? "unavailable")}</td><td>${esc(m.metrics.added_latency_p99_us?.state || m.status.state)}</td><td>${esc(m.measured_at)}</td></tr>`).join("")}</tbody></table></section>`);
+    const rows = publication.gateways.map(g => publication.measurements.find(m => m.gateway_id === g.id && m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai") || { gateway_id:g.id, metrics:{}, status:{state:"not_measured"}, measured_at:null });
+    document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${esc(m.gateway_id)}</a></td><td>${esc(m.metrics.added_latency_p99_us?.value ?? "n/a")}</td><td>${esc(m.metrics.added_latency_p99_us?.state || m.status.state)}</td><td>${esc(m.measured_at)}</td></tr>`).join("")}</tbody></table></section>`);
   }
   document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal}</style></noscript>`);
   document.querySelector("main").insertAdjacentHTML("beforeend",
