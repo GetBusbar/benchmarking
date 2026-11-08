@@ -20,6 +20,9 @@ verify-website:
     - if: '$VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/ || $CI_PIPELINE_SOURCE == "push"'
   variables:
     OTB_SINGLE_ENGINE: "1"
+    # The dedicated website runner requires this opt-in on every job. This job
+    # validates only; refresh-gateway-stars has its own pipeline-level rules.
+    REFRESH_GATEWAY_STARS: "1"
   script:
     # The protected controller can check an exact release candidate without
     # publishing it or changing the main branch's human promotion policy.

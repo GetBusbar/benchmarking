@@ -95,7 +95,7 @@ async function route(request, env) {
   if (raw) {
     const response = await env.ASSETS.fetch(new Request(ORIGIN + path + ".gz"));
     if (!response.ok) return error(404, "Unknown run");
-    return new Response(response.body, { headers: { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Cache-Control": "public, max-age=31536000, immutable", ETag: `"${raw[1].slice(-64)}"` } });
+    return new Response(response.body, { encodeBody: "manual", headers: { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Cache-Control": "public, max-age=31536000, immutable", ETag: `"${raw[1].slice(-64)}"` } });
   }
   let asset = path;
   if (path === "/api/v1") asset = "/api/v1/index.json";
@@ -144,6 +144,8 @@ export default {
       response = new Response(body, { status: response.status, headers });
     }
     if (response.ok && request.headers.get("If-None-Match")?.split(/,\s*/).some(tag => tag === headers.get("ETag") || tag === "*")) return new Response(null, { status: 304, headers });
-    return new Response(request.method === "HEAD" || response.status === 204 ? null : response.body, { status: response.status, headers });
+    // Preserve already encoded asset streams, especially immutable raw JSON.
+    // Workers' default automatic encoding would gzip our gzip bytes again.
+    return new Response(request.method === "HEAD" || response.status === 204 ? null : response.body, { status: response.status, headers, encodeBody: "manual" });
   },
 };
