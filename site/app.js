@@ -549,7 +549,7 @@ function frontierCell(rec, boundMs) {
      "no rung held this tail", distinct from "no frontier" (never measured at all).
      Detected via mcode(), not the envelope's raw `.value` (invariant C5: display rules live in
      accessors) - mcode returns null for below-resolution while mval coerces it to 0. */
-  if (mcode(rd.rps) == null) return { ...c, text: "0", why: "no rung held this tail", reading: rd };
+  if (mcode(rd.rps) == null) return { ...c, v: null, na: true, text: "n/a", why: "no rung held this tail", reading: rd };
   const floor = rd.lower_bound === true;
   return { ...c, text: floor ? `≥ ${c.text}` : c.text, note: readingSentence(rd, c.v), reading: rd, floor };
 }
@@ -3612,7 +3612,7 @@ function renderMatrix() {
   }
   // Per-gateway tallies over the full grid; sorted by pass count desc, then name.
   const tally = (g) => {
-    const t = { pass: 0, fail: 0, notconf: 0, unprobed: 0, unverified: 0, untestable: 0 };
+    const t = { pass: 0, fail: 0, notconf: 0, notdeclared: 0, unprobed: 0, unverified: 0, untestable: 0 };
     for (const e of MATRIX_CELLS) for (const c of MATRIX_CELLS) {
       const cell = matrixCell(g, e, c);
       if (!cell) continue;
@@ -3635,6 +3635,7 @@ function renderMatrix() {
       ? [`<b class="pass-count">0</b>/36 pass`, `<span class="matrix-nores">${esc(matrixFailureReason(g))}</span>`]
       : [`<b class="pass-count">${t.pass}</b>/36 pass`];
     if (t.fail) bits.push(`${t.fail} fail`);
+    if (t.notdeclared) bits.push(`${t.notdeclared} not declared`);
     if (t.notconf) bits.push(`${t.notconf} not configured`);
     if (t.untestable) bits.push(`${t.untestable} untestable (mock limit)`);
     if (t.unverified) bits.push(`${t.unverified} not verified`);

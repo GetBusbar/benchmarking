@@ -40,7 +40,7 @@ await check("unknown routes return 404", async () => {
   const r = await fetch(new URL("/api/v1/gateways/publication-check-missing", origin));
   assert.equal(r.status, 404);
 });
-for (const userAgent of ["GPTBot/1.3", "Googlebot/2.1", "ChatGPT-User/1.0", "OAI-SearchBot/1.0", "ClaudeBot/1.0", "PerplexityBot/1.0", "Python-urllib/3.14"]) {
+for (const userAgent of ["GPTBot/1.3", "Googlebot/2.1", "ChatGPT-User/1.0", "OAI-SearchBot/1.0", "ClaudeBot/1.0", "Claude-User/1.0", "Claude-SearchBot/1.0", "Bingbot/2.0", "PerplexityBot/1.0", "Python-urllib/3.14"]) {
   await check(`public retrieval with ${userAgent}`, async () => {
     const robots = await get("/robots.txt", userAgent);
     assert.match(await robots.text(), /User-agent: \*\nAllow: \//);
