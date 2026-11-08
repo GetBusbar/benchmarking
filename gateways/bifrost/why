@@ -18,3 +18,5 @@ network_config upstream  # base_url -> the mock
 # LIVE config does not set it: the harness sets it for every gateway from the cores it pinned
 # (manifest.rs's pinned_parallelism), so no entrant states its own.
 GOMAXPROCS     bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
+
+Native ingress routes require /anthropic, /genai, /cohere and /bedrock prefixes in transports/v2.5.0 (69f4d56d18b9ba00ac5f9cf969b4501a882b9967), transports/bifrost-http/integrations/{anthropic,genai,cohere,bedrock}.go. Bedrock cross-provider ingress uses a URL-encoded provider/model ID; without that prefix Bifrost chooses its unconfigured Bedrock upstream. The whole Bedrock upstream column remains untestable because the plain-HTTP mock cannot replace its HTTPS endpoint. Direct pinned-image probes and observed upstream dialects are retained under results/diagnostics/refresh-configuration/bifrost-native-route-probe-2026-11-08.json. A successful HTTP status alone does not prove the requested upstream dialect; the frozen engine re-verification still withholds mismatches.
