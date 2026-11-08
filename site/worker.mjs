@@ -46,6 +46,7 @@ function integer(value, fallback, min, max) {
 }
 async function route(request, env) {
   const url = new URL(request.url), path = decodeURIComponent(url.pathname);
+  if (url.hostname === "www.onthebench.ai") { url.hostname = "onthebench.ai"; return Response.redirect(url.href, 308); }
   if (/%2f|%5c|%2e/i.test(path) || path.includes("\\") || path.startsWith("/_publication")) return error(404, "Not found");
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (!["GET", "HEAD"].includes(request.method)) return new Response(null, { status: 405, headers: { Allow: "GET, HEAD, OPTIONS" } });

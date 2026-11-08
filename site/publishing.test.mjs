@@ -93,6 +93,9 @@ test("published HTTP interface works without JavaScript", { skip: !artifact }, a
   const paged = await r.json(); assert.equal(paged.measurements.length, 1); assert.ok(paged.next);
   assert.equal((await call(`/api/v1/measurements?gateway=${first}&limit=1`, { headers: { "If-None-Match": r.headers.get("ETag") } })).status, 304);
   assert.equal((await call("/api/v1", { method: "POST" })).status, 405);
+  const www = await worker.fetch(new Request("https://www.onthebench.ai/gateways?mode=same"), env);
+  assert.equal(www.status, 308);
+  assert.equal(www.headers.get("Location"), "https://onthebench.ai/gateways?mode=same");
   const rawUrl = pub.measurements.find(m => m.provenance.raw_result_url).provenance.raw_result_url;
   const raw = await worker.fetch(new Request(rawUrl), env);
   const bytes = gunzipSync(Buffer.from(await raw.arrayBuffer()));
