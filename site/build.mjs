@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // One checked input bundle, one deployable directory. Never upload source/tests.
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
 import { resolve, join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -11,7 +11,7 @@ import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, s
 import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords, PROTOCOLS } from "./public-data.mjs";
 import { measurementTable, gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
 
-import { historicalMeasurements, historyPoints, historyArticle, fieldRankings, metricDirection, PROJECTOR } from "./history.mjs";
+import { expandHistorical, historicalMeasurements, historyPoints, historyArticle, fieldRankings, metricDirection, PROJECTOR } from "./history.mjs";
 import { semanticGuide, retrievalGuide, compactCsv, DATA_LICENSE, gatewayFamily } from "./retrieval.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -63,9 +63,18 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   write("/_publication/template.html", template);
   json("/ui-shell.json", shellViews(template));
   const projector = `${PROJECTOR}-${hash(['history.mjs','seal-matrix.mjs','seal.mjs','public-data.mjs','states.mjs'].map(file=>readFileSync(join(root,'site',file),'utf8')).join('\n'))}`;
-  const retention = [], deferredHistoryPages = [], placements = new Map();
-  const retain = (key, value) => retention.push({ key, value: typeof value === "string" ? value : JSON.stringify(value) });
-  const historicalRecords = new Map();
+  const deferredHistoryPages = [], placements = new Map();
+  // Stream the upload manifest: serializing all retained evidence at once doubles
+  // its memory cost and can kill the CI runner before publication.
+  const retentionPath = join(out, "_publication/retention.json");
+  writeFileSync(retentionPath, "[");
+  let retained = 0;
+  const retain = (key, value, base64 = false) => {
+    const entry = { key, value: typeof value === "string" ? value : JSON.stringify(value), ...(base64 ? { base64: true } : {}) };
+    appendFileSync(retentionPath, `${retained++ ? "," : ""}${JSON.stringify(entry)}`);
+  };
+  const selectedFiles = new Set(data.gateways.flatMap(g => [g.snapshot_file,
+    ...Object.values(g.matrix?.upstreams || {}).flatMap(u => Object.values(u.cells || {}).map(c => c.__run?.file))]).filter(Boolean));
   const families = JSON.parse(readFileSync(join(root, "site/gateway-families.json"), "utf8"));
   const familyOf = id => Object.entries(families).find(([, aliases]) => aliases.includes(id))?.[0] || id;
   const archives = [], byFile = new Map(), byHash = new Map();
@@ -79,7 +88,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null };
       const compressed = gzipSync(bytes, { level: 9 });
       write(`/api/v1/runs/${id}/raw.json.gz`, compressed);
-      retention.push({key: `raw/${id}`, value: compressed.toString("base64"), base64: true});
+      retain(`raw/${id}`, compressed.toString("base64"), true);
       const summary = { schema_version: "1.0", ...item, raw_result_url: `${ORIGIN}/api/v1/runs/${id}/raw.json`, source_url: `${ORIGIN}/gateways/runs/${id}`, disclosure: DISCLOSURE };
       json(`/api/v1/benchmarks/${id}.json`, summary);
       page(`/gateways/runs/${id}`, renderArticle(template, {
@@ -97,12 +106,12 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       item.available_metrics = [...new Set(records.flatMap(m => Object.keys(m.metrics)))].sort();
       item.measurements_url = `${ORIGIN}/api/v1/runs/${id}/measurements`;
       item.source_url = summary.source_url; item.raw_result_url = summary.raw_result_url;
-      historicalRecords.set(id, records);
-      json(`/_publication/history/runs/${id}.json`, compactRecords(records));
-      retain(`history/${projector}/runs/${id}`,compactRecords(records));
+      const bundle = compactRecords(records);
+      json(`/_publication/history/runs/${id}.json`, bundle);
+      retain(`history/${projector}/runs/${id}`, bundle);
       archives.push(item); byHash.set(sha256, item);
     }
-    if (current) byFile.set(basename(file), { ...item, snapshot });
+    if (current && selectedFiles.has(basename(file))) byFile.set(basename(file), { ...item, snapshot });
   }
   const dir = join(root, "results/snapshots");
   if (existsSync(dir)) for (const file of readdirSync(dir).filter(f => f.endsWith(".json")).sort()) archive(file, readFileSync(join(dir, file)), true);
@@ -126,7 +135,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       if (entry.isDirectory()) inventory(file);
       else if (entry.name.endsWith('.json')) {
         const bytes = readFileSync(file);
-        try { const raw = JSON.parse(bytes); if (raw.gateway && raw.matrix) archive(file, bytes); } catch (e) { if (!(e instanceof SyntaxError)) throw e; }
+        try { archive(file, bytes); } catch (e) { if (!(e instanceof SyntaxError)) throw e; }
       }
     }
   }
@@ -148,7 +157,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json('/_publication/history/catalog.json', { catalog_id: catalogId, projector, runs: archives });
   retain(`history/catalogs/${catalogId}`, { catalog_id: catalogId, projector, runs: archives });
   for (const family of new Set(archives.map(r => r.gateway_family))) {
-    const records = archives.filter(r => r.gateway_family === family).flatMap(r => historicalRecords.get(r.id) || []);
+    const records = archives.filter(r => r.gateway_family === family).flatMap(r => r.evidence_available ? expandHistorical(JSON.parse(readFileSync(join(out, `_publication/history/runs/${r.id}.json`), "utf8"))) : []);
     const q={ingress:'openai',egress:'openai',metric:'added_latency_p99_us'};
     const familyRuns=archives.filter(r=>r.gateway_family===family);
     const readings=new Map(historyPoints(records,q).map(p=>[p.run_id,p]));
@@ -273,7 +282,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   write("/sitemap.xml", `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${routes.map(r => `<url><loc>${ORIGIN}${esc(r.path)}</loc></url>`).join("")}</urlset>\n`);
   write("/404.html", renderArticle(template, { path: "/404", title: "Page not found", body: '<h1>Page not found</h1><p><a href="/gateways">Browse published gateway benchmarks</a>.</p>' }));
   json("/_publication/routes.json", routes);
-  json("/_publication/retention.json",retention);
+  appendFileSync(retentionPath, "]\n");
   console.log(`publish: ${data.gateways.length} gateways, ${measurements.length} cells, ${archives.length} immutable runs, ${routes.length} HTML pages -> ${out}`);
   return { publication, routes, archives };
 }
