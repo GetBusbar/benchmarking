@@ -394,10 +394,10 @@ if [ "$_NOGATE" = 0 ] && [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$BENCH_ENGINE_COMMI
     _tree_sub="$(git -C "$HERE" rev-parse "${BENCH_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
     _eng_sub="$(git -C "$HERE" rev-parse "${BENCH_ENGINE_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
     if [ "$_tree_sub" != "$_eng_sub" ]; then
-      # Only this cfg(test)-gated fixture is exempt; release source and build
+      # Only these cfg(test)-gated fixtures are exempt; release source and build
       # inputs still have to match the commit recorded by the frozen binary.
-      if [ "$_sub" = engine ] && git -C "$HERE" diff --quiet "$BENCH_ENGINE_COMMIT" "$BENCH_COMMIT" -- engine ':!engine/src/tests/manifest_real_field_tests.rs'; then
-        echo "[pin] only the cfg(test) real-field fixture changed; frozen release sources are unchanged"
+      if [ "$_sub" = engine ] && git -C "$HERE" diff --quiet "$BENCH_ENGINE_COMMIT" "$BENCH_COMMIT" -- engine ':!engine/src/tests/manifest_real_field_tests.rs' ':!engine/src/tests/suite_tests.rs'; then
+        echo "[pin] only cfg(test) fixtures changed; frozen release sources are unchanged"
         continue
       fi
       echo "REFUSING: $_sub/ differs between the tree this run fetches and the engine it claims." >&2
