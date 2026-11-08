@@ -1,0 +1,192 @@
+{
+  "scope": "Five revised configurations; excludes discarded November 8 batch. This compares capability evidence, not performance or full readiness.",
+  "gateways": [
+    {
+      "gateway": "one-api",
+      "latest_prior_snapshot": "results/snapshots/result_one-api_2026-08-03T22-17-39Z.json",
+      "latest_prior_sha256": "11de2fe9f88cb0feb1f7defdde00f6ac6a769b77cb80b027b2362a0652915073",
+      "latest_prior_measured_at": "2026-08-03T22:17:39Z",
+      "definition_sha256": "b3e32159e692bd2f2f8659c289f52b986d586ace0cf6cdd29a1426584da7bca0",
+      "prior_served_pairs": [
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "openai>anthropic",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "openai>anthropic",
+        "openai>cohere",
+        "openai>gemini"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 5
+    },
+    {
+      "gateway": "bifrost",
+      "latest_prior_snapshot": "results/snapshots/result_bifrost_2026-08-26T19-08-46Z.json",
+      "latest_prior_sha256": "9b2b5f70d61994ac469a86d5949dc62ffadcdb5dfcd808ca2c1a0c0f08368019",
+      "latest_prior_measured_at": "2026-08-26T19:08:46Z",
+      "definition_sha256": "1c31ebe496927b56c1736513deec25002417eaddb64e9feed72287b3f061e331",
+      "prior_served_pairs": [
+        "anthropic>openai-responses",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>cohere",
+        "anthropic>gemini",
+        "anthropic>openai",
+        "anthropic>openai-responses",
+        "bedrock>anthropic",
+        "bedrock>cohere",
+        "bedrock>gemini",
+        "bedrock>openai",
+        "bedrock>openai-responses",
+        "cohere>anthropic",
+        "cohere>cohere",
+        "cohere>gemini",
+        "cohere>openai",
+        "gemini>anthropic",
+        "gemini>cohere",
+        "gemini>gemini",
+        "gemini>openai",
+        "gemini>openai-responses",
+        "openai-responses>anthropic",
+        "openai-responses>cohere",
+        "openai-responses>gemini",
+        "openai-responses>openai",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "anthropic>anthropic",
+        "anthropic>cohere",
+        "anthropic>gemini",
+        "anthropic>openai",
+        "bedrock>anthropic",
+        "bedrock>cohere",
+        "bedrock>gemini",
+        "bedrock>openai",
+        "bedrock>openai-responses",
+        "cohere>anthropic",
+        "cohere>cohere",
+        "cohere>gemini",
+        "cohere>openai",
+        "gemini>anthropic",
+        "gemini>cohere",
+        "gemini>gemini",
+        "gemini>openai",
+        "gemini>openai-responses",
+        "openai-responses>anthropic",
+        "openai-responses>cohere",
+        "openai-responses>gemini",
+        "openai-responses>openai"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 5
+    },
+    {
+      "gateway": "portkey",
+      "latest_prior_snapshot": "results/snapshots/result_portkey_2026-08-03T22-17-41Z.json",
+      "latest_prior_sha256": "55e6c9f8627b83ac5cc64c85cff37ec1fbe3c2f4e07ec33ca56aa14ae2c8e16b",
+      "latest_prior_measured_at": "2026-08-03T22:17:41Z",
+      "definition_sha256": "97630831079ad9772b4a0fed011c1a4d6ad85e4055db418fcddb76075571345f",
+      "prior_served_pairs": [
+        "anthropic>anthropic",
+        "anthropic>bedrock",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>bedrock",
+        "bedrock>bedrock",
+        "cohere>cohere",
+        "gemini>gemini",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "bedrock>bedrock",
+        "cohere>cohere",
+        "gemini>gemini"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 4
+    },
+    {
+      "gateway": "kong",
+      "latest_prior_snapshot": "results/snapshots/result_kong_2026-08-03T22-17-28Z.json",
+      "latest_prior_sha256": "15ab99f39305beb017cb61146e45e6036349ad37ae66ee0d59cdd0064fe4e7d5",
+      "latest_prior_measured_at": "2026-08-03T22:17:28Z",
+      "definition_sha256": "eab3db1e2bf342000b45f4b49351a0636bc04aabaa7a94a6d39bd542560ad650",
+      "prior_served_pairs": [
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "bedrock>bedrock",
+        "gemini>gemini",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "bedrock>bedrock",
+        "gemini>gemini",
+        "openai>cohere"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 5
+    },
+    {
+      "gateway": "tensorzero",
+      "latest_prior_snapshot": "results/snapshots/result_tensorzero_2026-08-03T22-17-45Z.json",
+      "latest_prior_sha256": "8d3c2b0262d67569e6d1c72c9670e49674df1989438d4705f67c8db9897abc67",
+      "latest_prior_measured_at": "2026-08-03T22:17:45Z",
+      "definition_sha256": "235b6506aa3b789d4b952c3a4c716de0d8b5eff0e4f61517163a3c188f1ca0a3",
+      "prior_served_pairs": [
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>openai",
+        "openai>openai-responses"
+      ],
+      "configured_pairs": [
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>openai",
+        "openai>openai-responses"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 4
+    }
+  ]
+}
