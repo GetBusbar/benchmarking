@@ -53,8 +53,18 @@ export function renderDashboard(template, data, path, publication) {
   document.querySelectorAll("[data-wired]").forEach(n => n.removeAttribute("data-wired"));
   // A crawler must be able to read a protocol verdict without interpreting color
   // or relying on an aria attribute that its text extractor might discard.
-  for (const cell of document.querySelectorAll(".cell[aria-label]")) {
-    cell.innerHTML = `<span class="sr-only">${esc(cell.getAttribute("aria-label"))}</span>`;
+  for (const cell of document.querySelectorAll(".cell[data-gw]")) {
+    const gateway = data.gateways.find(g => g.key === cell.dataset.gw);
+    const record = gateway?.matrix?.upstreams?.[cell.dataset.egress]?.cells?.[cell.dataset.cell];
+    const label = cell.getAttribute("aria-label") || `${cell.dataset.cell} → ${cell.dataset.egress}: ${app.cellState(record || {})[1]}`;
+    cell.innerHTML = `<span class="sr-only">${esc(label)}</span>`;
+  }
+  // Older production bundles predate the canvas's accessible data table. The
+  // shared chart selector supplies it without deriving a second set of values.
+  if (!document.getElementById("chart-canvas-data")) {
+    const metric = app.CHART_METRICS.find(m => m.id === state.chartMetric) || app.CHART_METRICS[0];
+    const rows = app.chartRows(metric, app.applyFilters(data.gateways, state), state);
+    document.getElementById("chart-panel")?.insertAdjacentHTML("beforeend", `<table class="sr-only" id="chart-canvas-data"><caption>${esc(metric.label)}</caption><thead><tr><th>Gateway</th><th>Value</th><th>Unit</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.v)}</td><td>${esc(metric.unit)}</td></tr>`).join("")}</tbody></table>`);
   }
   const title = state.view === "gateways"
     ? "AI Gateway Benchmarks: Latency, Throughput & Protocol Support | On the Bench"
@@ -63,6 +73,7 @@ export function renderDashboard(template, data, path, publication) {
   metadata(document, url.pathname, title,
     `Reproducible AI gateway benchmarks. Measurement dates and protocol cells are disclosed; gateway overhead is not model response latency.`,
     datasetMetadata(publication, url.pathname), markdown);
+  document.head.insertAdjacentHTML("beforeend", '<style data-publication>.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style>');
   document.documentElement.setAttribute("data-prerendered", "true");
   document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><style>canvas{display:none}#chart-canvas-data{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal}</style></noscript>`);
   document.querySelector("main").insertAdjacentHTML("beforeend",
