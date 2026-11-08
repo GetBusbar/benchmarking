@@ -20,7 +20,7 @@ const freshness = {
 export function schemas() {
   return {
     ActiveField: object({id:str,engine_commit:str,started_at:str,gateways:array(str)}),
-    Trend: object({ tolerance_percent: { const: 5 }, change_percent: nn, state: { enum: ['improved','regressed','flat','not_comparable'] }, symbol: str, label: str, previous_run_id: ns }, ['tolerance_percent','change_percent','state','symbol','label']),
+    Trend: object({ tolerance_percent: { const: 5 }, change_percent: nn, state: { enum: ['improved','regressed','flat','not_comparable'] }, symbol: str, label: str, reasons: array(str), previous_run_id: ns }, ['tolerance_percent','change_percent','state','symbol','label']),
     HistoryPoint: object({run_id:str,measurement_id:ns,gateway_id:str,gateway_build:ns,measured_at:ns,engine:ns,metric:str,value:nn,state:str,reason:ns,definition_id:ns,disposition:str,trend:ref('Trend'),provenance:object({run_url:ns},['run_url'])},['run_id','gateway_id','gateway_build','measured_at','engine','value','state','disposition','provenance']),
     HistoryComparison: object({metric:str,before:nn,after:nn,status:{enum:['comparable','incomparable','insufficient_evidence']},reasons:array(str),change_percent:nn,trend:ref('Trend')}),
     HistoryPage: object({schema_version:str,catalog_id:str,projector:str,total:num,limit:num,offset:num,returned:num,next:ns,metrics:array(str),definitions:map(str),points:array(ref('HistoryPoint')),comparisons:array(ref('HistoryComparison'))}),

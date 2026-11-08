@@ -11,7 +11,7 @@ import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, s
 import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords, PROTOCOLS } from "./public-data.mjs";
 import { measurementTable, gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
 
-import { expandHistorical, historicalMeasurements, historyPoints, historyArticle, fieldRankings, metricDirection, PROJECTOR } from "./history.mjs";
+import { expandHistorical, historicalMeasurements, historyPoints, currentTrends, historyArticle, fieldRankings, rankChanges, metricDirection, PROJECTOR } from "./history.mjs";
 import { semanticGuide, retrievalGuide, compactCsv, DATA_LICENSE, gatewayFamily } from "./retrieval.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -158,6 +158,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   retain(`history/catalogs/${catalogId}`, { catalog_id: catalogId, projector, runs: archives });
   for (const family of new Set(archives.map(r => r.gateway_family))) {
     const records = archives.filter(r => r.gateway_family === family).flatMap(r => r.evidence_available ? expandHistorical(JSON.parse(readFileSync(join(out, `_publication/history/runs/${r.id}.json`), "utf8"))) : []);
+    for (const gateway of data.gateways.filter(g => familyOf(g.key) === family)) {
+      gateway.history_family = family;
+      gateway.history_trends = currentTrends(records, projectMeasurements(gateway, byFile).map(m => records.find(r => r.measurement_id === m.measurement_id) || m));
+    }
     const q={ingress:'openai',egress:'openai',metric:'added_latency_p99_us'};
     const familyRuns=archives.filter(r=>r.gateway_family===family);
     const readings=new Map(historyPoints(records,q).map(p=>[p.run_id,p]));
@@ -228,7 +232,13 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const baselines = join(root, 'results/baselines');
   if (existsSync(baselines)) for (const name of readdirSync(baselines)) {
     const file = join(baselines,name,'collection.json.gz');
-    if (existsSync(file)) { const old = JSON.parse(gunzipSync(readFileSync(file))); retainField(old,name,old.published_at); }
+    if (existsSync(file)) {
+      const old = JSON.parse(gunzipSync(readFileSync(file))); retainField(old,name,old.published_at);
+      for (const gateway of data.gateways) for (const trend of Object.values(gateway.history_trends || {})) {
+        const movement = rankChanges(old,publication,{ingress:trend.ingress,egress:trend.egress,metric:trend.metric,bound:trend.bound})[gateway.key];
+        if (movement?.previous_run_id === trend.previous_run_id) trend.rank_change = movement;
+      }
+    }
   }
   retainField(publication, 'Current field', publishedAt);
   for (const family of new Set(archives.map(r=>r.gateway_family))) for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) {
@@ -245,6 +255,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json("/api/v1/schema/index.json", schemaIndex());
   json("/api/v1/schema/measurement.json", measurementSchema());
   json("/openapi.json", openapi());
+  json("/data.json", data);
   for (const path of ["/", "/gateways", ...["memory", "performance", "frontier", "streaming", "matrix", "charts", "method"].map(v => `/gateways/${v}`)]) page(path, renderDashboard(template, data, path, publication));
   json("/api/v1/methodology.json", { schema_version: "1.0", url: `${ORIGIN}/gateways/method`, markdown: readFileSync(join(out, "gateways/method.md"), "utf8"), definitions: data.definitions ?? {}, comparison_policy: POLICY, disclosure: DISCLOSURE });
   for (const g of data.gateways) {
@@ -269,7 +280,14 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     json(`/api/v1/gateways/${key}.json`, { schema_version: "1.0", gateway: { key, current: false }, measurements: [], history: histories, disclosure: DISCLOSURE });
   }
   page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", structured: { "@context": "https://schema.org", "@type": "DataCatalog", license: DATA_LICENSE, name: "On the Bench published gateway evidence", url: `${ORIGIN}/gateways/data`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, dataset: publication.gateways.map(g => ({ "@type": "Dataset", license: DATA_LICENSE, name: g.name + " measurements", url: g.url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: g.json_url } })) }, body: dataArticle(publication) }));
-  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Historical benchmark runs", body: `<h1>Historical benchmark runs</h1>${disclosureHtml}<p><a href="/api/v1/runs">Paginated run catalog</a> · <a href="/api/v1/runs?family=busbar">All Busbar versions</a>. Gateway IDs identify tested variants; gateway_family groups their history.</p><ul>${archives.slice(0, 50).map(r => `<li><a href="${esc(r.source_url || `/gateways/runs/${r.id}`)}">${esc(r.gateway_id)} — ${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
+  const historyFamilies = [...new Set(archives.map(r => r.gateway_family))].sort();
+  const historyDirectory = historyFamilies.map(family => {
+    const runs = archives.filter(r => r.gateway_family === family);
+    const dates = runs.map(r => r.measured_at).filter(Boolean).sort();
+    const name = data.gateways.find(g => familyOf(g.key) === family)?.display || family;
+    return `<tr><td><a href="/gateways/${encodeURIComponent(family)}/history">${esc(name)}</a></td><td>${runs.length}</td><td>${esc(dates.at(-1)?.slice(0, 10) || "Not recorded")}</td><td><a href="/gateways/${encodeURIComponent(family)}/history">View history →</a></td></tr>`;
+  }).join("");
+  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Gateway history", body: `<h1>Gateway history</h1><p>Choose a gateway to see its previous results, changes and original evidence. All tested versions are grouped together.</p><div class="table-scroll"><table><thead><tr><th>Gateway</th><th>Retained runs</th><th>Latest measurement</th><th>History</th></tr></thead><tbody>${historyDirectory}</tbody></table></div><p><a href="/api/v1/runs">Machine-readable run catalog</a></p>` }));
   write("/gateways/data.csv", compactCsv(measurements, measurements, datasetId));
   const index = `# On the Bench\n\n> Reproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Dataset reuse license](${ORIGIN}/gateways/license)\n- [Compact summary — start here](${ORIGIN}/api/v1/summary)\n- [Gateway catalog](${ORIGIN}/api/v1/gateways)\n- [API discovery](${ORIGIN}/api/v1)\n- [Latest dataset — large; prefer summary or paginated measurements](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Retrieval alternatives\n\nMarkdown pages also have text/plain .txt twins. Use the HTML URL without .md if your tool rejects text/markdown.\n\n- [Compact CSV](${ORIGIN}/gateways/data.csv)\n- [Schema index](${ORIGIN}/api/v1/schema)\n\n## Example workflow\n\nCompare Busbar and Bifrost: read the gateway catalog, then [compare OpenAI to OpenAI p99 added latency](${ORIGIN}/api/v1/compare?a=busbar&b=bifrost&ingress=openai&egress=openai&metric=added_latency_p99_us). Inspect comparability.status before reporting a ratio; read measured_at, definitions, and provenance.run_url. Cite both runs and methodology with the numbers and caveats.\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Measurement pages are capped at 1 MiB of UTF-8 JSON. Always follow next until null, even when fewer than limit rows are returned. Use gateway, ingress, egress and metric filters to narrow retrieval.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Distinguish measured_at from generated_at and published_at (unknown when null). Age is relative to age_as_of, not retrieval time. current_metadata contains dated repository statistics, not run-time statistics.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
   write("/llms.txt", index);

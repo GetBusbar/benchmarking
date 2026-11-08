@@ -465,6 +465,22 @@ const ZERO_WHY = {
    gateway does nothing", when the envelope's own note says "no tested load held the qualifying gates"
    or "offered the load, sustained none". The ZERO_WHY short form rides under the number; the full
    sentence stays on the tooltip. A zero with no note renders bare, exactly as before. */
+function withHistoryTrend(cell, g, record, key, bound) {
+  const p = record && record.path;
+  if (cell.na || !p) return cell;
+  const ingress = p.ingress || p.dialect, egress = p.egress || p.dialect;
+  const trend = g.history_trends && g.history_trends[`${ingress}/${egress}/${key}${bound === undefined ? "" : "/" + (bound == null ? "none" : bound)}`];
+  if (!trend) return cell;
+  const query = new URLSearchParams({ingress,egress,metric:trend.metric,a:trend.previous_run_id,b:trend.current_run_id});
+  if (trend.bound != null) query.set("bound",trend.bound);
+  return {...cell,historyTrend:{...trend,url:`/gateways/${encodeURIComponent(g.history_family || g.key)}/history?${query}`}};
+}
+function historyTrendMarkup(trend) {
+  if (!trend) return "";
+  const rank = trend.rank_change;
+  const detail = `${rank ? `Position ${rank.before} → ${rank.after}. ` : ""}${trend.label}: ${trend.change_percent > 0 ? "+" : ""}${trend.change_percent.toFixed(1)}% since ${trend.previous_measured_at.slice(0,10)}. Within ±5% is roughly unchanged.`;
+  return ` <a class="metric-trend trend-${esc(trend.state)}" href="${esc(trend.url)}" title="${esc(detail)}" aria-label="${esc(detail)}">${esc(trend.symbol)}${rank && rank.change ? ` <span class="rank-change">(${rank.change > 0 ? "+" : ""}${rank.change})</span>` : ""}</a>`;
+}
 function metricTd(cell, sc = "") {
   if (cell.na)
     return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}${cell.why ? `<span class="zero-why">${esc(cell.why)}</span>` : ""}</td>`;
@@ -472,7 +488,7 @@ function metricTd(cell, sc = "") {
   // note token: a frontier reading where no rung held the bound is a measured 0 whose reason lives on the
   // READING, not on the envelope, and "0" alone would read as "no data" for the gateways it matters most on.
   const zeroWhy = cell.why || (cell.v === 0 && cell.env && ZERO_WHY[cell.env.note]);
-  return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${
+  return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${historyTrendMarkup(cell.historyTrend)}${
     zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
 }
 function metric(env, fmt = fmtInt) {
@@ -1495,14 +1511,14 @@ function passCell(g, key, fmt) {
    a sealed envelope; metric() reads it. A gateway that did not stream (no g.streaming) reads n/a. */
 function streamCell(g, key, fmt) {
   const s = canonicalStreaming(g);
-  return s ? metric(s[key], fmt) : { v: null, text: "n/a", na: true };
+  return s ? withHistoryTrend(metric(s[key], fmt), g, s, key) : { v: null, text: "n/a", na: true };
 }
 /* memCell: the memory columns read the record memoryFor() chose: the per-cell window for the chosen mode,
    or (legacy bundle) the single post-6x6 window. Each metric is a sealed envelope; metric() reads it. A
    gateway with no record for the chosen cell reads n/a; nothing is ever substituted from another cell. */
 function memCell(g, key, fmt, st = state) {
   const m = memoryFor(g, st);
-  return m ? metric(m[key], fmt) : { v: null, text: "n/a", na: true };
+  return m ? withHistoryTrend(metric(m[key], fmt), g, m, key) : { v: null, text: "n/a", na: true };
 }
 
 /* DELETED: `ZERO_RPS_NOTE` / `withZeroNote(cell)`, which annotated a throughput 0 with "served, but no
@@ -1595,7 +1611,7 @@ function chooserDialects(g, st = state) {
 // value reads n/a. No gate here — the envelope carries the honesty decision (Design E §2.3).
 function chooserPerfCell(g, key, fmt, st = state) {
   const p = chooserCellPerf(g, st);
-  return p ? metric(p[key], fmt) : { v: null, text: "n/a", na: true };
+  return p ? withHistoryTrend(metric(p[key], fmt), g, p, key) : { v: null, text: "n/a", na: true };
 }
 // The chosen cell's STREAMING record (metrics as sealed envelopes). Per-cell streaming is only measured on
 // the diagonal today (gen-data projects it to g.streaming), so:
@@ -1636,7 +1652,7 @@ function chooserCellStream(g, st = state) {
 function chooserStreamCell(g, key, fmt, st = state) {
   if (st.mode === "peak") return streamCell(g, key, fmt);
   const s = chooserCellStream(g, st);
-  return s ? metric(s[key], fmt) : { v: null, text: "n/a", na: true };
+  return s ? withHistoryTrend(metric(s[key], fmt), g, s, key) : { v: null, text: "n/a", na: true };
 }
 // Does gateway g have a chosen cell to show at all (a served, measured cell)? Drives whether a row
 // appears / how the pill renders. Peak: any best_cell. Same/Custom: the exact cell is served.
@@ -1737,7 +1753,7 @@ const COL_NAME = {
     // window of one measurement - which is a much larger claim than the metric supports. The finding
     // is not hidden: the Growth column carries the rate, and the per-cell tooltip says what each
     // window did and, when it did not settle, whether it climbed or merely swung.
-    return `<td class="name">${a}</td>`;
+    return `<td class="name">${a}<br><a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>`;
   },
 };
 // The "Tested on" column: present in EVERY mode (identical column set across Own cell/Same/Custom). It reads
@@ -1899,7 +1915,7 @@ function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
   const cell = frontierCell(p, boundMs);
   const rd = cell.reading;
   if (cell.na || !rd || rd.concurrency == null) return cell;
-  return { ...cell, text: `${cell.text} @ ${fmtInt(rd.concurrency)} conc` };
+  return withHistoryTrend({ ...cell, text: `${cell.text} @ ${fmtInt(rd.concurrency)} conc` }, g, p, "throughput_rps", boundMs);
 }
 // frontierBoundCell: the chosen cell's reading at ONE NAMED bound, for the frontier tab's per-bound
 // columns. No inline concurrency (six columns of "@ N conc" is noise); the number and its observed tail are
@@ -1907,7 +1923,7 @@ function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
 function frontierBoundCell(g, boundMs, st = state) {
   const p = chooserCellPerf(g, st);
   if (!p) return { v: null, text: "n/a", na: true };
-  return frontierCell(p, boundMs);
+  return withHistoryTrend(frontierCell(p, boundMs), g, p, "throughput_rps", boundMs);
 }
 /* frontierFullRate(frontier): the UNBOUNDED reading's rate, i.e. the denominator that "full rate" means.
    Named, and read through the same accessor as every other rate, so the share stated in the shape column and
