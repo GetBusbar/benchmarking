@@ -1,0 +1,912 @@
+{
+  "schema_version": 1,
+  "gateway_provenance": {
+    "binary_name": "litellm-gateway",
+    "binary_sha256": "ae1fec119755a8a2ae5b6a9d56225c34205ce7a54548cb11696b03b2557ce01b",
+    "cargo_lock_sha256": "ae9550da9f00c3ffb10ac2974d7d33c3784902c702c74c6aa85f1b83f1efcb2d",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+    "source_commit": "b7d579fab2818968322ef96e5b8e98dc8178fafc",
+    "source_dirty": false
+  },
+  "definitions": {
+    "memory": "See `matrix.memory.protocol` and each cell's `memory.protocol`, which state the durations and both plateau thresholds formatted from the constants that ran.",
+    "perf.added_latency": "WHAT THE GATEWAY ADDS, at concurrency 1. The gateway leg's percentile minus the same request taken straight to the mock, one at a time, both legs in the same window. No search and no threshold: there is nothing to stop early and nothing to decide. A difference at or below what the rig can resolve publishes `below_resolution` - the best result the comparison can express - and every surface renders that apart from a never-measured hole.",
+    "perf.cost": "WHAT A REQUEST COST, in microseconds of gateway CPU. User plus system time, summed across the gateway's whole PROCESS TREE (a gateway that forks workers keeps its CPU in the children, and a parent-only reading would report a busy gateway as idle), sampled as the DIFFERENCE across one load window and divided by the requests that window actually completed. WHY IT EXISTS BESIDE THROUGHPUT. Peak rps is a SATURATION number: once a gateway fills the cores it is pinned to, the ladder stops describing the gateway and starts describing the box, and two gateways at that wall read the same however different they are. Cost per request has no such ceiling - at saturation both serve the same rate by definition, and the one doing less work per request still reads lower. It is also the figure that maps to money, since half the CPU serves the same traffic on half the instance. MEASURED AT ONE CONCURRENCY, c=8, HELD IDENTICAL FOR EVERY GATEWAY and published as `cost_window_conc`. No single concurrency is below saturation for a field spanning double-digit to five-figure rps, so matched LOAD is impossible and matched CONCURRENCY is the honest substitute - and it is stated rather than assumed. REFUSED, NOT ESTIMATED, IN TWO CASES. A window with ANY failure publishes no cost at all: CPU spent refusing requests is real, but dividing it by only the successes would describe the failures rather than the work. And a window with major page faults means the box was SWAPPING, so what was timed is the disk - those numbers publish with `cost_majflt` non-zero and the cost itself marked a harness fault, so a reader sees why the row looks wrong instead of finding a hole. `cost_core_utilisation` is the fraction of the PINNED cores busy across that same window. It is what makes a peak interpretable: near 1.0 the gateway had filled the cores it was given and its throughput number is a real ceiling; well below it, the limit is somewhere else and the peak means something else.",
+    "perf.frontier": "THROUGHPUT AT A TAIL LATENCY YOU ACCEPT. For each declared bound, the most requests/sec this cell carried while 99% of requests finished under that bound AND it failed none it accepted. Bounds: 1ms, 5ms, 10ms, 50ms, 100ms plus one reading with no latency bound at all (failures only). ONE MEASUREMENT, READ 6 WAYS: a single concurrency sweep, published as `sweep_max_proxy`, so every reading is re-derivable from the rungs rather than taken on trust. Monotone non-decreasing across the bounds BY CONSTRUCTION - relaxing a bound only adds rungs to the set a maximum is taken over - so a reading cannot exceed a looser one. ZERO FAILURES, not a tolerance: the load generator counts connections the RIG could not open separately (`rig_refused`, and those windows are discarded), so a failure reaching a reading is the gateway losing a request it had accepted. TERMINATION: the sweep climbs a doubling ladder from the floor and stops at the first concurrency where no window served cleanly, because more concurrency cannot un-fail those requests. Each reading names `first_disqualified_conc`, the lowest concurrency above it that stopped qualifying - that pair is the proof it is a boundary. When nothing above it disqualified, the sweep ran out of range instead of finding a limit, and the reading sets `lower_bound: true`: the rate is real, it is simply a floor rather than a ceiling. The `p99_us` on a reading is the tail the winning rung ACTUALLY produced, never the bound - 4ms under a 100ms bound is not the same finding as 99ms.",
+    "stream.added_ttft_and_gap": "WHAT THE GATEWAY ADDS TO A STREAM, at concurrency 1: time to the first event, and the gaps between frames inside one stream, each as the gateway leg minus the same stream taken straight to the mock. Time-to-first-EVENT rather than first token, deliberately and by the same definition on both legs: a frame budget of one is satisfied by a dialect's opening scaffolding (openai sends a role delta, anthropic a `message_start`), so the quantity is the same on both sides and the difference still isolates what the gateway added.",
+    "stream.streams_sustained": "THE MOST CONCURRENT SSE STREAMS THIS CELL CARRIES CLEANLY, and the frames/sec at that point. A concurrency holds the gate when every expected content frame arrives (ratio 1.0, i.e. no tolerance - a proxy that drops a frame has dropped a user's token), no inter-frame gap exceeds 10x the mock's own pacing interval, and under 0.1% of streams error. TERMINATION: the gate is monotone in concurrency, so the ceiling is a boundary found by bisection - a pass proven at n and a failure measured above it. `sweep_streams` carries every rung probed. A range whose top still passed publishes an absence rather than a ceiling, because the top of the range is our choice and not the gateway's answer."
+  },
+  "gateway": "litellm-rust",
+  "build": "litellm-gateway",
+  "measured_at": "2026-11-08T20:16:07Z",
+  "started_at": null,
+  "finished_at": null,
+  "duration_s": null,
+  "phase_s": null,
+  "arch": "arm64",
+  "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+  "rig": {
+    "arch": "arm64",
+    "release_url": "file:///home/ubuntu/benchmarking/rig",
+    "engine": {
+      "commit": "f713bb0bfe523200d2aae76ae5189648b7992028",
+      "dirty": false
+    },
+    "mock": {
+      "origin": "release",
+      "sha256": "baf50032199ce046d31021cea3f33ffc8cdba1853cace68cd70159789f878bbf",
+      "asset_updated_at": null
+    },
+    "ugen": null,
+    "box_qualify": {
+      "band_pct": 20.0,
+      "baseline_rps": 97282.0,
+      "baseline_samples": 1,
+      "concurrency": 32,
+      "drift_pct": 0.6753561809995683,
+      "observed_absent_detail": null,
+      "observed_absent_reason": null,
+      "observed_rps": 97939.0,
+      "outcome": "pass"
+    }
+  },
+  "config": {
+    "files": {
+      "config.gen.yaml": "general_settings:\n  master_key: \"gwbench\"\nmodel_list:\n  - model_name: bench-openai\n    litellm_params:\n      model: openai/gpt-4o-mini\n      api_base: http://127.0.0.1:8000/v1\n      api_key: dummy\n  - model_name: bench-anthropic\n    litellm_params:\n      model: anthropic/claude-3-5-sonnet-20241022\n      api_base: http://127.0.0.1:8000\n      api_key: dummy\n"
+    }
+  },
+  "matrix": {
+    "gateway": "litellm-rust",
+    "build": "litellm-gateway",
+    "matrix_version": null,
+    "served": true,
+    "serve_error": "",
+    "upstream_shape": "",
+    "upstream_note": "",
+    "egress_configured": "",
+    "probe_first": false,
+    "capability_note": "",
+    "cell_perf_sweep": true,
+    "sweep_rung_selection": null,
+    "sweep_ttft_ms": null,
+    "p99_ceiling_ms": null,
+    "sweep_dur": null,
+    "cell_stream": true,
+    "cell_memory": true,
+    "memory": null,
+    "cells": {},
+    "upstreams": {
+      "cohere": {
+        "configurable": false,
+        "served": false,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "cohere": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1beta/models/bench-openai:generateContent",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/model/bench-openai/converse",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          }
+        }
+      },
+      "openai-responses": {
+        "configurable": false,
+        "served": false,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "bedrock": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/model/bench-openai/converse",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1beta/models/bench-openai:generateContent",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          }
+        }
+      },
+      "bedrock": {
+        "configurable": false,
+        "served": false,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "bedrock": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/model/bench-openai/converse",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1beta/models/bench-openai:generateContent",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          }
+        }
+      },
+      "anthropic": {
+        "configurable": true,
+        "served": false,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "anthropic": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1beta/models/bench-anthropic:generateContent",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/model/bench-anthropic/converse",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          }
+        }
+      },
+      "openai": {
+        "configurable": true,
+        "served": true,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "openai": {
+            "served": "failed",
+            "reason": "failed",
+            "status": "400",
+            "path": "/v1/chat/completions",
+            "verdict_note": "probed and answered failed (HTTP 400)",
+            "body_snippet": "{\"error\":{\"message\":\"invalid provider: openai\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":400}}",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1beta/models/bench-openai:generateContent",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/model/bench-openai/converse",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": true,
+            "reason": null,
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "egress not re-verified: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": "perf and stream withheld: re-verification proved this cell's request did not reach the mock as openai, so every number taken here belongs to a wire that is not openai-responses>openai: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")",
+            "perf": {
+              "added_latency_p50_us": null,
+              "added_latency_p99_us": null,
+              "gateway_c1_p99_us": null,
+              "direct_c1_p99_us": null,
+              "cpu_us_per_request": null,
+              "rps_per_cpu_second": null,
+              "cost_window_conc": null,
+              "cost_window_ok": null,
+              "cost_window_rps": null,
+              "cost_core_utilisation": null,
+              "cost_threads": null,
+              "cost_nonvol_ctxt_per_request": null,
+              "cost_majflt": null,
+              "frontier": [],
+              "sweep_max_proxy": [],
+              "egress_reverified": false,
+              "reverify_note": "the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")",
+              "c1_note": null
+            },
+            "stream": {
+              "stream_served": "harness_error",
+              "reason": "harness_error",
+              "stream_error": "not measured: a restart of the gateway earlier in this cell failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness could not vouch for the gateway's state",
+              "added_ttft_p50_us": null,
+              "added_ttft_p99_us": null,
+              "added_gap_p50_us": null,
+              "added_gap_p99_us": null,
+              "streams_sustained": null,
+              "streams_sustained_fps": null,
+              "streams_sustained_mock_ceiling": null,
+              "streams_sustained_headroom": null,
+              "sweep_streams": [],
+              "stream_c1_note": null,
+              "ttft_gw_samples": null,
+              "ttft_direct_samples": null
+            },
+            "memory": {
+              "protocol": "cold restart, 60s idle read at rest, then load at c=32 for 300s, then 60s with the load removed. `plateaued` is a verdict over the trailing 60s, taken at the END of the load: steady means drift under 1% and range under 2% of the mean. The verdict does not end the load - every cell is loaded for the full duration.",
+              "served": true,
+              "serve_error": "",
+              "load_recipe": null,
+              "idle_rss_mib": null,
+              "steady_state_rss_mib": null,
+              "recovered_rss_mib": null,
+              "peak_rss_mib": null,
+              "peak_rss_hwm_mib": null,
+              "plateaued": null,
+              "time_to_plateau_s": null,
+              "growth_rate_mib_per_min": null,
+              "load_s": null,
+              "shape": null,
+              "idle_shape": null,
+              "idle_static": null,
+              "idle_growth_rate_mib_per_min": null,
+              "rss_series": [],
+              "idle_rss_series": [],
+              "idle_window_s": 60,
+              "recovery_window_s": 30
+            },
+            "timings_s": {
+              "memory": 30.315587131,
+              "throughput": 541.599963765
+            },
+            "absences": {
+              "memory.growth_rate_mib_per_min": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.idle_growth_rate_mib_per_min": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.idle_rss_mib": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.idle_shape": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.idle_static": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.load_s": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.peak_rss_hwm_mib": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.peak_rss_mib": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.plateaued": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.recovered_rss_mib": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.shape": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.steady_state_rss_mib": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "memory.time_to_plateau_s": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this window measured a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.added_latency_p50_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.added_latency_p99_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_core_utilisation": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_majflt": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_nonvol_ctxt_per_request": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_threads": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_window_conc": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_window_ok": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cost_window_rps": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.cpu_us_per_request": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.direct_c1_p99_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.gateway_c1_p99_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "perf.rps_per_cpu_second": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.added_gap_p50_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.added_gap_p99_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.added_ttft_p50_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.added_ttft_p99_us": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.streams_sustained": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.streams_sustained_fps": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.streams_sustained_headroom": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.streams_sustained_mock_ceiling": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.ttft_direct_samples": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              },
+              "stream.ttft_gw_samples": {
+                "reason": "not_served",
+                "detail": "withheld: re-verification proved the request did not reach the mock as this cell's egress dialect, so this number was taken over a wire that is not this pairing: the request arrived on the mock's openai-responses endpoint - the client's own ingress dialect - and nothing arrived on openai, so the gateway forwarded the ingress request rather than translating it: openai-responses (count 1, last path \"/v1/responses\")"
+              }
+            }
+          }
+        }
+      },
+      "gemini": {
+        "configurable": false,
+        "served": false,
+        "egress_config": null,
+        "serve_error": "",
+        "cells": {
+          "openai": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/chat/completions",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "gemini": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1beta/models/bench-openai:generateContent",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "openai-responses": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/responses",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "cohere": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v2/chat",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "bedrock": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/model/bench-openai/converse",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          },
+          "anthropic": {
+            "served": "untestable",
+            "reason": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "status": "",
+            "path": "/v1/messages",
+            "verdict_note": "a restart of the gateway inside a cell's measurement failed (stopping it failed: StillHeld { port: 8101, waited: 30s }), so the harness can no longer vouch for the gateway's state; measuring on would publish our failure as the gateway's",
+            "body_snippet": "",
+            "probe_note": null,
+            "perf_dropped": null,
+            "perf": null,
+            "stream": null,
+            "memory": null,
+            "timings_s": null,
+            "absences": {}
+          }
+        }
+      }
+    },
+    "model": null,
+    "upstream_endpoint": null,
+    "ootb_config": null,
+    "arch": "arm64",
+    "hardware": "AWS m7g.4xlarge (Graviton3, 16 cores / 64 GB). Gateway-under-test pinned to 4 cores (the comparable basis); mock and load generator on 6 cores each so the mock never bottlenecks the streaming sweep. Ubuntu 24.04. One dedicated box per gateway.",
+    "rig": {
+      "arch": "arm64",
+      "release_url": "file:///home/ubuntu/benchmarking/rig",
+      "engine": {
+        "commit": "f713bb0bfe523200d2aae76ae5189648b7992028",
+        "dirty": false
+      },
+      "mock": {
+        "origin": "release",
+        "sha256": "baf50032199ce046d31021cea3f33ffc8cdba1853cace68cd70159789f878bbf",
+        "asset_updated_at": null
+      },
+      "ugen": null,
+      "box_qualify": {
+        "band_pct": 20.0,
+        "baseline_rps": 97282.0,
+        "baseline_samples": 1,
+        "concurrency": 32,
+        "drift_pct": 0.6753561809995683,
+        "observed_absent_detail": null,
+        "observed_absent_reason": null,
+        "observed_rps": 97939.0,
+        "outcome": "pass"
+      }
+    },
+    "measured_at": "2026-11-08T20:16:07Z",
+    "started_at": null,
+    "finished_at": null,
+    "duration_s": null,
+    "phase_s": null,
+    "build_env": null
+  },
+  "memory": null,
+  "streaming": null
+}

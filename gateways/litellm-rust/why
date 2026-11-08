@@ -3,3 +3,5 @@ Standalone Rust gateway from LiteLLM's official v1.108.3 tag, pinned to commit b
 The upstream release has no verified ARM64 image of this standalone Rust server. Build its locked Rust workspace in release mode before measurement, recording the exact source commit, lockfile and executable hashes. No Python interpreter or Python config bridge is used.
 
 One static YAML configuration wires OpenAI and Anthropic models to the local mock. Fresh correctness probes determine which protocol pairs actually work in this configuration. Missing adapters and failed probes remain explicit results; they are not converted into zero measurements.
+
+The standalone release uses its openai_like chat provider for a local OpenAI-compatible endpoint; openai is rejected by its native chat provider dispatch. The full native executable path identifies live processes without matching a Linux defunct entry containing only the 15-character executable name.

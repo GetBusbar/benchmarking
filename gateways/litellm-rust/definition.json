@@ -13,9 +13,7 @@
     "openai",
     "anthropic"
   ],
-  "headers": [
-    "Authorization: Bearer {GW_AUTH}"
-  ],
+  "headers": [],
   "lang": "Rust",
   "launch": {
     "args": [],
@@ -32,7 +30,7 @@
   "repo": "https://github.com/BerriAI/litellm",
   "runtime": {
     "kind": "native",
-    "proc_match": "litellm-gateway"
+    "proc_match": "src/litellm-rust/target/release/litellm-gateway"
   },
   "egress_models": {
     "openai": "bench-openai",
