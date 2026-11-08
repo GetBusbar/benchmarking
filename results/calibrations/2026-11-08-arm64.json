@@ -1,0 +1,24 @@
+{
+  "engine_commit": "f713bb0bfe523200d2aae76ae5189648b7992028",
+  "mock_sha256": "baf50032199ce046d31021cea3f33ffc8cdba1853cace68cd70159789f878bbf",
+  "load_generator_sha256": "ecddeaadd621cad32a2020de94df10d1df03ba8255e29b72d921e6f4d39b2e5e",
+  "instance_type": "m7g.4xlarge",
+  "region": "ap-south-1",
+  "measured_at": "2026-11-08T20:09:04.158792+00:00",
+  "concurrency": 32,
+  "duration_seconds": 8,
+  "mock_cores": "10-15",
+  "load_cores": "4-9",
+  "observations": [
+    {
+      "rps": 98228,
+      "fail": 0
+    },
+    {
+      "rps": 96336,
+      "fail": 0
+    }
+  ],
+  "evidence": "2026-11-08-arm64-control.txt",
+  "scope": "Direct local mock calibration, not a gateway result. Both exact frozen binaries were exercised on the same host as a rebuilt earlier engine. Historical 501229 rps baseline used other instrument bytes and is not reused. The existing 20% qualification band is unchanged."
+}

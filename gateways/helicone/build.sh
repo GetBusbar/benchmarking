@@ -16,7 +16,7 @@ GW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # PINNED to a revision rather than a branch, so two runs weeks apart measure the same code.
 REPO="${HELICONE_REPO:-https://github.com/Helicone/ai-gateway}"
-COMMIT="${HELICONE_COMMIT:-9649b27bdc9fb0907d359e899894102a15f3a085}"
+COMMIT="${HELICONE_COMMIT:-081f310be779f27122e6038e81e2359c44db4ecb}" # v0.2.0-beta.30
 SRC="$GW_DIR/src"
 
 # Prerequisites. Unconditionally, because apt-get install is already idempotent and already
@@ -34,14 +34,17 @@ sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential
 [ -d "$SRC" ] || git clone -q "$REPO" "$SRC"
 # Re-pin every time, not only on a fresh clone: a surviving source tree would otherwise keep an old
 # ref and the run would record a build string that does not match what it measured.
-git -C "$SRC" fetch -q origin 2>/dev/null || true
-git -C "$SRC" checkout -q "$COMMIT"
+git -C "$SRC" fetch -q origin tag v0.2.0-beta.30
+[ "$(git -C "$SRC" rev-parse v0.2.0-beta.30^{commit})" = "$COMMIT" ] || { echo "release tag no longer matches pinned commit" >&2; exit 1; }
+git -C "$SRC" checkout -q --detach "$COMMIT"
 
 # The release profile here uses LTO and codegen-units=1, so this is slow and memory hungry. It is
 # fine on the bench box and it is what the project itself ships, which is the configuration we are
 # supposed to be measuring.
-( cd "$SRC" && cargo build --release -p ai-gateway )
+( cd "$SRC" && cargo build --release --locked -p ai-gateway )
 
 BIN="$SRC/target/release/ai-gateway"
 [ -x "$BIN" ] || { echo "build: finished but $BIN is not there"; exit 1; }
 echo "build: $BIN at $(git -C "$SRC" rev-parse --short HEAD)"
+
+python3 "$GW_DIR/../../lib/gateway_build_provenance.py" "$SRC" "$BIN" "$GW_DIR/.build-provenance.json"

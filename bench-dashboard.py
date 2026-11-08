@@ -29,9 +29,37 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEY = os.path.join(os.environ.get("TMPDIR", "/tmp"), "gateway-bench-key.pem")
-SSH = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+STATE = os.environ.get("BENCH_STATE_DIR", os.path.expanduser("~/.cache/gateway-bench"))
+KEY = os.path.join(STATE, "gateway-bench-key.pem")
+SSH = ["ssh", "-o", "StrictHostKeyChecking=yes",
        "-o", "ConnectTimeout=6", "-o", "BatchMode=yes", "-i", KEY]
+SSH_PINS = {}
+
+
+def authenticated_ssh(ip):
+    """Resolve the exact EC2 instance and authenticate its host key before reading it."""
+    if ip in SSH_PINS:
+        return SSH_PINS[ip]
+    response = subprocess.run(
+        ["aws", "ec2", "describe-instances", "--filters", f"Name=ip-address,Values={ip}",
+         "Name=tag:purpose,Values=gateway-bench", "Name=instance-state-name,Values=running",
+         "--query", "Reservations[].Instances[].[InstanceId,PublicIpAddress]", "--output", "text"],
+        capture_output=True, text=True, timeout=15)
+    rows = [line.split() for line in response.stdout.splitlines() if line.strip()]
+    if (response.returncode or len(rows) != 1 or len(rows[0]) != 2
+            or not re.fullmatch(r"i-[0-9a-f]+", rows[0][0]) or rows[0][1] != ip):
+        return None
+    instance = rows[0][0]
+    os.makedirs(STATE, exist_ok=True)
+    known_hosts = os.path.join(STATE, instance + ".known_hosts")
+    verified = subprocess.run(
+        [sys.executable, os.path.join(HERE, "lib/ssh_trust.py"), instance, ip, known_hosts],
+        capture_output=True, text=True, timeout=140)
+    if verified.returncode:
+        return None
+    command = SSH + ["-o", "UserKnownHostsFile=" + known_hosts]
+    SSH_PINS[ip] = command
+    return command
 
 
 def _configure_stdout():
@@ -87,7 +115,7 @@ PHASE_RE = re.compile(r"\[phase\] (\S+) (\S+)")
 # so a cell in `streams_sustained` would have reported progress including 10.2% of work that no longer
 # exists. The test that parses metric.rs's METRICS caught it, which is what it is for.
 #
-# The remaining five are re-derived from MEASURED wall clock on the new engine rather than by
+# The five groups of that time were re-derived from MEASURED wall clock on the new engine rather than by
 # redistributing the old guesses, because two things changed size at once: the sustained bisection was
 # deleted (its windows folded into the climb) and the memory phase became a FIXED duration instead of
 # stopping when the RSS trace looked flat. From a 2026-07-30 single-cell run:
@@ -137,6 +165,8 @@ def cell_fraction_done(phase_name):
             return done
         done += PHASE_COST.get(name, 0.0)
     return 0.0
+
+
 IP_RE = re.compile(r"ip=([0-9.]+)")
 TS_RE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 
@@ -148,14 +178,26 @@ CHEAP = ("not_configurable", "untestable", "unprobed_auth")
 # served cell. That happened the day a per-cell cost breakdown was added under the same prefix - every
 # measured cell counted twice, gateways showed "10/8 served", and the ETA hit zero while they were
 # still running. Listing what DOES count means an unrecognised line is ignored rather than believed.
-MEASURED = ("served", "failed")
+#
+# `served` ONLY. `failed (HTTP ...)` is the engine's Served::No verdict - the probe answered an error,
+# and `Served::is_measurable()` is false for it, so the cell ran no battery at all. Counting it put
+# cells that were NOT served into the SERVED column and credited a near-free probe as a full cell of
+# progress, shortening the ETA (the flattering direction). Left uncounted, a declared cell that fails
+# its probe leaves the ETA pessimistic, which is the safe direction this tool already chooses.
+MEASURED = ("served",)
 
 
 def declared_served(gw):
-    """How many cells this gateway's own manifest claims to serve: the '1's in its matrix."""
+    """How many cells this gateway's own manifest claims to serve: the '1's in its matrix.
+
+    None - no denominator - when it cannot be read, and when the matrix is EMPTY: an empty matrix is
+    "undeclared, every cell is probed" (`manifest::matrix_declared_capable`), not "declares zero", and
+    reporting 0 rendered SERVED as "3/0" and suppressed the ETA for the whole run."""
     try:
         with open(os.path.join(HERE, "gateways", gw, "definition.json")) as f:
             rows = json.load(f).get("matrix") or []
+        if not rows:
+            return None
         return sum(row.count("1") for row in rows)
     except Exception:
         return None
@@ -242,17 +284,28 @@ def remote_tail(ip):
     what is actually parsed (two line shapes, both anchored at column 0) instead of by bytes of prose.
     A 36-cell grid emits 36-ish cell lines and about 430 phase lines, so `tail -n 4000` keeps the whole
     history of any real run while still refusing to stream an unbounded file. The completeness check
-    in `parse_progress` is what catches it if that assumption is ever wrong."""
+    in `parse_progress` is what catches it if that assumption is ever wrong.
+
+    None, NOT "", WHEN THE FETCH ITSELF FAILED. A timeout, a refused connection or ssh's own exit 255
+    used to collapse into "", which is exactly what a box that has logged nothing yet returns - so a box
+    hours into its run that stopped answering ssh rendered as "booting/building", served 0, no floor
+    mark: the reading of a healthy fresh box. The remote pipeline ends in `tail`, which exits 0 even
+    when the log does not exist yet, so a non-zero status here is ssh failing, not an empty log."""
     if not ip:
         return ""
     try:
+        command = authenticated_ssh(ip)
+        if command is None:
+            return None
         r = subprocess.run(
-            SSH + [f"ubuntu@{ip}",
+            command + [f"ubuntu@{ip}",
                    "grep -a -E '^\\[(cell|phase)' ~/benchmarking/.run.log 2>/dev/null | tail -n 4000"],
             capture_output=True, text=True, timeout=15)
-        return r.stdout
     except Exception:
-        return ""
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout
 
 
 def parse_progress(text):
@@ -281,6 +334,10 @@ def parse_progress(text):
             positions.add(done)
             if verdict.startswith(MEASURED):
                 served_done += 1
+            # A verdict line CLOSES its cell, so the phase seen before it belongs to a finished cell.
+            # Kept, it credited the next cell (and every cheap grey cell after it) with the finished
+            # cell's last phase - ~99% of a cell of progress that had not happened.
+            phase = None
             continue
         m = PHASE_RE.search(ln)
         if m:
@@ -298,6 +355,14 @@ def hms(sec):
     return f"{sec // 3600}h{(sec % 3600) // 60:02d}m"
 
 
+def _since(now_s, start):
+    """Seconds from a same-day HH:MM:SS stamp to now, crossing midnight at most once."""
+    if start is None:
+        return None
+    d = now_s - start
+    return d + 86400 if d < 0 else d
+
+
 def row_for(gw, path, now_s):
     st = local_state(path)
     if st.get("terminal"):
@@ -305,14 +370,20 @@ def row_for(gw, path, now_s):
                     done=st["terminal"] == "DONE", bad=st["terminal"] == "INCOMPLETE")
 
     text = remote_tail(st.get("ip"))
-    cells, total, served_done, phase, complete = parse_progress(text)
+    unreachable = text is None
+    cells, total, served_done, phase, complete = parse_progress(text or "")
     expect = declared_served(gw)
+    if unreachable:
+        # NOTHING WAS READ, so nothing below may be presented as a reading: not a phase, not a count
+        # of 0, not an ETA. Before measurement started, ssh refusing is what a booting box does; after
+        # it, the box was reachable and has stopped answering, which an operator must see as that.
+        measuring_started = st.get("measuring") is not None
+        return dict(gw=gw,
+                    phase="UNREACHABLE (ssh failed)" if measuring_started else "booting (no ssh yet)",
+                    cells="?", served=f"?/{expect}" if expect is not None else "?",
+                    elapsed=hms(_since(now_s, st.get("start"))), eta="-", done=False, bad=False)
 
-    elapsed = None
-    if st.get("start") is not None:
-        elapsed = now_s - st["start"]
-        if elapsed < 0:
-            elapsed += 86400  # the run crossed midnight
+    elapsed = _since(now_s, st.get("start"))  # the run may have crossed midnight
 
     # Time spent MEASURING, which is what the per-cell rate must divide by. Falls back to the box's
     # whole lifetime when the "running <gw>" line has not appeared yet (or a caller supplies no such
@@ -320,9 +391,7 @@ def row_for(gw, path, now_s):
     # measurement starts.
     measuring = elapsed
     if st.get("measuring") is not None:
-        measuring = now_s - st["measuring"]
-        if measuring < 0:
-            measuring += 24 * 3600
+        measuring = _since(now_s, st["measuring"])
     eta = None
     if measuring and expect:
         # Progress in CELLS, including the fraction of the one in flight. Without the fraction there
@@ -391,7 +460,8 @@ def main():
             os.system("clear")
         finished = render(rows)
         if not watch or finished:
-            return 0
+            # An INCOMPLETE box is not a clean finish, whatever else is on the board.
+            return 1 if any(r["bad"] for r in rows) else 0
         time.sleep(20)
 
 

@@ -13,7 +13,7 @@
 // real committed sweep data through the stub canvas.
 
 import { execFileSync } from "node:child_process";
-import { snapshotCellCoords, isStrictSubset, layerScopedMatrix } from "./snapshots.mjs";
+import { snapshotCellCoords, isStrictSubset, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
 import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { checkConsistency, c6Inversions, c7HwmBelowPeak, hasCellMemory } from "./check-consistency.mjs";
 import * as checkMod from "./check-consistency.mjs";
 import { sealMetric, displayedValue, THROUGHPUT_FIELDS, isMetricField, zeroNoteFor, ZERO_NO_CEILING, ZERO_MEASURED_FAIL,
-  FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, sealFrontier } from "./seal.mjs";
+  FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, sealFrontier, sealRungs } from "./seal.mjs";
 import { oracleExpected } from "./check-consistency.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
 // (the CLI never passes it) to waive the oracle-verifiable requirement.
@@ -66,6 +66,7 @@ function skip(name, why) {
   console.log(`skip - ${name}  # ${why}`);
 }
 process.on("exit", () => {
+  console.log(`\n${passed} tests passed${skipped.length ? `, ${skipped.length} skipped (see the list below - a skip is not a pass)` : ""}`);
   if (skipped.length) {
     console.warn(`\n${skipped.length} SKIPPED test(s) (not run, not passed):`);
     for (const s of skipped) console.warn(`  - ${s.name}  # ${s.why}`);
@@ -845,9 +846,13 @@ test("url state round-trips through /<category>/<view>?<params>", () => {
   const url = app.encodeUrl(st);
   assert.ok(url.startsWith("/gateways/matrix?"), `path carries category+view: ${url}`);
   const back = app.decodeUrl(...parts(url));
-  for (const k of ["category", "view", "q", "sortCol", "sortDesc", "needStream", "needXlate", "cmpOpen", "drawer"]) {
+  for (const k of ["category", "view", "q", "sortCol", "sortDesc", "cmpOpen", "drawer"]) {
     assert.deepEqual(back[k], st[k], `field ${k}`);
   }
+  // The capability filters have no visible control any more, so they must NOT travel in a link: an
+  // invisible filter nobody can clear hides gateways (same rule as the retired ?cls= / ?lang=).
+  assert.ok(!url.includes("cap="), `a capability filter must not be encoded: ${url}`);
+  assert.equal(app.decodeUrl("/gateways/performance", "?cap=stream|xlate").needStream, false, "a stale ?cap= is ignored");
   assert.deepEqual(back.cmp, st.cmp);
 });
 
@@ -1246,8 +1251,8 @@ test("a throughput hole is an ABSENCE with the engine's reason, never a zero", (
      the reader sees a gateway that carried nothing under a tight tail, which is the finding, not a hole. */
   const tooSlow = { best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 18, none: 20 } }) };
   const slow1 = app.frontierCell(tooSlow.best_cell, 1);
-  assert.equal(slow1.v, 0, "no rung held this bound ranks as zero throughput under it");
-  assert.equal(slow1.text, "0");
+  assert.equal(slow1.v, null, "no certified rung is unavailable, not zero");
+  assert.equal(slow1.text, "n/a");
   // AND IT SAYS SO ON THE CELL. On the field data plano is this state at five of six bounds; a bare cell
   // there would read as five missing measurements instead of the one damning finding it is.
   assert.equal(slow1.why, "no rung held this tail");
@@ -1397,6 +1402,8 @@ testWithMatrixDonor("C1 RED: EVERY malformed metric shape fails C1, not just a b
     ["a boolean", false],
     ["an array", [20057]],
     ["a partial envelope with no certified flag", { value: 20057 }],
+    // A bare null is an unsealed hole with no reason - it used to be waved through.
+    ["a bare null", null],
   ]) {
     const d = clone();
     const g = matrixGw(d);
@@ -1631,28 +1638,25 @@ testWithData("C7: the live bundle's hwm-below-peak rows warn but never hard-fail
     assert.match(w, /sampled peak_rss [\d.]+ MiB > kernel peak_rss_hwm [\d.]+ MiB/);
 });
 
-// C6 IS A HARD FAILURE. It was a warning on the theory that two independently-swept ceilings overlap
-// on noise. That theory was wrong and it hid a real defect: the two sweeps searched different
-// concurrency ranges, so the peak search terminated on its own bound rather than on the gateway. Both
-// sweeps now share one SWEEP constant, so an inversion has no benign mechanism left. Whatever
-// inversions the live bundle still carries must therefore reach ERRORS, and must be well formed.
-test("C6 on the live bundle: every inversion is adjudicated against its own cell's scatter, and says which", () => {
-  const { errors, warnings } = checkConsistency(data, app);
+// C6 IS A HARD FAILURE, and it checks the FRONTIER now: ascending bounds, monotone readings, and a
+// lower_bound flag that agrees with the rungs. This test used to filter messages for the retired
+// "sustained@20ms" substring, which no C6 message contains any more, so both loops iterated nothing and
+// it asserted nothing. It now drives the live C6 contract: it runs, it lands in ERRORS only, and every
+// message names a gateway in the bundle and says which frontier rule broke.
+test("C6 on the live bundle: it runs, never warns, and every violation names its gateway and rule", () => {
+  const { errors, warnings, cover } = checkConsistency(data, app);
+  if (BOARD_HAS_DATA) assert.ok(cover.has("C6.cell"), "C6 must actually inspect cells on a populated board");
   const keys = new Set(data.gateways.map((g) => g.key));
-  const c6 = [...errors, ...warnings].filter((x) => x.includes("sustained@20ms"));
-  for (const m of c6) {
+  const C6_RULES = /the frontier's bounds are not ascending|the frontier inverts|reports lower_bound=/;
+  assert.ok(!warnings.some((x) => C6_RULES.test(x)), "a C6 violation is a hard failure, never a warning");
+  for (const m of errors.filter((x) => C6_RULES.test(x))) {
     assert.ok(keys.has(m.split(".")[0]), `a C6 message must name a gateway in the bundle; got: ${m}`);
-    // NO SILENT TOLERANCE: whichever channel it lands in, the message must carry the magnitude AND the
-    // basis for the verdict, so a reader can check the judgement instead of trusting it.
-    assert.match(m, /% inversion/, `a C6 message must state the magnitude; got: ${m}`);
-    assert.match(m, /scatter|too few rungs|ceiling on excusable noise/,
-      `a C6 message must state the basis it was judged against; got: ${m}`);
   }
-  // A C6 message routed to the soft channel must be there BECAUSE it fell inside the band, never for
-  // any other reason.
-  for (const w of warnings.filter((x) => x.includes("sustained@20ms")))
-    assert.match(w, /within this cell's own max-proxy sweep scatter/,
-      `only a within-band inversion may warn; got: ${w}`);
+  // And it can fail: a synthetic inversion is reported through the same rule text matched above.
+  const inverted = { upstreams: { openai: { cells: { openai: { served: true, perf: { frontier: [
+    { p99_bound_us: 1000, rps: 900 }, { p99_bound_us: 5000, rps: 800 }, { p99_bound_us: null, rps: 1000 }] } } } } } };
+  assert.ok(c6Inversions("gw", inverted).violations.some((v) => /the frontier inverts/.test(v)),
+    "the rule text this test matches must be the text C6 actually emits");
 });
 
 // ---- matrix is the single source: streaming + memory projection + download ----------------------
@@ -2060,7 +2064,7 @@ test("recovery sparkline: renders only when rss_series exists (≥2 points), nev
   assert.ok(/45\.0 MiB at the last sample/.test(svg), `the caption reports the final figure and names the point: ${svg}`);
   // Given the column's own scalar and window, it names that window too, so the two are comparable on sight.
   const withMark = app.rssSparkline([ { t_s: 0, rss_mib: 40 }, { t_s: 60, rss_mib: 1000 }, { t_s: 180, rss_mib: 45 } ], null, 40, "load", { recoveredAt: 60, recoveryWindowS: 30 });
-  assert.match(withMark, /60\.0 MiB at the 30 s recovery mark, still falling to 45\.0 MiB by the last sample/);
+  assert.match(withMark, /60\.0 MiB median over the final 30 s of recovery, still falling to 45\.0 MiB by the last sample/);
   // No series, one point, or a non-array → nothing drawn (never a fabricated flat line).
   assert.equal(app.rssSparkline(undefined), "", "no series → no sparkline");
   assert.equal(app.rssSparkline([]), "", "empty series → no sparkline");
@@ -2210,21 +2214,17 @@ test("measuredBadge shows a gateway's own measured_at + a stale pill only when f
 // ---- compact not-served labels (compare + results cells) --------------------
 test("naText keeps long diagnostic notes out of cell values", () => {
   assert.deepEqual(app.naText(null, "xlate_served", "xlate_error"), { text: "not measured", note: "" });
-  for (const g of data.gateways) {
-    for (const l of app.LANES) {
-      const j = g[l.key];
-      if (!j || j[l.flag] !== false) continue;
-      const na = app.naText(j, l.flag, l.err);
-      assert.ok(na.text.length <= 24, `${g.key}/${l.key}: label too long: ${na.text}`);
-      assert.equal(na.note, app.stripRigPaths(j[l.err] || ""), `${g.key}/${l.key}: full note preserved (rig paths scrubbed)`);
-      assert.ok(!/\/home\//.test(na.note), `${g.key}/${l.key}: tooltip leaks a rig path`);
-    }
+  // SYNTHETIC, because the live bundle carries no raw lane objects any more (C4 forbids g.perf/g.xlate/...),
+  // so a loop over data.gateways skipped every row and asserted nothing. One refused record per lane, with
+  // a long rig-path-bearing note, drives the same rules.
+  for (const l of app.LANES) {
+    if (!l.flag || !l.err) continue;
+    const j = { [l.flag]: false, [l.err]: "upstream refused the probe at /home/ubuntu/rig/run/x.log after a very long diagnostic explanation" };
+    const na = app.naText(j, l.flag, l.err);
+    assert.ok(na.text.length <= 24, `${l.key}: label too long: ${na.text}`);
+    assert.equal(na.note, app.stripRigPaths(j[l.err]), `${l.key}: full note preserved (rig paths scrubbed)`);
+    assert.ok(!/\/home\//.test(na.note), `${l.key}: tooltip leaks a rig path`);
   }
-  // Data-dependent: the field may or may not currently contain an untranslated-passthrough
-  // gateway (it comes and goes with re-runs). Assert the label only when one exists; always
-  // assert the mapping itself on a synthetic record so the rule stays covered.
-  const pass = data.gateways.find((g) => g.xlate && g.xlate.xlate_passthrough === true);
-  if (pass) assert.equal(app.naText(pass.xlate, "xlate_served", "xlate_error").text, "n/a (passthrough)");
   assert.equal(app.naText({ xlate_served: false, xlate_passthrough: true }, "xlate_served", "xlate_error").text, "n/a (passthrough)");
   // "manifest defines no <hook>" = the harness never probed that lane: "not tested", never a capability
   // verdict. (Governance is retired from the board, so this is asserted on a synthetic record - the
@@ -2301,6 +2301,37 @@ test("CHARTS: the tab draws from the live board, ranks by the metric's own direc
   // this board an absent number usually means a refusal a reader needs to see.
   const withHole = app.chartRows(cpu, [mk("has", 100), { key: "none", name: "none", lang: "Go", best_cell: bcCell({}) }], st);
   assert.deepEqual(withHole.map((r) => r.key), ["has"]);
+});
+
+/* EVERY CHART METRIC MUST EVALUATE. 'Peak memory' called chooserCellMemory(), defined nowhere, so picking it
+   threw a ReferenceError out of renderCharts - and out of every renderAll after it (theme toggle, nav). And
+   a below-resolution cost lane is undefined, never $0: mval ranks below_resolution as 0, which on the
+   lower-is-better cost axis charted three gateways that held nothing under the bound as the cheapest. */
+test("CHARTS: every metric evaluates, Peak memory reads the memory record, and an unresolved cost is not $0", () => {
+  const memCell = { served: true, memory: { plateaued: true, steady_state_rss_mib: seal(40), peak_rss_mib: seal(55) } };
+  const g = { key: "x", display: "X Gateway", lang: "Go",
+    matrix: { upstreams: { openai: { cells: { openai: memCell } } } },
+    best_cell: { ...bcCell({}), cost_per_million_usd: seal(null, { absent: { reason: "below_resolution", detail: "no rung held this tail" } }) } };
+  const st = { data: { gateways: [g] }, mode: "min", bound: 10 };
+  for (const m of app.CHART_METRICS) assert.doesNotThrow(() => m.get(g, st), `chart metric ${m.id} throws`);
+  const rss = app.CHART_METRICS.find((m) => m.id === "rss");
+  assert.equal(rss.get(g, st), 55, "Peak memory must read the chosen cell's peak RSS");
+  const cpm = app.CHART_METRICS.find((m) => m.id === "permillion");
+  assert.equal(cpm.get(g, { ...st, mode: "peak" }), null, "a below-resolution cost lane must chart as absent, not $0");
+  // Bars are labelled with the gateway's display name, the field gen-data actually emits.
+  assert.equal(app.chartRows(rss, [g], st)[0].name, "X Gateway");
+});
+
+/* A PINNED RUNG IS SHAREABLE STATE. applyState copied every decoded field except `conc`, so a ?conc= link
+   lost its pin on load and a stale pin survived Back/navigation to a URL without one. */
+test("applyState carries the pinned concurrency rung both ways", () => {
+  const saved = { ...app.state };
+  try {
+    app.applyState({ ...app.newState(), conc: 128 });
+    assert.equal(app.state.conc, 128, "a decoded ?conc= must reach the live state");
+    app.applyState(app.newState());
+    assert.equal(app.state.conc, null, "a URL without ?conc= must clear a previously pinned rung");
+  } finally { Object.assign(app.state, saved); }
 });
 
 test("SATURATION: a utilisation figure cannot be read as a verdict unless the window reached the peak", () => {
@@ -2780,10 +2811,14 @@ test("machine-readable served states map to distinct honest cell states", () => 
   assert.equal(app.cellState({ served: "not_verified", reason: "harness_boot_failure" })[0], "unverified");
   // untestable is a rig limit (real cloud host pinned), its own state, never a red
   assert.equal(app.cellState({ served: "untestable", reason: "no_base_url_override" })[0], "untestable");
-  assert.equal(app.cellState({ served: "untestable" })[1], "untestable (mock limit)");
-  assert.ok(app.matrixCellTip({ served: "untestable" }).includes("untestable on this rig"));
+  assert.equal(app.cellState({ served: "untestable" })[1], "untestable");
+  assert.ok(app.matrixCellTip({ served: "untestable" }).includes("untestable: the recorded harness"));
   // served:false with an explicit reason (wrong_answer) is the ONLY red: not a harness gap
   assert.equal(app.cellState({ served: false, reason: "wrong_answer", status: "200" })[0], "failed");
+  // An UNRECOGNISED value is not a recorded refusal: the engine's own `not_probed` default, a newer token,
+  // or a missing field must never paint red (it used to fall through to "failed").
+  for (const v of ["not_probed", "some_future_token", undefined])
+    assert.equal(app.cellState({ served: v })[0], "unverified", `served=${v} must not render as a refusal`);
   // a lane the gateway never declared reads "not declared", never a failure
   assert.equal(app.naText({ xlate_declared: false, xlate_served: false }, "xlate_served", "xlate_error").text, "not declared");
 });
@@ -2793,11 +2828,11 @@ test("a grey (not_configurable) cell tooltip shows the gateway's cited reason", 
   const reason = "this gateway accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type";
   const tip = app.matrixCellTip({ served: "not_configurable", verdict_note: reason });
   // HONEST wording: grey = not in the grid WE drafted, not a claim the maintainer declined it.
-  assert.ok(tip.includes("not in the capability grid we drafted"), "reads as our omission, not the gateway's declared incapability");
+  assert.ok(tip.includes("historical capability research"), "reads as our omission, not the gateway's declared incapability");
   assert.ok(tip.includes(reason), "carries the cited capability-limit reason");
   // no reason present: still honest, never a bare "untested"
   const bare = app.matrixCellTip({ served: "not_configurable" });
-  assert.ok(bare.includes("not in the capability grid we drafted"));
+  assert.ok(bare.includes("historical capability research"));
 });
 
 test("probe-first: a not_configured cell renders grey with the probe evidence, never a red", () => {
@@ -2950,15 +2985,25 @@ test("Cluster-B: drawer/compare (laneRecord) read the SAME chosen cell as the ta
   ]) {
     const rec = app.laneRecord(perfLane, g, st);
     assert.ok(rec, `lane record present in ${st.mode}`);
-    for (const k of ["added_latency_p99_us", "rps_sustained_20ms", "rps_max_proxy"]) {
+    // THE THROUGHPUT IS THE FRONTIER READING. This loop used to compare the retired rps_sustained_20ms /
+    // rps_max_proxy, which are undefined on every record, so null == null passed and the throughput
+    // agreement between drawer and table was never asserted.
+    for (const k of ["added_latency_p99_us"]) {
       const tableV = app.chooserPerfCell(g, k, String, st).v;
-      // The lane record's metric is a sealed envelope; mval() reads its displayable value.
+      assert.notEqual(tableV, null, `${st.mode}: the fixture must carry ${k}, or this comparison is vacuous`);
       assert.equal(app.mval(rec[k]), tableV, `${st.mode}: drawer/compare ${k} == table`);
     }
+    for (const b of app.FRONTIER_BOUNDS_MS.concat([null])) {
+      const tableV = app.frontierBoundCell(g, b, st).v;
+      const laneV = app.frontierCell(rec, b).v;
+      assert.equal(laneV, tableV, `${st.mode}: drawer/compare frontier@${b} == table`);
+    }
+    assert.ok(app.FRONTIER_BOUNDS_MS.some((b) => app.frontierBoundCell(g, b, st).v != null),
+      `${st.mode}: the fixture must carry a frontier reading, or the throughput comparison is vacuous`);
   }
   // The Peak record still equals the canonical (Peak) accessor - no regression on the default mode.
-  assert.equal(app.mval(app.laneRecord(perfLane, g, { mode: "peak" }).rps_sustained_20ms),
-    app.mval(app.canonicalPerf(g).rps_sustained_20ms), "Peak lane record == canonicalPerf");
+  assert.equal(app.frontierCell(app.laneRecord(perfLane, g, { mode: "peak" }), 10).v,
+    app.frontierCell(app.canonicalPerf(g), 10).v, "Peak lane record == canonicalPerf");
 });
 
 // Finding 22 was that the drawer chart plotted a curve for a metric the table showed no number for, so
@@ -3979,10 +4024,10 @@ test("memory Min/Max select on memory and report memory, and disclose the size o
   // The candidate count rides next to the cell: min-of-3 and min-of-1 are different-sized searches.
   const ofText = (html) => (html.match(/<span class="tested-of[^>]*>([^<]*)<\/span>/) || [])[1] || "";
   const pill = memCol("tested").render(g, min);
-  assert.equal(ofText(pill), "of 3 served", "a Min/Max row must state how many cells the extremum was chosen from");
+  assert.equal(ofText(pill), "of 3 steady", "a Min/Max row must state how many cells the extremum was chosen from");
   assert.match(pill, /OpenAI→Gemini/, "and which cell it landed on");
   const narrow = memGw("narrow", { "anthropic>anthropic": { steady_state_rss_mib: 70 } });
-  assert.equal(ofText(memCol("tested").render(narrow, memState([narrow], { mode: "min" }))), "of 1 served");
+  assert.equal(ofText(memCol("tested").render(narrow, memState([narrow], { mode: "min" }))), "of 1 steady");
   // Same/Custom are like-for-like: one named cell on every row, so there is no candidate set to disclose.
   assert.equal(ofText(memCol("tested").render(g, memState([g], { mode: "same", sameDialect: "openai" }))), "",
     "Same names one cell for every row; there is no search size to state");
@@ -5048,7 +5093,8 @@ test("SITE-15: the data-derived Same dialect is seeded for the MEMORY tab, not f
   }
 });
 
-console.log(`\n${passed} tests passed${skipped.length ? `, ${skipped.length} skipped (see the list below - a skip is not a pass)` : ""}`);
+// The pass summary is printed from the exit handler (below), AFTER every test in this file has run: printed
+// here it sat mid-file and undercounted the ~1800 lines of tests that follow.
 
 // ---- C8: THE BOARD IS GROUPED BY INSTRUMENT, NOT BY COMMIT SHA -----------------------------------
 //
@@ -5092,6 +5138,11 @@ test("C8: commits the repo attests are one instrument, with artifact evidence, d
   // No evidence block at all is equally inert.
   assert.equal(checkMod.instrumentOf(JSON.stringify({
     instruments: [{ id: "bare", commits: [A, B] }] })).size, 0);
+  // Evidence keyed by OTHER commits proves nothing about these: equal hash values are not enough.
+  assert.equal(checkMod.instrumentOf(JSON.stringify({
+    instruments: [{ id: "misKeyed", commits: [A, B],
+      evidence: { otb_release_sha256: { [A]: "h1", someOtherCommit: "h1" } } }] })).size, 0,
+    "a listed commit with no recorded hash must not be admitted");
   // Unparseable or absent file degrades to commit-equality, never to "everything agrees".
   assert.equal(checkMod.instrumentOf("{ not json").size, 0);
 });
@@ -6166,7 +6217,7 @@ test("#5 IDLE CURVE: it is not a recovery curve, and a flat window renders flat"
   }
   // The LOAD panel keeps the recovery vocabulary - correct there - but attached to the window it read at.
   const loadMarked = app.rssSparkline(rampSeries, 60, 217.0, "load", { recoveredAt: 237.3, recoveryWindowS: 30 });
-  assert.match(loadMarked, /peak .* → .* recovery mark/, "the LOAD panel names the recovery mark it read at");
+  assert.match(loadMarked, /peak .* → .* final 30 s of recovery/, "the LOAD panel names the recovery slice it read");
   assert.match(load, /peak .* → .* at the last sample/, "and without that scalar it names the point it does have");
 
   /* 2. A FLAT WINDOW RENDERS FLAT. This is the trap a bare auto-scale walks into, and it is the same bug the
@@ -6561,7 +6612,7 @@ test("MEMORY #0: the row is ONE lifecycle curve, short, with the axis break SHOW
     assert.match(td, /<button type="button"[^>]*aria-label="/, "the curve sits in a focusable control with a name");
     const name = td.match(/aria-label="([^"]*)"/)[1];
     assert.match(name, /this cell: median 46\.7 MiB/, "the scoped median is reachable by keyboard");
-    assert.match(name, /recovery mark/, "and the windowed recovery figure");
+    assert.match(name, /of recovery/, "and the windowed recovery figure");
     assert.match(name, /At rest \(60 s, before any request\)/, "and which window is which");
     assert.match(name, /Under load: peak/, "and the other window, named");
     assert.match(name, /Released 10\.\d MiB of the 19\.\d MiB it gained/, "and the release finding, quantified");
@@ -6771,7 +6822,8 @@ test("a scoped re-run layers over the full run instead of replacing it", () => {
    ranking it last on a higher-is-better axis for it. It shipped on one-api, plano and tensorzero
    because neither lane is in seal.mjs's vocabulary, so `isMetricField` is false for them and
    check-consistency never compared either against the raw artifact. Nothing was watching. */
-test("the dollar lanes are never more certain than the rate they are derived from", () => {
+// testWithData: an empty board is a legitimate state (see BOARD_HAS_DATA) and must skip, not fail.
+testWithData("the dollar lanes are never more certain than the rate they are derived from", () => {
   let checkedAbsent = 0, checkedMeasured = 0;
   for (const g of data.gateways) {
     const bc = g.best_cell;
@@ -6790,8 +6842,16 @@ test("the dollar lanes are never more certain than the rate they are derived fro
         // And it must carry the RATE's reason, not a flattened stand-in: "measured, and it could
         // not hold the bound" is a different finding from "nothing was measured here", and the
         // second is the one that flatters the gateway.
-        assert.equal(env.reason, rate.reason,
-          `${g.key}.${lane} reports ${env.reason} where the rate says ${rate.reason} - a flattened reason`);
+        // EXCEPT a below_resolution rate on the cost lane: every reader ranks below_resolution as 0, and
+        // $0 per million is the cheapest value on a lower-is-better axis. The cost lane must be undefined.
+        if (lane === "cost_per_million_usd" && rate.reason === "below_resolution")
+          assert.equal(env.reason, "not_applicable",
+            `${g.key}.cost_per_million_usd inherits below_resolution, which ranks as $0 - the cheapest gateway`);
+        else
+          assert.equal(env.reason, rate.reason,
+            `${g.key}.${lane} reports ${env.reason} where the rate says ${rate.reason} - a flattened reason`);
+        assert.notEqual(app.mval(bc.cost_per_million_usd), 0,
+          `${g.key}.cost_per_million_usd renders as $0 for a rate that is absent`);
       } else if (rate.value > 0 && lane === "rps_per_dollar") {
         checkedMeasured++;
         assert.equal(env.certified, true, `${g.key}.${lane} must certify a rate that WAS measured`);
@@ -6865,4 +6925,207 @@ test("layering two scoped runs discloses both, not just the last", () => {
   assert.deepEqual(runs.map((r) => r.from.file), ["a.json", "b.json"]);
   assert.deepEqual(runs[0].cells, ["openai>openai"]);
   assert.deepEqual(runs[1].cells, ["anthropic>openai"]);
+});
+
+/* THE ORACLE MUST RESOLVE WHAT GEN-DATA PUBLISHES. gen-data renders the newest FULL run with strictly-
+   scoped newer re-runs layered over it; the oracle read only the newest snapshot, so with a scoped re-run
+   on disk it verified 1 cell (or tripped R3 on the base's stamp) instead of the grid on the board, and C8
+   read only the scoped run's engine while the base run's cells were the ones shown. */
+test("the oracle resolves the base run with scoped re-runs layered, and C8 sees every contributing engine", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oracle-layer-"));
+  try {
+    const cell = (tag) => ({ served: true, perf: { tag } });
+    const snap = (at, engine, coords) => {
+      const m = { measured_at: at, upstreams: {} };
+      for (const [eg, ing, tag] of coords) (m.upstreams[eg] ??= { cells: {} }).cells[ing] = cell(tag);
+      return { measured_at: at, rig: { engine: { commit: engine } }, matrix: m };
+    };
+    writeFileSync(join(dir, "result_gw_2026-08-01T00-00-00Z.json"), JSON.stringify(snap("2026-08-01T00:00:00Z", "aaaa", [
+      ["openai", "openai", "old"], ["openai", "anthropic", "old"], ["gemini", "gemini", "old"]])));
+    writeFileSync(join(dir, "result_gw_2026-08-02T00-00-00Z.json"), JSON.stringify(snap("2026-08-02T00:00:00Z", "bbbb", [
+      ["openai", "openai", "new"]])));
+    const r = checkMod.resolvedSnapshotOnDisk("gw", dir);
+    assert.equal(r.file, "result_gw_2026-08-01T00-00-00Z.json", "the base is the full run, not the newest file");
+    assert.equal(r.snap.matrix.upstreams.openai.cells.openai.perf.tag, "new", "the scoped cell is layered in");
+    assert.equal(r.snap.matrix.upstreams.gemini.cells.gemini.perf.tag, "old", "untouched cells keep the base");
+    assert.equal(r.runs.length, 2, "both contributing runs are reported");
+    const eng = checkMod.engineAgreement(["gw"], () => r.runs, { equivalence: new Map(), override: "" });
+    assert.ok(eng.errors.some((e) => /mixes 2 harness engines/.test(e)),
+      `a scoped re-run on another engine must trip C8: ${JSON.stringify(eng.errors)}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/* A CLEAN RUNG IS THE ENGINE'S CLEAN RUNG (frontier::Rung::served_cleanly: ok > 0 && fail == 0). A window
+   with an unknown (null) failure count used to be certified clean through `fail ?? 0`. */
+test("sealRungs applies the engine's served-cleanly rule and says why a rung has no rate", () => {
+  const [r] = sealRungs([{ conc: 8, rps: 900, fail: null, ok: 3600, p99_us: 100 }, { conc: 8, rps: 0, fail: 0, ok: 0, p99_us: null }]);
+  assert.equal(r.rps.value, null, "neither window is clean: one has unknown failures, one completed nothing");
+  assert.equal(r.clean_windows, 0);
+  assert.doesNotMatch(r.rps.detail, /every window at c=8 failed requests/, "no request was recorded as failed");
+  const [ok] = sealRungs([{ conc: 4, rps: 500, fail: 0, ok: 2000, p99_us: 80 }, { conc: 4, rps: 510, fail: 0, p99_us: 90 }]);
+  assert.equal(ok.clean_windows, 2, "a clean window, and an older one without `ok`, both count");
+});
+
+/* AN UNDATABLE STAMP FAILS THE BUILD. Date.parse("garbage") is NaN; displayedMeasuredMs fell back to the
+   legacy suites (or Math.max went NaN) and every board-wide freshness guard compares false against NaN. */
+test("a matrix with an unparseable measured_at refuses to build rather than disabling freshness", () => {
+  const root = certifyRepo(buildStreamMemRepo(), (m) => { m.measured_at = "not-a-date"; });
+  assert.throws(() => genInto(root), (e) => /unparseable measured_at/.test(String(e.stderr || e.message)),
+    "gen-data must name the undatable stamp");
+});
+
+/* A MALFORMED MANIFEST IS NOT A GATEWAY WITH NO METADATA: it used to publish under its directory name as
+   lang "Other", class "Gateway", with no repo or version. */
+test("an unparseable definition.json fails the build instead of publishing a mislabelled row", () => {
+  const root = certifyRepo(buildStreamMemRepo());
+  writeFileSync(join(root, "gateways", "sgw", "definition.json"), "{ not json");
+  assert.throws(() => genInto(root), (e) => /definition\.json is not valid JSON/.test(String(e.stderr || e.message)));
+});
+
+/* A SCOPED RE-RUN THAT TOUCHES A NEW COORDINATE IS STILL SCOPED. The base was "the newest run that is not
+   a strict subset of the widest", so a 4-cell re-run including a 7th dialect became the base by recency and
+   every other measured cell vanished. And the cell it measured under an upstream the base lacks is
+   recorded as dropped rather than silently discarded. */
+test("a scoped re-run with a new dialect layers over the full run instead of replacing it", () => {
+  const full = new Set(["openai|openai", "openai|anthropic", "gemini|gemini"]);
+  assert.ok(isScopedRelativeTo(new Set(["openai|openai", "vertex|openai"]), full), "smaller and overlapping is scoped");
+  assert.ok(!isScopedRelativeTo(new Set(["v1|openai"]), full), "a disjoint (v1) set is not alignable, so not scoped");
+  assert.ok(!isScopedRelativeTo(full, full), "an identical full re-run replaces");
+  const dir = mkdtempSync(join(tmpdir(), "scoped-new-dialect-"));
+  try {
+    const snap = (at, coords) => {
+      const m = { measured_at: at, upstreams: {} };
+      for (const [eg, ing, tag] of coords) (m.upstreams[eg] ??= { cells: {} }).cells[ing] = { served: true, perf: { tag } };
+      return { measured_at: at, matrix: m };
+    };
+    writeFileSync(join(dir, "result_gw_a.json"), JSON.stringify(snap("2026-08-01T00:00:00Z",
+      [["openai", "openai", "old"], ["openai", "anthropic", "old"], ["gemini", "gemini", "old"]])));
+    writeFileSync(join(dir, "result_gw_b.json"), JSON.stringify(snap("2026-08-02T00:00:00Z",
+      [["openai", "openai", "new"], ["vertex", "openai", "new"]])));
+    const r = checkMod.resolvedSnapshotOnDisk("gw", dir);
+    assert.equal(r.file, "result_gw_a.json", "the full run stays the base");
+    assert.equal(r.snap.matrix.upstreams.gemini.cells.gemini.perf.tag, "old", "no measured cell vanishes");
+    assert.equal(r.snap.matrix.upstreams.openai.cells.openai.perf.tag, "new", "the re-measured cell wins");
+    assert.deepEqual(r.snap.matrix.__layered.runs[0].dropped, ["openai>vertex"], "the unlayerable cell is disclosed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/* THE c=1 SAMPLE WEIGHT TRAVELS WITH THE PERCENTILE. sealPerfCellPerf rebuilt the perf record from a fixed
+   key list and dropped CellPerf.c1_note, so an added-latency p99 over 148 round trips published exactly
+   like one over 250,000. */
+test("a perf cell's c1_note survives into the published record", () => {
+  const root = certifyRepo(buildStreamMemRepo(), (m) => {
+    m.upstreams.openai.cells.openai.perf.c1_note = "taken over 148 successful gateway round trips";
+  });
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  assert.equal(g.best_cell.c1_note, "taken over 148 successful gateway round trips");
+});
+
+/* THE CONFIG SHOWN IS THE CONFIG OF THE RUN SHOWN. When a newer results/matrix/<gw>.json beat an older
+   snapshot, the board still took ootb_config from that older snapshot's config.files. */
+test("an older snapshot that lost to a newer matrix does not supply the published config", () => {
+  const root = certifyRepo(buildStreamMemRepo());
+  const old = new Date(Date.now() - 72 * 3600000).toISOString();
+  writeSnapshot(root, "sgw", { measuredAt: old, files: { "sgw.yaml": "stale: config-from-an-older-run\n" },
+    matrix: { gateway: "sgw", build: "old", matrix_version: 2, served: true, measured_at: old,
+      upstreams: { openai: { configurable: true, served: true, cells: { openai: { served: true,
+        perf: { added_latency_p50_us: 9, added_latency_p99_us: 9, frontier: rawFrontier({ 10: 33333, none: 33334 }) } } } } } } });
+  const g = genInto(root).gateways.find((x) => x.key === "sgw");
+  assert.ok(!g.matrix_from_snapshot, "the newer matrix on disk wins");
+  assert.doesNotMatch(String(g.ootb_config ?? ""), /config-from-an-older-run/,
+    "the losing snapshot's config must not be published beside the winning run's numbers");
+});
+
+/* A ROW WITHHELD FOR ENGINE MISMATCH IS NOT A FAILED RUN. gen-data (OTB_SINGLE_ENGINE) blanks it and sets
+   awaiting_engine; app.js never read it, so the matrix said "the run produced no protocol matrix" and the
+   footer counted it as "measured on an older version" over a row showing no numbers at all. */
+test("a row suppressed for engine mismatch says it is awaiting re-measurement", () => {
+  const g = { key: "w", display: "W", awaiting_engine: "4c45e0b", engine: { sha: "deadbee", current: false } };
+  assert.match(app.matrixFailureReason(g), /not yet re-measured on the current benchmark engine \(4c45e0b\)/);
+  const stamp = app.benchmarkVersionStamp({ benchmark_version: "4c45e0b4fa92", gateways: [g] });
+  assert.match(stamp, /1 withheld pending re-measurement/);
+  assert.doesNotMatch(stamp, /measured on an older version/);
+});
+
+/* A MATRIX-SOURCED RECORD WHOSE CLAIMED CELL IS NOT IN THE RAW ARTIFACT IS UNVERIFIED, NOT VERIFIED. The
+   projected-record oracle used to `continue` past it, so none of its numbers were compared while the
+   gateway still counted as oracled. */
+testWithMatrixDonor("R1 RED: a projected record pointing at a cell the artifact lacks is reported unverifiable", () => {
+  const d = clone(); matrixGw(d).best_cell.path.dialect = "not-a-dialect";
+  const e = checkConsistency(d, app).errors;
+  assert.ok(e.some((x) => x.startsWith("R1:") && x.includes("best_cell") && /cannot be verified/.test(x)),
+    `R1 must report the unverifiable record; got ${JSON.stringify(e.slice(0, 4))}`);
+});
+
+/* F1-72: THE TABLE, THE DRAWER AND THE CHARTS WERE MOUSE-ONLY. A sortable header was a bare <th> with a click
+   handler, a row a bare <tr>, the drawer an <aside> nothing moved focus into, and every chart a <canvas> with
+   no text at all - so a keyboard or screen-reader user could not sort, could not open a gateway's detail,
+   and was told nothing by any chart. */
+test("F1-72: sortable table headers are focusable and carry aria-sort; non-sortable ones do not", () => {
+  const st = { ...app.newState(), view: "performance" };
+  const cols = app.columnsFor("performance");
+  const sortable = cols.find((c) => c.sortable !== false);
+  st.sortCol = sortable.id; st.sortDesc = true;
+  const head = app.theadHtml(cols, st);
+  const thFor = (id) => (head.match(new RegExp(`<th data-col="${id}"[^>]*>`)) || [""])[0];
+  assert.match(thFor(sortable.id), /tabindex="0"/, "the sorted header must be focusable");
+  assert.match(thFor(sortable.id), /aria-sort="descending"/, "the sorted header must say its direction");
+  const other = cols.find((c) => c.sortable !== false && c.id !== sortable.id);
+  if (other) assert.match(thFor(other.id), /aria-sort="none"/, "an unsorted sortable header reads aria-sort=none");
+  for (const c of cols.filter((x) => x.sortable === false))
+    assert.doesNotMatch(thFor(c.id), /tabindex|aria-sort/, `non-sortable ${c.id} must not pose as a control`);
+  assert.equal(app.ariaSortFor(true, false), "ascending");
+  assert.equal(app.ariaSortFor(false, true), "none");
+});
+test("F1-72: Enter and Space activate a header or row; other keys do not", () => {
+  assert.ok(app.isActivateKey({ key: "Enter" }));
+  assert.ok(app.isActivateKey({ key: " " }));
+  assert.ok(!app.isActivateKey({ key: "Tab" }));
+  assert.ok(!app.isActivateKey({ key: "a" }));
+  assert.ok(!app.isActivateKey(null));
+});
+test("F1-72: table and roster rows are focusable and wired for keys; the drawer is a modal dialog", () => {
+  const src = readFileSync(join(HERE, "app.js"), "utf8");
+  assert.match(src, /<tr data-gw="\$\{esc\(g\.key\)\}" tabindex="0"/, "results rows must be focusable");
+  assert.match(src, /<tr data-gw="\$\{esc\(g\.key\)\}" class="rowlink" tabindex="0"/, "roster rows must be focusable");
+  assert.equal((src.match(/wireRowKeys\(tr\);/g) || []).length, 2, "both row kinds must get the Enter/Space handler");
+  const html = readFileSync(join(HERE, "index.html"), "utf8");
+  const aside = (html.match(/<aside id="drawer"[^>]*>/) || [""])[0];
+  assert.match(aside, /role="dialog"/); assert.match(aside, /aria-modal="true"/);
+  assert.match(html, /id="drawer-close"[^>]*aria-label="[^"]+"/, "the glyph-only close button needs an accessible name");
+  assert.match(src, /closeBtn\.focus\(\)/, "opening the drawer must move focus into it");
+  assert.match(src, /back\.focus\(\)/, "closing the drawer must return focus to its trigger");
+});
+test("F1-72: Tab is trapped inside the open drawer and wraps at both ends", () => {
+  const a = {}, b = {}, c = {}, outside = {};
+  assert.equal(app.focusTrapNext([a, b, c], c, false), a, "Tab on the last control wraps to the first");
+  assert.equal(app.focusTrapNext([a, b, c], a, true), c, "Shift+Tab on the first wraps to the last");
+  assert.equal(app.focusTrapNext([a, b, c], b, false), null, "mid-dialog Tab is left to the browser");
+  assert.equal(app.focusTrapNext([a, b, c], outside, false), a, "focus that escaped is pulled back in");
+  assert.equal(app.focusTrapNext([], a, false), null);
+});
+test("F1-72: the ranked-bar chart has a name and a data table carrying every drawn value", () => {
+  const metric = { label: "Added latency (p99)", unit: "µs", log: true };
+  const rows = [{ name: "Alpha", v: 120 }, { name: "Beta <b>", v: 4500 }];
+  const alt = app.rankedBarsAlt(rows, metric);
+  assert.match(alt.label, /Added latency \(p99\) \(log scale\): ranked bar chart of 2 gateways, led by Alpha at 120 µs/);
+  assert.match(alt.table, /^<table id="chart-canvas-data" class="sr-only">/);
+  assert.match(alt.table, /<td>1<\/td><td>Alpha<\/td><td>120 µs<\/td>/);
+  assert.match(alt.table, /<td>2<\/td><td>Beta &lt;b&gt;<\/td><td>4\.5 ms<\/td>/, "names are escaped; values formatted as drawn");
+  const src = readFileSync(join(HERE, "app.js"), "utf8");
+  assert.match(src, /role="img" aria-label="\$\{esc\(alt\.label\)\}" aria-describedby="chart-canvas-data"/,
+    "the Charts-tab canvas must carry the name and point at its table");
+});
+test("F1-72: each sweep chart canvas is named and points at its own data table", () => {
+  const usable = [{ label: "gw", color: "#fff", sweep: [{ conc: 1, rps: 100, p99_us: 900 }, { conc: 8, rps: null, p99_us: 1500 }] }];
+  const html = app.sweepChartsHtml(app.sweepRpsSeries(usable), app.sweepP99Series(usable), "drawer-sweeps");
+  const canvases = html.match(/<canvas[^>]*>/g) || [];
+  assert.equal(canvases.length, 2);
+  assert.match(canvases[0], /role="img"[^>]*aria-describedby="drawer-sweeps-rps-data"/);
+  assert.match(canvases[1], /role="img"[^>]*aria-describedby="drawer-sweeps-p99-data"/);
+  assert.match(html, /<table id="drawer-sweeps-rps-data" class="sr-only">.*<td>gw<\/td><td>1<\/td><td>100 rps<\/td>/s);
+  assert.doesNotMatch(html.split("drawer-sweeps-p99-data")[0], /<td>8<\/td>/, "an absent rung is not a row in the RPS table (never a 0)");
+  assert.match(html, /<td>gw<\/td><td>8<\/td><td>1,500 µs p99<\/td>/);
+  const css = readFileSync(join(HERE, "style.css"), "utf8");
+  assert.match(css, /\.sr-only \{[^}]*clip-path: inset\(50%\)/, "the data tables are visually hidden, not drawn");
 });

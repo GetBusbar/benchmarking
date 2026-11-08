@@ -6,15 +6,12 @@
 //
 // Two families, both class invariants rather than spot checks:
 //
-//   1. THE URL CODEC AS A FIXED POINT, enumerated: for EVERY category, view, chooser mode, dialect
-//      selection and sortable column, encode(decode(encode(state))) === encode(state). test.mjs pins
-//      several specific links; this holds the whole space, so a new tab or mode cannot ship with a
-//      link that silently drops part of its state.
+//   1. The URL codec as a fixed point, enumerated: for every category, view, chooser mode, dialect
+//      selection and sortable column, encode(decode(encode(state))) === encode(state).
 //
-//   2. ONE ENVELOPE, ONE STORY ON EVERY SURFACE: the same sealed metric must tell the same story on
-//      the table cell, the drawer/compare lane record, the matrix popup and the rank value - for a
-//      measured zero, a below-resolution absence, a measured failure, a rig-limited suppression and
-//      an untested cell. A surface that disagrees is publishing a second truth.
+//   2. One envelope, one story on every surface: the same sealed metric must tell the same story on
+//      the table cell, drawer/compare lane record, matrix popup and rank value - for a measured zero,
+//      a below-resolution absence, a measured failure, a rig-limited suppression, and an untested cell.
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,7 +187,8 @@ test("compare/drawer/search/caps state survives alongside the chooser on one URL
   st.drawer = "bravo";
   const { url, back, again } = roundTrip(st);
   assert.equal(back.q, st.q, url);
-  assert.equal(back.needStream, true, url);
+  // ?cap= is no longer encoded (its checkbox is gone; an invisible filter would hide gateways).
+  assert.equal(back.needStream, false, url);
   assert.deepEqual(back.cmp, st.cmp, url);
   assert.equal(back.cmpOpen, true, url);
   assert.equal(back.drawer, "bravo", url);
@@ -201,27 +199,21 @@ test("compare/drawer/search/caps state survives alongside the chooser on one URL
 
 // ---- family 2: one envelope, one story on every surface ---------------------------------------
 
-/* A gateway whose openai->anthropic cell carries one field per story, so every surface can be read off the
-   SAME record. Metrics seal through the REAL sealMetric, exactly as gen-data does.
-
-   THE FOUR STORIES CHANGED, BECAUSE ONE OF THEM STOPPED EXISTING. They were: a measured zero, a
-   below-resolution absence, a measured failure, and a RIG-LIMITED SUPPRESSION - a sealed envelope
-   withholding a number it had, because our own rig might have bounded it. Suppression is gone: the
-   measurement was correct in every one of those cells and only its INTERPRETATION was open, so the number
-   is published with the fraction of the rig's ceiling it reached and the reader draws the conclusion.
-   The fourth story is now the LOWER BOUND, which the frontier introduced: a rate whose sweep ran out of
-   ladder while that concurrency was still qualifying. It is real, it is not a maximum, and a surface that
-   renders it as a ceiling is making a claim the data does not support - the same class of error the
-   suppression was, in the opposite direction. So the four remain four, and each is still one substitution
-   away from being indistinguishable from its neighbour, which is why every surface is checked. */
+/* A gateway whose openai->anthropic cell carries one field per story, so every surface can be read off
+   the same record, sealed through the real sealMetric exactly as gen-data does.
+   The four stories: a measured zero, a below-resolution absence, a measured failure, and a lower
+   bound (a rate whose sweep ran out of ladder while still qualifying - real, not a maximum). The
+   retired fourth story, rig-limited suppression, is gone: the measurement was correct and only its
+   interpretation was open, so it now publishes with the fraction of the rig's ceiling it reached.
+   Each story is still one substitution away from being indistinguishable from its neighbor, which is
+   why every surface is checked. */
 const IN = "openai";
 const OUT = "anthropic";
 // The frontier as it arrives on a projected record: a sealed rate per reading, with the reading's own
 // evidence beside it. Written out rather than built by a helper so each story is visible at its bound.
 const STORY_FRONTIER = [
-  // story A: SERVED, BUT NO RUNG HELD THIS TAIL. `below_resolution` on a throughput reading - a measured
-  // nothing, not a missing measurement. On the field data this is five of six columns for the slowest
-  // gateways, so it is the state most likely to be misread as "no data".
+  // story A: served, but no rung held this tail. `below_resolution` on a throughput reading is a
+  // measured nothing, not a missing measurement - the state most likely to be misread as "no data".
   { bound_ms: 1, concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false,
     rps: sealMetric(null, { absent: { reason: "below_resolution",
       detail: "every cleanly-served rung had a tail latency at or above 1ms, so this gateway carried no measurable throughput under that bound" } }) },
@@ -234,9 +226,9 @@ const STORY_FRONTIER = [
 ];
 const STORY_CELL_PERF = {
   frontier: STORY_FRONTIER,
-  // story B: a below-resolution absence on a LATENCY difference - the best result the comparison can
-  // express. Note it is the SAME engine reason as story A and must render differently, because the
-  // sentence differs: "smaller than we can measure" for a difference, "held nothing" for a rate.
+  // story B: a below-resolution absence on a latency difference - the best result the comparison can
+  // express. Same engine reason as story A but must render differently ("too small to measure" vs
+  // "held nothing").
   added_latency_p99_us: sealMetric(null, {
     absent: { reason: "below_resolution", detail: "the gateway leg (20073us) came in under the direct leg (21070us)" },
   }),
@@ -244,8 +236,8 @@ const STORY_CELL_PERF = {
   added_latency_p50_us: sealMetric(null, {
     absent: { reason: "not_measured", detail: "the gateway leg at c=1 was not clean: 0 ok, 14201 fail" },
   }),
-  // A number taken NEAR THE RIG'S OWN CEILING, published with the comparison's facts on it. This is what
-  // replaced the suppression, and it is here so the inverted property has something to hold.
+  // A number taken near the rig's own ceiling, published with the comparison's facts - what replaced
+  // the suppression.
   gateway_c1_p99_us: sealMetric(99999, { headroom: 0.996, ceiling: 100400 }),
 };
 const STORY_GW = {
@@ -262,18 +254,18 @@ const CUSTOM = { ...app.newState(), mode: "custom", xlateIn: IN, xlateOut: OUT }
 const perfLane = app.LANES.find((l) => l.key === "perf");
 const laneRow = (bound) => perfLane.metrics.find((m) => m.k === `frontier.${bound}`);
 
-test("a MEASURED NOTHING is a 0 that says why, on every surface, and is never a missing measurement", () => {
+test("an uncertified frontier bound preserves its reason without claiming numeric zero", () => {
   const table = app.frontierBoundCell(STORY_GW, 1, CUSTOM);
-  assert.equal(table.na, false, "the gateway served and the sweep ran: this is a result, not a hole");
-  assert.equal(table.text, "0", "the table shows the digit");
-  assert.equal(table.v, 0, "it ranks as 0 - last on a higher-is-better sort, which is the honest place");
+  assert.equal(table.na, true, "no rung certified a quantitative result");
+  assert.equal(table.text, "n/a", "the table does not fabricate zero");
+  assert.equal(table.v, null, "unavailable values do not receive a quantitative rank");
   assert.equal(table.why, "no rung held this tail", "and the cell says WHY, not just '0'");
   assert.match(app.metricTd(table), /no rung held this tail/, "on the cell itself, not only on hover");
   assert.match(table.note, /no measurable throughput under that bound/, "with the engine's own prose on the tooltip");
 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
   assert.ok(rec, "the drawer/compare lane reads the same cell");
-  assert.equal(laneRow("1ms").cell(rec).v, 0, "drawer/compare rank the same 0");
+  assert.equal(laneRow("1ms").cell(rec).v, null, "drawer/compare preserve the same absence");
   assert.equal(laneRow("1ms").cell(rec).why, "no rung held this tail", "and tell the same story");
 
   const pop = app.cellPopFull(STORY_GW, IN, OUT);
@@ -286,9 +278,8 @@ test("a BELOW-RESOLUTION absence reads as approximately-zero on every surface, n
   assert.equal(table.text, "≈0", "the table reads approximately zero");
   assert.equal(table.v, 0, "it ranks as 0, equal-best on a lower-is-better sort");
   assert.match(table.note, /came in under the direct leg/, "the engine's evidence is the tooltip");
-  // THE SAME REASON, A DIFFERENT SENTENCE. Story A above is `below_resolution` too, and it must NOT read
-  // "≈0": "approximately zero" is the right words for a difference too small to weigh and the wrong words
-  // for a gateway that held nothing under a tail.
+  // Same reason, different sentence: story A is below_resolution too but must NOT read "≈0" - that
+  // phrasing fits a difference too small to weigh, not a gateway that held nothing under a tail.
   assert.notEqual(app.frontierBoundCell(STORY_GW, 1, CUSTOM).text, table.text,
     "one absence reason, two findings: they must not render identically");
 
@@ -316,15 +307,10 @@ test("a MEASURED FAILURE yields a number on NO surface, but carries its counts o
   assert.ok(!untested.failed, "an untested cell must never wear the failure red");
 });
 
-/* THE INVERTED STORY. This test used to be "a RIG-LIMITED suppression is n/a on every surface and the raw
-   number is unrecoverable from any of them": a measurement at or above a chosen fraction of our own rig's
-   ceiling had its value replaced with null, and the test asserted that no surface could recover it.
-   That was withholding a correct measurement. The engine reached the verdict by comparing the observation
-   against a rig reference and applying a chosen fraction, and it fired hardest on the gateways that did
-   best - a gateway keeping pace with the paced mock to within 0.7% published nothing at all. So the
-   opposite property is the one that must hold now, and it is asserted in both directions: the number is
-   PUBLISHED on every surface with the comparison's own facts attached, and the suppression vocabulary
-   cannot come back (invariant C2 asserts the same thing from the bundle side). */
+/* The inverted story: this test used to assert a rig-limited suppression was n/a and unrecoverable
+   from every surface - withholding a correct measurement, and hardest on the gateways doing best. The
+   opposite property holds now: the number publishes on every surface with the comparison's own facts
+   attached, and the suppression vocabulary cannot come back (C2 asserts the same from the bundle side). */
 test("a NEAR-CEILING measurement is published on every surface, and suppression cannot come back", () => {
   const table = app.chooserPerfCell(STORY_GW, "gateway_c1_p99_us", String, CUSTOM);
   assert.equal(table.na, false, "a number near the rig's own ceiling is not a hole");
@@ -335,8 +321,8 @@ test("a NEAR-CEILING measurement is published on every surface, and suppression 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
   assert.equal(app.mval(rec.gateway_c1_p99_us), 99999, "drawer/compare publish the same number");
   assert.equal(rec.gateway_c1_p99_us.headroom, 0.996, "the fraction travels with the record");
-  // AND NO SURFACE WITHHOLDS IT. Every sealed envelope on the record is unsuppressed, which is the
-  // structural half: there is no `suppressed: true` shape left for a value to hide behind.
+  // And no surface withholds it: every sealed envelope on the record is unsuppressed - no
+  // `suppressed: true` shape left for a value to hide behind.
   for (const [k, v] of Object.entries(rec))
     if (app.isEnvelope(v)) assert.equal(v.suppressed, false, `${k} must not be suppressed`);
   for (const r of rec.frontier) assert.equal(r.rps.suppressed, false, "nor may any frontier reading's rate be");
@@ -377,13 +363,16 @@ test("the popup reads the SAME chosen-cell values the table reads, at the SAME b
     ["added_latency_p50_us", "Added latency p50"],
   ]) {
     assert.ok(pop.includes(label), `the popup shows ${label}`);
-    assert.ok(app.chooserPerfCell(STORY_GW, key, String, CUSTOM), `${key} is read by the same accessor`);
+    // The cell object is always truthy, so asserting on it proved nothing. Assert the VALUE: the table's
+    // own text for this cell, formatted as the popup formats it, appears in the popup.
+    const c = app.chooserPerfCell(STORY_GW, key, app.fmtAdded, CUSTOM);
+    // A plain absence is dropped from the popup; a value or a MEASURED FAILURE must appear verbatim.
+    assert.ok(!c.na || c.failed, `${key}: the fixture must carry a value or a measured failure`);
+    assert.ok(pop.includes(c.text), `${key}: the popup shows the table's own text ${c.text}`);
   }
-  /* THE THROUGHPUT ROW IS LABELLED WITH ITS BOUND, AND FOLLOWS THE SELECTOR. This replaces the old
-     "the popup shows Sustained @20ms" check, whose column is deleted - and it is a strictly stronger
-     property, because a bound selector creates a way for two surfaces to disagree that a fixed column
-     could not: the popup could keep showing 10 ms after the reader switched to 1 ms. Both read
-     selectedBound() through the same accessors, so both move together or neither does. */
+  /* The throughput row is labelled with its bound and follows the selector: a bound selector creates
+     a way for two surfaces to disagree that a fixed column couldn't (the popup could keep showing
+     10ms after the reader switched to 1ms). Both read selectedBound() through the same accessors. */
   const prev = app.state.bound;
   try {
     for (const bound of app.BOUND_CHOICES) {
@@ -395,13 +384,11 @@ test("the popup reads the SAME chosen-cell values the table reads, at the SAME b
         assert.ok(h.includes(cell.text), `the popup carries the table's own text at ${app.boundLabel(bound)} (${cell.text})`);
     }
   } finally { app.state.bound = prev; }
-  // THE AGREEMENT IS "RENDERS CONTENT", NOT "IS NOT n/a" - the two came apart deliberately.
-  //
-  // `na` means "there is no number here", and two different states share it. A never-measured value is
-  // absent and shows nothing on either surface. A MEASURED FAILURE is also `na` (0 ok, N fail: there is no
-  // latency to publish) but it is a result, and both surfaces render it in red with its counts. The popup
-  // used to drop it with the genuine absences, which is how a cell whose every metric was measured and
-  // failed printed "served, not measured on this cell" - a false claim about a cell we measured thoroughly.
+  // The agreement is "renders content", not "is not n/a" - the two came apart deliberately.
+  // `na` means "no number here", shared by two different states: a never-measured value shows nothing,
+  // but a measured failure is also `na` and yet is a result, rendered in red with its counts. The popup
+  // used to drop it with genuine absences, printing a false "served, not measured on this cell" for a
+  // cell that was measured thoroughly and failed.
   const failed = app.chooserPerfCell(STORY_GW, "added_latency_p50_us", String, CUSTOM);
   assert.equal(failed.na, true, "a measured failure has no number");
   assert.equal(failed.failed, true, "but it IS a result, not an absence");
@@ -421,16 +408,11 @@ test("a measured stream-sustain failure stays distinct from not-measured through
 });
 
 // ---- family 2b: ...and "every surface" now includes the two that had no test at all ---------------
-//
-// The family above reads the drawer and compare lanes through `laneRecord`, which is the RECORD those
-// surfaces consume - not the markup they emit. That was not a shortcut, it was the only thing reachable:
-// drawerHtml() was called by no test in either file, and renderCompare() reached for
-// document.getElementById on its first useful line in a suite with no DOM. So "one story on every
-// surface" was in fact asserted on every surface except the two a reader actually opens.
-//
-// With the compare panel's row-building extracted (compareBodyHtml) and the drawer threaded through its
-// state, both render as pure functions of (gateways, state). The same four stories are now asserted on
-// the markup itself, which is where a divergence would be visible to a reader and nowhere else.
+// The family above reads the drawer and compare lanes through `laneRecord`, the record those surfaces
+// consume, not the markup they emit - the only thing reachable, since drawerHtml() was called by no
+// test and renderCompare() reached for document.getElementById in a suite with no DOM. With the
+// compare panel's row-building extracted (compareBodyHtml) and the drawer threaded through its state,
+// both render as pure functions, and the same four stories are now asserted on the markup itself.
 const OTHER_GW = {
   key: "othergw", display: "Other GW", lang: "Go",
   matrix: { upstreams: { [OUT]: { cells: { [IN]: { served: true, status: 200, perf: {
@@ -449,7 +431,7 @@ const STORY_STATE = { ...app.newState(), view: "performance", mode: "custom", xl
 test("the DRAWER markup tells all four stories - a measured nothing, below-resolution, a failure, a floor", () => {
   const h = app.drawerHtml(STORY_GW, STORY_STATE);
   // A: the measured nothing is a digit with its reason beside it, never a hole and never a blank.
-  assert.match(h, /99% under 1 ms/, "the drawer names the reading's own bound");
+  assert.match(h, /1\s?ms/, "the drawer names the reading's own bound");
   assert.match(h, /no rung held this tail/, "and says what its 0 means");
   // B: below-resolution is the ≈0 result, not an absence.
   assert.match(h, /≈0/, "below-resolution reads as approximately zero in the drawer");

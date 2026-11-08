@@ -27,34 +27,35 @@
 #           is a real limit and it is reported rather than papered over - see the closing note, which
 #           prints it every run so nobody mistakes a pass here for a fully audited figure.
 #
-# The same shape of check applies to the streaming TTFT figures, which DO declare
-# `ttft_direct_samples` / `ttft_gw_samples`. On the boards seen so far those fields are null, so there
-# is nothing to re-derive from; the tool says so per cell rather than silently skipping, because a
+# The streaming TTFT figures CANNOT be re-derived here at all. `ttft_gw_samples` /
+# `ttft_direct_samples` are sample COUNTS (`Measurement<i64>` in record.rs CellStream - the weight behind
+# each percentile), not the samples themselves, and neither leg's TTFT percentile is published. The tool
+# says so every run, with the number of cells it applies to, rather than silently skipping, because a
 # checker that quietly finds nothing looks exactly like a clean bill of health.
 
 import glob
 import json
+import os
 import sys
+
+# Anchored to this file, not the caller's cwd (bench-audit.py's ledger TOOL-03): a cwd-relative glob
+# run from anywhere but the repo root found zero snapshots and printed PASS.
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def num(v):
-    """A published Measurement is a bare number or null. Absence is None, never 0."""
+    """A published Measurement is a bare number or null. Absence is None, never 0. A JSON bool is not a
+    number (Python's `True` would read as 1)."""
     if isinstance(v, dict):
         v = v.get("value")
-    return v if isinstance(v, (int, float)) else None
-
-
-def listof(v):
-    if isinstance(v, dict):
-        v = v.get("value")
-    return v if isinstance(v, list) else None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 def check(path):
     d = json.load(open(path))
     gw = d.get("gateway", "?")
     problems, checked, unverifiable = [], 0, 0
-    ttft_with_samples = 0
+    ttft_published = 0
     for eg, up in ((d.get("matrix") or {}).get("upstreams") or {}).items():
         for ing, cell in (up.get("cells") or {}).items():
             if cell.get("served") is not True:
@@ -111,22 +112,26 @@ def check(path):
             # the statement that is actually true of these numbers, and it stays.
 
             st = cell.get("stream") or {}
-            if listof(st.get("ttft_gw_samples")) and listof(st.get("ttft_direct_samples")):
-                ttft_with_samples += 1
-    return gw, checked, unverifiable, ttft_with_samples, problems
+            if num(st.get("added_ttft_p50_us")) is not None or num(st.get("added_ttft_p99_us")) is not None:
+                ttft_published += 1
+    return gw, checked, unverifiable, ttft_published, problems
 
 
 def main():
     paths = [a for a in sys.argv[1:] if not a.startswith("-")] or sorted(
-        glob.glob("results/snapshots/*.json")
+        glob.glob(os.path.join(HERE, "results", "snapshots", "*.json"))
     )
     total = unver = ttft = 0
     allp = []
+    skipped = []
     for p in paths:
         try:
             gw, n, u, t, probs = check(p)
-        except Exception as e:  # a snapshot mid-write during a live run is not a defect
+        except Exception as e:
+            # A snapshot mid-write during a live run is not a defect in the DATA - but it was not
+            # checked, so it can never be part of a PASS. Re-run once the write lands.
             print(f"  SKIP {p}: {e}")
+            skipped.append(p)
             continue
         total += n
         unver += u
@@ -140,8 +145,8 @@ def main():
     if unver:
         print(f"{unver} figure(s) published WITHOUT both legs - unverifiable by anyone")
     print(
-        f"{ttft} cell(s) publish raw TTFT samples; the rest publish TTFT percentiles with no samples, "
-        f"so those are not re-derivable here"
+        f"{ttft} cell(s) publish added-TTFT percentiles; ttft_*_samples are sample COUNTS and neither "
+        f"leg's TTFT percentile is published, so none of those are re-derivable here"
     )
     # PRINTED EVERY RUN, PASS OR FAIL. A pass here means the subtraction is right - not that the
     # percentiles feeding it are. Saying so on every run is the difference between a known limit and a
@@ -153,6 +158,10 @@ def main():
     )
     for x in allp:
         print(f"  PROBLEM: {x}")
+    if skipped:
+        print(f"\nFAIL: {len(skipped)} snapshot(s) could not be checked at all - a PASS cannot cover "
+              f"data nobody examined" + (f"; plus {len(allp)} problem(s)" if allp else ""))
+        return 1
     if allp:
         print(f"\nFAIL: {len(allp)} problem(s)")
         return 1

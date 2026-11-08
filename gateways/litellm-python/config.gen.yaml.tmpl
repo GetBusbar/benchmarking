@@ -31,3 +31,8 @@ model_list:
       aws_access_key_id: AKIAMOCKACCESSKEY
       aws_secret_access_key: mock-secret-access-key
       aws_region_name: us-east-1
+
+# Public test token for the local mock rig, never a real provider credential.
+general_settings:
+  master_key: {GW_AUTH}
+  dangerously_permit_weak_or_unset_master_key: true

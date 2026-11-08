@@ -1,0 +1,11 @@
+{
+  "engine_commit": "f713bb0bfe523200d2aae76ae5189648b7992028",
+  "architecture": "linux/arm64",
+  "target": "aarch64-unknown-linux-musl",
+  "builder_image": [
+    "rust@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e"
+  ],
+  "command": "OTB_BUILD_COMMIT=<engine-commit> cargo build --release --locked --workspace --target aarch64-unknown-linux-musl",
+  "validation": "verify_rig.py checks source commit, SHA-256 and ELF architecture; executable engine-commit was verified in Linux container",
+  "ci_pipeline": 139
+}

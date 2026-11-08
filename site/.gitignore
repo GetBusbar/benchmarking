@@ -3,3 +3,6 @@ data.json
 charts/
 fonts/
 404.html
+node_modules
+.wrangler/
+dist/

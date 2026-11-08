@@ -127,14 +127,19 @@ export const RSS_FIELD_RE = /_rss_(?:[a-z0-9]+_)*mib$/;
 // discover them) but they ARE published numbers: the growth rate is the leak rate when a gateway never
 // reached a steady state, i.e. the most load-bearing number the memory metric produces. Leaving them out
 // of the vocabulary would let them ship as bare unsealed scalars: the peak_rss_hwm_mib bug again.
-export const UNGATED_MEM_FIELDS = ["growth_rate_mib_per_min", "time_to_plateau_s"];
+// THE SHAPE CODES AND THE IDLE-WINDOW VERDICT ARE PUBLISHED NUMBERS TOO (record.rs CellMemory: shape,
+// idle_shape, idle_static, idle_growth_rate_mib_per_min, load_s). Left out, they shipped as bare scalars,
+// and app.js reads every one of them through mval()/mcode(), which return null for a non-envelope - so the
+// shape-aware memory wording ("swinging", not "climbing") and the idle verdict silently never rendered.
+export const UNGATED_MEM_FIELDS = ["growth_rate_mib_per_min", "time_to_plateau_s",
+  "shape", "idle_shape", "idle_static", "idle_growth_rate_mib_per_min", "load_s"];
 // isMetricField(k): is this key a sealed-envelope metric field? The single predicate both gen-data
 // (what to seal) and check-consistency (what must BE an envelope) use.
 export function isMetricField(k) {
   return THROUGHPUT_FIELDS.includes(k) || UNGATED_LAT_FIELDS.includes(k) ||
     UNGATED_COST_FIELDS.includes(k) ||
     UNGATED_STREAM_FIELDS.includes(k) || UNGATED_MEM_FIELDS.includes(k) ||
-    k === "streams_sustained_fps" || RSS_FIELD_RE.test(k);
+    RSS_FIELD_RE.test(k);
 }
 
 // makeSource: the provenance stamp carried by every cell + every envelope. `kind` is the coarse
@@ -320,7 +325,7 @@ export function sealFrontier(readings, absences = null) {
    MEDIAN OF THE CLEAN WINDOWS AT THAT RUNG, because the sweep drives each concurrency
    WINDOWS_PER_RUNG times and a single window is noise near saturation - the same discipline every
    other repeated measurement on this board reports under. A window that FAILED requests is not a rate:
-   it is excluded, and a rung with no clean window publishes a suppressed envelope rather than a
+   it is excluded, and a rung with no clean window publishes an absent envelope carrying the reason rather than a
    number, so "it dropped requests here" can never render as throughput. */
 export function sealRungs(sweep) {
   if (!Array.isArray(sweep) || !sweep.length) return [];
@@ -333,7 +338,12 @@ export function sealRungs(sweep) {
   }
   return [...byConc.keys()].sort((a, b) => a - b).map((conc) => {
     const windows = byConc.get(conc);
-    const clean = windows.filter((w) => Number.isFinite(w.rps) && (w.fail ?? 0) === 0);
+    /* THE ENGINE'S OWN RULE (frontier::Rung::served_cleanly: ok > 0 && fail == 0), not an approximation.
+       A window whose `fail` is null is a window whose failures are UNKNOWN, and `?? 0` used to certify it
+       as clean. `ok` is checked when the artifact carries it (older snapshots predate the field). */
+    const clean = windows.filter((w) => Number.isFinite(w.rps) && w.fail === 0
+      && (w.ok == null || (Number.isFinite(w.ok) && w.ok > 0)));
+    const failed = windows.filter((w) => Number.isFinite(w.fail) && w.fail > 0).length;
     const rates = clean.map((w) => w.rps).sort((a, b) => a - b);
     const tails = clean.map((w) => w.p99_us).filter(Number.isFinite).sort((a, b) => a - b);
     const med = (xs) => (xs.length ? xs[Math.floor((xs.length - 1) / 2)] : null);
@@ -345,7 +355,11 @@ export function sealRungs(sweep) {
         absent: clean.length
           ? null
           : { reason: "not_measured",
-              detail: `every window at c=${conc} failed requests, so no clean rate was carried there` },
+              // Say what actually disqualified the windows: a failed request, or a window whose rate or
+              // failure count was never recorded. The second is not a finding about the gateway.
+              detail: failed === windows.length
+                ? `every window at c=${conc} failed requests, so no clean rate was carried there`
+                : `no window at c=${conc} was clean: ${failed} of ${windows.length} failed requests, the rest carried no usable rate or failure count` },
       }),
       p99_us: med(tails),
       windows: windows.length,

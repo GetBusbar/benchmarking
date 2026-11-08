@@ -23,8 +23,13 @@
 
 import glob
 import json
+import os
 import sys
 from collections import Counter, defaultdict
+
+# Anchored to this file, not the caller's cwd (bench-audit.py's ledger TOOL-03): from any other
+# directory a cwd-relative glob found nothing and the tool exited 0.
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Quantities that cannot be negative. A negative one is not a measurement of anything.
 NON_NEGATIVE = {
@@ -70,17 +75,8 @@ NON_NEGATIVE = {
 # equals the difference of its own published legs - the statement that is actually true of them.
 
 
-# The gateway's pinned core count, and how far the two samplers may disagree before it is a defect.
-#
-# NOT TUNING KNOBS. `run-on-ec2.sh` pins the gateway to CORES=0-3, so four is the divisor the
-# utilisation fraction is taken over - if that split changes, this must change with it or the check
-# silently compares against the wrong denominator. The tolerance is deliberately LOOSE (3x) because
-# the honest direction of disagreement is one-sided: the utilisation window spans a little more wall
-# time than the load window, so implied-from-CPU runs BELOW measured. Only the impossible direction
-# is flagged - a gateway appearing to burn more CPU than its cores accumulated, which means it is not
-# confined to them and the comparable-basis claim is false.
-COST_PINNED_CORES = 4
-COST_UTIL_TOLERANCE = 3.0
+# (COST_PINNED_CORES / COST_UTIL_TOLERANCE are gone: they parameterised the CPU-vs-cores check whose
+# removal is explained in main(), and nothing read them after it went.)
 
 
 def num(v):
@@ -105,7 +101,9 @@ def scalar_fields(block):
     """
     out = {}
     for k, v in (block or {}).items():
-        if isinstance(v, list) or k.endswith("_series") or k.endswith("_note") or k.endswith("_samples"):
+        # NOT `_samples`: `ttft_gw_samples` / `ttft_direct_samples` are numeric sample COUNTS
+        # (`Measurement<i64>`, absence-carrying), and a list-valued field is already skipped above.
+        if isinstance(v, list) or k.endswith("_series") or k.endswith("_note"):
             continue
         if k in ("frontier", "sweep_max_proxy", "sweep_streams"):
             continue
@@ -123,9 +121,11 @@ def scalar_fields(block):
 
 
 def main():
-    paths = sorted(glob.glob("results/snapshots/*.json"))
+    paths = sorted(glob.glob(os.path.join(HERE, "results", "snapshots", "*.json")))
     if not paths:
-        print("no snapshots")
+        # The same rule bench-audit.py states: with zero snapshot files on disk nothing is published.
+        # Anchored to this file, so this is an empty board, never a wrong cwd.
+        print("SKIP: no snapshots present (empty board) - nothing published, nothing to audit")
         return 0
 
     present = Counter()
@@ -135,14 +135,18 @@ def main():
     warnings = []
     cells = 0
     gateways = set()
+    unreadable = []
 
     for p in paths:
         try:
-            d = json.load(open(p))
+            with open(p) as fh:
+                d = json.load(fh)
         except (OSError, ValueError):
-            # See verify-turnover.py: a snapshot mid-write during a live run is not a defect, and this
-            # tool is most useful precisely while a run is in flight.
+            # See verify-turnover.py: a snapshot mid-write during a live run is not a defect in the
+            # data, and this tool is most useful while a run is in flight - but it was not examined,
+            # so the run cannot end in "NO IMPOSSIBLE VALUES".
             print(f"  SKIP {p}: not readable as JSON yet (a snapshot mid-write is not a defect)")
+            unreadable.append(p)
             continue
         gw = d.get("gateway", "?")
         gateways.add(gw)
@@ -195,7 +199,10 @@ def main():
                 # 0.3 MiB (0.6%) on agentgateway's 48 MiB tree and 11.5 MiB (1.33%) on bifrost's 876 MiB
                 # one. Board-wide: 32 of 92 cells overshoot, median 0.22%, and the only cell above 1% is
                 # the largest tree on the board. That is the artefact's signature, not a defect's.
-                if hwm is not None and peak is not None and peak > hwm:
+                if hwm is not None and hwm <= 0 and peak is not None and peak > 0:
+                    problems.append(f"{at}: kernel HWM is {hwm} MiB beside a sampled peak of {peak} MiB - "
+                                    f"a process that ran has a high-water mark above zero")
+                elif hwm is not None and peak is not None and peak > hwm:
                     warnings.append(
                         f"{at}: sampled peak ({peak:.1f} MiB) exceeds kernel HWM ({hwm:.1f} MiB) by "
                         f"{(peak - hwm):.1f} MiB ({(peak / hwm - 1) * 100:.2f}%) - transient-worker artefact"
@@ -259,6 +266,13 @@ def main():
             print(f"  ... and {len(warnings) - 6} more, same class")
 
     print(f"\n{'=' * 92}")
+    # A NULL WITH NO REASON FAILS THE RUN. It is "THE FAILURE MODE THIS CATCHES" (above), and it used
+    # to be printed and then followed by exit 0 - the same bar bench-audit.py's check_no_bare_absence
+    # holds as a violation.
+    for k, ats in sorted(absent_no_reason.items()):
+        problems.append(f"{k}: null with NO reason in absences on {len(ats)} cell(s), e.g. {ats[0]}")
+    for p in unreadable:
+        problems.append(f"{p}: could not be read, so none of its cells were examined")
     if problems:
         print(f"PROBLEMS ({len(problems)}):")
         for x in problems:

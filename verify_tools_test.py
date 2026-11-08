@@ -73,21 +73,27 @@ CLEAN_CELL = {
 
 
 def snapshot(cell):
+    """A one-gateway board. `cell` is one cell (published as openai>openai) or {ingress: cell}."""
+    cells = cell if "served" not in cell else {"openai": cell}
     return {
         "schema_version": 2, "gateway": "fixture", "measured_at": "2026-07-30T00:00:00Z",
         "rig": {"engine": {"commit": "0" * 12, "dirty": False}},
-        "matrix": {"upstreams": {"openai": {"cells": {"openai": cell}}}},
+        "matrix": {"upstreams": {"openai": {"cells": cells}}},
     }
 
 
-def run(tool, cell):
-    """Run one auditor over a one-cell board and return (exit_code, output).
+def run(tool, cell, extra_files=None, cwd_elsewhere=False):
+    """Run one auditor over a one-gateway board and return (exit_code, output).
 
     `verify-frontier.py` deliberately PARSES engine/src/frontier.rs for the declared bounds rather than
     hardcoding them - so it cannot police a different axis than the one that ran, and going blind counts
     as a failure rather than a pass. The fixture tree therefore has to carry that file too.
+
+    `extra_files` ({name: raw text}) lands beside the snapshot; `cwd_elsewhere` runs the tool from a
+    different directory, which an auditor anchored to its own file must not notice.
     """
     d = tempfile.mkdtemp()
+    elsewhere = tempfile.mkdtemp()
     try:
         os.makedirs(os.path.join(d, "results", "snapshots"))
         os.makedirs(os.path.join(d, "engine", "src"), exist_ok=True)
@@ -95,11 +101,33 @@ def run(tool, cell):
                     os.path.join(d, "engine", "src", "frontier.rs"))
         with open(os.path.join(d, "results", "snapshots", "result_fixture_2026-07-30T00-00-00Z.json"), "w") as f:
             json.dump(snapshot(cell), f)
+        for name, text in (extra_files or {}).items():
+            with open(os.path.join(d, "results", "snapshots", name), "w") as f:
+                f.write(text)
         shutil.copy(os.path.join(HERE, tool), d)
-        p = subprocess.run([sys.executable, tool], cwd=d, capture_output=True, text=True)
+        p = subprocess.run([sys.executable, os.path.join(d, tool)], cwd=elsewhere if cwd_elsewhere else d,
+                           capture_output=True, text=True)
         return p.returncode, p.stdout + p.stderr
     finally:
         shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+def _with(cell, edit):
+    """A deep copy of `cell` with `edit` applied to it."""
+    c = copy.deepcopy(cell)
+    edit(c)
+    return c
+
+
+def _undisclosed_floor():
+    """The peak at the TOP of the probed ladder, with lower_bound NOT set - verify-turnover's red case."""
+    bad = copy.deepcopy(CLEAN_CELL)
+    bad["perf"]["sweep_max_proxy"] = [{"conc": 8, "ok": 100, "rps": 100.0, "p99_us": 900, "fail": 0}]
+    for r in bad["perf"]["frontier"]:
+        r["rps"], r["concurrency"], r["p99_us"], r["lower_bound"] = 100.0, 8, 900, False
+        r["first_disqualified_conc"] = None
+    return bad
 
 
 def mutate(**changes):
@@ -113,11 +141,14 @@ def mutate(**changes):
 FAILURES = []
 
 
-def expect(name, code, out, want_fail, needle=""):
+def expect(name, code, out, want_fail, needle="", absent=""):
     ok = (code != 0) if want_fail else (code == 0)
     if ok and needle and needle not in out:
         ok = False
         why = f"expected the message to mention {needle!r}"
+    elif ok and absent and absent in out:
+        ok = False
+        why = f"expected the message NOT to say {absent!r}"
     else:
         why = f"exit={code}, wanted {'non-zero' if want_fail else 'zero'}"
     print(f"  {'ok  ' if ok else 'FAIL'} - {name}")
@@ -129,7 +160,7 @@ def main():
     print("verify-latency.py:")
     # ACCEPT: a clean cell whose added latency really is the difference of its two legs.
     c, o = run("verify-latency.py", CLEAN_CELL)
-    expect("a cell whose legs subtract correctly passes", c, o, False)
+    expect("a cell whose legs subtract correctly passes", c, o, False, "sample COUNTS")
 
     # RED: the published difference disagrees with its own operands. This is the check's whole point,
     # and a typo'd field name would silently skip it while still printing PASS.
@@ -197,6 +228,18 @@ def main():
     c, o = run("verify-frontier.py", CLEAN_CELL)
     expect("a frontier that re-derives from its rungs passes", c, o, False)
 
+    interrupted = copy.deepcopy(CLEAN_CELL)
+    interrupted["perf"]["sweep_max_proxy_interrupted"] = True
+    for reading in interrupted["perf"]["frontier"]:
+        for key in ["rps", "concurrency", "p99_us", "first_disqualified_conc"]:
+            reading[key] = None
+        reading["lower_bound"] = False
+    c, o = run("verify-frontier.py", interrupted)
+    expect("an explicit interrupted sweep withholds completed readings", c, o, False)
+    interrupted["perf"]["frontier"][-1]["rps"] = 1.0
+    c, o = run("verify-frontier.py", interrupted)
+    expect("an interrupted sweep claiming throughput FAILS", c, o, True)
+
     # RED: the published rate is not the maximum its own rungs support. This is the check that would
     # have caught the tie-break bug, and it had no test at all until now.
     bad = copy.deepcopy(CLEAN_CELL)
@@ -258,6 +301,84 @@ def main():
     c, o = run("verify-turnover.py", good)
     expect("a DISCLOSED floor passes", c, o, False, "DISCLOSED FLOOR")
 
+    print("every auditor:")
+    # A SNAPSHOT THE TOOL COULD NOT READ IS NOT COVERED BY ITS PASS. Each of these used to print one
+    # SKIP line and then PASS / exit 0 over a board with a gateway nobody had examined.
+    for tool in ("verify-latency.py", "audit-every-metric.py", "verify-frontier.py", "verify-turnover.py"):
+        c, o = run(tool, CLEAN_CELL, extra_files={"result_other_2026-07-30T00-00-00Z.json": "{truncated"})
+        expect(f"{tool}: an unreadable snapshot beside a clean one FAILS", c, o, True, "SKIP")
+        # ANCHORED TO THE TOOL, NOT THE CWD: from another directory a cwd-relative glob found nothing.
+        c, o = run(tool, mutate(perf__added_latency_p99_us=999) if tool == "verify-latency.py"
+                   else mutate(memory__idle_rss_mib=-5.0) if tool == "audit-every-metric.py"
+                   else _with(CLEAN_CELL, lambda x: x["perf"]["frontier"][-1].update(rps=9999.0))
+                   if tool == "verify-frontier.py" else _undisclosed_floor(), cwd_elsewhere=True)
+        expect(f"{tool}: run from another directory still finds (and fails) the board", c, o, True,
+               {"verify-latency.py": "its own legs give", "audit-every-metric.py": "negative",
+                "verify-frontier.py": "rps, re-derived", "verify-turnover.py": "does NOT disclose"}[tool])
+
+    print("verify-frontier.py (published tail, dropped readings):")
+    # RED: the published p99 is not the tail the winning rung measured. The old check tested the
+    # RE-DERIVED winner's tail, which is under the bound by construction and so could never fire.
+    c, o = run("verify-frontier.py", _with(CLEAN_CELL, lambda x: x["perf"]["frontier"][2].update(p99_us=1400)))
+    expect("a published tail that is not the winning rung's FAILS", c, o, True, "published p99 1400us")
+    # RED: one served cell carries a frontier and its sibling - same snapshot - does not.
+    dropped = copy.deepcopy(CLEAN_CELL)
+    del dropped["perf"]["frontier"]
+    c, o = run("verify-frontier.py", {"openai": CLEAN_CELL, "anthropic": dropped})
+    expect("a served cell that dropped its frontier beside one that has it FAILS", c, o, True, "NO frontier")
+    # ACCEPT: the engine WITHHELD it and said so (egress re-verification failed).
+    withheld = copy.deepcopy(dropped)
+    withheld["perf"]["egress_reverified"] = False
+    c, o = run("verify-frontier.py", {"openai": CLEAN_CELL, "anthropic": withheld})
+    expect("a frontier withheld with egress_reverified=false passes", c, o, False)
+
+    # RED: `SweepPoint` publishes `ok`, so the engine's exact rule applies - a rung that completed
+    # nothing (ok=0) did not serve cleanly, whatever its p99 says, and cannot be a reading's winner.
+    c, o = run("verify-frontier.py", _with(CLEAN_CELL, lambda x: x["perf"]["sweep_max_proxy"][1].update(ok=0)))
+    expect("a rung with ok=0 cannot win a reading (exact ok > 0 rule)", c, o, True, "re-derived")
+
+    print("verify-turnover.py (what counts as clean, and what 'every' may claim):")
+    # RED: a rung above the peak with NO `fail` is not proven clean, so it cannot prove a turnover.
+    unknown = _with(CLEAN_CELL, lambda x: x["perf"]["sweep_max_proxy"][2].update(fail=None))
+    c, o = run("verify-turnover.py", unknown)
+    expect("a slower rung with an ABSENT fail does not prove a turnover", c, o, False, "PROVED (0)")
+    # A clean rung above at the SAME rate is a plateau, not a "cliff that matters" at +0.0%.
+    flat = _with(CLEAN_CELL, lambda x: x["perf"]["sweep_max_proxy"][2].update(rps=120.0, ok=120, fail=0))
+    c, o = run("verify-turnover.py", flat)
+    expect("a clean equal-rate rung above the peak is a PLATEAU", c, o, False, "PLATEAU (1)")
+    # A disclosed floor established no maximum, so "every maximum is a measured turnover" is false.
+    good_floor = _undisclosed_floor()
+    for r in good_floor["perf"]["frontier"]:
+        r["lower_bound"] = True
+    c, o = run("verify-turnover.py", good_floor)
+    expect("a disclosed floor is not claimed as a MEASURED TURNOVER", c, o, False, "DISCLOSED FLOOR (1)",
+           absent="MEASURED TURNOVER: for each one")
+
+    print("audit-every-metric.py (bare holes, HWM):")
+    # RED: a null with no reason, on a field another cell on the board publishes as a number. This
+    # was printed as "ABSENT WITH NO REASON" and then the tool exited 0.
+    hole = mutate(memory__idle_rss_mib=None)
+    c, o = run("audit-every-metric.py", {"openai": CLEAN_CELL, "anthropic": hole})
+    expect("a null with NO reason in absences FAILS", c, o, True, "memory.idle_rss_mib")
+    c, o = run("audit-every-metric.py", {"openai": CLEAN_CELL, "anthropic": _with(
+        hole, lambda x: x["absences"].update({"memory.idle_rss_mib": {"reason": "harness_error"}}))})
+    expect("the same null WITH its reason passes", c, o, False)
+    # RED: a zero kernel HWM is reported, not a ZeroDivisionError.
+    c, o = run("audit-every-metric.py", mutate(memory__peak_rss_hwm_mib=0.0))
+    expect("a zero kernel HWM beside a real peak FAILS as a finding, not a crash", c, o, True,
+           "high-water mark")
+    # The TTFT sample COUNTS are numeric measurements and appear in the inventory.
+    c, o = run("audit-every-metric.py", mutate(stream__ttft_gw_samples=100))
+    expect("ttft_*_samples counts are inventoried, not skipped as sample arrays", c, o, False,
+           "stream.ttft_gw_samples")
+
+    print("run-on-ec2.sh:")
+    _bad_quotes = _test_provision_payload_has_no_apostrophe()
+    for _ln, _txt in _bad_quotes:
+        FAILURES.append(f"run-on-ec2.sh:{_ln} apostrophe inside the single-quoted ssh payload: {_txt.strip()[:90]}")
+    print(f"  {'FAIL' if _bad_quotes else 'ok  '} - the provision payload contains no apostrophe "
+          f"(it would execute locally)")
+
     print()
     if FAILURES:
         for f in FAILURES:
@@ -280,7 +401,7 @@ def main():
 def _test_provision_payload_has_no_apostrophe():
     import re
     src = open(os.path.join(HERE, "run-on-ec2.sh"), encoding="utf-8").read().split("\n")
-    start = next((i for i, l in enumerate(src) if "ssh $SSHOPT ubuntu@" in l and l.rstrip().endswith("'set -e")), None)
+    start = next((i for i, l in enumerate(src) if 'ssh "${SSHOPT[@]}" ubuntu@' in l and l.rstrip().endswith("'set -e")), None)
     assert start is not None, "could not find the provision ssh payload opener"
     end = next((i for i in range(start + 1, len(src)) if re.match(r"^\s*.*'\s*>>\"\$glog\"", src[i])), None)
     assert end is not None, "could not find the provision ssh payload terminator"
@@ -288,13 +409,8 @@ def _test_provision_payload_has_no_apostrophe():
     return bad
 
 
-_bad_quotes = _test_provision_payload_has_no_apostrophe()
-if _bad_quotes:
-    for _ln, _txt in _bad_quotes:
-        print(f"FAIL - run-on-ec2.sh:{_ln} apostrophe inside the single-quoted ssh payload: {_txt.strip()[:90]}")
-    print("FAIL - the provision payload must contain ZERO apostrophes (see comment above this check)")
-    sys.exit(1)
-print("ok   - run-on-ec2.sh provision payload contains no apostrophe (would execute locally)")
+# Run from main() with every other check, not at import time: a module-level sys.exit here used to
+# fire BEFORE main() and skip all sixteen auditor fixtures - ordering deciding coverage.
 
 
 if __name__ == "__main__":

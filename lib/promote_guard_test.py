@@ -18,20 +18,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GUARD = os.path.join(HERE, "promote_guard.py")
 
 _fail = 0
+# Every fixture file lives in ONE private directory removed at exit, and "absent" is a name inside it
+# that is never created - not a fixed shared /tmp path another process could create.
+_TMP = tempfile.TemporaryDirectory()
+ABSENT = os.path.join(_TMP.name, "no-such-file.json")
 
 
 def _w(doc):
-    f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-    json.dump(doc, f)
+    f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir=_TMP.name)
+    f.write(doc if isinstance(doc, str) else json.dumps(doc))
     f.close()
     return f.name
 
 
 def guard(suite, existing, incoming):
     """Return the guard's exit code. 0 = PROMOTE incoming, 1 = KEEP existing."""
-    ex = _w(existing) if existing is not None else os.path.join(tempfile.gettempdir(), "no-such-file.json")
-    inc = _w(incoming) if incoming is not None else os.path.join(tempfile.gettempdir(), "no-such-file.json")
-    return subprocess.run([sys.executable, GUARD, suite, ex, inc]).returncode
+    ex = _w(existing) if existing is not None else ABSENT
+    inc = _w(incoming) if incoming is not None else ABSENT
+    return subprocess.run([sys.executable, GUARD, suite, ex, inc], capture_output=True).returncode
 
 
 def check(name, got, want):
@@ -155,14 +159,30 @@ check("all-dead does not block when existing was ALSO not served → PROMOTE", g
 # result. load()'s bare `except Exception: return None` makes a corrupt existing file indistinguishable
 # from a MISSING one, so is_served(existing) comes back False and the boot-failure incoming is allowed
 # to overwrite it.
-corrupt_existing = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-corrupt_existing.write("{not valid json")  # truncated / corrupted, as a real committed file, not absent
-corrupt_existing.close()
-inc = _w(all_dead)
-rc = subprocess.run([sys.executable, GUARD, "matrix", corrupt_existing.name, inc]).returncode
-check("corrupt-but-present existing result must KEEP (not be clobbered by a boot failure)", rc, 1)
+# truncated / corrupted, as a real committed file, not absent
+check("corrupt-but-present existing result must KEEP (not be clobbered by a boot failure)",
+      guard("matrix", "{not valid json", all_dead), 1)
+
+# ── fail CLOSED on every input the guard cannot read ─────────────────────────────────────────────────
+# Exit 0 is PROMOTE, so a miscalled guard used to wave every incoming file over good data.
+check("a wrong argument count does NOT promote",
+      subprocess.run([sys.executable, GUARD, "matrix", ABSENT], capture_output=True).returncode != 0, True)
+# Valid JSON that is not an object: no result to read, so treated as unreadable (never a crash).
+_p = subprocess.run([sys.executable, GUARD, "matrix", _w([1, 2]), _w(all_dead)], capture_output=True, text=True)
+check("an existing file that is a JSON list is protected like an unreadable one, without a traceback",
+      (_p.returncode, "Traceback" in _p.stderr), (1, False))
+_p = subprocess.run([sys.executable, GUARD, "matrix", _w(SERVED_MATRIX), _w("{trunc")], capture_output=True,
+                    text=True)
+check("an unreadable INCOMING file keeps the existing one and says why",
+      (_p.returncode, "unreadable" in _p.stderr), (1, True))
+# An upstream the harness never verified is not a served upstream ("not_verified" is truthy).
+not_verified_up = {"served": False, "serve_error": "HTTP 502", "upstreams": {
+    "openai": {"served": "not_verified", "cells": {"openai": {"served": "not_verified", "status": "502"}}}}}
+check("an upstream served='not_verified' does not make a boot-failed matrix 'served'",
+      guard("matrix", SERVED_MATRIX, not_verified_up), 1)
 
 
+_TMP.cleanup()
 if _fail == 0:
     print("all promote-guard tests passed")
     sys.exit(0)

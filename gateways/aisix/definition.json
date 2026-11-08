@@ -19,40 +19,42 @@
   "display": "AISIX (api7)",
   "egress": [
     "openai",
+    "openai-responses",
     "anthropic"
   ],
   "egress_models": {
     "anthropic": "claude-3-5-sonnet-20241022",
-    "openai": "gpt-4o-mini"
+    "openai": "gpt-4o-mini",
+    "openai-responses": "gpt-4o-mini"
   },
   "lang": "Rust",
   "launch": {
+    "kind": "docker",
+    "image": "ghcr.io/api7/aisix:1.9.0@sha256:dbe230bdaa4f353f7bf99d5437ab11f8b67435afabb217cf371c441ede43270a",
     "args": [
       "--config",
-      "{GW_DIR}/config.gen.yaml"
+      "/etc/aisix/config.yaml"
     ],
-    "binary": [
-      "src/target/release/aisix"
-    ],
-    "build": "build.sh",
-    "kind": "native"
+    "mounts": [
+      {
+        "host_path": "config.gen.yaml",
+        "container_path": "/etc/aisix/config.yaml",
+        "read_only": true
+      },
+      {
+        "host_path": "resources.gen.yaml",
+        "container_path": "/etc/aisix/resources.yaml",
+        "read_only": true
+      }
+    ]
   },
-  "matrix": [
-    "101000",
-    "101000",
-    "101000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "For the six chat-wire dialects benchmarked here, AISIX v0.7.0 exposes OpenAI Chat Completions (/v1/chat/completions), OpenAI Responses (/v1/responses), and Anthropic Messages (/v1/messages) ingress; it has no native Gemini, Cohere, or Bedrock ingress. This harness config wires only OpenAI and Anthropic egress to the mock upstream; Vertex requires OAuth2, Cohere is supported through its OpenAI-compatible endpoint rather than a native Cohere-wire adapter, and Bedrock requires SigV4/AWS credentials.",
   "model": "gpt-4o-mini",
   "name": "aisix",
   "path": "/v1/chat/completions",
   "port": 3000,
   "repo": "https://github.com/api7/aisix",
   "runtime": {
-    "kind": "native",
-    "proc_match": "target/release/aisix"
+    "kind": "docker",
+    "container": "aisix-bench"
   }
 }
