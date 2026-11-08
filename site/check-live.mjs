@@ -23,7 +23,10 @@ await check("benchmark facts in the HTML response", async () => {
 await check("Markdown results", async () => {
   const r = await get("/gateways/performance.md");
   assert.match(r.headers.get("Content-Type"), /text\/markdown/);
-  assert.match(await r.text(), /\|.*Gateway.*\|/);
+  const markdown = await r.text();
+  assert.match(markdown, /\| Ingress → upstream \| Metric \| Value/);
+  assert.match(markdown, /## busbar/);
+  assert.equal((markdown.match(/^# /gm) || []).length, 1);
 });
 await check("raw download has its published SHA-256 after HTTP decoding", async () => {
   const catalog = await (await get("/api/v1/gateways")).json();
