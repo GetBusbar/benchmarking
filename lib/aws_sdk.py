@@ -30,7 +30,7 @@ def request(operation, options):
                'key-name': 'KeyName', 'key-names': 'KeyNames', 'group-name': 'GroupName',
                'description': 'Description', 'group-id': 'GroupId', 'security-group-ids': 'SecurityGroupIds',
                'name': 'Name', 'instance-initiated-shutdown-behavior': 'InstanceInitiatedShutdownBehavior',
-               'user-data': 'UserData'}
+               'vpc-id': 'VpcId', 'subnet-id': 'SubnetId', 'user-data': 'UserData'}
     arrays = {'instance-ids', 'key-names', 'security-group-ids'}
     result = {}
     for key, values in options.items():
@@ -72,13 +72,42 @@ def request(operation, options):
     return result
 
 
-def session():
+def expected_account():
+    account = os.environ.get('OTB_AWS_ACCOUNT_ID', '')
+    if not re.fullmatch(r'\d{12}', account):
+        raise ValueError('Set OTB_AWS_ACCOUNT_ID to the explicitly selected AWS account')
+    return account
+
+
+def session(region=None):
+    """Explicit account + standard SDK credentials, or an optional local Keychain service."""
     import boto3
-    secret = subprocess.check_output(['security', 'find-generic-password', '-s', 'onthebench-aws-personal', '-w'], text=True)
-    credentials = json.loads(secret)
-    if credentials.get('account_id') != '457667483187':
-        raise ValueError('unexpected benchmark account in Keychain')
-    return boto3.Session(**{key: credentials[key] for key in ('aws_access_key_id', 'aws_secret_access_key', 'region_name')})
+    account = expected_account()
+    region = region or os.environ.get('OTB_AWS_REGION') or os.environ.get('AWS_REGION')
+    service = os.environ.get('OTB_AWS_KEYCHAIN_SERVICE')
+    profile = os.environ.get('OTB_AWS_PROFILE')
+    if service and profile:
+        raise ValueError('Choose a profile or Keychain service, not both')
+    if service:
+        secret = subprocess.check_output(['security', 'find-generic-password', '-s', service, '-w'], text=True)
+        credentials = json.loads(secret)
+        if credentials.get('account_id') != account:
+            raise ValueError('Keychain credential account differs from the expected account')
+        return boto3.Session(aws_access_key_id=credentials['aws_access_key_id'],
+                             aws_secret_access_key=credentials['aws_secret_access_key'],
+                             aws_session_token=credentials.get('aws_session_token'),
+                             region_name=region or credentials.get('region_name'))
+    if not profile and not (os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('AWS_WEB_IDENTITY_TOKEN_FILE')
+                            or os.environ.get('AWS_CONTAINER_CREDENTIALS_RELATIVE_URI')
+                            or os.environ.get('AWS_CONTAINER_CREDENTIALS_FULL_URI')
+                            or os.environ.get('OTB_AWS_USE_INSTANCE_ROLE') == '1'):
+        raise ValueError('Select OTB_AWS_PROFILE or provide environment/role credentials explicitly')
+    return boto3.Session(profile_name=profile, region_name=region)
+
+
+def verify_account(sdk):
+    if sdk.client('sts').get_caller_identity()['Account'] != expected_account():
+        raise ValueError('AWS account mismatch')
 
 
 def main(args):
@@ -92,9 +121,8 @@ def main(args):
     waiter = args.pop(0) if operation == 'wait' else None
     options = parse_options(args)
     sdk = session()
-    if operation in ('run-instances', 'terminate-instances'):
-        if sdk.client('sts').get_caller_identity()['Account'] != '457667483187':
-            raise ValueError('AWS account mismatch')
+    if not operation.startswith('describe-') and operation not in ('get-parameter','get-console-output','wait'):
+        verify_account(sdk)
     client = sdk.client(service)
     parameters = request(operation, options)
     if waiter:
@@ -120,5 +148,5 @@ if __name__ == '__main__':
     try:
         main(sys.argv[1:])
     except Exception as exc:
-        print(f'benchmark AWS request failed: {exc}', file=sys.stderr)
+        print('benchmark AWS request failed: ' + str(exc).split('Encoded authorization failure message:')[0], file=sys.stderr)
         sys.exit(1)

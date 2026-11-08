@@ -16,7 +16,7 @@
 # gateway build/pulls itself on its box from the ref pinned in its own gateways/<name>/definition.json.
 set -uo pipefail
 export PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib:$PATH"
-export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+if [ -n "${OTB_AWS_REGION:-}" ]; then export AWS_DEFAULT_REGION="$OTB_AWS_REGION"; fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
 
 # Per-invocation run id: every box THIS run launches is tagged run=$RUN_ID, and teardown filters on
@@ -763,7 +763,7 @@ if [[ ! -s "$KEYFILE" || -z "$_aws_keyid" || "$_aws_keyid" == "None" || "$_local
 fi
 # Each invocation owns its security group and its sole SSH /32. Reusing a group
 # accumulates old caller addresses and makes revocation race with concurrent runs.
-SG=$(OTB_BENCH_RUN_ID="$RUN_ID" bench-aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench run-local SSH" --query GroupId --output text) || exit 1
+SG=$(OTB_BENCH_RUN_ID="$RUN_ID" bench-aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench run-local SSH" ${BENCH_VPC_ID:+--vpc-id "$BENCH_VPC_ID"} --query GroupId --output text) || exit 1
 [[ "$SG" == sg-* ]] || { echo "FATAL: create-security-group returned no group id" >&2; exit 1; }
 CREATED_SG=1
 # The SDK creates this group atomically with purpose=gateway-bench for scoped IAM access.
@@ -790,7 +790,8 @@ _sg_err=$(bench-aws ec2 authorize-security-group-ingress --group-id "$SG" --prot
        esac; }
 
 
-AMI=$(bench-aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
+AMI="${BENCH_AMI_ID:-}"
+if [ -z "$AMI" ]; then AMI=$(bench-aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text); fi
 
 mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix,snapshots}
 
@@ -1045,7 +1046,7 @@ bench_gateway_once() {
   # run has - the engine caps nothing - so it must sit ABOVE the slowest grid the field measures, never
   # at it. See the BENCH_MAX_MIN block at the top of this file for the run it killed when it did not.
   iid=$(bench-aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
-    --security-group-ids "$SG" \
+    --security-group-ids "$SG" ${BENCH_SUBNET_ID:+--subnet-id "$BENCH_SUBNET_ID"} \
     --instance-initiated-shutdown-behavior terminate \
     --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "$BENCH_MAX_MIN")" \
     --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":60,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
