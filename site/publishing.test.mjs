@@ -328,3 +328,19 @@ test('container version display uses the tag rather than the image digest', asyn
   assert.equal(app.parseBuildVersion('apache/apisix:3.17.0-debian'),'3.17.0-debian');
   assert.equal(app.parseBuildVersion('target/release/ai-gateway'),null);
 });
+
+test('completed null metrics sort ahead of pending rows in both directions', async () => {
+  const { default: app } = await import('./app.js');
+  const rows = [{display:'agentgateway',v:null}, {display:'One-API',v:null,measured_at:'2026-11-08T20:15:58Z'}, {display:'Kong',v:19461,measured_at:'2026-11-08T20:15:58Z'}];
+  for (const desc of [true,false]) assert.deepEqual(rows.slice().sort(app.rowComparator({get:g=>({v:g.v})},desc)).map(g=>g.display),['Kong','One-API','agentgateway']);
+});
+
+test('table trends are compact position changes and respect the neutral band', async () => {
+ const {default:app}=await import('./app.js');
+ const trend={state:'improved',label:'Improved',change_percent:12,previous_measured_at:'2026-08-01',rank_change:{before:8,after:1,change:7}};
+ const render=t=>app.metricTd({v:100,text:'100',historyTrend:t});
+ assert.match(render(trend),/↑ \+7/);
+ assert.match(render({...trend,state:'flat',change_percent:1}),/trend-flat[^>]*>—/);
+ assert.doesNotMatch(render({...trend,rank_change:null}),/metric-trend/);
+ assert.doesNotMatch(render(trend),/<a /);
+});
