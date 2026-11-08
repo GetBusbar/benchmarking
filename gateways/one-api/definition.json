@@ -6,12 +6,14 @@
   "egress": [
     "openai",
     "anthropic",
-    "gemini"
+    "gemini",
+    "cohere"
   ],
   "egress_models": {
     "anthropic": "claude-3-5-sonnet-20240620",
     "gemini": "gemini-1.5-pro",
-    "openai": "gpt-4o-mini"
+    "openai": "gpt-4o-mini",
+    "cohere": "command-r-plus"
   },
   "lang": "Go",
   "launch": {
@@ -30,19 +32,16 @@
     "kind": "docker"
   },
   "untestable": [
-    "openai/bedrock",
-    "cohere/openai",
-    "cohere/openai-responses",
-    "cohere/anthropic",
-    "cohere/gemini",
-    "cohere/cohere",
-    "cohere/bedrock",
-    "bedrock/openai",
-    "bedrock/openai-responses",
-    "bedrock/anthropic",
-    "bedrock/gemini",
-    "bedrock/cohere",
-    "bedrock/bedrock"
+    "openai/bedrock"
   ],
-  "untestable_note": "The harness does not configure a Bedrock upstream channel. Native Cohere and Bedrock ingress paths return the web dashboard (HTTP 200 text/html), not protocol responses, on the pinned v0.6.10 image; they are withheld because this frozen engine cannot distinguish that fallback from a successful protocol probe. This is a harness limitation, not a measured gateway failure. OpenAI, Anthropic and Gemini channel probes otherwise run normally."
+  "untestable_note": "Pinned v0.6.10 relay/adaptor/aws/adaptor.go creates a Bedrock SDK client without a mock endpoint override and uses the AWS model invocation API. This rig cannot safely exercise that adapter against its local Converse mock; this is a rig limitation, not missing Bedrock product support.",
+  "matrix": [
+    "101110",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned v0.6.10 source 3915ce9814b8261a1ab13ed93adec58b463cd75c: router/relay.go exposes OpenAI chat ingress, not native Responses, Anthropic, Gemini, Cohere or Bedrock ingress. relay/adaptor supports OpenAI, Anthropic, Gemini and Cohere (v1/chat) upstreams. This matrix describes the tested protocol routes, not all product features. Source: https://github.com/songquanpeng/one-api/blob/3915ce9814b8261a1ab13ed93adec58b463cd75c/router/relay.go"
 }

@@ -19,10 +19,10 @@ INITIAL_ROOT_TOKEN boot  # its relay routes serve nothing without a token it iss
 # booting the process into a usable state or pointing an upstream at the mock.
 curl upstream  # the admin-API calls that wire this gateway's upstreams to the test mock
 
-## Current channel configuration (2026-11-08)
+## Current channel configuration
 
-The commands configure OpenAI, Anthropic and Gemini channels. The November refresh recorded successful upstream verification for OpenAI-to-Anthropic and OpenAI-to-Gemini; the July channel-selection failure is historical, not the current configuration. No Bedrock channel is configured, so that withheld cell describes a harness gap.
+The pinned v0.6.10 relay router implements OpenAI chat ingress. Four channels target the local mock: OpenAI, Anthropic, Gemini and Cohere v1. Every channel must return nonempty assistant content during setup; failure aborts measurement rather than producing a misleading result.
 
-Unsupported non-/v1 routes can fall through to the HTML dashboard. A 200 response there is not protocol support; the engine must validate protocol response content before measuring it. The web dashboard rate limiter is left at its default because it is not a benchmark inference route.
+Native Responses, Anthropic, Gemini, Cohere and Bedrock ingress are absent from router/relay.go and are excluded by the versioned capability matrix. Dashboard HTML is never inference evidence. Bedrock upstream uses an AWS SDK invocation adapter without a local endpoint override, so it remains explicitly untestable on this rig.
 
-The frozen refresh engine accepts any HTTP 2xx during discovery. Direct checks of the pinned image confirmed /v2/chat and /model/.../converse return identical text/html dashboard bodies. Those ingress rows are explicitly untestable for this rig so dashboard throughput cannot become an API result. The original raw run remains retained as diagnostic evidence; this exclusion changes gateway configuration only.
+Source revision: 3915ce9814b8261a1ab13ed93adec58b463cd75c. Evidence: router/relay.go; relay/channeltype/define.go; relay/adaptor/cohere/adaptor.go; relay/adaptor/aws/adaptor.go. The discarded November refresh is not retained as benchmark evidence.
