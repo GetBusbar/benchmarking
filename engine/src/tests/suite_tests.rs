@@ -110,8 +110,34 @@ fn serve(status: u16) -> SocketAddr {
         for c in l.incoming() {
             let Ok(mut c) = c else { continue };
             std::thread::spawn(move || {
-                let mut b = [0u8; 4096];
-                while c.read(&mut b).unwrap_or(0) > 0 {
+                // TCP reads are not HTTP messages: a request header/body can be
+                // split across reads. Reply once, only after consuming its body.
+                use std::io::BufRead;
+                let Ok(reader) = c.try_clone() else { return };
+                let mut reader = std::io::BufReader::new(reader);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut content_length = 0;
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((key, value)) = line.split_once(':') {
+                            if key.eq_ignore_ascii_case("content-length") {
+                                content_length = value.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                    if reader.read_exact(&mut vec![0; content_length]).is_err() {
+                        return;
+                    }
                     let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
                     if c.write_all(r.as_bytes()).is_err() {
                         return;

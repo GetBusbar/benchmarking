@@ -2828,11 +2828,11 @@ test("a grey (not_configurable) cell tooltip shows the gateway's cited reason", 
   const reason = "this gateway accepts only OpenAI-canonical ingress and emits no OpenAI-Responses route_type";
   const tip = app.matrixCellTip({ served: "not_configurable", verdict_note: reason });
   // HONEST wording: grey = not in the grid WE drafted, not a claim the maintainer declined it.
-  assert.ok(tip.includes("not in the capability grid we drafted"), "reads as our omission, not the gateway's declared incapability");
+  assert.ok(tip.includes("historical capability research"), "reads as our omission, not the gateway's declared incapability");
   assert.ok(tip.includes(reason), "carries the cited capability-limit reason");
   // no reason present: still honest, never a bare "untested"
   const bare = app.matrixCellTip({ served: "not_configurable" });
-  assert.ok(bare.includes("not in the capability grid we drafted"));
+  assert.ok(bare.includes("historical capability research"));
 });
 
 test("probe-first: a not_configured cell renders grey with the probe evidence, never a red", () => {
