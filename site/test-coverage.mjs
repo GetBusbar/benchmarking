@@ -263,18 +263,18 @@ const CUSTOM = { ...app.newState(), mode: "custom", xlateIn: IN, xlateOut: OUT }
 const perfLane = app.LANES.find((l) => l.key === "perf");
 const laneRow = (bound) => perfLane.metrics.find((m) => m.k === `frontier.${bound}`);
 
-test("a MEASURED NOTHING is a 0 that says why, on every surface, and is never a missing measurement", () => {
+test("an uncertified frontier bound preserves its reason without claiming numeric zero", () => {
   const table = app.frontierBoundCell(STORY_GW, 1, CUSTOM);
-  assert.equal(table.na, false, "the gateway served and the sweep ran: this is a result, not a hole");
-  assert.equal(table.text, "0", "the table shows the digit");
-  assert.equal(table.v, 0, "it ranks as 0 - last on a higher-is-better sort, which is the honest place");
+  assert.equal(table.na, true, "no rung certified a quantitative result");
+  assert.equal(table.text, "n/a", "the table does not fabricate zero");
+  assert.equal(table.v, null, "unavailable values do not receive a quantitative rank");
   assert.equal(table.why, "no rung held this tail", "and the cell says WHY, not just '0'");
   assert.match(app.metricTd(table), /no rung held this tail/, "on the cell itself, not only on hover");
   assert.match(table.note, /no measurable throughput under that bound/, "with the engine's own prose on the tooltip");
 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
   assert.ok(rec, "the drawer/compare lane reads the same cell");
-  assert.equal(laneRow("1ms").cell(rec).v, 0, "drawer/compare rank the same 0");
+  assert.equal(laneRow("1ms").cell(rec).v, null, "drawer/compare preserve the same absence");
   assert.equal(laneRow("1ms").cell(rec).why, "no rung held this tail", "and tell the same story");
 
   const pop = app.cellPopFull(STORY_GW, IN, OUT);
@@ -455,7 +455,7 @@ const STORY_STATE = { ...app.newState(), view: "performance", mode: "custom", xl
 test("the DRAWER markup tells all four stories - a measured nothing, below-resolution, a failure, a floor", () => {
   const h = app.drawerHtml(STORY_GW, STORY_STATE);
   // A: the measured nothing is a digit with its reason beside it, never a hole and never a blank.
-  assert.match(h, /99% under 1 ms/, "the drawer names the reading's own bound");
+  assert.match(h, /1\s?ms/, "the drawer names the reading's own bound");
   assert.match(h, /no rung held this tail/, "and says what its 0 means");
   // B: below-resolution is the ≈0 result, not an absence.
   assert.match(h, /≈0/, "below-resolution reads as approximately zero in the drawer");

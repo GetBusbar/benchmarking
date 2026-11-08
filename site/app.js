@@ -467,7 +467,7 @@ const ZERO_WHY = {
    sentence stays on the tooltip. A zero with no note renders bare, exactly as before. */
 function metricTd(cell, sc = "") {
   if (cell.na)
-    return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}</td>`;
+    return `<td class="na${cell.failed ? " failcell" : ""}${sc}" title="${esc(cell.note || "")}">${esc(cell.text)}${cell.why ? `<span class="zero-why">${esc(cell.why)}</span>` : ""}</td>`;
   // `cell.why` is an EXPLICIT short on-cell reason, for a state whose meaning is not carried by an envelope
   // note token: a frontier reading where no rung held the bound is a measured 0 whose reason lives on the
   // READING, not on the envelope, and "0" alone would read as "no data" for the gateways it matters most on.
