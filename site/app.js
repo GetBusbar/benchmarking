@@ -1753,7 +1753,7 @@ const COL_NAME = {
     // window of one measurement - which is a much larger claim than the metric supports. The finding
     // is not hidden: the Growth column carries the rate, and the per-cell tooltip says what each
     // window did and, when it did not settle, whether it climbed or merely swung.
-    return `<td class="name">${a}<br><a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>`;
+    return `<td class="name">${a} <a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>`;
   },
 };
 // The "Tested on" column: present in EVERY mode (identical column set across Own cell/Same/Custom). It reads
@@ -5283,7 +5283,7 @@ function renderGateways() {
     const lastRun = gatewayLastRun(g);
     const lastRunTxt = fmtLastRun(lastRun);
     return `<tr data-gw="${esc(g.key)}" class="rowlink" tabindex="0">
-      <td class="name">${name}<br><a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.history_family || g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>
+      <td class="name">${name} <a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.history_family || g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${version
         ? `<span title="${esc(versionBasis(g))}">${esc(version)}</span>`

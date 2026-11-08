@@ -900,7 +900,7 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
 #gateways-table td.contrib { color:var(--fg-dim); white-space:nowrap; }
 #gateways-table .contrib-link { color:var(--accent); }
 
-.gateway-history-link { font-size: .8em; font-weight: 400; }
+td.name .gateway-history-link { margin-left: .65em; color: var(--muted); font-size: .75em; font-weight: 400; white-space: nowrap; }
 .history-comparison-reasons { display: block; margin-top: .25rem; color: var(--muted); font-size: .8em; }
 
 .metric-trend { font-size: .75em; font-weight: 500; text-decoration: none; }
