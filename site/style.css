@@ -896,3 +896,6 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
 .table-scroll { overflow-x:auto; }
 
 .refresh-status { margin:1rem 0; padding:1rem; border:1px solid var(--border); border-radius:.5rem; color:var(--muted); }
+
+#gateways-table td.contrib { color:var(--fg-dim); white-space:nowrap; }
+#gateways-table .contrib-link { color:var(--accent); }

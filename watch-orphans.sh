@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Pull snapshots off boxes whose orchestrator is gone, then terminate each box once its result is in.
 #
-# Twice now an orchestrator has died with boxes still measuring: once to a network event that dropped
-# every ssh session at once, and once to my own `pkill -f run-on-ec2`, which matched BOTH running
-# orchestrators when I meant to stop one. A box with nothing holding its result is a box whose hours
-# are already spent and whose data is one shutdown away from gone.
+# An orchestrator can die with boxes still measuring (a dropped network session, or a `pkill` pattern
+# that matches more running orchestrators than intended) - a box with nothing holding its result is a
+# box whose hours are already spent and whose data is one shutdown away from gone.
 #
-# Pulls the live partial every poll, so a box lost mid-run costs the cells since the last poll rather
-# than everything - the lesson from busbar's 8-hour loss.
+# Pulls the live partial every poll, so a box lost mid-run costs only the cells since the last poll,
+# not everything.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

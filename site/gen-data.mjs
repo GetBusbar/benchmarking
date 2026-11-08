@@ -188,6 +188,7 @@ function parseManifest(text) {
   };
 }
 
+const contributorsBook = existsSync(join(HERE,"contributors.json")) ? JSON.parse(readFileSync(join(HERE,"contributors.json"),"utf8")) : {};
 const gatewaysDir = join(ROOT, "gateways");
 const gatewayKeys = existsSync(gatewaysDir)
   ? readdirSync(gatewaysDir).filter((d) => {
@@ -575,6 +576,7 @@ const allGateways = gatewayKeys.map((key) => {
   // Surfacing it here makes an instrument change legible at a glance on any cross-run comparison.
   // NULL-SAFE: a snapshot with no rig block renders "not recorded", never a fabricated digest.
   g.rig = (g.matrix && g.matrix.rig) || null;
+  g.contributed_by = contributorsBook[g.key] || [];
   return g;
 })
 /* A GATEWAY NOBODY HAS MEASURED IS NOT A ROW.
@@ -604,7 +606,7 @@ if (activeField) for (const g of allGateways) {
   const current = g.rig?.engine?.commit === activeField.engine_commit &&
     displayedMeasuredMs(g) >= Date.parse(activeField.started_at);
   if (current) continue;
-  const identity = new Set(["key", "display", "lang", "cls", "repo", "stars", "stars_as_of", "first_commit"]);
+  const identity = new Set(["contributed_by", "key", "display", "lang", "cls", "repo", "stars", "stars_as_of", "first_commit"]);
   for (const key of Object.keys(g)) if (!identity.has(key)) g[key] = null;
   g.version = parseManifest(readFileSync(join(gatewaysDir, g.key, "definition.json"), "utf8")).version || builtFromSourceVersion(g.key);
   g.awaiting_engine = activeField.engine_commit.slice(0, 7);
@@ -1065,7 +1067,7 @@ const SINGLE_ENGINE = Boolean(activeField) || process.env.OTB_SINGLE_ENGINE === 
 const suppressedForEngine = [];
 if (SINGLE_ENGINE && boardEngine != null) {
   const IDENTITY = new Set([
-    "key", "display", "lang", "cls", "repo", "version",
+    "contributed_by", "key", "display", "lang", "cls", "repo", "version",
     "stars", "stars_as_of", "first_commit", "engine",
   ]);
   for (const g of gateways) {

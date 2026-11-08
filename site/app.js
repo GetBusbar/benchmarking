@@ -5030,6 +5030,7 @@ const ROSTER_KEY = {
   age: (g) => { const t = g.first_commit ? new Date(g.first_commit).getTime() : NaN; return Number.isFinite(t) ? t : null; }, // older = smaller ms
   stars: (g) => (g.stars == null ? null : g.stars),
   cls: (g) => (g.cls || "Gateway").toLowerCase(),
+  contrib: (g) => g.contributed_by?.[0]?.handle?.toLowerCase() ?? null,
 };
 const rosterRows = (gateways) => {
   const key = ROSTER_KEY[rosterSort.col] || ROSTER_KEY.name;
@@ -5053,6 +5054,17 @@ const fmtStars = (v) => (v == null ? null : v >= 1000 ? `${(v / 1000).toFixed(1)
 /* Project age from the repo's first-commit date, in ONE simple floored unit: "11+ years",
    "7+ months", "3+ weeks". Context for the star counts and scores - a decade-old project and a
    three-week-old one earn them differently. Null (no snapshot) renders muted. */
+function contribCell(g) {
+  const cs = g.contributed_by || [];
+  if (!cs.length) return `<span class="muted" title="first-party entrant">&mdash;</span>`;
+  return cs.map((c) => {
+    const chip = `@${esc(c.handle)}`;
+    const title = esc(`${c.name || c.handle} contributed this entrant`);
+    return c.url
+      ? `<a class="contrib-link" href="${c.url}" target="_blank" rel="noopener noreferrer" title="${title}">${chip}</a>`
+      : `<span class="contrib-link" title="${title}">${chip}</span>`;
+  }).join(" ");
+}
 const fmtProjectAge = (firstCommit) => {
   if (!firstCommit) return null;
   const t = new Date(firstCommit).getTime();
@@ -5255,7 +5267,7 @@ function renderGateways() {
       <td class="lastrun">${lastRunTxt ? `${runModeCell(g)}<span title="last benchmarked ${esc(lastRun.toISOString().slice(0, 16).replace("T", " "))} UTC">${esc(lastRunTxt)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="age">${age ? `<span title="first commit ${esc(g.first_commit)}">${esc(age)}</span>` : `<span class="muted">n/a</span>`}</td>
       <td class="stars">${stars != null ? esc(stars) : `<span class="muted">n/a</span>`}</td>
-      <td class="cls">${esc(g.cls || "Gateway")}</td>
+      <td class="contrib">${contribCell(g)}</td>
     </tr>`;
   }).join("");
   // Row click opens the per-gateway drawer (same as the perf tabs) — /gateways rows are clickable too.
