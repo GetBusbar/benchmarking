@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {trendIndicator,metricDirection,historicalComparison} from './history.mjs';
+import {trendIndicator,metricDirection,historicalComparison,historyPoints,currentTrends,rankChanges} from './history.mjs';
 test('trend tolerance includes both five-percent boundaries',()=>{
  for(const after of [950,999,1000,1001,1050]) assert.equal(trendIndicator(1000,after,'higher').state,'flat');
  assert.equal(trendIndicator(1000,1051,'higher').state,'improved');
@@ -79,4 +79,35 @@ test('two-run comparisons preserve distinct throughput bounds and missing values
  assert.equal(comparisons[0].change_percent,null);
  assert.equal(comparisons[0].trend.state,'not_comparable');
  assert.match(comparisons[1].metric,/unbounded/);
+});
+
+
+test('history distinguishes first observations from changed engines', () => {
+ const row=(id,date,engine)=>({run_id:id,measured_at:date,gateway_id:'helicone',status:{state:'served'},provenance:{raw_result_url:'https://example.test/run'},test:{ingress_protocol:'openai',upstream_protocol:'openai',hardware:'m7g.4xlarge',architecture:'arm64',harness_commit:engine,harness_dirty:false,mock_sha256:'mock',configuration_sha256:'config',qualification:{outcome:'pass'}},metrics:{added_latency_p99_us:{value:293,state:'valid',definition:'added latency',section:'perf'}},frontier:[]});
+ const points=historyPoints([row('old','2026-08-03','old-engine'),row('new','2026-11-08','new-engine')],{ingress:'openai',egress:'openai',metric:'added_latency_p99_us'});
+ assert.equal(points[0].trend.label,'First recorded run');
+ assert.equal(points[1].trend.label,'Engine changed');
+ assert.ok(points[1].trend.reasons.includes('different_harness_commit'));
+ assert.equal(points[1].trend.change_percent,null);
+});
+
+test('current indicators require compatible evidence and preserve metric and protocol selection', () => {
+ const row=(id,date,value,engine='same')=>({run_id:id,measured_at:date,gateway_id:'helicone',status:{state:'served'},provenance:{raw_result_url:'https://example.test/run'},test:{ingress_protocol:'openai',upstream_protocol:'openai',hardware:'m7g.4xlarge',architecture:'arm64',harness_commit:engine,harness_dirty:false,mock_sha256:'mock',configuration_sha256:'config',qualification:{outcome:'pass'}},metrics:{added_latency_p99_us:{value,state:'valid',definition:'added latency',section:'perf'}},frontier:[]});
+ const old=row('old','2026-08-03',100), current=row('new','2026-11-08',90);
+ const trends=currentTrends([old,current],[current]);
+ assert.equal(trends['openai/openai/added_latency_p99_us'].state,'improved');
+ assert.equal(trends['openai/openai/added_latency_p99_us'].previous_run_id,'old');
+ assert.deepEqual(currentTrends([old],[{...current,test:{...current.test,harness_commit:'different'}}]),{});
+ assert.deepEqual(currentTrends([],[current]),{});
+});
+
+test('rank movement rejects partial fields and engine changes', () => {
+ const row=(id,value,engine='same')=>({run_id:id+value,gateway_id:id,status:{state:'served'},provenance:{raw_result_url:'https://example.test/run'},test:{ingress_protocol:'openai',upstream_protocol:'openai',hardware:'m7g.4xlarge',architecture:'arm64',harness_commit:engine,harness_dirty:false,mock_sha256:'mock',qualification:{outcome:'pass'}},metrics:{added_latency_p99_us:{value,state:'valid',definition:'latency',section:'perf'}},frontier:[]});
+ const field=measurements=>({gateways:[{id:'a'},{id:'b'}],measurements});
+ const before=field([row('a',100),row('b',200)]), after=field([row('a',100),row('b',90)]);
+ const q={ingress:'openai',egress:'openai',metric:'added_latency_p99_us'};
+ assert.equal(rankChanges(before,after,q).b.change,1);
+ assert.equal(rankChanges(before,after,q).a.change,-1);
+ assert.deepEqual(rankChanges(before,field([row('b',90)]),q),{});
+ assert.deepEqual(rankChanges(before,field([row('a',100,'new'),row('b',90,'new')]),q),{});
 });
