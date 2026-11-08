@@ -92,7 +92,7 @@ verify-engine:
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     # Library qualification tests spawn the CLI; clippy does not build that executable.
     - cargo build --workspace --bins --locked
-    - OTB_TEST_ENGINE_BIN="$CI_PROJECT_DIR/target/debug/otb" cargo test --workspace --locked
+    - RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN="$CI_PROJECT_DIR/target/debug/otb" cargo test --workspace --locked
     - rustup target add aarch64-unknown-linux-musl
     - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
     - mkdir -p rig

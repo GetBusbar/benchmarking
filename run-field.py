@@ -52,8 +52,8 @@ def main():
     if args.plan_only:return 0
     networks={};children=[];images={}
     def interrupt(signum,frame):
-        for child in children:
-            if child.poll() is None:child.send_signal(signal.SIGTERM)
+        # Send exactly one signal in finally: a second TERM can interrupt the
+        # shell's teardown trap while its instances are still billing.
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM,interrupt);signal.signal(signal.SIGINT,interrupt)
     try:
