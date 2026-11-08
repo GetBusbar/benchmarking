@@ -22,6 +22,8 @@ test('historical API projection cannot resurrect reviewed dashboard numbers',()=
  const records=historicalMeasurements(snapshot,{id:'run-one-api-test',sha256:'exact-raw-hash',review});
  const cohere=records.find(m=>m.test.ingress_protocol==='cohere');
  assert.equal(cohere.status.state,'untestable');
+ assert.equal(cohere.status.raw_state,true);
+ assert.match(cohere.status.evidence_scope,/Publication correction/);
  assert.equal(cohere.status.detail,review.reason);
  assert.deepEqual(cohere.frontier,[]);
  assert.ok(Object.values(cohere.metrics).every(m=>m.value===null));
