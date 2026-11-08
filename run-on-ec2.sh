@@ -438,14 +438,6 @@ fi
 # rig.box_qualify.outcome is "pass" or "seed" contributes, and only a numeric observed_rps. A grep of
 # every "observed_rps" took failed boxes' observations too (dragging the median toward the boxes the
 # gate exists to reject) and read an unmeasured `null` as an empty value that awk counted as 0.
-OTB_QUALIFY_BASELINE="$(python3 "$HERE/lib/qualification_baseline.py" "$HERE" "$BENCH_RIG_DIR" "$BENCH_ENGINE_COMMIT" "$ARCH" "${ITYPE:-m7g.4xlarge}")" || exit 1
-
-if [ -n "$OTB_QUALIFY_BASELINE" ]; then
-  export OTB_QUALIFY_BASELINE
-  echo "box qualification baseline: ${OTB_QUALIFY_BASELINE} rps (instrument-matched control/history)"
-else
-  echo "box qualification: no prior observations, this run seeds the baseline"
-fi
 
 case "$ARCH" in
   arm64|aarch64|graviton)
@@ -466,6 +458,15 @@ case "$ARCH" in
     CPU_LABEL="Intel (Sapphire Rapids)" ;;
   *) echo "unknown ARCH='$ARCH' (use arm64 or x86)"; exit 2 ;;
 esac
+OTB_QUALIFY_BASELINE="$(python3 "$HERE/lib/qualification_baseline.py" "$HERE" "$BENCH_RIG_DIR" "$BENCH_ENGINE_COMMIT" "$ARCH" "$ITYPE")" || exit 1
+
+if [ -n "$OTB_QUALIFY_BASELINE" ]; then
+  export OTB_QUALIFY_BASELINE
+  echo "box qualification baseline: ${OTB_QUALIFY_BASELINE} rps (instrument-matched control/history)"
+else
+  echo "box qualification: no prior observations, this run seeds the baseline"
+fi
+
 # THE CORE SPLIT BELOW (gateway 0-3, loadgen 4-9, mock 10-15) AND THIS LABEL BOTH ASSUME A 4xlarge
 # (16 vCPUs). An ITYPE override to any other size would pin onto CPUs that do not exist (or leave
 # cores idle) while the snapshot still claimed "16 cores / 64 GB", so it is refused, and the memory

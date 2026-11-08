@@ -42,18 +42,29 @@ bake in.
 ## Prerequisites
 
 **To run locally on your own box:**
-- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone, AISIX). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
+- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3** - runs the auditors and verifiers (`bench-audit.py`, `verify-*.py`). No plotting library is needed: the charts are drawn by the site in the browser (the static matplotlib pipeline was retired in 704fcf6).
-- Docker. Every container gateway pulls the project's official image at the tag pinned in its own `gateways/<name>/definition.json` (`launch.image`). Images are pinned by **tag, not digest**, and only the tag is recorded in the result, so a re-pushed tag would not be detected. Three build from a pinned commit instead, set in their own `gateways/<name>/build.sh`.
+- Container gateways use official ARM64 images pinned by tag and digest. Native builds pin named release commits.
 
-**To run the one-click cloud version** (`run-on-ec2.sh`) the *only* extra dependency is **AWS CLI v2**, configured (`aws configure` - creds + a default region). The orchestrator itself needs **bash >= 4** (associative arrays; macOS ships bash 3.2 as `/bin/bash`, so install a current bash, e.g. `brew install bash`, first on `PATH`). The script launches a fresh Graviton box, installs everything on it, runs the full suite, pulls the results back, and **terminates the box** - nothing to set up, nothing to clean up.
+Cloud runs use Python's AWS SDK, bash 4+, SSH and rsync. Install `lib/aws-sdk-requirements.txt` in a virtual environment and set `OTB_AWS_PYTHON` to that interpreter. Set `OTB_AWS_ACCOUNT_ID` explicitly and select `OTB_AWS_PROFILE`, standard SDK credentials, or an authorized workload role. No credentials belong in the repository. See [frozen rig and credential setup](rig/frozen/README.md).
+
+`run-field.py` queries current on-demand compute, gp3 and public IPv4 prices. `--placement cheapest` can distribute identical boxes across eligible regions; `--placement same-region` selects the cheapest region with enough quota for the whole field. Owned VPCs, subnets and routing are created and torn down with the run. Other workloads' networks are never adopted.
+
+```sh
+export OTB_AWS_ACCOUNT_ID=YOUR_ACCOUNT_ID
+export OTB_AWS_PROFILE=YOUR_PROFILE
+export OTB_AWS_PYTHON=/path/to/venv/bin/python
+"$OTB_AWS_PYTHON" run-field.py --placement cheapest --state-dir /path/to/private-state --rig-dir /path/to/verified-rig
+# Later, run just one updated gateway with the same frozen rig:
+"$OTB_AWS_PYTHON" run-field.py busbar --placement same-region --state-dir /path/to/another-private-state --rig-dir /path/to/verified-rig
+```
 
 ## Run it - one command, every metric
 
 Clone, then run one script. Everything is at the repo root, and **every gateway provisions itself**
 from the ref pinned in its own [`gateways/<name>/`](gateways/) directory - a Docker image tag in
-`definition.json`, or (for the three native gateways) a source commit in `build.sh`. Nothing to fetch
+`definition.json`, or (for native gateways) a source commit in `build.sh`. Nothing to fetch
 by hand for any of them.
 
 ```sh
@@ -65,7 +76,7 @@ git clone https://github.com/GetBusbar/benchmarking && cd benchmarking
 ./run-on-ec2.sh kill                 # terminate every box now
 ```
 
-Requires awscli v2 (configured), `ssh` and `rsync`. Every gateway gets its own fresh
+The lower-level runner requires explicit SDK credentials, a verified rig, `ssh` and `rsync`. Every gateway gets its own fresh
 `m7g.4xlarge`, so no gateway inherits another's page cache or disk state, and the wall clock is
 the slowest single gateway rather than the sum of all of them.
 
@@ -76,7 +87,7 @@ and the engine commit that measured it - which is what the board is generated fr
 ### On a fresh cloud box (nothing to install)
 
 `run-on-ec2.sh` launches a Graviton box, installs everything, runs the full suite, pulls results
-back, and **terminates the box**. Only needs AWS CLI v2 configured.
+back, and **terminates the box**. Use `run-field.py` above for credential verification and automatic network management.
 
 ```sh
 ./run-on-ec2.sh                     # every gateway, one-click (Graviton/arm64)

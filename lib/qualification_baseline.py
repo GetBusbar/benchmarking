@@ -20,6 +20,7 @@ def median_for(records, engine, mock_sha):
 
 
 def resolve(root, rig_dir, engine, arch, instance_type):
+    arch={"aarch64":"arm64","graviton":"arm64","x86":"amd64","x86_64":"amd64"}.get(arch,arch)
     mock=hashlib.sha256((rig_dir/f'mock-{arch}').read_bytes()).hexdigest()
     loadgen=hashlib.sha256((rig_dir/f'otb-{arch}').read_bytes()).hexdigest()
     # A frozen control calibration takes precedence over moving field history.
