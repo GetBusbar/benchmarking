@@ -30,7 +30,19 @@
     "kind": "docker"
   },
   "untestable": [
-    "openai/bedrock"
+    "openai/bedrock",
+    "cohere/openai",
+    "cohere/openai-responses",
+    "cohere/anthropic",
+    "cohere/gemini",
+    "cohere/cohere",
+    "cohere/bedrock",
+    "bedrock/openai",
+    "bedrock/openai-responses",
+    "bedrock/anthropic",
+    "bedrock/gemini",
+    "bedrock/cohere",
+    "bedrock/bedrock"
   ],
-  "untestable_note": "The harness does not configure a Bedrock channel for this entrant. The OpenAI-to-Bedrock cell is withheld as a harness configuration gap, not a measured gateway failure. Anthropic and Gemini channels are configured and probed normally; their earlier July channel-selection issue does not describe the November refresh."
+  "untestable_note": "The harness does not configure a Bedrock upstream channel. Native Cohere and Bedrock ingress paths return the web dashboard (HTTP 200 text/html), not protocol responses, on the pinned v0.6.10 image; they are withheld because this frozen engine cannot distinguish that fallback from a successful protocol probe. This is a harness limitation, not a measured gateway failure. OpenAI, Anthropic and Gemini channel probes otherwise run normally."
 }

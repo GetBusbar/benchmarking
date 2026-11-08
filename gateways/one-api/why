@@ -24,3 +24,5 @@ curl upstream  # the admin-API calls that wire this gateway's upstreams to the t
 The commands configure OpenAI, Anthropic and Gemini channels. The November refresh recorded successful upstream verification for OpenAI-to-Anthropic and OpenAI-to-Gemini; the July channel-selection failure is historical, not the current configuration. No Bedrock channel is configured, so that withheld cell describes a harness gap.
 
 Unsupported non-/v1 routes can fall through to the HTML dashboard. A 200 response there is not protocol support; the engine must validate protocol response content before measuring it. The web dashboard rate limiter is left at its default because it is not a benchmark inference route.
+
+The frozen refresh engine accepts any HTTP 2xx during discovery. Direct checks of the pinned image confirmed /v2/chat and /model/.../converse return identical text/html dashboard bodies. Those ingress rows are explicitly untestable for this rig so dashboard throughput cannot become an API result. The original raw run remains retained as diagnostic evidence; this exclusion changes gateway configuration only.
