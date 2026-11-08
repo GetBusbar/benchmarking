@@ -1,5 +1,5 @@
 {
-  "auth": "dummy",
+  "auth": "sk-otb-local-mock-benchmark",
   "class": "LLM gateway",
   "config": [],
   "config_files": [
