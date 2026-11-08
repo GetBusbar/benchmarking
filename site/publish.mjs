@@ -25,5 +25,6 @@ try {
     // is a hash of its content; star refreshes do not create another identity.
     run("kv", "key", "put", `datasets/${publication.dataset_id}`, "--binding", "PUBLICATIONS", "--path", join(out, `api/v1/benchmarks/${publication.dataset_id}.json`), "--remote");
     run("deploy", "--outdir", join(scratch, "bundle"));
+    execFileSync(process.execPath, [join(here, "check-live.mjs")], { stdio: "inherit" });
   }
 } finally { rmSync(scratch, { recursive: true, force: true }); }

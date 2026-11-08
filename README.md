@@ -333,6 +333,9 @@ Deploy authorization alone does not grant permission to edit those zone settings
 must check both ordinary crawler user agents and a default HTTP-library client against the
 live domain. A descriptive user agent can work even when a default library user agent is
 blocked before the Worker executes.
+`site/publish.mjs` runs `site/check-live.mjs` after deployment and reports a failed release
+check if the CDN blocks an agent or changes the raw evidence bytes. This is a post-deployment
+check: an error does not mean that the previous deployment remains active.
 
 ## Add a gateway
 
