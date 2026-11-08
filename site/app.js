@@ -5155,6 +5155,14 @@ const runModeCell = (g) => {
 function parseBuildVersion(full) {
   const head = String(full).split(" (")[0].trim();
   const first = head.split(/\s+/)[0];
+  const image = first.match(/^(.*)@sha256:([0-9a-f]{64})$/i);
+  if (image) {
+    const tagColon = image[1].lastIndexOf(":");
+    return tagColon > image[1].lastIndexOf("/")
+      ? image[1].slice(tagColon + 1)
+      : "sha256:" + image[2].slice(0, 12);
+  }
+  if (/^sha256:[0-9a-f]{64}$/i.test(first)) return first.slice(0, 19);
   const colon = first.lastIndexOf(":");
   if (colon > 0 && !first.slice(colon + 1).includes("/")) return first.slice(colon + 1);
   if (first.includes("==")) return first.split("==").pop();
@@ -5275,7 +5283,7 @@ function renderGateways() {
     const lastRun = gatewayLastRun(g);
     const lastRunTxt = fmtLastRun(lastRun);
     return `<tr data-gw="${esc(g.key)}" class="rowlink" tabindex="0">
-      <td class="name">${name}</td>
+      <td class="name">${name}<br><a class="gateway-history-link" href="/gateways/${encodeURIComponent(g.history_family || g.key.replace(/^busbar-\d+$/, "busbar"))}/history">History</a></td>
       <td><span class="lang-chip" style="background:${c}">${esc(g.lang)}</span></td>
       <td class="build">${version
         ? `<span title="${esc(versionBasis(g))}">${esc(version)}</span>`
