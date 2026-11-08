@@ -35,16 +35,18 @@ def main():
     p.add_argument('--publication',type=Path,required=True)
     p.add_argument('--state',type=Path,required=True)
     p.add_argument('--measured-files',type=Path,nargs='+',required=True)
+    p.add_argument('--additional-source',type=Path,nargs=2,action='append',default=[],metavar=('SOURCE','COMPLETION_LIST'),help='Additional batch to publish through the same serialized queue')
     p.add_argument('--watch',action='store_true')
     p.add_argument('command',nargs=argparse.REMAINDER)
     args=p.parse_args();command=args.command
     if command and command[0]=='--':command=command[1:]
     if not command:p.error('Supply a publication command after --')
     source=args.source.resolve();publication=args.publication.resolve()
+    batches=[(source,args.measured_files)]+[(extra.resolve(),[listing]) for extra,listing in args.additional_source]
     args.state.parent.mkdir(parents=True,exist_ok=True)
     done=set(json.loads(args.state.read_text())) if args.state.exists() else set()
     while True:
-        candidates=[(path,digest) for path,digest in collect(source,publication,args.measured_files) if digest not in done]
+        candidates=[(path,digest) for source,listings in batches for path,digest in collect(source,publication,listings) if digest not in done]
         if candidates:
             for path,digest in candidates:
                 target=publication/'results/snapshots'/path.name;target.parent.mkdir(parents=True,exist_ok=True)
