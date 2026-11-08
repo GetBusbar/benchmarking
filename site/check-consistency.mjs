@@ -382,6 +382,8 @@ export function resolvedSnapshotOnDisk(gwKey, dir = SNAP_DIR) {
     if (snap) {
       const reviews = readJsonOrNull(join(ROOT, "results/run-reviews.json")) || {};
       const digest = createHash("sha256").update(readFileSync(join(dir, f))).digest("hex");
+      const withdrawn = readJsonOrNull(join(ROOT, "results/withdrawn-runs.json"))?.runs || {};
+      if (withdrawn[digest]) continue;
       snap = reviewedOracleSnapshot(snap, reviews[digest]);
     }
     if (!snap) continue;

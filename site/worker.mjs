@@ -62,6 +62,12 @@ async function route(request, env) {
     const headers = new Headers(response.headers); headers.set("Content-Type", "text/plain; charset=utf-8");
     return new Response(response.body, { status: response.status, headers });
   }
+  const requestedRun = path.match(/(?:^|\/)(run-[a-z0-9-]+-([a-f0-9]{64}))(?:[/.]|$)/);
+  if (requestedRun) {
+    const response = await env.ASSETS.fetch(new Request(`${ORIGIN}/_publication/withdrawn-runs.json`));
+    const withdrawn = response.ok ? await response.json() : {};
+    if (withdrawn[requestedRun[2]]) return error(410, "This run was withdrawn and its measurements are unavailable.");
+  }
   const input = inputs(env);
   const getPublication = () => input("/_publication/records.json");
   const historyMatch = path.match(/^\/gateways\/([a-z0-9-]+)\/history(\.md)?$/);

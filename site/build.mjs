@@ -86,12 +86,16 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     if (!existsSync(proof)) throw new Error(`Missing review evidence: ${name}`);
     json(`/api/v1/reviews/${name}`, JSON.parse(readFileSync(proof, 'utf8')));
   }
+  const withdrawnPath = join(root, 'results/withdrawn-runs.json');
+  const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
+  json('/_publication/withdrawn-runs.json', withdrawn);
   const archives = [], byFile = new Map(), byHash = new Map();
   function archive(file, bytes, current = false) {
     const snapshot = JSON.parse(bytes.toString("utf8"));
     if (!snapshot.gateway || !snapshot.matrix) return;
     if (!/^[a-z0-9][a-z0-9-]*$/.test(snapshot.gateway)) throw new Error(`Unsafe gateway ID in ${file}`);
     const sha256 = hash(bytes), id = `run-${snapshot.gateway}-${sha256}`;
+    if (withdrawn[sha256]) return;
     let item = byHash.get(sha256);
     if (!item) {
       item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null, ...(runReviews[sha256] ? { review: runReviews[sha256] } : {}) };

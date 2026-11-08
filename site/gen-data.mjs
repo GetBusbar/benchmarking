@@ -222,6 +222,8 @@ function readJson(path) {
 }
 
 const SNAP_DIR = join(ROOT, "results", "snapshots");
+const withdrawnPath = join(ROOT, "results", "withdrawn-runs.json");
+const withdrawnRuns = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, "utf8")).runs : {};
 const reviewPath = join(ROOT, "results", "run-reviews.json");
 const runReviews = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, "utf8")) : {};
 
@@ -232,6 +234,7 @@ function resolvedSnapshot(key) {
   const snaps = [];
   for (const f of readdirSync(SNAP_DIR)) {
     if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
+    if (withdrawnRuns[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]) continue;
     let snap = readJson(join(SNAP_DIR, f));
     if (snap) snap = applyRunReview(snap, runReviews[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]);
     if (!snap) continue;
