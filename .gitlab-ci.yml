@@ -90,7 +90,9 @@ verify-engine:
     - sh "$CI_PROJECT_DIR/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain 1.98.0 --component rustfmt --component clippy
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
-    - cargo test --workspace --locked
+    # Library qualification tests spawn the CLI; clippy does not build that executable.
+    - cargo build --workspace --bins --locked
+    - OTB_TEST_ENGINE_BIN="$CI_PROJECT_DIR/target/debug/otb" cargo test --workspace --locked
     - rustup target add aarch64-unknown-linux-musl
     - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
     - mkdir -p rig
