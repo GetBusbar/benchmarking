@@ -53,7 +53,7 @@ def pin(instance, ip, path):
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:
-            response = subprocess.run(["aws", "ec2", "get-console-output", "--instance-id", instance, "--latest", "--output", "json"], capture_output=True, text=True, timeout=15, check=True)
+            response = subprocess.run(["bench-aws", "ec2", "get-console-output", "--instance-id", instance, "--latest", "--output", "json"], capture_output=True, text=True, timeout=15, check=True)
             console = json.loads(response.stdout).get("Output", "")
             scan = subprocess.run(["ssh-keyscan", "-T", "3", "-t", "ed25519", ip], capture_output=True, text=True, timeout=6, check=True)
             line = verified_key(ip, scan.stdout, console)

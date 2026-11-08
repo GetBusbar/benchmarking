@@ -1,6 +1,6 @@
 _format_version: "3.0"
 # ONE static config, four upstream providers. The client picks the upstream with a request header on
-# the SAME uniform OpenAI path: `x-llm-provider: anthropic|gemini|bedrock`; no header = openai.
+# the SAME uniform OpenAI path: \`x-llm-provider: anthropic|gemini|bedrock\`; no header = openai.
 # Route priority puts every header-matched route above the header-less openai fallback
 # (kong/router/transform.lua get_priority: match_weight occupies the top 3 bits).
 services:

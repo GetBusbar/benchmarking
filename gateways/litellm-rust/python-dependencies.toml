@@ -1,5 +1,0 @@
-[project]
-name="litellm-proxy-environment"
-version="0.0.0"
-requires-python=">=3.12,<3.13"
-dependencies=["litellm[proxy]==1.93.0"]

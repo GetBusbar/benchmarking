@@ -33,7 +33,7 @@
       "--port",
       "{GW_PORT}"
     ],
-    "image": "ghcr.io/berriai/litellm:v1.94.0",
+    "image": "ghcr.io/berriai/litellm:v1.108.3@sha256:e2bce769eb29b100d53ce90cbf2d6bba00dce82cb894c79d092ef6377523d7e5",
     "kind": "docker",
     "mounts": [
       {
@@ -43,15 +43,6 @@
       }
     ]
   },
-  "matrix": [
-    "111111",
-    "010000",
-    "001000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "LiteLLM accepts OpenAI ingress into any provider plus native Anthropic/Responses ingress diagonals; other ingress rows are grey by declaration",
   "model": "gpt-4o-mini",
   "name": "litellm-python",
   "path": "/v1/chat/completions",

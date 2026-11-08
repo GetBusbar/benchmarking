@@ -49,7 +49,7 @@ if name == "python3":
     if args and args[0].endswith("/lib/ssh_trust.py") and os.environ["AUTH_REFUSE"] == "1":
         sys.exit(1)
     os.execv(sys.executable, [sys.executable, *args])
-elif name == "aws":
+elif name in ("aws", "bench-aws"):
     action = args[1]
     if action == "get-console-output":
         print(json.dumps({"Output": "256 " + os.environ["FIXTURE_FINGERPRINT"] + " host (ED25519)"}))
@@ -84,7 +84,7 @@ elif name == "sleep":
     if os.environ["AUTH_REFUSE"] == "1" and os.environ["CLIENT"] == "watch-orphans.sh":
         os.kill(os.getppid(), signal.SIGTERM)
 '''
-            for name in ["aws", "ssh", "rsync", "ssh-keyscan", "sleep", "git", "python3"]:
+            for name in ["aws", "bench-aws", "ssh", "rsync", "ssh-keyscan", "sleep", "git", "python3"]:
                 command = bins / name
                 command.write_text("#!" + sys.executable + "\n" + stub)
                 command.chmod(0o755)
@@ -119,7 +119,7 @@ sys.exit(0 if result is not None else 1)
                 result, calls, pins = self.run_client(client)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 authenticated = [i for i, row in enumerate(calls)
-                                 if row[:3] == ["aws", "ec2", "get-console-output"]]
+                                 if row[:3] == ["bench-aws", "ec2", "get-console-output"]]
                 self.assertTrue(authenticated, "client never authenticated the EC2 host key")
                 auth = authenticated[0]
                 connections = [(i, row) for i, row in enumerate(calls) if row[0] in ["ssh", "rsync"]]
@@ -133,8 +133,8 @@ sys.exit(0 if result is not None else 1)
                     self.assertTrue(any(path.replace(" ", "\\ ") in options or path in options for path in pins))
                 self.assertEqual(list(pins.values()), [IP + " ssh-ed25519 " + KEY + "\n"])
                 if client in ["watch-busbar.sh", "bench-dashboard.py"]:
-                    self.assertFalse(any(row[:3] in [["aws", "ec2", "run-instances"],
-                                                     ["aws", "ec2", "terminate-instances"]] for row in calls))
+                    self.assertFalse(any(row[:3] in [["bench-aws", "ec2", "run-instances"],
+                                                     ["bench-aws", "ec2", "terminate-instances"]] for row in calls))
 
     def test_refused_authentication_prevents_every_connection_and_pull(self):
         for client in CLIENTS:

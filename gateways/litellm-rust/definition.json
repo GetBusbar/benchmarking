@@ -10,6 +10,7 @@
   ],
   "display": "LiteLLM \u00b7 Rust",
   "egress": [
+    "openai",
     "anthropic"
   ],
   "headers": [
@@ -19,29 +20,22 @@
   "launch": {
     "args": [],
     "binary": [
-      "src/litellm-rust/target/release/litellm-ai-gateway",
-      "src/litellm-rust/target/release/litellm_ai_gateway",
-      "src/litellm-rust/target/release/server"
+      "src/litellm-rust/target/release/litellm-gateway"
     ],
     "build": "build.sh",
     "kind": "native"
   },
-  "matrix": [
-    "000000",
-    "000000",
-    "001000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "LiteLLM-Rust beta serves only the Anthropic /v1/messages route (azure_ai upstream); no other ingress or upstream dialect exists, so those cells are grey by that capability limit",
-  "model": "azure_ai/mock",
+  "model": "bench-openai",
   "name": "litellm-rust",
-  "path": "/v1/messages",
+  "path": "/v1/chat/completions",
   "port": 8101,
   "repo": "https://github.com/BerriAI/litellm",
   "runtime": {
     "kind": "native",
-    "proc_match": "litellm-rust/target/release/"
+    "proc_match": "litellm-gateway"
+  },
+  "egress_models": {
+    "openai": "bench-openai",
+    "anthropic": "bench-anthropic"
   }
 }

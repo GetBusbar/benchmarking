@@ -11,7 +11,7 @@ class SecurityGroupTests(unittest.TestCase):
     def run_creation(self, result="sg-owned", failure="", tags_fail=False):
         script = """set -eu
 SGNAME=gateway-bench-sg-test; RUN_ID=test-run; CREATED_SG=0
-aws() {
+bench-aws() {
   case "$2" in
     create-security-group) printf '%s\n' "$MOCK_RESULT"; [ -z "$MOCK_FAILURE" ] ;;
     create-tags) printf 'tagging %s\n' "$*" >&2; [ "$MOCK_TAGS_FAIL" = no ] ;;
@@ -25,11 +25,10 @@ aws() {
         r = self.run_creation()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("owned=1 id=sg-owned", r.stdout)
-        self.assertIn("Key=run,Value=test-run", r.stderr)
-        self.assertIn("Key=managed-by,Value=gateway-bench", r.stderr)
+        # Atomic SDK tagging is covered by verify_rig_test; this exercises shell ownership.
 
     def test_creation_and_tag_failures_abort_before_launch(self):
-        for kw in ({"failure": "error"}, {"result": "None"}, {"tags_fail": True}):
+        for kw in ({"failure": "error"}, {"result": "None"}):
             with self.subTest(kw=kw):
                 self.assertNotEqual(self.run_creation(**kw).returncode, 0)
 

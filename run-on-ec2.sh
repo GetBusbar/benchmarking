@@ -10,11 +10,12 @@
 #   run-on-ec2.sh                                   # all gateways, one box each, in parallel
 #   run-on-ec2.sh <name> <name>                     # a subset, one box each
 #
-# Requires awscli v2 (configured), ssh, rsync. Each box is m7g.4xlarge (16 real Graviton3 cores): the
+# Requires the Keychain SDK credential, boto3, ssh, rsync. Each box is m7g.4xlarge (16 real Graviton3 cores): the
 # gateway-under-test is pinned to 4 cores (= an m7g.xlarge, the class AIGatewayBench uses); the mock +
 # load generator get 6 cores each, so the harness can never steal cycles from the gateway. EVERY
 # gateway build/pulls itself on its box from the ref pinned in its own gateways/<name>/definition.json.
 set -uo pipefail
+export PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib:$PATH"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this repo (benchmarking) root
 
@@ -48,7 +49,7 @@ HARVEST_GRACE_MIN="${HARVEST_GRACE_MIN:-120}"
 # the field across two revisions and publish them beside each other as though they were comparable.
 # The default is the orchestrator's own HEAD, which must be pushed: a commit that exists only here
 # cannot be cloned, and that failure is loud rather than silently measuring something else.
-BENCH_REPO="${BENCH_REPO:-https://github.com/GetBusbar/benchmarking.git}"
+BENCH_REPO="${BENCH_REPO:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" remote get-url origin)}"
 BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD 2>/dev/null)}"
 
 # `kill` and `harvest` stop cost and rescue data. Neither launches anything or stamps anything, so
@@ -56,6 +57,11 @@ BENCH_COMMIT="${BENCH_COMMIT:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-pars
 # between the operator and them: a dirty checkout mid-incident must not be what keeps boxes billing.
 _NOGATE=0
 case "${1:-}" in kill|--kill|harvest) _NOGATE=1 ;; esac
+
+if [ "$_NOGATE" = 0 ]; then
+  : "${BENCH_RIG_DIR:?Set BENCH_RIG_DIR to the verified CI artifact directory}"
+  [ -r "$BENCH_RIG_DIR/engine-commit" ] && [ -r "$BENCH_RIG_DIR/SHA256SUMS" ] || exit 1
+fi
 
 # ── LAUNCH PRECONDITIONS: two git facts, checked before a single box is created ───────────────────
 #
@@ -110,7 +116,7 @@ if [ "$_NOGATE" = 0 ] && [ -z "${BENCH_SKIP_PREFLIGHT:-}" ]; then
   # prevent. The harmless direction (an older pushed BENCH_COMMIT under an unpushed HEAD) was refused.
   if ! git -C "$_here" branch -r --contains "$BENCH_COMMIT" 2>/dev/null | grep -q .; then
     echo "PREFLIGHT FAILED: BENCH_COMMIT ($BENCH_COMMIT) is not on any remote branch." >&2
-    echo "  Every box fetches the harness BY SHA from $BENCH_REPO, so all of them would fail to fetch" >&2
+    echo "  Every box receives the committed source archive; publish its SHA to $BENCH_REPO before launching" >&2
     echo "  a commit that exists only on this machine. Push it first (or set BENCH_COMMIT to a pushed sha)." >&2
     exit 1
   fi
@@ -255,7 +261,7 @@ if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
   # error and the terminate output, print "done" and exit 0, so expired credentials terminated nothing
   # while the operator (or a wrapper) believed the fleet was gone.
   _kill_rc=0
-  if ! _kill_ids="$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+  if ! _kill_ids="$(bench-aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
       "Name=instance-state-name,Values=running,pending,stopping,stopped" \
       --query 'Reservations[].Instances[].InstanceId' --output text)"; then
     echo "KILL FAILED: describe-instances failed (see above) - NOTHING was terminated" >&2
@@ -263,10 +269,10 @@ if [[ "${1:-}" == "kill" || "${1:-}" == "--kill" ]]; then
   fi
   _kill_ids="$(printf '%s\n' "$_kill_ids" | tr '\t' '\n' | grep -E '^i-' || true)"
   if [ -n "$_kill_ids" ]; then
-    printf '%s\n' "$_kill_ids" | xargs -n 25 aws ec2 terminate-instances --output text --instance-ids >/dev/null \
+    printf '%s\n' "$_kill_ids" | xargs -n 25 bench-aws ec2 terminate-instances --output text --instance-ids >/dev/null \
       || { echo "KILL: terminate-instances reported a failure (see above)" >&2; _kill_rc=1; }
   fi
-  left=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+  left=$(bench-aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
     "Name=instance-state-name,Values=running,pending" --query 'length(Reservations[].Instances[])' --output text) || left=""
   echo "done - running/pending remaining: ${left:-?}"
   case "${left:-?}" in 0) : ;; *) echo "KILL: could not confirm every box is gone (remaining: ${left:-?})" >&2; _kill_rc=1 ;; esac
@@ -402,6 +408,9 @@ fi
 # unreadable tree is not evidence of a clean one, and dirty=false is the claim C8 trusts.
 if ! _eng_status="$(git -C "$HERE" status --porcelain -- . ':(exclude)results' 2>/dev/null)" || [ -n "$_eng_status" ]; then BENCH_ENGINE_DIRTY=1; else BENCH_ENGINE_DIRTY=0; fi
 export BENCH_COMMIT BENCH_ENGINE_COMMIT BENCH_ENGINE_DIRTY
+if [ "$_NOGATE" = 0 ]; then
+  python3 "$HERE/lib/verify_rig.py" "$BENCH_RIG_DIR" "$BENCH_ENGINE_COMMIT" "$ARCH" || exit 1
+fi
 
 # THE BOX HAS NO HISTORY, SO THE ORCHESTRATOR HANDS IT ONE.
 #
@@ -540,7 +549,7 @@ if [[ "${1:-}" == "harvest" ]]; then
   echo "harvest: looking for gateway-bench boxes in $AWS_DEFAULT_REGION ..."
   # An AWS failure is not "no boxes": saying there is nothing to rescue while finished runs sit on
   # self-terminating boxes is the one wrong answer this command can give.
-  if ! rows=$(aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
+  if ! rows=$(bench-aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
     "Name=instance-state-name,Values=running" \
     --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress,InstanceId]' \
     --output text); then
@@ -645,12 +654,12 @@ teardown() {
   # Say so when the terminate cannot be done or confirmed: a silent failure here is a fleet left billing
   # until its 12 h backstop, with nothing on the operator's screen to say it happened.
   local _ids
-  if ! _ids="$(aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
+  if ! _ids="$(bench-aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
       "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)"; then
     echo "TEARDOWN: describe-instances FAILED - could not list run=$RUN_ID boxes; run './run-on-ec2.sh kill' to be sure none is left billing" >&2
   fi
   _ids="$(printf '%s\n' "$_ids" | tr '\t' '\n' | grep -E '^i-' || true)"
-  if [ -n "$_ids" ] && ! printf '%s\n' "$_ids" | xargs -n25 aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1; then
+  if [ -n "$_ids" ] && ! printf '%s\n' "$_ids" | xargs -n25 bench-aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1; then
     echo "TEARDOWN: terminate-instances FAILED for run=$RUN_ID ($(printf '%s' "$_ids" | tr '\n' ' ')) - run './run-on-ec2.sh kill'" >&2
   fi
   # THE SHARED KEY IS ONLY DELETED WHEN NOTHING ELSE IS USING IT. "This invocation created it" is not
@@ -660,10 +669,10 @@ teardown() {
   # (ours are shutting-down by now, so they do not count) keeps it; an AWS error keeps it too.
   if [[ "$CREATED_KEY" == 1 ]]; then
     local _key_users
-    if _key_users="$(aws ec2 describe-instances --filters "Name=key-name,Values=$KEYNAME" \
+    if _key_users="$(bench-aws ec2 describe-instances --filters "Name=key-name,Values=$KEYNAME" \
         "Name=instance-state-name,Values=running,pending" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)" \
         && [ "$_key_users" = 0 ]; then
-      aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE" "$KEYFILE.awsid"
+      bench-aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true; rm -f "$KEYFILE" "$KEYFILE.awsid"
     else
       echo "TEARDOWN: keeping key pair $KEYNAME and $KEYFILE - other live boxes use it (or AWS could not say)" >&2
     fi
@@ -675,18 +684,18 @@ teardown() {
     # for the instances THIS run launched to reach `terminated` (ENIs detached) before deleting the SG.
     # Best-effort + time-bounded so teardown never hangs; this group belongs only to this run.
     local _tids
-    _tids=$(aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
+    _tids=$(bench-aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
       --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null | tr '\t' '\n' | grep -E '^i-' | tr '\n' ' ')
     if [[ -n "${_tids// }" ]]; then
-      # aws ec2 wait has its own ~600s ceiling; wrap in a timeout where available (Linux) so a wedged wait
+      # bench-aws ec2 wait has its own ~600s ceiling; wrap in a timeout where available (Linux) so a wedged wait
       # can't hang teardown. macOS has no `timeout` - fall back to the bare wait (its own ceiling applies).
       if command -v timeout >/dev/null 2>&1; then
-        timeout 300 aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
+        timeout 300 bench-aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
       else
-        aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
+        bench-aws ec2 wait instance-terminated --instance-ids $_tids >/dev/null 2>&1 || true
       fi
     fi
-    aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || echo "TEARDOWN: could not delete owned security group $SG ($SGNAME); remove it after its interfaces detach" >&2
+    bench-aws ec2 delete-security-group --group-id "$SG" >/dev/null 2>&1 || echo "TEARDOWN: could not delete owned security group $SG ($SGNAME); remove it after its interfaces detach" >&2
   fi
 }
 # EXIT runs teardown; a signal only has to EXIT (which runs it, once). A handler that ran teardown and
@@ -723,7 +732,7 @@ KEYID_FILE="$KEYFILE.awsid"
 # expired credentials) read as "no keypair" deleted and recreated the shared pair, which locks every
 # in-flight run's boxes out of ssh. Refuse to start instead.
 _aws_keyid=""
-if ! _aws_keyid="$(aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text 2>&1)"; then
+if ! _aws_keyid="$(bench-aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text 2>&1)"; then
   case "$_aws_keyid" in
     *InvalidKeyPair.NotFound*) _aws_keyid="" ;;
     *) echo "FATAL: describe-key-pairs failed ($_aws_keyid) - refusing to rebuild a key pair that may be in use; retry" >&2; exit 1 ;;
@@ -734,14 +743,14 @@ if [[ ! -s "$KEYFILE" || -z "$_aws_keyid" || "$_aws_keyid" == "None" || "$_local
   if [[ -s "$KEYFILE" && -n "$_aws_keyid" && "$_local_keyid" != "$_aws_keyid" ]]; then
     echo "[key] local key does not correspond to AWS keypair $KEYNAME (recorded '${_local_keyid:-none}' vs live '$_aws_keyid') - rebuilding both, or every box would refuse it"
   fi
-  aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+  bench-aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
   rm -f "$KEYFILE" "$KEYID_FILE"
   # Create the private key under a 077 umask so it is 600 from birth - no sub-millisecond window at the
   # default umask between create and chmod. The chmod stays as a belt-and-braces backstop.
-  if ! ( umask 077; aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ) \
+  if ! ( umask 077; bench-aws ec2 create-key-pair --key-name "$KEYNAME" --query KeyMaterial --output text > "$KEYFILE" ) \
      || ! grep -q 'PRIVATE KEY' "$KEYFILE" 2>/dev/null; then
     echo "FATAL: create-key-pair failed or returned no private key - refusing to launch boxes nobody could ssh into" >&2
-    aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
+    bench-aws ec2 delete-key-pair --key-name "$KEYNAME" >/dev/null 2>&1 || true
     rm -f "$KEYFILE"
     exit 1
   fi
@@ -749,15 +758,15 @@ if [[ ! -s "$KEYFILE" || -z "$_aws_keyid" || "$_aws_keyid" == "None" || "$_local
   CREATED_KEY=1
   # Record the id the key belongs to, so the NEXT run can tell correspondence from mere existence. A
   # missing sidecar makes the next run rebuild the pair, so a failure here is said out loud.
-  aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text > "$KEYID_FILE" 2>/dev/null \
+  bench-aws ec2 describe-key-pairs --key-names "$KEYNAME" --query 'KeyPairs[0].KeyPairId' --output text > "$KEYID_FILE" 2>/dev/null \
     || echo "WARNING: could not record the key pair id in $KEYID_FILE - the next run will rebuild the pair" >&2
 fi
 # Each invocation owns its security group and its sole SSH /32. Reusing a group
 # accumulates old caller addresses and makes revocation race with concurrent runs.
-SG=$(aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench run-local SSH" --query GroupId --output text) || exit 1
+SG=$(OTB_BENCH_RUN_ID="$RUN_ID" bench-aws ec2 create-security-group --group-name "$SGNAME" --description "gateway bench run-local SSH" --query GroupId --output text) || exit 1
 [[ "$SG" == sg-* ]] || { echo "FATAL: create-security-group returned no group id" >&2; exit 1; }
 CREATED_SG=1
-aws ec2 create-tags --resources "$SG" --tags "Key=run,Value=$RUN_ID" 'Key=managed-by,Value=gateway-bench' || exit 1
+# The SDK creates this group atomically with purpose=gateway-bench for scoped IAM access.
 # Fetch our public IP for the SSH ingress rule. A transient checkip hiccup that returns an empty/
 # malformed MYIP would make `--cidr "/32"` get rejected by AWS and swallowed by `|| true`; on a
 # freshly-created SG that leaves NO port-22 rule, so ssh to every box times out and the whole run
@@ -771,7 +780,7 @@ for _try in 1 2 3; do
 done
 [[ -n "$MYIP" ]] || { echo "FATAL: could not determine a valid public IPv4 from checkip.amazonaws.com (3 tries) - refusing to launch boxes into an SG with no SSH ingress rule" >&2; exit 1; }
 # Authorize only this run's current address; all unexpected AWS failures are fatal.
-_sg_err=$(aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" 2>&1) \
+_sg_err=$(bench-aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "${MYIP}/32" 2>&1) \
   && echo "authorized SSH ingress for ${MYIP}/32 on $SG" \
   || { case "$_sg_err" in
          *InvalidPermission.Duplicate*) echo "SSH ingress for ${MYIP}/32 already present on $SG (ok)" ;;
@@ -781,7 +790,7 @@ _sg_err=$(aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol t
        esac; }
 
 
-AMI=$(aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
+AMI=$(bench-aws ssm get-parameter --name "$SSM" --query Parameter.Value --output text)
 
 mkdir -p "$HERE"/results/{perf,memory,stream,xlate,governed,matrix,snapshots}
 
@@ -1035,19 +1044,19 @@ bench_gateway_once() {
   # therefore bleed cost for at most BENCH_MAX_MIN, never indefinitely. It is also the ONLY ceiling the
   # run has - the engine caps nothing - so it must sit ABOVE the slowest grid the field measures, never
   # at it. See the BENCH_MAX_MIN block at the top of this file for the run it killed when it did not.
-  iid=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
+  iid=$(bench-aws ec2 run-instances --image-id "$AMI" --instance-type "$ITYPE" --key-name "$KEYNAME" \
     --security-group-ids "$SG" \
     --instance-initiated-shutdown-behavior terminate \
     --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "$BENCH_MAX_MIN")" \
-    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=60,VolumeType=gp3,DeleteOnTermination=true}' \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$tag},{Key=purpose,Value=gateway-bench},{Key=run,Value=$RUN_ID}]" \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":60,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+    --tag-specifications '[{"ResourceType":"instance","Tags":[{"Key":"Name","Value":"'"$tag"'"},{"Key":"purpose","Value":"gateway-bench"},{"Key":"run","Value":"'"$RUN_ID"'"}]}]' \
     --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
   glog_echo "launched $iid"
   # self-terminate this box no matter how we exit
-  trap 'aws ec2 terminate-instances --instance-ids "'"$iid"'" >/dev/null 2>&1 || true' RETURN
+  trap 'bench-aws ec2 terminate-instances --instance-ids "'"$iid"'" >/dev/null 2>&1 || true' RETURN
 
-  aws ec2 wait instance-running --instance-ids "$iid" 2>>"$glog" || { glog_echo "wait running FAILED"; return 1; }
-  ip=$(aws ec2 describe-instances --instance-ids "$iid" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+  bench-aws ec2 wait instance-running --instance-ids "$iid" 2>>"$glog" || { glog_echo "wait running FAILED"; return 1; }
+  ip=$(bench-aws ec2 describe-instances --instance-ids "$iid" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
   glog_echo "ip=$ip - authenticating SSH against the instance console"
   python3 "$HERE/lib/ssh_trust.py" "$iid" "$ip" "$KNOWN_HOSTS" >>"$glog" 2>&1 || return 1
   glog_echo "authenticated host key - waiting for ssh"
@@ -1309,28 +1318,9 @@ bench_gateway_once() {
     glog_echo "FETCH FAILED: commit ${BENCH_COMMIT:0:12} contains no gateways/$gw - refusing to measure"
     return 1
   fi
-  local _raw="https://raw.githubusercontent.com/${BENCH_REPO#https://github.com/}"
-  _raw="${_raw%.git}/$BENCH_COMMIT"
-  ssh "${SSHOPT[@]}" ubuntu@"$ip" "set -e
-    rm -rf ~/benchmarking
-    mkdir -p ~/benchmarking
-    cd ~/benchmarking
-    while IFS=\$'\t' read -r mode f; do
-      [ -n \"\$f\" ] || continue
-      mkdir -p \"\$(dirname \"\$f\")\"
-      # -f so a path missing from this commit is an error, never a silently empty file the run would
-      # then try to measure with.
-      curl -fsSL -o \"\$f\" '$_raw/'\"\$f\"
-      # Restore the mode the commit recorded. 100755 is the only executable mode git stores.
-      [ \"\$mode\" = 100755 ] && chmod +x \"\$f\"
-    done <<'FILELIST'
-$_files
-FILELIST
-    # Refuse to measure if the fetch did not produce what the run needs.
-    test -d 'gateways/$gw' && test -r lib/rig.sh
-    # results/ on a box is how a previous run's numbers got recycled; nothing above can create it.
-    test ! -e results
-  " >>"$glog" 2>&1
+  # Transfer exact committed sources over SSH; private GitLab credentials never reach a box.
+  (set -o pipefail; git -C "$HERE" archive "$BENCH_COMMIT" "gateways/$gw" lib/rig.sh lib/gateway_build_provenance.py | \
+    ssh "${SSHOPT[@]}" ubuntu@"$ip" 'set -e; rm -rf ~/benchmarking; mkdir -p ~/benchmarking; tar -xf - -C ~/benchmarking')
   local _up_rc=$?
   if [ "$_up_rc" -ne 0 ]; then
     glog_echo "FETCH FAILED (rc=$_up_rc) - harness incomplete; refusing to measure a partial tree, tearing down this box"
@@ -1338,6 +1328,11 @@ FILELIST
   fi
   local _n; _n="$(printf '%s\n' "$_files" | grep -c .)"
   glog_echo "fetched $_n file(s) in $((SECONDS-_t0))s"
+
+  # Identical CI artifacts on every box; no rolling release fetch and no build on the measurement path.
+  ssh "${SSHOPT[@]}" ubuntu@"$ip" 'mkdir -p ~/benchmarking/rig' || return 1
+  scp "${SSHOPT[@]}" "$BENCH_RIG_DIR/otb-$ARCH" "$BENCH_RIG_DIR/mock-$ARCH" "$BENCH_RIG_DIR/SHA256SUMS" ubuntu@"$ip":benchmarking/rig/ >>"$glog" 2>&1 || return 1
+  ssh "${SSHOPT[@]}" ubuntu@"$ip" 'set -e; cd ~/benchmarking; ln -s rig verification-rig; sed "s@rig/@verification-rig/@g" rig/SHA256SUMS | sha256sum -c -; chmod +x rig/otb-* rig/mock-*; printf "{\"assets\":[]}" > rig/release.json' >>"$glog" 2>&1 || return 1
 
   # ── BOX QUALIFICATION, right here: the harness is on the box, nothing has been built or launched
   # yet, and the 6x6 has not started. This is the last moment at which rejecting the box is cheap.
@@ -1466,6 +1461,7 @@ FILELIST
   # variables like $PWD inside the remote script before the box ever saw it.
   local _run_sh
   _run_sh="$(
+    printf 'export BENCH_RIG_ORIGIN=%q\n' "${BENCH_RIG_ORIGIN:-}"
     printf 'export BENCH_HARDWARE=%q BENCH_ARCH=%q\n' "$HW_LABEL" "$ARCH"
     printf 'export BENCH_ENGINE_COMMIT=%q BENCH_ENGINE_DIRTY=%q\n' "$BENCH_ENGINE_COMMIT" "$BENCH_ENGINE_DIRTY"
     # THE BOX GETS WHAT IS WRITTEN HERE, and nothing else. `export` in this orchestrator sets a
@@ -1563,6 +1559,7 @@ sudo -n true 2>/dev/null && sudo chmod 666 /var/run/docker.sock || true
 #
 # The only thing that ever builds here is a gateway with no official artifact for this arch, and
 # that is a matter for the gateway itself, done before the memory baseline is taken.
+export RIG_URL="file://$PWD/rig" RIG_API="file://$PWD/rig/release.json"
 source lib/rig.sh
 fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
 # Record which mock this run used. rig is a moving tag, so the same URL can serve different binaries
@@ -1572,7 +1569,7 @@ fetch_rig "$PWD" || { echo rig fetch FAILED; echo 126 > .run-done; exit 0; }
 export OTB_RIG_MOCK_ORIGIN="$RIG_MOCK_ORIGIN"
 export OTB_RIG_MOCK_SHA256="$(_rig_sha256 "$MOCK")"
 export OTB_RIG_MOCK_UPDATED_AT="$(_rig_asset_updated_at "mock-$BENCH_ARCH")"
-export OTB_RIG_URL="$RIG_URL"
+export OTB_RIG_URL="${BENCH_RIG_ORIGIN:-$RIG_URL}"
 # rig.sh puts what it fetches in bin/; the run invokes ./otb. RIG_URL comes from rig.sh, so the
 # engine is fetched from the same release the rest of the rig came from, named once.
 #
