@@ -256,7 +256,7 @@ test("thin HTML, semantic guide, compact exports and run discovery", { skip: !ar
     const discovery = doc.querySelector('nav[aria-label="Crawler discovery"]');
     for (const file of ["robots.txt", "sitemap.xml", "llms.txt"]) {
       const url = `https://onthebench.ai/${file}`;
-      assert.equal(discovery.querySelector(`a[href="${url}"]`)?.textContent, url);
+      assert.equal(discovery.querySelector(`a[href="${url}"]`)?.textContent, file);
     }
     assert.equal(doc.querySelectorAll("main > .view.hidden").length, 0, path);
     assert.ok(!doc.querySelector("#view-method"), path);
