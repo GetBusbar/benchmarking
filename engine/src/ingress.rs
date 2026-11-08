@@ -97,6 +97,38 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
 }
 
 impl Dialect {
+    /// Require actual protocol output before a successful HTTP response can qualify a cell.
+    /// Dashboard HTML, error objects and another dialect's response are not successful probes.
+    pub fn valid_nonstream_response(self, body: &[u8]) -> bool {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return false;
+        };
+        if !v.is_object() || v.get("error").is_some() {
+            return false;
+        }
+        let text = |value: &serde_json::Value| value.as_str().is_some_and(|s| !s.is_empty());
+        let blocks = |value: &serde_json::Value| {
+            value
+                .as_array()
+                .is_some_and(|a| a.iter().any(|b| text(&b["text"])))
+        };
+        match self {
+            Self::Openai => v["choices"].as_array().is_some_and(|a| {
+                a.iter()
+                    .any(|c| text(&c["message"]["content"]) || blocks(&c["message"]["content"]))
+            }),
+            Self::OpenaiResponses => v["output"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|m| blocks(&m["content"]))),
+            Self::Anthropic => blocks(&v["content"]),
+            Self::Gemini => v["candidates"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|c| blocks(&c["content"]["parts"]))),
+            Self::Cohere => blocks(&v["message"]["content"]),
+            Self::Bedrock => blocks(&v["output"]["message"]["content"]),
+        }
+    }
+
     /// Every dialect, in the canonical order used across the harness (lib/ingress.sh, matrix/run.sh).
     pub const ALL: [Dialect; 6] = [
         Dialect::Openai,

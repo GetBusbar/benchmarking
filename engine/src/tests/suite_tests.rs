@@ -126,6 +126,7 @@ fn serve(status: u16) -> SocketAddr {
                         if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
                             return;
                         }
+                        let anthropic = line.contains("/messages");
                         let mut content_length = 0;
                         loop {
                             line.clear();
@@ -148,7 +149,12 @@ fn serve(status: u16) -> SocketAddr {
                         {
                             return;
                         }
-                        let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                        let body = if anthropic {
+                            r#"{"content":[{"type":"text","text":"hello"}]}"#
+                        } else {
+                            r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#
+                        };
+                        let r = format!("HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
                         if write.write_all(r.as_bytes()).await.is_err() {
                             return;
                         }

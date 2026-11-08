@@ -619,6 +619,12 @@ fn a_stepped_down_stream_rung_whose_fresh_window_fails_never_votes_for_itself() 
 
 /// A server that answers every request with a fixed status.
 fn serve(status: u16) -> SocketAddr {
+    serve_body(status, "ok")
+}
+
+const OPENAI_OUTPUT: &str = r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#;
+
+fn serve_body(status: u16, body: &'static str) -> SocketAddr {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = l.local_addr().expect("addr");
     std::thread::spawn(move || {
@@ -627,7 +633,10 @@ fn serve(status: u16) -> SocketAddr {
             std::thread::spawn(move || {
                 let mut b = [0u8; 4096];
                 while c.read(&mut b).unwrap_or(0) > 0 {
-                    let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                    let r = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
                     if c.write_all(r.as_bytes()).is_err() {
                         return;
                     }
@@ -639,13 +648,13 @@ fn serve(status: u16) -> SocketAddr {
 }
 
 #[test]
-fn a_2xx_is_served() {
+fn a_probe_rejects_success_without_protocol_output() {
     let gw = serve(200);
     let cfg = cfg_for(gw, gw);
-    assert_eq!(
+    assert!(matches!(
         probe_cell(&cfg, &CellId::new("openai", "openai"), true),
-        Served::Yes
-    );
+        Served::No(Verdict::Failed, _)
+    ));
 }
 
 // A real error status with a healthy rig is the GATEWAY's own answer about this pairing.
@@ -845,7 +854,7 @@ fn a_failed_mid_grid_restart_marks_every_remaining_cell_untestable_naming_the_ha
 // exists to prevent (a global gate answering for a pairing that was never really asked).
 #[test]
 fn a_declared_incapable_cell_is_never_probed_even_when_the_server_would_serve_it() {
-    let gw = serve(200);
+    let gw = serve_body(200, OPENAI_OUTPUT);
     let mut cfg = cfg_for(gw, gw);
     cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
     // Rows = ingress, cols = egress, axis order [openai, openai-responses, anthropic, gemini,
@@ -1402,7 +1411,7 @@ fn serve_busy_then_ok(busy_times: usize) -> SocketAddr {
                             "{\"error\":{\"message\":\"The service is temporarily overloaded.\"}}",
                         )
                     } else {
-                        (200, "{\"ok\":true}")
+                        (200, OPENAI_OUTPUT)
                     };
                     let r = format!(
                         "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
@@ -1480,7 +1489,7 @@ fn serve_silent_then_ok(silent_times: usize) -> SocketAddr {
                         std::thread::sleep(std::time::Duration::from_secs(30));
                         return;
                     }
-                    let body = "{\"ok\":true}";
+                    let body = OPENAI_OUTPUT;
                     let r = format!(
                         "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
                         body.len()
@@ -2494,4 +2503,36 @@ fn a_failed_stream_restart_is_a_harness_error_that_the_grid_can_see() {
         None,
         "taken once, then cleared"
     );
+}
+
+#[test]
+fn a_probe_accepts_protocol_output_and_rejects_dashboard_html() {
+    for (body, expected) in [
+        (r#"{"choices":[{"message":{"content":"hello"}}]}"#, true),
+        ("<!doctype html><html>One API dashboard</html>", false),
+        ("{}", false),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            let _ = socket.read(&mut request);
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let cfg = cfg_for(addr, addr);
+        let result = probe_cell_once(&cfg, &CellId::new("openai", "openai"), true).0;
+        assert_eq!(
+            matches!(result, Served::Yes),
+            expected,
+            "{body}: {result:?}"
+        );
+        server.join().unwrap();
+    }
 }
