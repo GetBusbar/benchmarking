@@ -13,7 +13,7 @@ const root = resolve(here, "..");
 const wrangler = join(here, "node_modules/wrangler/bin/wrangler.js");
 try {
   const out = join(scratch, "site");
-  const { publication } = build({ root, out });
+  const { publication } = build({ root, out, publishedAt: process.argv.includes("--dry-run") ? null : new Date().toISOString() });
   execFileSync(process.execPath, ["--test", join(here, "publishing.test.mjs")], { stdio: "inherit", env: { ...process.env, OTB_TEST_ARTIFACT: out } });
   const config = JSON.parse(readFileSync(join(here, "wrangler.jsonc"), "utf8"));
   config.main = join(here, "worker.mjs"); config.assets.directory = out;
@@ -24,6 +24,7 @@ try {
     // Retain the complete evidence collection across later deployments. Its key
     // is a hash of its content; star refreshes do not create another identity.
     run("kv", "key", "put", `datasets/${publication.dataset_id}`, "--binding", "PUBLICATIONS", "--path", join(out, `api/v1/benchmarks/${publication.dataset_id}.json`), "--remote");
+    run("kv", "key", "put", `definitions/${publication.dataset_id}`, "--binding", "PUBLICATIONS", "--path", join(out, `api/v1/definitions/${publication.dataset_id}.json`), "--remote");
     run("deploy", "--outdir", join(scratch, "bundle"));
     execFileSync(process.execPath, [join(here, "check-live.mjs")], { stdio: "inherit" });
   }

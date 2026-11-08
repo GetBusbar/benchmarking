@@ -19,6 +19,8 @@ function dom(html) {
   return document;
 }
 
+export function shellViews(template) { return [...dom(template).querySelectorAll("main > .view")].map(n => n.outerHTML); }
+
 export function metadata(document, path, title, description, structured, markdown) {
   document.title = title;
   for (const [selector, attr, value] of [
@@ -33,7 +35,8 @@ export function metadata(document, path, title, description, structured, markdow
   document.querySelectorAll('[data-publication]').forEach(n => n.remove());
   document.head.insertAdjacentHTML("beforeend",
     `<link data-publication rel="alternate" type="text/markdown" href="${esc(ORIGIN + markdown)}">` +
-    `<link data-publication rel="alternate" type="application/json" href="${ORIGIN}/api/v1/benchmarks/latest">` +
+    `<link data-publication rel="alternate" type="application/json" href="${ORIGIN}/api/v1/summary">` +
+    `<link data-publication rel="service-desc" type="application/json" href="${ORIGIN}/openapi.json"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/llms.txt"><link data-publication rel="help" href="${ORIGIN}/gateways/data"><meta data-publication property="og:image" content="${ORIGIN}/social-card.png">` +
     `<script data-publication type="application/ld+json">${jsonScript(structured)}</script>`);
 }
 
@@ -76,13 +79,22 @@ export function renderDashboard(template, data, path, publication) {
     : app.pageTitle(state);
   const markdown = url.pathname === "/" ? "/index.md" : `${url.pathname === "/gateways" ? "/gateways/index" : url.pathname}.md${url.search}`;
   metadata(document, url.pathname, title,
-    `Reproducible AI gateway benchmarks. Measurement dates and protocol cells are disclosed; gateway overhead is not model response latency.`,
+    `${title}. ${state.view === "memory" ? "Per-cell idle, loaded and recovery memory with recorded conditions." : state.view === "charts" ? "Charts with accessible data tables for the selected metric." : state.view === "method" ? "Versioned instrument definitions, provenance and comparison limitations." : state.view === "matrix" ? "Per-protocol support states and probe evidence." : "Protocol-selected gateway measurements against a local mock; not model inference latency."}`,
     datasetMetadata(publication, url.pathname), markdown);
   document.head.insertAdjacentHTML("beforeend", '<style data-publication>.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style>');
   document.documentElement.setAttribute("data-prerendered", "true");
+  document.documentElement.setAttribute("data-thin-publication", "true");
+  // Keep only the selected view in crawler HTML. The browser restores the small
+  // unrendered view templates before initializing its existing controls.
+  document.querySelectorAll("main > .view.hidden").forEach(n => n.remove());
+  document.querySelectorAll("select option").forEach(n => { if (!n.hasAttribute("selected")) n.remove(); });
+  if (url.pathname === "/") {
+    const rows = publication.measurements.filter(m => m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai");
+    document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${esc(m.gateway_id)}</a></td><td>${esc(m.metrics.added_latency_p99_us?.value ?? "unavailable")}</td><td>${esc(m.metrics.added_latency_p99_us?.state || m.status.state)}</td><td>${esc(m.measured_at)}</td></tr>`).join("")}</tbody></table></section>`);
+  }
   document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal}</style></noscript>`);
   document.querySelector("main").insertAdjacentHTML("beforeend",
-    `<nav class="sr-only" aria-label="Benchmark data"><a href="/gateways/data">Data and API documentation</a> <a href="/gateways/runs">Historical measurements</a></nav>`);
+    `<nav class="muted" aria-label="Benchmark data"><a href="/gateways/data">Data and API documentation</a> · <a href="/api/v1">API discovery</a> · <a href="/api/v1/summary">Compact results</a> · <a href="/llms.txt">Agent guide</a> · <a href="/gateways/runs">Historical measurements</a></nav>`);
   return document.toString();
 }
 
@@ -92,10 +104,10 @@ export function datasetMetadata(publication, path = "/gateways") {
     "@id": ORIGIN + path + ("#dataset"),
     name: "On the Bench AI Gateway Benchmarks", url: ORIGIN + path,
     description: "Gateway measurements against a local mock upstream. Independent runs; compare only matched test conditions. Operated by the Busbar team, also a benchmark participant.",
-    creator: { "@type": "Organization", name: "Busbar team" }, isAccessibleForFree: true,
+    license: publication.license, creator: { "@type": "Organization", name: "Busbar team" }, isAccessibleForFree: true,
     ...(publication.measured_range?.latest ? { temporalCoverage: `${publication.measured_range.earliest}/${publication.measured_range.latest}` } : {}),
     distribution: [{ "@type": "DataDownload", encodingFormat: "application/json", contentUrl: ORIGIN + "/api/v1/benchmarks/latest" },
-      { "@type": "DataDownload", encodingFormat: "text/csv", contentUrl: ORIGIN + "/gateways/data.csv" }],
+      { "@type": "DataDownload", encodingFormat: "text/csv", contentUrl: ORIGIN + "/gateways/data.csv?compact=1" }],
   };
 }
 

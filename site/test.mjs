@@ -2811,8 +2811,8 @@ test("machine-readable served states map to distinct honest cell states", () => 
   assert.equal(app.cellState({ served: "not_verified", reason: "harness_boot_failure" })[0], "unverified");
   // untestable is a rig limit (real cloud host pinned), its own state, never a red
   assert.equal(app.cellState({ served: "untestable", reason: "no_base_url_override" })[0], "untestable");
-  assert.equal(app.cellState({ served: "untestable" })[1], "untestable (mock limit)");
-  assert.ok(app.matrixCellTip({ served: "untestable" }).includes("untestable on this rig"));
+  assert.equal(app.cellState({ served: "untestable" })[1], "untestable");
+  assert.ok(app.matrixCellTip({ served: "untestable" }).includes("untestable: the recorded harness"));
   // served:false with an explicit reason (wrong_answer) is the ONLY red: not a harness gap
   assert.equal(app.cellState({ served: false, reason: "wrong_answer", status: "200" })[0], "failed");
   // An UNRECOGNISED value is not a recorded refusal: the engine's own `not_probed` default, a newer token,

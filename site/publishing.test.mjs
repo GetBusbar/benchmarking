@@ -76,7 +76,7 @@ test("published HTTP interface works without JavaScript", { skip: !artifact }, a
   const pub = await (await call("/api/v1/benchmarks/latest")).json();
   const data = JSON.parse(readFileSync(artifact + "/data.json"));
   const first = pub.gateways[0].id;
-  for (const path of ["/gateways", "/gateways/performance", "/gateways/matrix", `/gateways/${first}`]) {
+  for (const path of ["/", "/gateways", "/gateways/performance", "/gateways/matrix", `/gateways/${first}`]) {
     const r = await call(path); assert.equal(r.status, 200, path);
     const html = await r.text(); const doc = parseHTML(html).document;
     assert.ok(doc.querySelectorAll("tbody tr").length > 0, `${path} has actual rows`);
@@ -132,7 +132,7 @@ test("agent contract: bounded retrieval, schemas, freshness and provenance", { s
   }
   const pub = await (await call("/api/v1/benchmarks/latest")).json(); validate("LatestCollection", pub);
   const first = pub.gateways[0].id, second = pub.gateways[1].id;
-  for (const [path, schema] of [["/api/v1", "Discovery"], ["/api/v1/gateways", "Catalog"], [`/api/v1/gateways/${first}`, "GatewayEvidence"], ["/api/v1/methodology", "Methodology"], ["/api/v1/schema", "SchemaIndex"], ["/api/v1/measurements?limit=2", "MeasurementPage"], [`/api/v1/benchmarks/${pub.dataset_id}`, "BenchmarkResource"], [`/api/v1/benchmarks/${pub.measurements.find(m => m.run_id).run_id}`, "BenchmarkResource"]]) validate(schema, await (await call(path)).json());
+  for (const [path, schema] of [["/api/v1", "Discovery"], ["/api/v1/gateways", "Catalog"], [`/api/v1/gateways/${first}`, "GatewayEvidence"], ["/api/v1/methodology", "Methodology"], ["/api/v1/schema", "SchemaIndex"], ["/api/v1/measurements?limit=2", "MeasurementPage"], ["/api/v1/measurements?limit=2&compact=1", "MeasurementPage"], ["/api/v1/definitions", "Definitions"], ["/api/v1/runs?limit=2", "RunPage"], [`/api/v1/benchmarks/${pub.dataset_id}`, "BenchmarkResource"], [`/api/v1/benchmarks/${pub.measurements.find(m => m.run_id).run_id}`, "BenchmarkResource"]]) validate(schema, await (await call(path)).json());
   const body = await (await call("/api/v1/summary")).text();
   assert.ok(Buffer.byteLength(body) < 64 * 1024, "summary fits a small retrieval context");
   const summary = JSON.parse(body); validate("Summary", summary);
@@ -142,10 +142,10 @@ test("agent contract: bounded retrieval, schemas, freshness and provenance", { s
     if (source) {
       assert.deepEqual(row.provenance, source.provenance);
       assert.equal(row.measured_at, source.measured_at);
-      if (source.metrics.added_latency_p99_us) assert.deepEqual(row.metrics.added_latency_p99_us, source.metrics.added_latency_p99_us);
+      if (source.metrics.added_latency_p99_us) { const metric = row.metrics.added_latency_p99_us; assert.equal(metric.value, source.metrics.added_latency_p99_us.value); assert.equal(metric.state, source.metrics.added_latency_p99_us.state); assert.equal(summary.definitions[metric.definition_id] ?? null, source.metrics.added_latency_p99_us.definition); }
     }
     assert.equal(row.age_as_of, pub.generated_at);
-    assert.equal(row.published_at, null, "unknown deployment time is not fabricated");
+    assert.equal(row.published_at, pub.published_at, "release date agrees with collection metadata");
     const gateway = await (await call(`/api/v1/gateways/${row.gateway_id}`)).json();
     assert.equal(row.current_metadata.stars, gateway.gateway.stars);
     assert.equal(row.current_metadata.stars_as_of, gateway.gateway.stars_as_of);
@@ -205,4 +205,82 @@ test("OpenAPI generates a usable typed client with nullable metrics", async () =
     `);
     execFileSync(process.execPath, [new URL("./node_modules/typescript/bin/tsc", import.meta.url).pathname, "--strict", "--noEmit", "--skipLibCheck", "--lib", "es2022,dom", join(dir, "client.ts")], { stdio: "pipe" });
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("byte-aware pagination preserves every record and UTF-8 boundaries", async () => {
+  const { measurementPage } = await import("./retrieval.mjs");
+  const rows = Array.from({ length: 17 }, (_, i) => ({ id: i, note: "🧪".repeat(240) }));
+  let url = new URL("https://onthebench.ai/api/v1/measurements?gateway=busbar&limit=10"), seen = [];
+  do {
+    const page = measurementPage(rows, { datasetId: "dataset-test", offset: Number(url.searchParams.get("offset") || 0), limit: 10, url }, 2400);
+    assert.ok(Buffer.byteLength(JSON.stringify(page) + "\n") <= 2400);
+    assert.ok(page.returned > 0 && page.returned < 10);
+    seen.push(...page.measurements.map(r => r.id));
+    if (!page.next) break;
+    url = new URL(page.next); assert.equal(url.searchParams.get("gateway"), "busbar");
+  } while (seen.length < 100);
+  assert.deepEqual(seen, rows.map(r => r.id));
+  assert.equal(measurementPage([{ huge: "x".repeat(3000) }], { datasetId: "x", offset: 0, limit: 1, url }, 2400), null);
+});
+
+test("thin HTML, semantic guide, compact exports and run discovery", { skip: !artifact }, async () => {
+  const env = { ASSETS: fileAssets(artifact) };
+  const call = path => worker.fetch(new Request("https://onthebench.ai" + path), env);
+  const pub = await (await call("/api/v1/benchmarks/latest")).json();
+  const first = pub.gateways[0].id;
+  const full = await (await call(`/api/v1/measurements?gateway=${first}&limit=2`)).json();
+  assert.equal(full.applied_filters.gateway, first); assert.equal(full.limit, 2); assert.ok(full.measurements.every(m => m.gateway_id === first));
+  const compactResponse = await call(`/api/v1/measurements?gateway=${first}&compact=1&limit=2`);
+  const compact = await compactResponse.json();
+  assert.equal(compact.measurements.length, full.measurements.length);
+  for (let i = 0; i < full.measurements.length; i++) for (const [key, metric] of Object.entries(full.measurements[i].metrics)) {
+    const c = compact.measurements[i].metrics[key];
+    assert.equal(c.value, metric.value); assert.equal(c.state, metric.state);
+    assert.equal(compact.definitions[c.definition_id] ?? null, metric.definition);
+  }
+  const guide = await (await call("/llms-full.txt")).text();
+  assert.ok(Buffer.byteLength(guide) < 64 * 1024);
+  assert.equal((guide.match(/^# /gm) || []).length, 1);
+  assert.doesNotMatch(guide, /\d+ of \d+|<select|coming soon|32,768 concurrent/);
+  const csv = await (await call(`/gateways/data.csv?gateway=${first}&compact=1`)).text();
+  assert.match(csv, /definition_id/); assert.match(csv, /\/api\/v1\/definitions/);
+  const dictionaryResponse = await call(`/api/v1/definitions/${pub.dataset_id}`);
+  assert.equal(dictionaryResponse.status, 200); assert.match(dictionaryResponse.headers.get("Cache-Control"), /immutable/);
+  assert.ok(csv.length < (await (await call(`/gateways/data.csv?gateway=${first}`)).text()).length);
+  const runs = await (await call("/api/v1/runs?family=busbar&limit=2")).json();
+  assert.ok(runs.runs.every(r => r.gateway_family === "busbar")); assert.equal(runs.limit, 2); assert.ok(runs.next);
+  assert.equal((await call("/api/v1/runs?family=nonexistent")).status, 404);
+  for (const path of ["/", "/gateways", "/gateways/performance", "/gateways/memory", "/gateways/charts"]) {
+    const html = await (await call(path)).text(), doc = parseHTML(html).document;
+    assert.equal(doc.querySelectorAll("h1").length, 1, path);
+    assert.equal(doc.querySelectorAll("main > .view.hidden").length, 0, path);
+    assert.ok(!doc.querySelector("#view-method"), path);
+    assert.ok(!doc.querySelector("#matrix-grid"), path);
+    assert.ok(doc.querySelector('meta[property="og:image"]'));
+    for (const href of ["/gateways/data", "/api/v1", "/llms.txt"]) assert.ok(doc.querySelector(`main a[href="${href}"]`));
+  }
+  assert.equal(pub.license, "https://creativecommons.org/licenses/by/4.0/");
+  assert.match(await (await call("/gateways/license")).text(), /CC BY 4.0/);
+});
+
+test("browser restores omitted view templates before initializing navigation", { skip: !artifact }, async () => {
+  const { default: appModule } = await import("./app.js");
+  const env = { ASSETS: fileAssets(artifact) };
+  const html = await (await worker.fetch(new Request("https://onthebench.ai/gateways/performance"), env)).text();
+  const doc = parseHTML(html).document;
+  const before = doc.getElementById("view-table").innerHTML;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async path => env.ASSETS.fetch(new Request("https://onthebench.ai" + path));
+  try { await appModule.createApp(doc).restorePublicationViews(); }
+  finally { globalThis.fetch = originalFetch; }
+  assert.ok(doc.getElementById("view-method")); assert.ok(doc.getElementById("matrix-grid"));
+  assert.equal(doc.getElementById("view-table").innerHTML, before);
+});
+
+test("UI and API state vocabulary agree without rewriting raw evidence", async () => {
+  const { default: app } = await import("./app.js");
+  const { canonicalCellState } = await import("./states.mjs");
+  for (const served of [true, false, "failed", "not_configurable", "not_configured", "untestable", "unprobed_auth", "not_verified", "not_probed", "not_measured", "future_token"]) {
+    assert.equal(app.cellState({ served })[1].replaceAll(" ", "_"), canonicalCellState({ served }));
+  }
 });
