@@ -1,6 +1,8 @@
 {
   "auth": "dummy",
   "cell_paths": {
+    "anthropic>anthropic": "/anthropic/v1/messages",
+    "bedrock>bedrock": "/bedrock/model/anthropic.claude-3-5-sonnet-v1:0/converse",
     "openai>anthropic": "/router/anthropic/chat/completions",
     "openai>bedrock": "/router/bedrock/chat/completions",
     "openai>openai": "/router/openai/chat/completions"

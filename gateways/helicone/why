@@ -1,3 +1,5 @@
 Official v0.2.0-beta.30 source release, pinned to commit 081f310be779f27122e6038e81e2359c44db4ecb. Beta use is explicitly approved for this entrant. Its published Docker image is AMD64-only; this ARM64 field builds the locked release source before measurement and records source, lockfile and binary hashes.
 
 The static configuration points configured providers at the local mock. Fresh correctness probes determine supported pairs for this build. This measures this configuration, not every production feature.
+
+Native Anthropic and Bedrock passthrough probes use the provider-prefixed routes required by the pinned release (ai-gateway/src/router/router_details.rs, RouteType::DirectProxy). Bare /v1/messages is interpreted as provider v1 and rejected before any upstream request. The OpenAI translation routes continue to use the configured routers.
