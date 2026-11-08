@@ -3,12 +3,12 @@
   "cell_paths": {
     "anthropic>openai-responses": "/anthropic/v1/messages",
     "anthropic>openai": "/anthropic/v1/messages",
-    "gemini>openai": "/genai/v1beta/models/gpt-4o-mini:generateContent",
+    "gemini>openai": "/genai/v1beta/models/bench-chat/gpt-4o-mini:generateContent",
     "cohere>openai": "/cohere/v2/chat",
-    "bedrock>openai": "/bedrock/model/openai%2Fgpt-4o-mini/converse",
-    "gemini>openai-responses": "/genai/v1beta/models/gpt-4o-mini:generateContent",
+    "bedrock>openai": "/bedrock/model/bench-chat%2Fgpt-4o-mini/converse",
+    "gemini>openai-responses": "/genai/v1beta/models/bench-responses/gpt-4o-mini:generateContent",
     "cohere>openai-responses": "/cohere/v2/chat",
-    "bedrock>openai-responses": "/bedrock/model/openai%2Fgpt-4o-mini/converse",
+    "bedrock>openai-responses": "/bedrock/model/bench-responses%2Fgpt-4o-mini/converse",
     "anthropic>anthropic": "/anthropic/v1/messages",
     "gemini>anthropic": "/genai/v1beta/models/claude-3-5-sonnet-20241022:generateContent",
     "cohere>anthropic": "/cohere/v2/chat",
@@ -46,8 +46,8 @@
     "anthropic": "claude-3-5-sonnet-20241022",
     "cohere": "command-r-plus",
     "gemini": "gemini-1.5-pro",
-    "openai": "gpt-4o-mini",
-    "openai-responses": "gpt-4o-mini"
+    "openai": "bench-chat/gpt-4o-mini",
+    "openai-responses": "bench-responses/gpt-4o-mini"
   },
   "lang": "Go",
   "launch": {
@@ -82,5 +82,14 @@
   "untestable_note": "Bifrost transports/v2.5.0 (69f4d56d18b9ba00ac5f9cf969b4501a882b9967), core/providers/bedrock/bedrock.go, constructs HTTPS Bedrock runtime endpoints. The benchmark mock serves plain HTTP, so this harness cannot measure that upstream. This is a mock limitation, not a claim that Bifrost lacks Bedrock support.",
   "headers": [
     "x-bf-vk: sk-bf-benchmark-dummy"
-  ]
+  ],
+  "matrix": [
+    "101110",
+    "111110",
+    "111110",
+    "111110",
+    "101110",
+    "111110"
+  ],
+  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967 and local pinned-image recorder preflight establish 28 exact protocol pairs. Separate custom OpenAI providers select Chat Completions versus Responses operations; Responses-to-Chat fallback is supported. OpenAI-chat and Cohere ingress use ChatCompletionRequest and cannot select the Responses-only provider in this tested configuration (unsupported_operation, including with convert_chat_to_responses compatibility enabled). Bedrock upstream is a separate rig limitation. Evidence: results/diagnostics/refresh-configuration/bifrost-explicit-provider-preflight.json"
 }
