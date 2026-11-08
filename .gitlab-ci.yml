@@ -1,0 +1,68 @@
+# Publish the website and its machine-readable evidence from production main.
+# GitHub Actions stays retired. The schedule uses REFRESH_GATEWAY_STARS=1,
+# Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+    - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
+    - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
+      changes: [site/**/*, .gitlab-ci.yml]
+    - when: never
+
+stages: [verify, publish]
+
+verify-website:
+  stage: verify
+  tags: [onthebench-production]
+  timeout: 30m
+  image: node:22-bookworm
+  rules:
+    - if: '$VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/ || $CI_PIPELINE_SOURCE == "push"'
+  variables:
+    OTB_SINGLE_ENGINE: "1"
+    # The dedicated website runner requires this opt-in on every job. This job
+    # validates only; refresh-gateway-stars has its own pipeline-level rules.
+    REFRESH_GATEWAY_STARS: "1"
+  script:
+    # The protected controller can check an exact release candidate without
+    # publishing it or changing the main branch's human promotion policy.
+    - verify_dir="$CI_BUILDS_DIR/onthebench-verify-$CI_JOB_ID"
+    - trap 'rm -rf "$verify_dir"' EXIT
+    - git clone --quiet "$CI_REPOSITORY_URL" "$verify_dir"
+    - git -C "$verify_dir" checkout --quiet --detach "${VERIFY_WEBSITE_REF:-$CI_COMMIT_SHA}"
+    - cd "$verify_dir"
+    - npm ci --prefix site --ignore-scripts
+    - node site/gen-data.mjs
+    - node site/check-consistency.mjs site/data.json
+    - node site/test-coverage.mjs
+    - node site/test.mjs
+    - node site/build.mjs "$verify_dir" "$verify_dir/publication"
+    - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs
+
+refresh-gateway-stars:
+  stage: publish
+  tags: [onthebench-production]
+  timeout: 30m
+  image: node:22-bookworm
+  resource_group: onthebench-production
+  rules:
+    - if: '$REFRESH_GATEWAY_STARS == "1"'
+  variables:
+    OTB_SINGLE_ENGINE: "1"
+    WRANGLER_SEND_METRICS: "false"
+  script:
+    # Always rebuild the currently published source branch. Scheduling from dev
+    # must never publish unqualified development results or promote product code.
+    - publish_dir="$CI_BUILDS_DIR/onthebench-publish-$CI_JOB_ID"
+    - trap 'rm -rf "$publish_dir"' EXIT
+    # Full history retains original raw bytes when a snapshot is corrected.
+    - git clone --quiet --single-branch --branch main "$CI_REPOSITORY_URL" "$publish_dir"
+    - cd "$publish_dir"
+    # Fail the refresh on API errors; stale data must not look like a fresh run.
+    - node gateways/fetch-stars.mjs
+    - node site/gen-data.mjs
+    - node site/check-consistency.mjs site/data.json
+    - node site/test-coverage.mjs
+    - node site/test.mjs
+    - npm ci --prefix site --ignore-scripts
+    - node site/publish.mjs

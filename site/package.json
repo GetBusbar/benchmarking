@@ -1,0 +1,16 @@
+{
+  "name": "onthebench-publishing",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "test:publishing": "node --test publishing.test.mjs",
+    "dev": "node serve.mjs"
+  },
+  "dependencies": {
+    "linkedom": "0.18.15"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.2"
+  },
+  "engines": { "node": ">=22" }
+}

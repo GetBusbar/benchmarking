@@ -291,6 +291,52 @@ cell, so the idle -> steady -> recovered arc is a real curve. Windows are tunabl
 actually used. Any RSS the sampler cannot obtain is **null, never a fabricated 0**, and a rig that
 cannot read RSS at all withholds the plateau verdict as **null** rather than asserting `false`.
 
+## Website publishing
+
+The website and engine share this repository. `site/gen-data.mjs` projects the measured
+snapshots; `site/build.mjs` validates that bundle and renders the existing dashboard into
+complete HTML with the same renderer the browser uses. It also publishes gateway evidence,
+Markdown, CSV, JSON, schemas, a sitemap, and immutable raw runs. No benchmark rerun is needed
+for a website-only change. The API documentation is at `/gateways/data`.
+
+```sh
+npm ci --prefix site --ignore-scripts
+node site/build.mjs "$PWD" /path/to/empty/build-directory
+OTB_TEST_ARTIFACT=/path/to/empty/build-directory node --test site/publishing.test.mjs
+node site/serve.mjs /path/to/empty/build-directory
+```
+
+Production is built from `main`, including its committed results and full Git history.
+The GitLab workflow on `dev` is the production controller: trigger it with
+`REFRESH_GATEWAY_STARS=1` (also scheduled nightly). It clones `main`, refreshes metadata,
+runs checks, and invokes `site/publish.mjs`. The publisher deploys a Worker with static assets
+on `onthebench.ai/*`; it does not deploy a JavaScript-only Pages shell. The existing analytics
+relay routes remain separate. `site/wrangler.jsonc` declares the route and the `PUBLICATIONS`
+KV namespace, which retains immutable dataset versions across deployments. Exact raw run
+versions are recovered from Git history and addressed by SHA-256.
+
+For an explicit release, `OTB_BUILD_ROOT=/path/to/scratch node site/publish.mjs` runs the same
+build and targeted HTTP checks before deploying with Wrangler's configured credentials.
+Use `--dry-run` to build and bundle without publishing. The token needs Workers Scripts,
+Workers Routes and Workers KV write permissions for the declared account and zone.
+CI runs the existing full site suites; local verification should use the targeted publishing
+tests and the actual generated artifact. Website changes pushed to `dev` run verification
+automatically. An API or web pipeline on `dev` with `VERIFY_WEBSITE_REF` set to a full commit
+SHA checks that release candidate without publishing it. Production promotion still follows
+the repository's protected-branch approval policy.
+
+Default comparison pages and their JSON are also built ahead of time. Arbitrary dashboard
+query combinations use the shared renderer at request time and can exceed Workers Free's
+CPU allowance; production should use Workers Paid for reliable dynamic requests. The
+Cloudflare zone must permit automated clients (including Browser Integrity Check settings).
+Deploy authorization alone does not grant permission to edit those zone settings. A release
+must check both ordinary crawler user agents and a default HTTP-library client against the
+live domain. A descriptive user agent can work even when a default library user agent is
+blocked before the Worker executes.
+`site/publish.mjs` runs `site/check-live.mjs` after deployment and reports a failed release
+check if the CDN blocks an agent or changes the raw evidence bytes. This is a post-deployment
+check: an error does not mean that the previous deployment remains active.
+
 ## Add a gateway
 
 Drop a directory under [`gateways/`](gateways/) with a `definition.json` manifest. The runners are
