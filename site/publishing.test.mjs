@@ -304,3 +304,13 @@ test("default exports are compact and plain-text alternatives retain evidence", 
  assert.equal(await txt.text(), await (await call("/gateways/index.md")).text());
  const csv = await (await call("/gateways/data.csv?gateway=busbar")).text(); assert.match(csv.split("\n")[0], /definition_id/); assert.doesNotMatch(csv.split("\n")[0], /"definition",/);
 });
+
+test("gateway entry pages are bounded and explicitly lead to full evidence", { skip: !artifact }, async () => {
+ const call = path => worker.fetch(new Request("https://onthebench.ai" + path), { ASSETS: fileAssets(artifact) });
+ const html = await (await call("/gateways/busbar")).text();
+ assert.ok(Buffer.byteLength(html) < 20000); assert.match(html, /OpenAI → OpenAI/); assert.match(html, /busbar\/evidence/);
+ const page = await (await call("/api/v1/measurements?gateway=busbar&limit=1")).json();
+ const summary = await (await call("/api/v1/summary")).json();
+ assert.equal(page.dataset_id, summary.dataset_id); assert.equal(page.generated_at, summary.generated_at); assert.equal(page.published_at, summary.published_at);
+ assert.equal((await call("/gateways/busbar/evidence")).status, 200);
+});

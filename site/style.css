@@ -867,3 +867,5 @@ tbody tr.tied-above > td {
 
 /* Publication resources stay readable without dominating the results. */
 .data-links{display:flex;flex-wrap:wrap;gap:.4rem .7rem;padding:1.2rem 0;font-size:.8rem;border-top:1px solid var(--border);margin-top:1.5rem}.crawler-links{font-size:.72rem;margin:.3rem 0 1rem;overflow-wrap:anywhere}.crawler-links p{margin:0}.footer-content{display:grid;gap:.7rem}.footer-content p{max-width:85ch}.footer-content details{max-width:85ch}.footer-content summary{cursor:pointer}.footer-content pre{overflow:auto;font-size:.78rem}.footer-credit{font-weight:500}
+
+.entry-links{font-size:.85rem;margin:.65rem 0;display:flex;flex-wrap:wrap;gap:.5rem}.entry-links a:first-child{font-weight:600}
