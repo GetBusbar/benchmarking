@@ -16,7 +16,16 @@ export function measurementTable(measurements) {
     return rows;
   }));
 }
-export function gatewayArticle(g, records, histories, gateways) {
+export function gatewayArticle(g, records, histories, gateways, { full = false } = {}) {
+  if (!full) {
+    const selected = records.filter(m => m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai");
+    const core = selected.map(m => ({ ...m, metrics: Object.fromEntries(Object.entries(m.metrics).filter(([key]) => ["added_latency_p50_us", "added_latency_p99_us", "added_ttft_p99_us"].includes(key))), frontier: [] }));
+    return `<h1>${esc(g.display)} benchmark summary</h1>${disclosureHtml}<p>Selected pair: <strong>OpenAI → OpenAI</strong>. Other protocol pairs are available through paginated measurements. This summary is not a universal product ranking.</p>` +
+      `<nav aria-label="Gateway data"><a href="/api/v1/summary?gateway=${esc(g.key)}">Compact JSON</a> · <a href="/api/v1/measurements?gateway=${esc(g.key)}&amp;limit=10">Paginated measurements</a> · <a href="/gateways/${esc(g.key)}.md">Markdown</a> · <a href="/gateways/data.csv?gateway=${esc(g.key)}">Gateway CSV</a></nav>` +
+      (core.length ? measurementTable(core) : "<p>This protocol pair has no measurement.</p>") +
+      selected.map(m => `<p>Build: ${esc(m.gateway_build)}. Measured: ${esc(m.measured_at)}. Published: ${esc(m.published_at || "not recorded")}. Age: ${esc(m.age)}.</p><p><a href="${esc(m.provenance.run_url)}">Immutable run and definitions</a> · <a href="${esc(m.provenance.raw_result_url)}">Raw evidence (large download)</a></p>`).join("") +
+      `<p><a href="/gateways/${esc(g.key)}/evidence">Complete evidence: all protocol pairs, configuration and history (large page)</a> · <a href="/api/v1/runs?family=${esc(g.key.replace(/-\d+$/, ""))}">Paginated historical runs</a> · <a href="/gateways/data">Data &amp; API guidance</a></p>`;
+  }
   const dates = [...new Set(records.map(r => r.measured_at).filter(Boolean))].sort();
   const runs = [...new Set(records.map(r => r.run_id).filter(Boolean))];
   return `<h1>${esc(g.display)} benchmark measurements</h1>${disclosureHtml}` +
