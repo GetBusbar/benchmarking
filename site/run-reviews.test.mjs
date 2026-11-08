@@ -27,3 +27,11 @@ test('historical API projection cannot resurrect reviewed dashboard numbers',()=
  assert.ok(Object.values(cohere.metrics).every(m=>m.value===null));
  assert.equal(cohere.provenance.raw_sha256,'exact-raw-hash');
 });
+import { reviewedOracleSnapshot } from './check-consistency.mjs';
+test('independent oracle excludes reviewed values but preserves every unreviewed cell',()=>{
+ const oracle=reviewedOracleSnapshot(snapshot,review);
+ assert.equal(oracle.matrix.upstreams.openai.cells.cohere.perf,null);
+ assert.equal(oracle.matrix.upstreams.openai.cells.cohere.served,'untestable');
+ assert.deepEqual(oracle.matrix.upstreams.openai.cells.openai,snapshot.matrix.upstreams.openai.cells.openai);
+ assert.equal(snapshot.matrix.upstreams.openai.cells.cohere.perf.added_latency_p99_us,1);
+});
