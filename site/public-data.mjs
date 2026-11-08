@@ -155,3 +155,33 @@ export function measurementsCsv(measurements) {
   ]);
   return rows.map(r => r.map(quote).join(",")).join("\r\n") + "\r\n";
 }
+
+// Publication time is unknown until deployed; never relabel a build as a new run.
+export function freshness(measuredAt, generatedAt, publishedAt = null) {
+  const elapsed = Date.parse(generatedAt) - Date.parse(measuredAt);
+  const days = Number.isFinite(elapsed) && elapsed >= 0 ? Math.floor(elapsed / 86400000) : null;
+  return { measured_at: measuredAt ?? null, published_at: publishedAt, generated_at: generatedAt,
+    age_days: days, age_as_of: generatedAt,
+    age: days == null ? "Measurement age unknown" : `${days} day${days === 1 ? "" : "s"} old at collection generation` };
+}
+
+export function compactSummary(publication, query = {}) {
+  const ingress = query.ingress || "openai", egress = query.egress || "openai";
+  const keys = ["added_latency_p50_us", "added_latency_p99_us", "added_ttft_p99_us"];
+  return {
+    schema_version: "1.0", dataset_id: publication.dataset_id, generated_at: publication.generated_at,
+    published_at: publication.published_at, selected_protocol_pair: { ingress_protocol: ingress, upstream_protocol: egress },
+    results: publication.gateways.filter(g => !query.gateway || g.id === query.gateway).map(g => {
+      const m = publication.measurements.find(m => m.gateway_id === g.id && m.test.ingress_protocol === ingress && m.test.upstream_protocol === egress);
+      return { gateway_id: g.id, name: g.name, gateway_build: m?.gateway_build ?? null,
+        ...freshness(m?.measured_at, publication.generated_at, publication.published_at),
+        current_metadata: g.current_metadata,
+        status: m?.status ?? { state: "not_measured", reason: "requested_cell_not_measured", detail: null },
+        metrics: Object.fromEntries(keys.map(k => [k, m?.metrics[k] ?? { value: null, state: "not_measured", reason: "metric_not_recorded", definition: null }])),
+        provenance: m?.provenance ?? { source_url: g.url, raw_result_url: null, run_url: null, methodology_url: `${ORIGIN}/gateways/method`, raw_sha256: null },
+        evidence_url: `${ORIGIN}/api/v1/measurements?gateway=${g.id}&ingress=${ingress}&egress=${egress}` };
+    }),
+    comparison_policy: POLICY, disclosure: DISCLOSURE,
+    interpretation: "Selected protocol cells, not a ranking. Check /api/v1/compare before calculating ratios. Null and below-resolution values are not zero. Repository statistics are dated metadata, not measurements. published_at is null when the actual deployment time is not recorded; generated_at is the collection build time.",
+  };
+}
