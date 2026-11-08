@@ -87,9 +87,16 @@ async function route(request, env) {
     if (q.catalog && q.catalog !== catalog.catalog_id) return error(409, 'Catalog revision changed. Restart traversal; records from different revisions are never silently mixed.');
     if (!catalog.runs.some(r => r.gateway_family === q.family)) throw new URIError('Unknown gateway family');
     for (const key of ['from','to']) if (q[key] && (!/^\d{4}-\d{2}-\d{2}$/.test(q[key]) || !Number.isFinite(Date.parse(q[key])))) throw new RangeError('Date must be YYYY-MM-DD');
+    async function archivedShard(key,empty) {
+      if (catalog.shards && !catalog.shards[key]) return empty;
+      const storageKey=catalog.shards?.[key] || `history/catalogs/${catalog.catalog_id}/${key}`;
+      const value=await env.PUBLICATIONS.get(storageKey);
+      if (value == null && catalog.shards) throw new Error('Retained history shard is unavailable');
+      return value == null ? empty : JSON.parse(value);
+    }
     const shard=`families/${q.family}/${q.ingress}--${q.egress}`;
     const records = expandHistorical(archivedRevision
-      ? JSON.parse(await env.PUBLICATIONS.get(`history/catalogs/${catalog.catalog_id}/${shard}`))
+      ? await archivedShard(shard,{measurements:[],definitions:{}})
       : await input(`/_publication/history/${shard}.json`));
     const metrics = [...new Set(['added_latency_p50_us','added_latency_p99_us','added_ttft_p99_us','throughput_rps', ...records.flatMap(m=>Object.keys(m.metrics))])].sort();
     if (!metrics.includes(q.metric)) throw new RangeError('Unknown historical metric');
@@ -100,7 +107,7 @@ async function route(request, env) {
     const readings = new Map(historyPoints(records,q).map(p=>[p.run_id,p]));
     const points = runs.slice(offset,offset+limit).map(r=>({ ...(readings.get(r.id) || { run_id:r.id,gateway_id:r.gateway_id,gateway_build:r.build,measured_at:r.measured_at,engine:r.engine,value:null,state:r.evidence_available ? 'not_measured' : 'evidence_unavailable',provenance:{run_url:r.source_url} }), disposition:r.disposition }));
     const placementKey=`placements/${q.family}/${q.ingress}--${q.egress}`;
-    const placements=archivedRevision ? JSON.parse(await env.PUBLICATIONS.get(`history/catalogs/${catalog.catalog_id}/${placementKey}`) || '[]') : await input(`/_publication/history/${placementKey}.json`);
+    const placements=archivedRevision ? await archivedShard(placementKey,[]) : await input(`/_publication/history/${placementKey}.json`);
     for(const point of points) point.placements=placements.filter(p=>p.run_id===point.run_id && p.metric===q.metric && (q.metric!=='throughput_rps' || p.bound===(q.bound || '10')));
     const definitions = {};
     for (const p of points) { if (p.definition) { let id=Object.keys(definitions).find(k=>definitions[k]===p.definition); if (!id) {id=`definition-${Object.keys(definitions).length+1}`;definitions[id]=p.definition;} p.definition_id=id;} delete p.definition; }
