@@ -40,13 +40,35 @@ await check("unknown routes return 404", async () => {
   const r = await fetch(new URL("/api/v1/gateways/publication-check-missing", origin));
   assert.equal(r.status, 404);
 });
-for (const userAgent of ["ChatGPT-User/1.0", "OAI-SearchBot/1.0", "ClaudeBot/1.0", "PerplexityBot/1.0", "Python-urllib/3.14"]) {
+for (const userAgent of ["GPTBot/1.3", "Googlebot/2.1", "ChatGPT-User/1.0", "OAI-SearchBot/1.0", "ClaudeBot/1.0", "PerplexityBot/1.0", "Python-urllib/3.14"]) {
   await check(`public retrieval with ${userAgent}`, async () => {
+    const robots = await get("/robots.txt", userAgent);
+    assert.match(await robots.text(), /User-agent: \*\nAllow: \//);
+    assert.equal(robots.headers.get("cf-mitigated"), null);
     const r = await get("/llms.txt", userAgent);
     assert.match(r.headers.get("Content-Type"), /text\/plain/);
     assert.match(await r.text(), /# On the Bench/);
   });
 }
+await check("compact evidence, discovery and canonical pages", async () => {
+  const response = await get("/api/v1/summary");
+  const body = await response.text();
+  assert.ok(Buffer.byteLength(body) < 64 * 1024);
+  const summary = JSON.parse(body);
+  assert.ok(summary.results.length);
+  for (const row of summary.results) {
+    assert.ok("measured_at" in row && "published_at" in row && "age" in row);
+    assert.ok(row.provenance.methodology_url);
+  }
+  const sitemap = await (await get("/sitemap.xml")).text();
+  for (const path of ["/gateways", "/gateways/data", "/gateways/method", "/gateways/runs"]) {
+    assert.ok(sitemap.includes(`<loc>${origin}${path}</loc>`));
+    const html = await (await get(path)).text();
+    assert.ok(html.includes(`href="${origin}${path}"`));
+  }
+  const spec = await (await get("/openapi.json")).json();
+  assert.equal(spec.paths["/api/v1/summary"].get.responses[200].content["application/json"].schema.$ref, "#/components/schemas/Summary");
+});
 if (failures.length) {
   console.error(`Deployment checks failed: ${failures.join("; ")}. The deployment may already be live; inspect HTTP/CDN behavior before declaring the release complete.`);
   process.exitCode = 1;

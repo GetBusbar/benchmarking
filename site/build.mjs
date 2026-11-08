@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata } from "./render.mjs";
-import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN } from "./public-data.mjs";
+import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary } from "./public-data.mjs";
 import { gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -84,24 +84,26 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     }
   }
   archives.sort((a,b) => (b.measured_at || "").localeCompare(a.measured_at || "") || a.id.localeCompare(b.id));
-  const measurements = data.gateways.flatMap(g => projectMeasurements(g, byFile));
+  let measurements = data.gateways.flatMap(g => projectMeasurements(g, byFile));
   const dates = measurements.map(m => m.measured_at).filter(Boolean).sort();
   const evidence = { schema_version: "1.0", collection_kind: "independent_gateway_runs", measurements, disclosure: DISCLOSURE, comparison_policy: POLICY };
   const datasetId = `dataset-${hash(JSON.stringify(evidence))}`;
+  measurements = measurements.map(m => ({ ...m, ...freshness(m.measured_at, data.generated_at) }));
   const publication = {
-    ...evidence, dataset_id: datasetId, generated_at: data.generated_at, published_at: null,
+    ...evidence, measurements, dataset_id: datasetId, generated_at: data.generated_at, published_at: null,
     measured_range: { earliest: dates[0] || null, latest: dates.at(-1) || null },
     metadata_as_of: data.gateways.map(g => g.stars_as_of).filter(Boolean).sort().at(-1) || null,
     license: null, archive_history_included: history,
     source_url: `${ORIGIN}/gateways`, immutable_url: `${ORIGIN}/api/v1/benchmarks/${datasetId}`,
-    gateways: data.gateways.map(g => ({ id: g.key, name: g.display, url: `${ORIGIN}/gateways/${g.key}`, json_url: `${ORIGIN}/api/v1/gateways/${g.key}` })),
+    gateways: data.gateways.map(g => ({ id: g.key, name: g.display, url: `${ORIGIN}/gateways/${g.key}`, json_url: `${ORIGIN}/api/v1/gateways/${g.key}`, current_metadata: { stars: g.stars ?? null, stars_as_of: g.stars_as_of ?? null, first_commit: g.first_commit ?? null } })),
     metrics: [...new Set(["throughput_rps", ...measurements.flatMap(m => Object.keys(m.metrics))])].sort(),
   };
   json(`/api/v1/benchmarks/${datasetId}.json`, { ...evidence, dataset_id: datasetId });
   json("/api/v1/benchmarks/latest.json", publication);
   json("/_publication/records.json", publication);
+  json("/api/v1/summary.json", compactSummary(publication));
   json("/api/v1/gateways.json", { schema_version: "1.0", gateways: publication.gateways, disclosure: DISCLOSURE });
-  json("/api/v1/index.json", { schema_version: "1.0", links: { gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
+  json("/api/v1/index.json", { schema_version: "1.0", links: { summary: `${ORIGIN}/api/v1/summary`, gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
   json("/api/v1/schema/index.json", schemaIndex());
   json("/api/v1/schema/measurement.json", measurementSchema());
   json("/openapi.json", openapi());
@@ -110,8 +112,8 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   for (const g of data.gateways) {
     const records = measurements.filter(m => m.gateway_id === g.key);
     const histories = archives.filter(r => r.gateway_id === g.key);
-    json(`/api/v1/gateways/${g.key}.json`, { schema_version: "1.0", gateway: g, measurements: records, history: histories, generated_at: data.generated_at, disclosure: DISCLOSURE });
-    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, body: gatewayArticle(g, records, histories, data.gateways) }));
+    json(`/api/v1/gateways/${g.key}.json`, { schema_version: "1.0", gateway: g, current_metadata: publication.gateways.find(item => item.id === g.key).current_metadata, metadata_scope: "gateway.stars and stars_as_of are legacy aliases of current_metadata, a dated repository snapshot, not stars at measurement time. Run statistics were not recorded.", measurements: records, history: histories, generated_at: data.generated_at, disclosure: DISCLOSURE });
+    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", name: `${g.display} gateway measurements`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways) }));
   }
   // Common comparison URLs cost only a static read, and are discoverable in the
   // sitemap. Both orders are useful: the ratio explicitly names its denominator.
@@ -127,10 +129,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     page(`/gateways/${key}`, renderArticle(template, { path: `/gateways/${key}`, title: `${key} historical benchmarks`, body: `<h1>${esc(key)} historical benchmarks</h1>${disclosureHtml}<p>This gateway is not on the current board.</p><ul>${histories.map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
     json(`/api/v1/gateways/${key}.json`, { schema_version: "1.0", gateway: { key, current: false }, measurements: [], history: histories, disclosure: DISCLOSURE });
   }
-  page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", body: dataArticle(publication) }));
+  page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", structured: { "@context": "https://schema.org", "@type": "DataCatalog", name: "On the Bench published gateway evidence", url: `${ORIGIN}/gateways/data`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, dataset: publication.gateways.map(g => ({ "@type": "Dataset", name: g.name + " measurements", url: g.url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: g.json_url } })) }, body: dataArticle(publication) }));
   page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Historical benchmark runs", body: `<h1>Historical benchmark runs</h1>${disclosureHtml}<ul>${archives.map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.gateway_id)} — ${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
   write("/gateways/data.csv", measurementsCsv(measurements));
-  const index = `# On the Bench\n\nReproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Latest dataset](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
+  const index = `# On the Bench\n\nReproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Compact summary — start here](${ORIGIN}/api/v1/summary)\n- [Gateway catalog](${ORIGIN}/api/v1/gateways)\n- [API discovery](${ORIGIN}/api/v1)\n- [Latest dataset — large; prefer summary or paginated measurements](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Distinguish measured_at from generated_at and published_at (unknown when null). Age is relative to age_as_of, not retrieval time. current_metadata contains dated repository statistics, not run-time statistics.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
   write("/llms.txt", index);
   write("/llms-full.txt", index + "\n" + readFileSync(join(out, "gateways/performance.md"), "utf8") + "\n" + readFileSync(join(out, "gateways/method.md"), "utf8"));
   write("/robots.txt", `User-agent: *\nAllow: /\nDisallow: /_publication/\nSitemap: ${ORIGIN}/sitemap.xml\n`);
