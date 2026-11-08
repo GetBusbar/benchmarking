@@ -1,0 +1,565 @@
+{
+  "checked_at": "2026-11-08T23:35:49.278767+00:00",
+  "image": "portkeyai/gateway:1.15.2@sha256:9065e15701d5f90ae1728c57369f8cec137d8c7dffcd027a402a67e64f27b9d3",
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress_requested": "openai",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "8d9c7d587d65436cdc464a36ca0a38ea7026417e16132a5b1d711c9673f9f212",
+      "body_start": "{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress_requested": "openai",
+      "path": "/v1/responses",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "f90db9fa23fcca34b1ffc57c78f91d5164b493fb009cade9f026f28f4bf00fce",
+      "body_start": "{\"id\":\"resp_x\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"model\":\"mock\",\"output\":[{\"type\":\"message\",\"id\":\"msg_x\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12},\"provider\":\"openai\"}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"input\":\"hello\",\"model\":\"gpt-4o-mini\"}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress_requested": "openai",
+      "path": "/v1/messages",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "cc128ac40a785991f66a6aa6f6e20626e3cb7e2f06be81b68c4a5b68f9ea5f4e",
+      "body_start": "{\"status\":\"failure\",\"message\":\"messages is not supported by openai\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress_requested": "openai",
+      "path": "/v1/proxy/v1beta/models/gpt-4o-mini:generateContent",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "bcdd1763b91abc13a4580eccc739608c3772556771c30272bb15c3041ba7c700",
+      "body_start": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/v1beta/models/gpt-4o-mini:generateContent",
+          "last_snippet": "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "egress_requested": "openai",
+      "path": "/v1/proxy/v2/chat",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "a7ca6331358decf80ebd9f7c0b197a83f4727a59e6ec4c2858b8a27aa791ad19",
+      "body_start": "{\"id\":\"x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2}}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/v2/chat",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress_requested": "openai",
+      "path": "/v1/proxy/model/gpt-4o-mini/converse",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "d044c5e8f2abcc2d4ff62f36a256dcebcee61bb87712fb87224ebcd6b51cd824",
+      "body_start": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/model/gpt-4o-mini/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress_requested": "openai-responses",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "8d9c7d587d65436cdc464a36ca0a38ea7026417e16132a5b1d711c9673f9f212",
+      "body_start": "{\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress_requested": "openai-responses",
+      "path": "/v1/responses",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "f90db9fa23fcca34b1ffc57c78f91d5164b493fb009cade9f026f28f4bf00fce",
+      "body_start": "{\"id\":\"resp_x\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"model\":\"mock\",\"output\":[{\"type\":\"message\",\"id\":\"msg_x\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12},\"provider\":\"openai\"}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"input\":\"hello\",\"model\":\"gpt-4o-mini\"}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress_requested": "openai-responses",
+      "path": "/v1/messages",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "cc128ac40a785991f66a6aa6f6e20626e3cb7e2f06be81b68c4a5b68f9ea5f4e",
+      "body_start": "{\"status\":\"failure\",\"message\":\"messages is not supported by openai\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress_requested": "openai-responses",
+      "path": "/v1/proxy/v1beta/models/gpt-4o-mini:generateContent",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "bcdd1763b91abc13a4580eccc739608c3772556771c30272bb15c3041ba7c700",
+      "body_start": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/v1beta/models/gpt-4o-mini:generateContent",
+          "last_snippet": "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "egress_requested": "openai-responses",
+      "path": "/v1/proxy/v2/chat",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "a7ca6331358decf80ebd9f7c0b197a83f4727a59e6ec4c2858b8a27aa791ad19",
+      "body_start": "{\"id\":\"x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2}}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/v2/chat",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress_requested": "openai-responses",
+      "path": "/v1/proxy/model/gpt-4o-mini/converse",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "d044c5e8f2abcc2d4ff62f36a256dcebcee61bb87712fb87224ebcd6b51cd824",
+      "body_start": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/model/gpt-4o-mini/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress_requested": "anthropic",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "c0bbbd18ee9a313c35933a7465678f06d90d1ca356676daf61a32985ac4b0480",
+      "body_start": "{\"id\":\"msg_x\",\"object\":\"chat.completion\",\"created\":1794180949,\"model\":\"mock\",\"provider\":\"anthropic\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0}}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"system\":[],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress_requested": "anthropic",
+      "path": "/v1/responses",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "49e577ad85230a981389f3ccff2ee27f8e4b60077b0bf0bb9a3566d8755488dc",
+      "body_start": "{\"status\":\"failure\",\"message\":\"createModelResponse is not supported by anthropic\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress_requested": "anthropic",
+      "path": "/v1/messages",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "82c10f75d34f55e73fe8dc6b2b32946ab3026ac796cba7b3b9f279be8071e02e",
+      "body_start": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":64}"
+        }
+      }
+    },
+    {
+      "ingress": "gemini",
+      "egress_requested": "anthropic",
+      "path": "/v1/proxy/v1beta/models/claude-3-5-sonnet-20241022:generateContent",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "bcdd1763b91abc13a4580eccc739608c3772556771c30272bb15c3041ba7c700",
+      "body_start": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/v1beta/models/claude-3-5-sonnet-20241022:generateContent",
+          "last_snippet": "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "egress_requested": "anthropic",
+      "path": "/v1/proxy/v2/chat",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "a7ca6331358decf80ebd9f7c0b197a83f4727a59e6ec4c2858b8a27aa791ad19",
+      "body_start": "{\"id\":\"x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2}}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/v2/chat",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress_requested": "anthropic",
+      "path": "/v1/proxy/model/claude-3-5-sonnet-20241022/converse",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "d044c5e8f2abcc2d4ff62f36a256dcebcee61bb87712fb87224ebcd6b51cd824",
+      "body_start": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/model/claude-3-5-sonnet-20241022/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress_requested": "gemini",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "87b37c7e28fe6392f77a93879ffc72cff213878227e0275793024f4f2ccafe9e",
+      "body_start": "{\"id\":\"portkey-67180fb8-73c2-4d06-8405-4bffea0b5b95\",\"object\":\"chat.completion\",\"created\":1794180949,\"provider\":\"google\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"completion_tokens_details\":{\"reasoning_tokens\":0,\"audio_tokens\":0},\"prompt_tokens_details\":{\"cached_tokens\":0,\"audio_tokens\":0}}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/gemini-1.5-pro:generateContent",
+          "last_snippet": "{\"model\":\"gemini-1.5-pro\",\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hello\"}]}],\"generationConfig\":{\"maxOutputTokens\":16}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress_requested": "gemini",
+      "path": "/v1/responses",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "8e52b830ebb37ca7d8acd32b13d51d12783112a1d5437c46905504f49ad3e78a",
+      "body_start": "{\"status\":\"failure\",\"message\":\"createModelResponse is not supported by google\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress_requested": "gemini",
+      "path": "/v1/messages",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "677586a0b23f4e12200f86930d3b9b92357e5bea370d3d5a136b837595b7bb9d",
+      "body_start": "{\"status\":\"failure\",\"message\":\"messages is not supported by google\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress_requested": "gemini",
+      "path": "/v1/proxy/v1beta/models/gemini-1.5-pro:generateContent",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "bcdd1763b91abc13a4580eccc739608c3772556771c30272bb15c3041ba7c700",
+      "body_start": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/gemini-1.5-pro:generateContent",
+          "last_snippet": "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "egress_requested": "gemini",
+      "path": "/v1/proxy/v2/chat",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "a7ca6331358decf80ebd9f7c0b197a83f4727a59e6ec4c2858b8a27aa791ad19",
+      "body_start": "{\"id\":\"x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2}}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v2/chat",
+          "last_snippet": "{\"model\":\"gemini-1.5-pro\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress_requested": "gemini",
+      "path": "/v1/proxy/model/gemini-1.5-pro/converse",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "d044c5e8f2abcc2d4ff62f36a256dcebcee61bb87712fb87224ebcd6b51cd824",
+      "body_start": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/gemini-1.5-pro/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress_requested": "cohere",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "5b3b158c6d677c50ac9a791ee06e462dcf53bbe6876d987a8370afb608457d0e",
+      "body_start": "{\"id\":\"x\",\"model\":\"command-r-plus\",\"object\":\"chat.completion\",\"created\":1794180949,\"provider\":\"cohere\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":10,\"total_tokens\":12}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v2/chat",
+          "last_snippet": "{\"model\":\"command-r-plus\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress_requested": "cohere",
+      "path": "/v1/responses",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "06b0c03fa0329b0ee6d4135376e5151c8bb60a7d1f5c67f129b92b4260653f3c",
+      "body_start": "{\"status\":\"failure\",\"message\":\"createModelResponse is not supported by cohere\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress_requested": "cohere",
+      "path": "/v1/messages",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "fd28d6047f772c232bbbf6f4719d612d003e1f3bc3a1fa3175b627dc7c9948b4",
+      "body_start": "{\"status\":\"failure\",\"message\":\"messages is not supported by cohere\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress_requested": "cohere",
+      "path": "/v1/proxy/v1beta/models/command-r-plus:generateContent",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "bcdd1763b91abc13a4580eccc739608c3772556771c30272bb15c3041ba7c700",
+      "body_start": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/command-r-plus:generateContent",
+          "last_snippet": "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "egress_requested": "cohere",
+      "path": "/v1/proxy/v2/chat",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "a7ca6331358decf80ebd9f7c0b197a83f4727a59e6ec4c2858b8a27aa791ad19",
+      "body_start": "{\"id\":\"x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2}}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v2/chat",
+          "last_snippet": "{\"model\":\"command-r-plus\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress_requested": "cohere",
+      "path": "/v1/proxy/model/command-r-plus/converse",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "d044c5e8f2abcc2d4ff62f36a256dcebcee61bb87712fb87224ebcd6b51cd824",
+      "body_start": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/command-r-plus/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress_requested": "bedrock",
+      "path": "/v1/chat/completions",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "93977f8ca5218c72fea7614929c682e7c60d95c5f3352fb905d19925fdb62242",
+      "body_start": "{\"id\":\"1794180949256\",\"object\":\"chat.completion\",\"created\":1794180949,\"model\":\"anthropic.claude-3-5-sonnet-v1:0\",\"provider\":\"bedrock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0}}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1%3A0/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"inferenceConfig\":{\"maxTokens\":16}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress_requested": "bedrock",
+      "path": "/v1/responses",
+      "status": 500,
+      "content_type": "application/json",
+      "body_sha256": "ac174ad31d08c81abead06aa92ba6695bebfb580698378830e275e34a4aae487",
+      "body_start": "{\"status\":\"failure\",\"message\":\"createModelResponse is not supported by bedrock\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress_requested": "bedrock",
+      "path": "/v1/messages",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "81bc270ed80697eff0a0dff5ec655480585e5d55e37da3803b3625250b8b4b16",
+      "body_start": "{\"id\":\"portkey-337a4007-4740-418f-a0cd-a7860203b7cf\",\"model\":\"anthropic.claude-3-5-sonnet-v1:0\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1%3A0/converse",
+          "last_snippet": "{\"inferenceConfig\":{\"maxTokens\":64},\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "gemini",
+      "egress_requested": "bedrock",
+      "path": "/v1/proxy/v1beta/models/anthropic.claude-3-5-sonnet-v1:0:generateContent",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "bcdd1763b91abc13a4580eccc739608c3772556771c30272bb15c3041ba7c700",
+      "body_start": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/anthropic.claude-3-5-sonnet-v1:0:generateContent",
+          "last_snippet": "{\"contents\":[{\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "egress_requested": "bedrock",
+      "path": "/v1/proxy/v2/chat",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "a7ca6331358decf80ebd9f7c0b197a83f4727a59e6ec4c2858b8a27aa791ad19",
+      "body_start": "{\"id\":\"x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2}}}",
+      "mock_observed": {
+        "cohere": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v2/chat",
+          "last_snippet": "{\"model\":\"anthropic.claude-3-5-sonnet-v1:0\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "bedrock",
+      "egress_requested": "bedrock",
+      "path": "/v1/proxy/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+      "status": 200,
+      "content_type": "application/json",
+      "body_sha256": "d044c5e8f2abcc2d4ff62f36a256dcebcee61bb87712fb87224ebcd6b51cd824",
+      "body_start": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    }
+  ],
+  "kind": "local correctness preflight; not performance measurements",
+  "source_revision": "ca7712947ec8c0887803990b746740d36011c697",
+  "definition_sha256": "97630831079ad9772b4a0fed011c1a4d6ad85e4055db418fcddb76075571345f"
+}

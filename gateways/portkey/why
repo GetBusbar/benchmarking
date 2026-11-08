@@ -12,3 +12,5 @@ x-portkey-custom-host upstream  # -> the mock, instead of the real provider host
 x-portkey-aws-access-key-id     boot  # bedrock SigV4 material; without it the request is refused
 x-portkey-aws-secret-access-key boot  # before any egress (dummy; the mock ignores the signature)
 x-portkey-aws-region            boot
+
+Pinned v1.15.2 (ca7712947ec8c0887803990b746740d36011c697) exposes native passthrough under /v1/proxy. Gemini, Cohere and Bedrock native ingress use that route on their matching diagonal. Passthrough is not cross-protocol translation: a 200 from another provider column still carried the ingress wire, so those pairs are excluded. Provider operation tables support OpenAI-chat to five upstream protocols, Responses to Responses, and Anthropic messages to Anthropic or Bedrock. Eleven exact pairs passed local recorder checks; proof is in portkey-protocol-preflight.json. Per-egress model IDs select the appropriate adapter instead of reusing anthropic/mock for every provider.
