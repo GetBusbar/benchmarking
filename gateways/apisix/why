@@ -29,3 +29,8 @@ provider_conf  boot      # bedrock: region, required by validate_provider_requir
 aws            boot      # bedrock: SigV4 material, required by the schema (dummy; mock ignores it)
 access_key_id      boot
 secret_access_key  boot
+
+x-bench-egress ingress # Selects the supported Anthropic-to-OpenAI converter on the shared Messages ingress path
+priority ingress # Header-qualified conversion route must precede the native Anthropic fallback
+
+Five pairs passed local protocol response and upstream-recorder checks. The pinned converter registry contains Anthropic Messages to OpenAI Chat and an unrelated embeddings conversion; no other chat translation is claimed. Gemini and Vertex provider names here describe OpenAI-compatible service endpoints, not native Gemini wire support.

@@ -1,5 +1,5 @@
 {
-  "scope": "Six revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
+  "scope": "Seven revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
   "gateways": [
     {
       "gateway": "one-api",
@@ -226,6 +226,32 @@
         "openai-responses>openai",
         "openai>bedrock",
         "openai>gemini"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 5
+    },
+    {
+      "gateway": "apisix",
+      "latest_prior_snapshot": "results/snapshots/result_apisix_2026-08-26T19-08-41Z.json",
+      "latest_prior_sha256": "d68eb62b25a8380960007441ef46ed419673d0e6192cf449af6b43fb70a6e73c",
+      "latest_prior_measured_at": "2026-08-26T19:08:41Z",
+      "definition_sha256": "53ed99ae8c6b1b88477132dab6d77013c778c5ef1fb0aa8254eedee2b018dfb4",
+      "prior_served_pairs": [
+        "anthropic>anthropic",
+        "bedrock>bedrock",
+        "openai-responses>openai-responses",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>openai",
+        "bedrock>bedrock",
+        "openai-responses>openai-responses",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "anthropic>openai"
       ],
       "earlier_served_not_in_current_configuration": [],
       "historical_snapshots_checked": 5
