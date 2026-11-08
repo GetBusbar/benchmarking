@@ -131,8 +131,7 @@ def main(args):
         client.get_waiter(waiter.replace('-', '_')).wait(**parameters)
         return
     response = getattr(client, operation.replace('-', '_'))(**parameters)
-    if operation == 'get-console-output' and response.get('Output'):
-        response['Output'] = base64.b64decode(response['Output']).decode('utf8', errors='replace')
+    # Botocore decodes EC2 console Output through its response handler.
     if 'query' in options:
         response = jmespath.search(options['query'][0], response)
     if options.get('output') == ['text']:
