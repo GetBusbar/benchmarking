@@ -46,7 +46,7 @@ export function renderDashboard(template, data, path, publication) {
   const app = browserApp.createApp(document);
   const state = app.renderForPublication(data, path);
   const url = new URL(path, ORIGIN);
-  if (data.active_field) {
+  if (data.active_field && data.gateways.some(g => !g.matrix)) {
     const completed = data.gateways.filter(g => g.matrix).length;
     document.querySelector("main")?.insertAdjacentHTML("afterbegin", `<aside class="refresh-status" role="status"><strong>Benchmark refresh: ${completed} of ${data.gateways.length} results published.</strong> Unfinished entrants show n/a. Results appear after validation. <a href="/gateways/runs">Previous runs remain in History</a>.</aside>`);
   }

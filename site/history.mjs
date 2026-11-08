@@ -44,7 +44,7 @@ export function metricDirection(metric) {
   if (/latency|ttft|gap|rss_mib$|cost_per_|cpu_us|memory_growth/.test(metric)) return 'lower';
   return null; // Do not invent a desirable direction for categorical or unknown metrics.
 }
-const trendHtml = t => `<span class="history-trend trend-${t?.state || 'not_comparable'}">${esc(t?.symbol || '·')} ${esc(t?.label || 'No comparable predecessor')}${t?.change_percent == null ? '' : ` (${t.change_percent > 0 ? '+' : ''}${t.change_percent.toFixed(2)}%)`}</span>`;
+const trendHtml = t => `<span class="history-trend trend-${t?.state || 'not_comparable'}">${esc(t?.symbol || '·')} ${esc(t?.label || 'No comparable predecessor')}${t?.change_percent == null ? '' : ` (${t.change_percent > 0 ? '+' : ''}${t.change_percent.toFixed(2)}%)`}</span>${t?.reasons?.length ? `<small class="history-comparison-reasons">${t.reasons.map(r => esc(r.replaceAll('_', ' '))).join('; ')}</small>` : ''}`;
 export function historyPoints(records, q) {
   const ordered = records.filter(m => m.test.ingress_protocol === q.ingress && m.test.upstream_protocol === q.egress).sort((a,b) => (Date.parse(a.measured_at)||0)-(Date.parse(b.measured_at)||0));
   return ordered.map((m,index) => {
@@ -52,34 +52,43 @@ export function historyPoints(records, q) {
     const previous = ordered.slice(0,index).reverse().find(p => Number.isFinite(Date.parse(p.measured_at)) && Date.parse(p.measured_at) < Date.parse(m.measured_at) && compareRuns(p,m,q.metric,q.bound).comparability.status === 'comparable');
     const priorMetric = previous && (q.metric === 'throughput_rps' ? previous.frontier.find(f=>f.bound_ms === (q.bound === 'none' ? null : Number(q.bound || 10)))?.rps : previous.metrics[q.metric]);
     const trend = trendIndicator(priorMetric?.value,metric?.value,metricDirection(q.metric),!!previous);
-    return { trend: { ...trend, previous_run_id: previous?.run_id ?? null }, run_id: m.run_id, measurement_id: m.measurement_id, gateway_id: m.gateway_id, gateway_build: m.gateway_build, measured_at: m.measured_at,
+    const latestEarlier = ordered.slice(0,index).reverse().find(p => Date.parse(p.measured_at) < Date.parse(m.measured_at));
+    const reasons = previous ? [] : latestEarlier ? compareRuns(latestEarlier,m,q.metric,q.bound).comparability.reasons : ['no_earlier_measurement'];
+    if (!previous) trend.label = reasons.includes('different_harness_commit') ? 'Engine changed' : reasons.includes('no_earlier_measurement') ? 'First recorded run' : 'Comparison unavailable';
+    return { trend: { ...trend, reasons, previous_run_id: previous?.run_id ?? null }, run_id: m.run_id, measurement_id: m.measurement_id, gateway_id: m.gateway_id, gateway_build: m.gateway_build, measured_at: m.measured_at,
       engine: m.test.harness_commit, metric: q.metric, value: metric?.value ?? null, state: metric?.state ?? 'not_measured', reason: metric?.reason ?? null,
       definition: metric?.definition ?? null, provenance: m.provenance };
   });
+}
+// Publish only supported changes for the current measurement; absent comparisons add no UI noise.
+export function currentTrends(records, current) {
+  const trends = {};
+  for (const m of current) {
+    const earlier = records.filter(p => p.test.ingress_protocol === m.test.ingress_protocol && p.test.upstream_protocol === m.test.upstream_protocol && Date.parse(p.measured_at) < Date.parse(m.measured_at)).sort((a,b)=>Date.parse(b.measured_at)-Date.parse(a.measured_at));
+    const queries = Object.keys(m.metrics).map(metric=>({metric})).concat(m.frontier.map(f=>({metric:'throughput_rps',bound:f.bound_ms == null ? 'none' : String(f.bound_ms)})));
+    for (const q of queries) {
+      const direction = metricDirection(q.metric);
+      if (!direction) continue;
+      const before = earlier.find(p=>compareRuns(p,m,q.metric,q.bound).comparability.status === 'comparable');
+      if (!before) continue;
+      const value = r => q.metric === 'throughput_rps' ? r.frontier.find(f=>f.bound_ms === (q.bound === 'none' ? null : Number(q.bound)))?.rps?.value : r.metrics[q.metric]?.value;
+      const trend = trendIndicator(value(before),value(m),direction);
+      if (trend.state === 'not_comparable') continue;
+      const key = `${m.test.ingress_protocol}/${m.test.upstream_protocol}/${q.metric}${q.bound == null ? '' : '/' + q.bound}`;
+      trends[key] = {...trend, previous_run_id:before.run_id,current_run_id:m.run_id,previous_measured_at:before.measured_at,metric:q.metric,ingress:m.test.ingress_protocol,egress:m.test.upstream_protocol,bound:q.bound};
+    }
+  }
+  return trends;
 }
 export function historyArticle(family, page, q, comparisons = []) {
   const link = `/gateways/${family}`;
   const options = values => values.map(v => `<option value="${esc(v)}"${v === q.metric ? ' selected' : ''}>${esc(v.replaceAll('_', ' '))}</option>`).join('');
   const points = page.points;
-  const valid = points.filter(p => p.value != null && Number.isFinite(Date.parse(p.measured_at)));
-  let chart = '';
-  if (valid.length) {
-    const dates = valid.map(p => Date.parse(p.measured_at)), values = valid.map(p => p.value);
-    const lo = Math.min(...dates), hi = Math.max(...dates), max = Math.max(...values), min = Math.min(...values);
-    const coords = p => [40+(Date.parse(p.measured_at)-lo)/(hi-lo||1)*730,180-(p.value-min)/(max-min||1)*160];
-    const segments = valid.map(p => {
-      const previous=valid.find(v=>v.run_id===p.trend?.previous_run_id);
-      if(!previous || p.trend.state==='not_comparable') return '';
-      const [x1,y1]=coords(previous),[x2,y2]=coords(p);
-      return `<line class="trend-${p.trend.state}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="currentColor" stroke-width="2"/>`;
-    }).join('');
-    chart = `<figure><svg class="history-chart" viewBox="0 0 800 220" role="img" aria-label="Recorded ${esc(q.metric)} by measurement date; lines connect only comparable observations"><path d="M40 10V190H780" fill="none" stroke="currentColor"/><text x="40" y="210" font-size="12" fill="currentColor">${esc(new Date(lo).toISOString().slice(0,10))}</text><text x="780" y="210" text-anchor="end" font-size="12" fill="currentColor">${esc(new Date(hi).toISOString().slice(0,10))}</text><text x="42" y="20" font-size="12" fill="currentColor">${esc(max.toPrecision(4))}</text><text x="42" y="185" font-size="12" fill="currentColor">${esc(min.toPrecision(4))}</text>${segments}${valid.map(p => `<a href="${esc(p.provenance.run_url)}"><circle cx="${40 + (Date.parse(p.measured_at)-lo)/(hi-lo || 1)*730}" cy="${180-(p.value-min)/(max-min || 1)*160}" r="5" fill="currentColor"><title>${esc(p.measured_at)}: ${p.value}; ${esc(p.gateway_build)}; engine ${esc(p.engine)}</title></circle></a>`).join('')}</svg><figcaption>Each point is one recorded run on this page. Lines connect comparable runs only; engine/configuration changes break the trend. Exact dates, values and evidence follow.</figcaption></figure>`;
-  }
   return `<h1>${esc(family)} history</h1><nav aria-label="Gateway"><a href="${link}">Overview</a> · <strong>History</strong> · <a href="${link}/evidence">Evidence</a></nav>
   <p>Every retained run, including incomplete and unavailable evidence. Values describe the recorded local-mock configuration. Missing readings are never zero.</p>
   <form method="get" class="history-controls"><label>Ingress <input name="ingress" value="${esc(q.ingress)}" list="protocols"></label> <label>Upstream <input name="egress" value="${esc(q.egress)}" list="protocols"></label><datalist id="protocols">${['openai','openai-responses','anthropic','gemini','cohere','bedrock'].map(p=>`<option value="${p}">`).join('')}</datalist> <label>Metric <select name="metric">${options(page.metrics)}</select></label> <label>Throughput p99 bound <select name="bound">${['1','5','10','50','100','none'].map(b=>`<option value="${b}"${b === (q.bound || '10') ? ' selected' : ''}>${b === 'none' ? 'Unbounded' : `${b} ms`}</option>`).join('')}</select></label> <label>From <input type="date" name="from" value="${esc(q.from || '')}"></label> <label>Through <input type="date" name="to" value="${esc(q.to || '')}"></label> <button>Show runs</button></form>
   <p>↑ Improved · ↓ Regressed · — Roughly unchanged (within ±5%). This is a display tolerance, not a statistical margin of error. Trends use the preceding comparable run; unknown evidence is neutral.</p>
-  ${chart}<p>${page.total} retained runs. Catalog <code>${esc(page.catalog_id)}</code>.</p>
+  <p>${page.total} retained runs. Catalog <code>${esc(page.catalog_id)}</code>.</p>
   <div class="table-scroll"><table><thead><tr><th>Measured</th><th>Build</th><th>Engine</th><th>Result</th><th>Trend</th><th>Field placement</th><th>Evidence</th></tr></thead><tbody>${points.map(p=>`<tr><td>${esc(p.measured_at || 'Undated')}</td><td>${esc(p.gateway_build || 'Not recorded')}</td><td>${esc(p.engine?.slice(0,12) || 'Not recorded')}</td><td>${p.value == null ? 'n/a' : esc(p.value)} — ${esc(p.state)}</td><td>${trendHtml(p.trend)}</td><td>${p.placements?.length ? p.placements.map(r=>`<a href="/api/v1/fields/${esc(r.field_id)}">${r.rank} of ${r.eligible} eligible / ${r.rostered} rostered</a> (${esc(r.field_name)})`).join("<br>") : "Not ranked in a retained field"}</td><td><a href="${esc(p.provenance?.run_url || '#')}">Run evidence</a></td></tr>`).join('')}</tbody></table></div>
   ${page.next ? `<p><a href="${esc(page.next)}">Next page of runs</a></p>` : ''}
   <details><summary>Compare any two runs across recorded metrics</summary><form method="get" class="history-controls"><input type="hidden" name="ingress" value="${esc(q.ingress)}"><input type="hidden" name="egress" value="${esc(q.egress)}"><label>Earlier run <select name="a">${points.map(p=>`<option value="${esc(p.run_id)}">${esc(p.measured_at)} ${esc(p.gateway_build)}</option>`).join('')}</select></label> <label>Later run <select name="b">${points.map(p=>`<option value="${esc(p.run_id)}">${esc(p.measured_at)} ${esc(p.gateway_build)}</option>`).join('')}</select></label> <button>Compare</button></form></details>
@@ -117,4 +126,26 @@ export function fieldRankings(collection, q) {
   return {metric:q.metric,ingress:q.ingress,egress:q.egress,direction,rostered:new Set(collection.gateways?.map(g=>g.id) || collection.measurements.map(m=>m.gateway_id)).size,excluded,
     groups:groups.map((group,index)=>({group:index+1,eligible:group.length,rankings:group.sort((a,b)=>(value(a)-value(b))*(direction==='lower'?1:-1)).map((m,idx,sorted)=>({gateway_id:m.gateway_id,value:value(m),rank:sorted.findIndex(other=>value(other)===value(m))+1,measurement_id:m.measurement_id,run_id:m.run_id}))})),
     interpretation:'Placement within this immutable field and compatible group only. Different fields or engines do not imply a rank improvement. Values within the 5% trend tolerance are not necessarily exact ranking ties.'};
+}
+
+// Rank movement needs the same complete roster and a compatible field-wide cohort.
+export function rankChanges(before, after, q) {
+  const roster = c => [...new Set(c.gateways?.map(g=>g.id) || c.measurements.map(m=>m.gateway_id))].sort();
+  const ids = roster(after);
+  if (!ids.length || JSON.stringify(ids) !== JSON.stringify(roster(before))) return {};
+  const complete = c => ids.every(id=>c.measurements.some(m=>m.gateway_id===id));
+  if (!complete(before) || !complete(after)) return {};
+  const a = fieldRankings(before,q), b = fieldRankings(after,q);
+  if (a.groups.length !== 1 || b.groups.length !== 1) return {};
+  const old = a.groups[0].rankings, fresh = b.groups[0].rankings;
+  const members = rows => rows.map(r=>r.gateway_id).sort();
+  if (JSON.stringify(members(old)) !== JSON.stringify(members(fresh))) return {};
+  for (const id of members(fresh)) {
+    const selected = c => c.measurements.find(m=>m.gateway_id===id && m.test.ingress_protocol===q.ingress && m.test.upstream_protocol===q.egress);
+    if (compareMeasurements([{...selected(before),gateway_id:'a'},{...selected(after),gateway_id:'b'}],{...q,a:'a',b:'b'}).comparability.status !== 'comparable') return {};
+  }
+  return Object.fromEntries(fresh.map(r=>{
+    const prior=old.find(p=>p.gateway_id===r.gateway_id);
+    return [r.gateway_id,{change:prior.rank-r.rank,before:prior.rank,after:r.rank,previous_run_id:prior.run_id}];
+  }));
 }
