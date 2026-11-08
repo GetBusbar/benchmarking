@@ -1,3 +1,9 @@
 Official AISIX 1.9.0 ARM64 container, pinned by immutable image digest. Configuration and provider resources are mounted read-only. The gateway and mock use the same host network, with the gateway constrained to the standard four-core slice.
 
 One static resource configuration wires the mock-backed OpenAI Chat, OpenAI Responses and Anthropic models. Fresh correctness probes establish the served pairs for this build; historical declarations from AISIX 0.10 are not reused as current evidence.
+
+vertex upstream # Pinned v1.9.0 supports api_base override and dummy access-token/project/region credentials for local Gemini adapter checks
+bedrock upstream # Pinned adapter accepts api_base plus explicit dummy AWS credentials; Nova uses Converse
+apis upstream # Empty API declaration on Chat-only provider prevents Responses ingress silently selecting the Responses upstream; separate alias retains Responses routing
+
+Thirteen pairs passed exact recorder and response-content checks in aisix-protocol-preflight.json. Cohere chat is not one of the five native adapter families; specialized Cohere embedding/reranking support is outside this chat matrix.
