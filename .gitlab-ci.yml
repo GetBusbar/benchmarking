@@ -84,6 +84,10 @@ verify-engine:
     - export VERIFY_ENGINE_REF="${VERIFY_ENGINE_REF:-$CI_COMMIT_SHA}"
     - git fetch origin "$VERIFY_ENGINE_REF"
     - git checkout --detach "$VERIFY_ENGINE_REF"
+    - export CARGO_HOME="$CI_PROJECT_DIR/.ci-cargo" RUSTUP_HOME="$CI_PROJECT_DIR/.ci-rustup"
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$CI_PROJECT_DIR/rustup-init.sh"
+    - sh "$CI_PROJECT_DIR/rustup-init.sh" -y --no-modify-path --profile minimal --default-toolchain 1.98.0 --component rustfmt --component clippy
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     - cargo test --workspace --locked
