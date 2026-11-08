@@ -296,7 +296,18 @@ fn the_core_count_placeholder_resolves_to_the_pinned_range_not_the_host() {
 #[test]
 fn a_native_entrant_can_require_that_a_variable_is_absent_not_merely_unset_by_us() {
     use std::time::Duration;
-    let f = field();
+    let mut f = field();
+    // The current entrant roster may legitimately need no environment removals.
+    // Keep exercising the capability independently of gateway version changes.
+    let mut fixture = crate::manifest::test_fixture();
+    fixture.launch = Some(
+        serde_json::from_value(serde_json::json!({
+            "kind": "native", "binary": ["/bin/true"],
+            "env_unset": ["OTB_TEST_REMOVE_ME"]
+        }))
+        .expect("native environment-removal fixture"),
+    );
+    f.insert("environment-removal-fixture".into(), fixture);
     let scrubbing: Vec<_> = f
         .iter()
         .filter(|(_, m)| {

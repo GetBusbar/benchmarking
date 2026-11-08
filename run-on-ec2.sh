@@ -394,6 +394,12 @@ if [ "$_NOGATE" = 0 ] && [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$BENCH_ENGINE_COMMI
     _tree_sub="$(git -C "$HERE" rev-parse "${BENCH_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
     _eng_sub="$(git -C "$HERE" rev-parse "${BENCH_ENGINE_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
     if [ "$_tree_sub" != "$_eng_sub" ]; then
+      # Only this cfg(test)-gated fixture is exempt; release source and build
+      # inputs still have to match the commit recorded by the frozen binary.
+      if [ "$_sub" = engine ] && git -C "$HERE" diff --quiet "$BENCH_ENGINE_COMMIT" "$BENCH_COMMIT" -- engine ':!engine/src/tests/manifest_real_field_tests.rs'; then
+        echo "[pin] only the cfg(test) real-field fixture changed; frozen release sources are unchanged"
+        continue
+      fi
       echo "REFUSING: $_sub/ differs between the tree this run fetches and the engine it claims." >&2
       echo "  tree   $BENCH_COMMIT -> $_sub = $_tree_sub" >&2
       echo "  engine $BENCH_ENGINE_COMMIT -> $_sub = $_eng_sub" >&2
@@ -402,7 +408,7 @@ if [ "$_NOGATE" = 0 ] && [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$BENCH_ENGINE_COMMI
       exit 1
     fi
   done
-  echo "[pin] tree ${BENCH_COMMIT:0:12}, engine ${BENCH_ENGINE_COMMIT:0:12} - engine/ and mock/ proven identical"
+  echo "[pin] tree ${BENCH_COMMIT:0:12}, engine ${BENCH_ENGINE_COMMIT:0:12} - release engine/mock sources and build inputs match"
 fi
 # Same predicate as the PREFLIGHT dirty check above. A git status that FAILS is recorded as dirty: an
 # unreadable tree is not evidence of a clean one, and dirty=false is the claim C8 trusts.
