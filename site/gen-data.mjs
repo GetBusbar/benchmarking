@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { absentEntryFor, sealMatrixCellsInPlace, sealPerfCell, sealStreaming, cpuFpsSourceFor, matrixHasCellMemory } from "./seal-matrix.mjs";
 import { snapshotCellCoords, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
+import { applyRunReview } from "./run-reviews.mjs";
 import { instrumentOf } from "./check-consistency.mjs";
 import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
@@ -221,6 +222,8 @@ function readJson(path) {
 }
 
 const SNAP_DIR = join(ROOT, "results", "snapshots");
+const reviewPath = join(ROOT, "results", "run-reviews.json");
+const runReviews = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, "utf8")) : {};
 
 /* The snapshot the board should render for `key`: the newest FULL run, with every strictly-scoped
    newer run layered over it oldest-first (so the newest measurement of any cell wins). */
@@ -229,7 +232,8 @@ function resolvedSnapshot(key) {
   const snaps = [];
   for (const f of readdirSync(SNAP_DIR)) {
     if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
-    const snap = readJson(join(SNAP_DIR, f));
+    let snap = readJson(join(SNAP_DIR, f));
+    if (snap) snap = applyRunReview(snap, runReviews[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]);
     if (!snap) continue;
     snap.__file = f;
     snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;

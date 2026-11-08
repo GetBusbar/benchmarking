@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { projectMeasurements, compareMeasurements, compactRecords } from './public-data.mjs';
 import { sealMatrixCellsInPlace } from './seal-matrix.mjs';
+import { applyRunReview } from './run-reviews.mjs';
 import { esc } from './render.mjs';
 export const PROJECTOR = 'historical-matrix-v1';
 export function expandHistorical(bundle) {
@@ -8,7 +9,7 @@ export function expandHistorical(bundle) {
 }
 export function historicalMeasurements(snapshot, run) {
   if (!snapshot.matrix) return [];
-  const matrix = structuredClone(snapshot.matrix);
+  const matrix = structuredClone(applyRunReview(snapshot, run.review).matrix);
   if (!matrix.upstreams && matrix.cells) matrix.upstreams = { [matrix.upstream_shape || 'openai']: { cells: matrix.cells } };
   matrix.measured_at ??= snapshot.measured_at;
   matrix.build ??= snapshot.build;
