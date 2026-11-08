@@ -38,7 +38,7 @@ verify-website:
     - node site/test-coverage.mjs
     - node site/test.mjs
     - node --max-old-space-size=256 site/build.mjs "$verify_dir" "$verify_dir/publication"
-    - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs
+    - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs site/history.test.mjs site/retention-upload.test.mjs
 
 refresh-gateway-stars:
   stage: publish
