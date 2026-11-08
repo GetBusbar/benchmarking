@@ -3,6 +3,8 @@ import { renderDashboard, renderArticle, htmlToMarkdown, ORIGIN } from "./render
 import { compareMeasurements, measurementsCsv, compactSummary, PROTOCOLS } from "./public-data.mjs";
 import { comparisonArticle } from "./evidence.mjs";
 
+import { measurementPage, compactCsv, gatewayFamily } from "./retrieval.mjs";
+
 const caches = new WeakMap();
 function inputs(env) {
   if (!caches.has(env.ASSETS)) caches.set(env.ASSETS, new Map());
@@ -61,12 +63,25 @@ async function route(request, env) {
   }
   if (path === "/api/v1/measurements" || path === "/gateways/data.csv") {
     const publication = await getPublication();
-    const q = filterQuery(url, publication, path.endsWith(".csv") ? ["gateway", "ingress", "egress", "metric"] : ["gateway", "ingress", "egress", "metric", "limit", "offset"]);
+    const q = filterQuery(url, publication, path.endsWith(".csv") ? ["gateway", "ingress", "egress", "metric", "compact"] : ["gateway", "ingress", "egress", "metric", "limit", "offset", "compact"]);
+    if (q.compact && !["0", "1"].includes(q.compact)) throw new RangeError("compact must be 0 or 1");
     const rows = select(publication.measurements, q);
-    if (path.endsWith(".csv")) return text(measurementsCsv(rows), "text/csv");
+    if (path.endsWith(".csv")) return text(q.compact === "1" ? compactCsv(rows, publication.measurements, publication.dataset_id) : measurementsCsv(rows), "text/csv");
     const limit = integer(q.limit, 50, 1, 100), offset = integer(q.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const page = measurementPage(rows, { datasetId: publication.dataset_id, limit, offset, url, compact: q.compact === "1" });
+    if (!page) return error(413, "One measurement exceeds the response budget. Filter by gateway, ingress, egress and metric, or use /api/v1/summary and its raw evidence links.");
+    return json(page);
+  }
+  if (path === "/api/v1/runs") {
+    const q = parameters(url, ["gateway", "family", "limit", "offset"]);
+    if (Object.values(q).some(v => v === "")) throw new RangeError("Query values must not be empty");
+    const catalog = await input("/_publication/runs.json");
+    if (q.gateway && !catalog.some(r => r.gateway_id === q.gateway)) throw new URIError("Unknown historical gateway");
+    if (q.family && !catalog.some(r => r.gateway_family === q.family)) throw new URIError("Unknown gateway family");
+    const rows = catalog.filter(r => (!q.gateway || r.gateway_id === q.gateway) && (!q.family || r.gateway_family === q.family));
+    const limit = integer(q.limit, 20, 1, 100), offset = integer(q.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const next = new URL(url); next.searchParams.set("offset", String(offset + limit)); next.searchParams.set("limit", String(limit));
-    return json({ schema_version: "1.0", dataset_id: publication.dataset_id, total: rows.length, offset, limit, next: offset + limit < rows.length ? next.href : null, measurements: rows.slice(offset, offset + limit) });
+    return json({ schema_version: "1.0", total: rows.length, limit, offset, next: offset + limit < rows.length ? next.href : null, runs: rows.slice(offset, offset + limit) });
   }
   const pair = path.match(/^\/gateways\/compare\/([a-z0-9-]+)-vs-([a-z0-9-]+?)(\.md)?$/);
   if (path === "/api/v1/compare" && [...url.searchParams.keys()].every(k => k === "a" || k === "b")) {
@@ -101,10 +116,16 @@ async function route(request, env) {
     if (!response.ok) return error(404, "Unknown run");
     return new Response(response.body, { encodeBody: "manual", headers: { "Content-Type": "application/json; charset=utf-8", "Content-Encoding": "gzip", "Cache-Control": "public, max-age=31536000, immutable", ETag: `"${raw[1].slice(-64)}"` } });
   }
+  const definitionsId = path.match(/^\/api\/v1\/definitions\/(dataset-[a-f0-9]{64})(?:\.json)?$/);
+  if (definitionsId) {
+    const response = await env.ASSETS.fetch(new Request(`${ORIGIN}/api/v1/definitions/${definitionsId[1]}.json`));
+    const stored = response.ok ? await response.text() : await env.PUBLICATIONS?.get(`definitions/${definitionsId[1]}`);
+    return stored == null ? error(404, "Unknown definition catalog") : new Response(stored, { headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=31536000, immutable" } });
+  }
   let asset = path;
   if (path === "/api/v1") asset = "/api/v1/index.json";
   else if (path === "/api/v1/schema") asset = "/api/v1/schema/index.json";
-  else if (/^\/api\/v1\/(summary|gateways|methodology|benchmarks\/latest|gateways\/[a-z0-9-]+|benchmarks\/(?:dataset-[a-f0-9]{64}|run-[a-z0-9-]+-[a-f0-9]{64}))$/.test(path)) asset += ".json";
+  else if (/^\/api\/v1\/(definitions|summary|gateways|methodology|benchmarks\/latest|gateways\/[a-z0-9-]+|benchmarks\/(?:dataset-[a-f0-9]{64}|run-[a-z0-9-]+-[a-f0-9]{64}))$/.test(path)) asset += ".json";
   else if (path === "/") asset = "/index.html";
   else if (!path.split("/").at(-1).includes(".")) asset += ".html";
   const response = await env.ASSETS.fetch(new Request(ORIGIN + asset));
@@ -137,7 +158,7 @@ export default {
     headers.set("Access-Control-Allow-Headers", "Accept, If-None-Match, If-Modified-Since");
     headers.set("Access-Control-Expose-Headers", "ETag, Last-Modified, Link");
     headers.set("X-Content-Type-Options", "nosniff");
-    headers.set("Link", `<${ORIGIN}/llms.txt>; rel="describedby"; type="text/plain", <${ORIGIN}/api/v1>; rel="service-desc"; type="application/json"`);
+    headers.set("Link", `<${ORIGIN}/api/v1/summary>; rel="alternate"; type="application/json", <${ORIGIN}/llms.txt>; rel="describedby"; type="text/plain", <${ORIGIN}/api/v1>; rel="service-desc"; type="application/json"`);
     if (!headers.has("Cache-Control")) headers.set("Cache-Control", response.ok ? "public, max-age=0, must-revalidate" : "no-store");
     // Static assets already have ETags. Small generated responses receive one as
     // well, so repeated API reads need not download an unchanged result.

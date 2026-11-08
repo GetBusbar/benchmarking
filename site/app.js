@@ -2854,16 +2854,25 @@ const isHarnessGap = (cell) => {
 };
 const cellState = (cell) =>
   cell.served === true ? ["served", "served"]
-    : cell.served === "unprobed_auth" ? ["unprobed", "unprobed (auth)"]
-      // Probe-first (matrix v3): every cell probed; a failed probe is "not configured", grey never red.
+    : cell.served === "not_measured" ? ["unverified", "not measured"]
+    : cell.served === "unprobed_auth" ? ["unprobed", "unprobed auth"]
+      // PROBE-FIRST (matrix v3): every cell is probed; a failed probe is "not configured" with the
+      // probe's evidence (probe_note) - it renders like the old declaration-grey, never as a red.
       : cell.served === "not_configured" ? ["notconf", "not configured"]
-        // Legacy (pre-probe-first): grey by the drafted capability grid, not by a probe.
-        : cell.served === "not_configurable" ? ["notconf", "not declared"]
-          : cell.served === "untestable" ? ["untestable", "untestable (mock limit)"]
-            // Real pairing, gateway declined the attempt - a genuine defect, so red not grey.
-            : cell.served === "failed" ? ["failed", "not served"]
+        // legacy results (pre-probe-first): grey by the drafted capability grid, not by a probe
+        : (cell.served === "not_configurable" || cell.served === "not_declared") ? ["notconf", "not declared"]
+          : cell.served === "untestable" ? ["untestable", "untestable"]
+            // The pairing is real (not a 404/501-shaped absence) but the gateway declined this
+            // attempt - a genuine defect to disclose, not a capability boundary, so it is RED, not
+            // grey, unlike every case above it.
+            : (cell.served === "failed" || cell.served === "not_served") ? ["failed", "not served"]
               : isHarnessGap(cell) ? ["unverified", "not verified"]
-              : ["failed", "not served"];
+              // RED ONLY FOR A REFUSAL THE ARTIFACT ACTUALLY RECORDS: the explicit "failed" token above, or
+              // the legacy boolean false. Any OTHER value - the engine's own `not_probed` default, a token
+              // this file predates, a missing field - is not evidence the gateway declined anything, and
+              // painting it red would accuse a gateway on the strength of our vocabulary gap.
+              : cell.served === false ? ["failed", "not served"]
+              : ["unverified", "not verified"];
 
 function laneStamp(j) {
   const bits = [];
@@ -3468,10 +3477,12 @@ function matrixCellTip(cell) {
     // Probe-first grey: probed and failed - show probe evidence, never graded red.
     return `not configured: the capability probe on this ingress/upstream pairing did not complete a correct translation round trip${cell.probe_note ? " - " + cell.probe_note : cell.verdict_note ? " - " + cell.verdict_note : ""}`;
   if (cell.served === "not_configurable")
-    // Grid is drafted by busbar from project docs, not confirmed by the project's own maintainers.
-    return `not tested (this cell is not in the capability grid we drafted from the project's docs; the maintainers have not confirmed their own grid yet)${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
+    // HONEST wording: the capability grid is authored by the busbar team from each project's docs
+    // as a stand-in until that project's maintainers confirm their own grid. So a grey cell is "not
+    // in the grid we drafted / not tested", NOT a claim the gateway's own maintainer declined it.
+    return `not declared (historical capability research, not a new probe of this tested build; cited research versions may differ from the build)${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
   if (cell.served === "untestable")
-    return `untestable on this rig: the gateway supports this pair in production but pins the real cloud host (no upstream base-URL override), so the test mock is unreachable - a harness limit, not gateway incapability${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
+    return `untestable: the recorded harness could not test this pair against its mock; this does not establish gateway incapability${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
   if (cell.served === "failed")
     // Real pairing; gateway reached and declined this attempt.
     return `failed: the gateway answered HTTP ${cell.status || "?"}${cell.body_snippet ? " - " + cell.body_snippet : ""}`;
@@ -4172,9 +4183,15 @@ function renderCatNav() {
 }
 
 function showView(view) {
-  // Outgoing view must be read before state.view moves: reading it after made `leaving` always equal
-  // the arriving view, so the mode memo below never stashed anything and silently discarded the mode
-  // the URL had just decoded.
+  document.getElementById("home-measurements")?.classList.toggle("hidden", view !== HOME_VIEW);
+  /* THE OUTGOING VIEW IS READ BEFORE state.view MOVES, and that ordering is the whole correctness of the
+     mode memo below. It used to read `modeFamily(state.view)` one line AFTER `state.view = view`, so
+     `leaving` was always the view being ARRIVED at: the two families always compared equal, the stash branch
+     was unreachable, and the memo was frozen at its newState defaults forever. What shipped was not a lossy
+     memo - it was `state.mode = resolveMode(modeMemo[family])` on every render, which silently threw away
+     the mode the URL had just decoded. `/gateways/performance?mode=same&d=openai` rendered Own cell WITH
+     "?mode=same" still in the address bar, i.e. a shared link showed different cells from the ones its own
+     URL named. */
   const leaving = modeFamily(state.view);
   state.view = view;
   // Memory's data-derived Same default is seeded on arrival at memory, not globally at boot, so other
@@ -4278,12 +4295,22 @@ function ensureData() {
     });
 }
 
+async function restorePublicationViews() {
+  if (!document.documentElement.hasAttribute("data-thin-publication")) return;
+  const response = await fetch("/ui-shell.json");
+  if (!response.ok) throw new Error("Could not load interactive view templates");
+  for (const html of await response.json()) {
+    const fragment = document.createElement("template"); fragment.innerHTML = html;
+    const view = fragment.content.firstElementChild;
+    if (!document.getElementById(view.id)) document.querySelector("main").appendChild(view);
+  }
+}
 function boot() {
   applyState(decodeUrl(location.pathname, location.search, location.hash));
   // Title the page from the URL before the fetch: state is fully decoded above, so the title is
   // knowable immediately rather than waiting on data.json (and staying generic on the failure path).
   updateTitle();
-  ensureData()
+  restorePublicationViews().then(ensureData)
     .then(() => {
       syncUrl(false); /* normalize: legacy #hash URLs -> clean path form */
       initTabs();
@@ -4343,7 +4370,7 @@ function renderForPublication(data, url) {
 if (NODE) {
   /* Exports for the node smoke test (site/test.mjs). */
   return {
-    renderForPublication,
+    renderForPublication, restorePublicationViews,
     newState, encodeUrl, decodeUrl, viewPath, applyFilters,
     fmtStamp, fmtAge, stampWithAge, measuredBadge, engineBadge,
     drawSweep, niceStep, fmtTick, COLUMN_SETS, columnsFor, PERF_VIEWS, TABLE_VIEWS, VIEW_SORT, LANES, naText, stripRigPaths,

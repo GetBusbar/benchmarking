@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ORIGIN, POLICY, PROTOCOLS } from "./public-data.mjs";
+import { METRIC_STATES, CELL_STATES, PAGE_MAX_BYTES } from "./retrieval.mjs";
 const str = { type: "string" }, num = { type: "number" }, bool = { type: "boolean" };
 const nullable = schema => ({ anyOf: [schema, { type: "null" }] });
 const ns = nullable(str), nn = nullable(num);
@@ -12,26 +13,30 @@ const map = value => ({ type: "object", additionalProperties: value });
 const jsonValue = { description: "Version-specific JSON from the recorded instrument; consult its pinned source.", anyOf: [{ type: "object", additionalProperties: true }, { type: "array", items: {} }, str, num, bool, { type: "null" }] };
 const freshness = {
   measured_at: ns, generated_at: str,
-  published_at: { ...ns, description: "Actual deployment timestamp, null when not recorded. Never inferred from measurement or build time." },
+  published_at: { ...ns, description: "Release timestamp recorded when publishing begins; not the first publication of historical measurements. Null for local builds or older unrecorded releases." },
   age_days: nullable({ type: "integer", minimum: 0 }), age_as_of: str,
   age: { type: "string", description: "Human-readable measurement age relative to age_as_of, not request time." },
 };
 export function schemas() {
   return {
     JsonValue: jsonValue,
+    Freshness: object(freshness, ["measured_at"]),
+    MetricState: { type: "string", enum: METRIC_STATES },
+    Retrieval: object({ start_here: str, next_step: str, measurements_max_response_bytes: { const: PAGE_MAX_BYTES }, full_collection_bytes: { type: "integer", minimum: 0 }, full_collection_use: str, license: str }),
     Disclosure: object({ operator: str, operator_is_entrant: bool }),
     Policy: object({ id: str, description: str }),
     CurrentMetadata: object({ stars: nullable({ type: "integer", minimum: 0 }), stars_as_of: ns, first_commit: ns }),
-    Status: object({ state: str, reason: ns, detail: ns }),
-    Metric: object({ value: nn, state: { type: "string", description: "valid, below_resolution, or the recorded absence/failure reason. Only valid values are quantitative evidence." }, reason: ns, definition: ns, section: str, certified: bool, suppressed: bool, note: str }, ["value", "state", "reason"]),
+    CellState: { type: "string", enum: CELL_STATES, description: "served: passed; not_configured: probe did not complete correctly; not_declared: historical capability research, not a probe; untestable: harness limitation; unprobed_auth: authentication not tested; not_served: recorded refusal/failure; not_verified: inconclusive harness evidence; not_measured: no measurement. raw_state preserves the instrument token." },
+    Status: object({ state: ref("CellState"), reason: ns, detail: ns, raw_state: { anyOf: [str, bool, { type: "null" }] }, evidence_scope: str, probe_http_status: ns, response_excerpt: ns }, ["state", "reason", "detail"]),
+    Metric: object({ value: nn, state: { ...ref("MetricState"), description: "Only valid values are quantitative evidence; retain the reason for every absence." }, reason: ns, definition: ns, definition_id: ns, section: str, certified: bool, suppressed: bool, note: str }, ["value", "state", "reason"]),
     Provenance: object({ source_url: str, raw_result_url: ns, run_url: ns, methodology_url: str, raw_sha256: ns }),
     ProtocolPair: object({ ingress_protocol: { type: "string", enum: PROTOCOLS }, upstream_protocol: { type: "string", enum: PROTOCOLS } }),
-    TestConfiguration: object({ ingress_protocol: str, upstream_protocol: str, hardware: ns, architecture: ns, harness_commit: ns, harness_dirty: nullable(bool), mock_sha256: ns, load_generator_sha256: ns, qualification: nullable(ref("JsonValue")), definitions: map(str), sweep_duration_s: nn, sweep_ttft_ms: nn, memory_protocol: ns, memory_concurrency: nn, memory_load_s: nn, cost_concurrency: nn }),
+    TestConfiguration: object({ ingress_protocol: str, upstream_protocol: str, hardware: ns, architecture: ns, harness_commit: ns, harness_dirty: nullable(bool), mock_sha256: ns, load_generator_sha256: ns, qualification: nullable(ref("JsonValue")), definitions: map(str), definition_ids: map(ns), sweep_duration_s: nn, sweep_ttft_ms: nn, memory_protocol: ns, memory_concurrency: nn, memory_load_s: nn, cost_concurrency: nn }, ["ingress_protocol", "upstream_protocol", "hardware", "architecture", "harness_commit", "harness_dirty", "mock_sha256", "load_generator_sha256", "qualification", "definitions", "sweep_duration_s", "sweep_ttft_ms", "memory_protocol", "memory_concurrency", "memory_load_s", "cost_concurrency"]),
     Frontier: object({ bound_ms: nn, concurrency: nn, lower_bound: bool, p99_us: nn, rps: nullable(ref("Metric")) }, ["rps"]),
-    Measurement: object({ schema_version: { const: "1.0" }, measurement_id: ns, gateway_id: str, gateway_build: ns, run_id: ns, ...freshness, status: ref("Status"), test: ref("TestConfiguration"), metrics: map(ref("Metric")), frontier: array(ref("Frontier")), provenance: ref("Provenance"), disclosure: ref("Disclosure") }, ["schema_version", "measurement_id", "gateway_id", "gateway_build", "run_id", "measured_at", "status", "test", "metrics", "frontier", "provenance", "disclosure"]),
+    Measurement: { allOf: [ref("Freshness"), object({ schema_version: { const: "1.0" }, measurement_id: ns, gateway_id: str, gateway_build: ns, run_id: ns, ...freshness, status: ref("Status"), test: ref("TestConfiguration"), metrics: map(ref("Metric")), frontier: array(ref("Frontier")), provenance: ref("Provenance"), disclosure: ref("Disclosure") }, ["schema_version", "measurement_id", "gateway_id", "gateway_build", "run_id", "measured_at", "status", "test", "metrics", "frontier", "provenance", "disclosure"])] },
     GatewayLink: object({ id: str, name: str, url: str, json_url: str, current_metadata: ref("CurrentMetadata") }),
     Catalog: object({ schema_version: str, gateways: array(ref("GatewayLink")), disclosure: ref("Disclosure") }),
-    Discovery: object({ schema_version: str, links: map(str), comparison_policy: ref("Policy"), disclosure: ref("Disclosure") }),
+    Discovery: object({ schema_version: str, retrieval: ref("Retrieval"), links: map(str), comparison_policy: ref("Policy"), disclosure: ref("Disclosure") }),
     Run: object({ id: str, sha256: str, gateway_id: str, measured_at: ns, build: ns }),
     RunResource: { allOf: [ref("Run"), object({ schema_version: str, raw_result_url: str, source_url: str, disclosure: ref("Disclosure") })] },
     RawRun: object({ gateway: str, build: ns, measured_at: ns, matrix: map(ref("JsonValue")), rig: ref("JsonValue"), definitions: map(str) }, ["gateway", "matrix"]),
@@ -40,9 +45,11 @@ export function schemas() {
     EvidenceCollection: object({ schema_version: str, collection_kind: { const: "independent_gateway_runs" }, dataset_id: str, measurements: array(ref("Measurement")), comparison_policy: ref("Policy"), disclosure: ref("Disclosure") }),
     LatestCollection: { allOf: [ref("EvidenceCollection"), object({ generated_at: str, published_at: ns, measured_range: object({ earliest: ns, latest: ns }), metadata_as_of: ns, license: ns, archive_history_included: bool, source_url: str, immutable_url: str, gateways: array(ref("GatewayLink")), metrics: array(str) })] },
     BenchmarkResource: { anyOf: [ref("EvidenceCollection"), ref("RunResource")] },
-    MeasurementPage: object({ schema_version: str, dataset_id: str, total: { type: "integer", minimum: 0 }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 }, next: ns, measurements: array(ref("Measurement")) }),
-    CompactResult: object({ gateway_id: str, name: str, gateway_build: ns, ...freshness, current_metadata: ref("CurrentMetadata"), status: ref("Status"), metrics: map(ref("Metric")), provenance: ref("Provenance"), evidence_url: str }),
-    Summary: object({ schema_version: str, dataset_id: str, generated_at: str, published_at: ns, selected_protocol_pair: ref("ProtocolPair"), results: array(ref("CompactResult")), comparison_policy: ref("Policy"), disclosure: ref("Disclosure"), interpretation: str }),
+    Definitions: object({ schema_version: str, dataset_id: str, definitions: map(str) }),
+    RunPage: object({ schema_version: str, total: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 }, offset: { type: "integer", minimum: 0 }, next: ns, runs: array({ allOf: [ref("Run"), object({ gateway_family: str, raw_result_url: str, source_url: str })] }) }),
+    MeasurementPage: object({ schema_version: str, dataset_id: str, total: { type: "integer", minimum: 0 }, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 }, returned: { type: "integer", minimum: 0 }, max_response_bytes: { const: PAGE_MAX_BYTES }, request_url: str, applied_filters: map(str), next: ns, measurements: array(ref("Measurement")), definitions: map(str) }, ["schema_version", "dataset_id", "total", "offset", "limit", "returned", "max_response_bytes", "request_url", "applied_filters", "next", "measurements"]),
+    CompactResult: { allOf: [ref("Freshness"), object({ gateway_id: str, name: str, gateway_build: ns, ...freshness, current_metadata: ref("CurrentMetadata"), status: ref("Status"), metrics: map(ref("Metric")), provenance: ref("Provenance"), evidence_url: str })] },
+    Summary: object({ schema_version: str, definitions: map(str), dataset_id: str, generated_at: str, published_at: ns, selected_protocol_pair: ref("ProtocolPair"), results: array(ref("CompactResult")), comparison_policy: ref("Policy"), disclosure: ref("Disclosure"), interpretation: str }),
     Comparison: object({
       comparison: object({ gateway_a: str, gateway_b: str, ingress_protocol: str, upstream_protocol: str, metric: str, bound_ms: nn }, ["gateway_a", "gateway_b", "ingress_protocol", "upstream_protocol", "metric"]),
       comparability: object({ status: { enum: ["comparable", "incomparable", "insufficient_evidence"] }, policy: str, conditions_matched: array(str), reasons: array(str), warnings: array(str) }),
@@ -50,8 +57,8 @@ export function schemas() {
       interpretation: object({ scope: str, generalizable_to_real_model_latency: { const: false }, statistical_significance: { const: "not_established" } }), disclosure: ref("Disclosure"),
     }),
     Methodology: object({ schema_version: str, url: str, markdown: str, definitions: ref("JsonValue"), comparison_policy: ref("Policy"), disclosure: ref("Disclosure") }),
-    SchemaIndex: object({ schema_version: str, schemas: map(str), states: array(str), comparison_policy: ref("Policy") }),
-    Error: object({ error: str, status: { type: "integer", enum: [400, 404, 500] } }),
+    SchemaIndex: object({ schema_version: str, schemas: map(str), states: array(ref("MetricState")), metric_states: array(ref("MetricState")), cell_states: array(ref("CellState")), comparison_policy: ref("Policy") }),
+    Error: object({ error: str, status: { type: "integer", enum: [400, 404, 413, 500] } }),
   };
 }
 export function measurementSchema() {
@@ -69,16 +76,20 @@ export function openapi() {
     "200": { description: "Published evidence. Null means unknown or unavailable; never coerce to zero.", content: { "application/json": { schema: ref(schema) } } },
     "400": { description: "Invalid, empty, repeated or unsupported query parameter, invalid bound, or identical comparison IDs.", content: { "application/json": { schema: ref("Error"), example: { error: "Unknown protocol: invalid", status: 400 } } } },
     "404": { description: "Unknown gateway, run or collection.", content: { "application/json": { schema: ref("Error") } } },
+    "413": { description: "One measurement exceeds the 1 MiB response budget. Narrow the metric filter or use summary and raw evidence links.", content: { "application/json": { schema: ref("Error") } } },
     "500": { description: "Publication artifact unavailable.", content: { "application/json": { schema: ref("Error") } } },
   } } });
-  return { openapi: "3.1.0", info: { title: "On the Bench", version: "1.1.0", description: `${POLICY.description} Start with /api/v1/summary for bounded retrieval. Full evidence can exceed 4 MB. Actual publication time is unknown when published_at is null; generated_at is build time. Dynamic filters reject unknown and repeated parameters.` }, servers: [{ url: ORIGIN }], components: { schemas: schemas() }, paths: {
+  return { openapi: "3.1.0", info: { title: "On the Bench", version: "1.2.0", description: `${POLICY.description} Start with /api/v1/summary for bounded retrieval. Full evidence can exceed 4 MB. Actual publication time is unknown when published_at is null; generated_at is build time. Dynamic filters reject unknown and repeated parameters.` }, servers: [{ url: ORIGIN }], components: { schemas: schemas() }, paths: {
+    "/api/v1/definitions/{id}": get("immutableDefinitions", "Immutable definition catalog for a dataset ID referenced by compact CSV", "Definitions", [{ ...path, example: "dataset-" + "0".repeat(64) }]),
+    "/api/v1/definitions": get("definitions", "Shared exact definition strings for compact CSV exports", "Definitions"),
+    "/api/v1/runs": get("runs", "Paginated immutable run catalog. family=busbar includes busbar, busbar-150 and busbar-151; gateway filters an exact historical ID.", "RunPage", [query("gateway", "Exact historical gateway ID", str, "busbar-151"), query("family", "Gateway family across versioned IDs", str, "busbar"), query("limit", "Maximum runs per page", { type: "integer", minimum: 1, maximum: 100, default: 20 }, 20), query("offset", "Zero-based offset", { type: "integer", minimum: 0, default: 0 }, 0)]),
     "/api/v1": get("discovery", "API links and interpretation policy", "Discovery"),
     "/api/v1/summary": get("summary", "Compact core latency measurements for one selected protocol pair, with freshness and provenance; not a ranking.", "Summary", [gateway("gateway"), protocol("ingress"), protocol("egress")]),
     "/api/v1/gateways": get("gateways", "Gateway catalog with dated repository metadata", "Catalog"),
     "/api/v1/gateways/{id}": get("gateway", "Gateway measurements, history and legacy dashboard projection", "GatewayEvidence", [path]),
     "/api/v1/benchmarks/latest": get("latest", "Large collection of independent runs; use summary or measurements for bounded retrieval", "LatestCollection"),
     "/api/v1/benchmarks/{id}": get("benchmark", "Immutable collection (dataset-<sha256>) or run metadata (run-<gateway>-<sha256>)", "BenchmarkResource", [{ ...path, example: "dataset-" + "0".repeat(64) }]),
-    "/api/v1/measurements": get("measurements", "Paginated evidence. Follow next until null. Missing requested metrics remain absent.", "MeasurementPage", [gateway("gateway"), protocol("ingress"), protocol("egress"), metric, query("limit", "Maximum records per page", { type: "integer", minimum: 1, maximum: 100, default: 50 }, 10), query("offset", "Zero-based result offset", { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER, default: 0 }, 0)]),
+    "/api/v1/measurements": get("measurements", "Paginated evidence capped at 1 MiB UTF-8 JSON. returned can be less than limit; always follow next until null. Missing requested metrics remain absent.", "MeasurementPage", [gateway("gateway"), protocol("ingress"), protocol("egress"), metric, query("compact", "Set to 1 to return definition_id references plus a shared definitions dictionary; default 0 retains self-contained evidence.", { type: "string", enum: ["0", "1"], default: "0" }, "1"), query("limit", "Maximum records per page", { type: "integer", minimum: 1, maximum: 100, default: 50 }, 10), query("offset", "Zero-based result offset", { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER, default: 0 }, 0)]),
     "/api/v1/compare": get("compare", "Inspect comparability.status before citing a ratio. Full source measurements and provenance are preserved.", "Comparison", [gateway("a"), gateway("b"), protocol("ingress"), protocol("egress"), metric, query("bound", "Only valid with metric=throughput_rps; none means unbounded. Matched operating concurrency is required.", { type: "string", enum: ["1", "5", "10", "50", "100", "none"], default: "10" }, "10")]),
     "/api/v1/methodology": get("methodology", "Method text plus definitions recorded by the instrument", "Methodology"),
     "/api/v1/schema": get("schemas", "Schema discovery", "SchemaIndex"),

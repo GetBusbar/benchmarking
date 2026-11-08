@@ -7,15 +7,17 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata } from "./render.mjs";
-import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary } from "./public-data.mjs";
+import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, shellViews } from "./render.mjs";
+import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords } from "./public-data.mjs";
 import { gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
+
+import { semanticGuide, retrievalGuide, DATA_LICENSE, gatewayFamily } from "./retrieval.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 function git(root, args) { return execFileSync("git", ["-C", root, ...args], { maxBuffer: 256 * 1024 * 1024 }); }
 
-export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), generate = true, history = true } = {}) {
+export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), generate = true, history = true, publishedAt = null } = {}) {
   root = resolve(root); out = resolve(out);
   if (out === root || out === join(root, "site")) throw new Error("Build output must be a separate artifact directory");
   if (existsSync(join(out, ".onthebench-build"))) rmSync(out, { recursive: true });
@@ -43,10 +45,11 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     write(md, htmlToMarkdown(html));
     routes.push({ path, file, markdown: md });
   };
-  for (const name of ["app.js", "style.css", "favicon.svg", "article.js"]) copyFileSync(join(root, "site", name), join(out, name));
+  for (const name of ["app.js", "style.css", "favicon.svg", "article.js", "social-card.png"]) copyFileSync(join(root, "site", name), join(out, name));
   // Private build inputs are fetched only through the ASSETS binding. The Worker
   // denies public /_publication requests.
   write("/_publication/template.html", template);
+  json("/ui-shell.json", shellViews(template));
   const archives = [], byFile = new Map(), byHash = new Map();
   function archive(file, bytes, current = false) {
     const snapshot = JSON.parse(bytes.toString("utf8"));
@@ -62,7 +65,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       json(`/api/v1/benchmarks/${id}.json`, summary);
       page(`/gateways/runs/${id}`, renderArticle(template, {
         path: `/gateways/runs/${id}`, title: `${snapshot.gateway} — ${snapshot.measured_at || "undated run"}`,
-        structured: { "@context": "https://schema.org", "@type": "Dataset", name: `${snapshot.gateway} benchmark run`, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
+        structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${snapshot.gateway} benchmark run`, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
         body: `<h1>${esc(snapshot.gateway)} benchmark run</h1>${disclosureHtml}<p>Measured ${esc(snapshot.measured_at)}. Recorded build: ${esc(snapshot.build)}.</p><p>Hardware: ${esc(snapshot.hardware)}. Architecture: ${esc(snapshot.arch)}.</p><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p><h2>Recorded metric definitions</h2><dl>${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2><pre>${esc(JSON.stringify(snapshot.rig ?? null, null, 2))}</pre>`,
       }));
       archives.push(item); byHash.set(sha256, item);
@@ -88,12 +91,12 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const dates = measurements.map(m => m.measured_at).filter(Boolean).sort();
   const evidence = { schema_version: "1.0", collection_kind: "independent_gateway_runs", measurements, disclosure: DISCLOSURE, comparison_policy: POLICY };
   const datasetId = `dataset-${hash(JSON.stringify(evidence))}`;
-  measurements = measurements.map(m => ({ ...m, ...freshness(m.measured_at, data.generated_at) }));
+  measurements = measurements.map(m => ({ ...m, ...freshness(m.measured_at, data.generated_at, publishedAt) }));
   const publication = {
-    ...evidence, measurements, dataset_id: datasetId, generated_at: data.generated_at, published_at: null,
+    ...evidence, measurements, dataset_id: datasetId, generated_at: data.generated_at, published_at: publishedAt,
     measured_range: { earliest: dates[0] || null, latest: dates.at(-1) || null },
     metadata_as_of: data.gateways.map(g => g.stars_as_of).filter(Boolean).sort().at(-1) || null,
-    license: null, archive_history_included: history,
+    license: DATA_LICENSE, publication_time_scope: "Release timestamp recorded when publishing begins; not the first historical publication of these measurements.", archive_history_included: history,
     source_url: `${ORIGIN}/gateways`, immutable_url: `${ORIGIN}/api/v1/benchmarks/${datasetId}`,
     gateways: data.gateways.map(g => ({ id: g.key, name: g.display, url: `${ORIGIN}/gateways/${g.key}`, json_url: `${ORIGIN}/api/v1/gateways/${g.key}`, current_metadata: { stars: g.stars ?? null, stars_as_of: g.stars_as_of ?? null, first_commit: g.first_commit ?? null } })),
     metrics: [...new Set(["throughput_rps", ...measurements.flatMap(m => Object.keys(m.metrics))])].sort(),
@@ -101,9 +104,13 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json(`/api/v1/benchmarks/${datasetId}.json`, { ...evidence, dataset_id: datasetId });
   json("/api/v1/benchmarks/latest.json", publication);
   json("/_publication/records.json", publication);
+  const definitionCatalog = { schema_version: "1.0", dataset_id: datasetId, definitions: compactRecords(measurements).definitions };
+  json("/api/v1/definitions.json", definitionCatalog);
+  json(`/api/v1/definitions/${datasetId}.json`, definitionCatalog);
+  json("/_publication/runs.json", archives.map(r => ({ ...r, gateway_family: gatewayFamily(r.gateway_id), raw_result_url: `${ORIGIN}/api/v1/runs/${r.id}/raw.json`, source_url: `${ORIGIN}/gateways/runs/${r.id}` })));
   json("/api/v1/summary.json", compactSummary(publication));
   json("/api/v1/gateways.json", { schema_version: "1.0", gateways: publication.gateways, disclosure: DISCLOSURE });
-  json("/api/v1/index.json", { schema_version: "1.0", links: { summary: `${ORIGIN}/api/v1/summary`, gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
+  json("/api/v1/index.json", { schema_version: "1.0", retrieval: retrievalGuide(Buffer.byteLength(JSON.stringify(publication) + "\n")), links: { runs: `${ORIGIN}/api/v1/runs`, definitions: `${ORIGIN}/api/v1/definitions`, summary: `${ORIGIN}/api/v1/summary`, gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
   json("/api/v1/schema/index.json", schemaIndex());
   json("/api/v1/schema/measurement.json", measurementSchema());
   json("/openapi.json", openapi());
@@ -111,9 +118,9 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json("/api/v1/methodology.json", { schema_version: "1.0", url: `${ORIGIN}/gateways/method`, markdown: readFileSync(join(out, "gateways/method.md"), "utf8"), definitions: data.definitions ?? {}, comparison_policy: POLICY, disclosure: DISCLOSURE });
   for (const g of data.gateways) {
     const records = measurements.filter(m => m.gateway_id === g.key);
-    const histories = archives.filter(r => r.gateway_id === g.key);
+    const histories = archives.filter(r => gatewayFamily(r.gateway_id) === gatewayFamily(g.key));
     json(`/api/v1/gateways/${g.key}.json`, { schema_version: "1.0", gateway: g, current_metadata: publication.gateways.find(item => item.id === g.key).current_metadata, metadata_scope: "gateway.stars and stars_as_of are legacy aliases of current_metadata, a dated repository snapshot, not stars at measurement time. Run statistics were not recorded.", measurements: records, history: histories, generated_at: data.generated_at, disclosure: DISCLOSURE });
-    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", name: `${g.display} gateway measurements`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways) }));
+    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${g.display} gateway measurements`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways) }));
   }
   // Common comparison URLs cost only a static read, and are discoverable in the
   // sitemap. Both orders are useful: the ratio explicitly names its denominator.
@@ -129,12 +136,15 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     page(`/gateways/${key}`, renderArticle(template, { path: `/gateways/${key}`, title: `${key} historical benchmarks`, body: `<h1>${esc(key)} historical benchmarks</h1>${disclosureHtml}<p>This gateway is not on the current board.</p><ul>${histories.map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
     json(`/api/v1/gateways/${key}.json`, { schema_version: "1.0", gateway: { key, current: false }, measurements: [], history: histories, disclosure: DISCLOSURE });
   }
-  page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", structured: { "@context": "https://schema.org", "@type": "DataCatalog", name: "On the Bench published gateway evidence", url: `${ORIGIN}/gateways/data`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, dataset: publication.gateways.map(g => ({ "@type": "Dataset", name: g.name + " measurements", url: g.url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: g.json_url } })) }, body: dataArticle(publication) }));
-  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Historical benchmark runs", body: `<h1>Historical benchmark runs</h1>${disclosureHtml}<ul>${archives.map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.gateway_id)} — ${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
+  page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", structured: { "@context": "https://schema.org", "@type": "DataCatalog", license: DATA_LICENSE, name: "On the Bench published gateway evidence", url: `${ORIGIN}/gateways/data`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, dataset: publication.gateways.map(g => ({ "@type": "Dataset", license: DATA_LICENSE, name: g.name + " measurements", url: g.url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: g.json_url } })) }, body: dataArticle(publication) }));
+  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Historical benchmark runs", body: `<h1>Historical benchmark runs</h1>${disclosureHtml}<p><a href="/api/v1/runs">Paginated run catalog</a> · <a href="/api/v1/runs?family=busbar">All Busbar versions</a>. Gateway IDs identify tested variants; gateway_family groups their history.</p><ul>${archives.slice(0, 50).map(r => `<li><a href="/gateways/runs/${r.id}">${esc(r.gateway_id)} — ${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
   write("/gateways/data.csv", measurementsCsv(measurements));
-  const index = `# On the Bench\n\nReproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Compact summary — start here](${ORIGIN}/api/v1/summary)\n- [Gateway catalog](${ORIGIN}/api/v1/gateways)\n- [API discovery](${ORIGIN}/api/v1)\n- [Latest dataset — large; prefer summary or paginated measurements](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Distinguish measured_at from generated_at and published_at (unknown when null). Age is relative to age_as_of, not retrieval time. current_metadata contains dated repository statistics, not run-time statistics.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
+  const index = `# On the Bench\n\nReproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Dataset reuse license](${ORIGIN}/gateways/license)\n- [Compact summary — start here](${ORIGIN}/api/v1/summary)\n- [Gateway catalog](${ORIGIN}/api/v1/gateways)\n- [API discovery](${ORIGIN}/api/v1)\n- [Latest dataset — large; prefer summary or paginated measurements](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Measurement pages are capped at 1 MiB of UTF-8 JSON. Always follow next until null, even when fewer than limit rows are returned. Use gateway, ingress, egress and metric filters to narrow retrieval.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Distinguish measured_at from generated_at and published_at (unknown when null). Age is relative to age_as_of, not retrieval time. current_metadata contains dated repository statistics, not run-time statistics.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
   write("/llms.txt", index);
-  write("/llms-full.txt", index + "\n" + readFileSync(join(out, "gateways/performance.md"), "utf8") + "\n" + readFileSync(join(out, "gateways/method.md"), "utf8"));
+  write("/llms-full.txt", semanticGuide(publication));
+  const licenseText = readFileSync(join(root, "DATA-LICENSE.md"), "utf8");
+  page("/gateways/license", renderArticle(template, { path: "/gateways/license", title: "Dataset reuse and attribution", body: `<h1>Dataset reuse and attribution</h1><pre>${esc(licenseText)}</pre><p><a href="${DATA_LICENSE}">CC BY 4.0</a> · <a href="${DATA_LICENSE}legalcode">Legal terms</a></p>` }));
+  write("/DATA-LICENSE.md", licenseText);
   write("/robots.txt", `User-agent: *\nAllow: /\nDisallow: /_publication/\nSitemap: ${ORIGIN}/sitemap.xml\n`);
   // No lastmod is preferable to an invented timestamp on every metadata refresh.
   write("/sitemap.xml", `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${routes.map(r => `<url><loc>${ORIGIN}${esc(r.path)}</loc></url>`).join("")}</urlset>\n`);
