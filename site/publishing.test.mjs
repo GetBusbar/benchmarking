@@ -317,3 +317,14 @@ test("gateway entry pages are bounded and explicitly lead to full evidence", { s
  assert.equal(page.dataset_id, summary.dataset_id); assert.equal(page.generated_at, summary.generated_at); assert.equal(page.published_at, summary.published_at);
  assert.equal((await call("/gateways/busbar/evidence")).status, 200);
 });
+
+
+test('container version display uses the tag rather than the image digest', async () => {
+  const { default: app } = await import('./app.js');
+  const digest='a'.repeat(64);
+  assert.equal(app.parseBuildVersion(`kong:3.9.4@sha256:${digest}`),'3.9.4');
+  assert.equal(app.parseBuildVersion(`registry.example:5000/kong:3.9.4@sha256:${digest}`),'3.9.4');
+  assert.equal(app.parseBuildVersion(`registry.example:5000/kong@sha256:${digest}`),'sha256:'+digest.slice(0,12));
+  assert.equal(app.parseBuildVersion('apache/apisix:3.17.0-debian'),'3.17.0-debian');
+  assert.equal(app.parseBuildVersion('target/release/ai-gateway'),null);
+});

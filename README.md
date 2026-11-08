@@ -42,7 +42,7 @@ bake in.
 ## Prerequisites
 
 **To run locally on your own box:**
-- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols and sustains 100s of k RPS, so it's never the bottleneck), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
+- **Rust** (`cargo`) - builds the mock (`mock/`, a hyper server that answers all six wire protocols; the runner checks its baseline against the frozen rig calibration), the engine (including its own `otb loadgen` load generator), plus the gateways compiled from source (LiteLLM-Rust, Helicone). Source builds also need `cmake`, `clang`, and `protobuf-compiler`.
 - **Docker** - for the container-based gateways (Bifrost, Kong, GoModel, One-API, …).
 - **Python 3** - runs the auditors and verifiers (`bench-audit.py`, `verify-*.py`). No plotting library is needed: the charts are drawn by the site in the browser (the static matplotlib pipeline was retired in 704fcf6).
 - Container gateways use official ARM64 images pinned by tag and digest. Native builds pin named release commits.
@@ -110,18 +110,22 @@ is stamped into every result.
 
 ### How long it takes
 
-Plan for it - this is a build-and-measure benchmark, not a quick script:
+The current suite checks **36 ingress/upstream protocol pairs** for each gateway.
+Served pairs can each run throughput searches, memory soaks, streaming checks,
+added-latency windows and CPU measurements. A single gateway can therefore take
+several hours; unsupported pairs finish much sooner. The number of supported
+pairs and search convergence matter more than build time alone.
 
-- **Full field, all metrics** (`run-on-ec2.sh` with the default gateways): **~60–75 min** on an
-  `m7g.4xlarge`. Most of that is *building* - LiteLLM-Rust from source is the long pole (~15–20 min),
-  plus the LiteLLM/Kong/Helicone images and busbar. The measurement itself is only ~5–6 min per
-  gateway (latency + throughput sweep + a memory soak).
-- **A single gateway** (e.g. `run-on-ec2.sh busbar`): **~8–12 min**, or ~2–3 min if it's already built.
-- **Locally**, subtract the box provisioning (~2–3 min) but expect the same build/measure times.
+The full field runs on separate boxes in parallel, so its elapsed time follows
+the slowest gateway. A later single-gateway rerun avoids repeating the other
+entrants, but still runs that gateway's full protocol matrix on a fresh box.
+Follow the per-gateway phase logs and the completed-result list for progress;
+recorded phase durations provide evidence for future estimates.
 
-The one-click EC2 script does all of this unattended and terminates the box when done, so the wall
-clock is hands-off. First run is slowest (cold builds + image pulls); re-runs on a warm box are much
-faster.
+The runner terminates each box after harvesting its results and arms a separate
+maximum-lifetime shutdown as a backstop. Keep the frozen rig and calibration
+when rerunning one gateway; changing the instrument calls for a new field-wide
+experiment.
 
 ## What it measures
 
