@@ -10,7 +10,12 @@
     "linkedom": "0.18.15"
   },
   "devDependencies": {
+    "ajv": "8.20.0",
+    "openapi-typescript": "7.10.1",
+    "typescript": "5.9.3",
     "wrangler": "4.156.2"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { renderDashboard, renderArticle, htmlToMarkdown, ORIGIN } from "./render.mjs";
-import { compareMeasurements, measurementsCsv, PROTOCOLS } from "./public-data.mjs";
+import { compareMeasurements, measurementsCsv, compactSummary, PROTOCOLS } from "./public-data.mjs";
 import { comparisonArticle } from "./evidence.mjs";
 
 const caches = new WeakMap();
@@ -55,6 +55,10 @@ async function route(request, env) {
   if (path === "/gateways/methodology" || path === "/gateways/methodology.md") { url.pathname = path.replace("methodology", "method"); return Response.redirect(url.href, 308); }
   const input = inputs(env);
   const getPublication = () => input("/_publication/records.json");
+  if (path === "/api/v1/summary" && url.search) {
+    const publication = await getPublication();
+    return json(compactSummary(publication, filterQuery(url, publication, ["gateway", "ingress", "egress"])));
+  }
   if (path === "/api/v1/measurements" || path === "/gateways/data.csv") {
     const publication = await getPublication();
     const q = filterQuery(url, publication, path.endsWith(".csv") ? ["gateway", "ingress", "egress", "metric"] : ["gateway", "ingress", "egress", "metric", "limit", "offset"]);
@@ -100,7 +104,7 @@ async function route(request, env) {
   let asset = path;
   if (path === "/api/v1") asset = "/api/v1/index.json";
   else if (path === "/api/v1/schema") asset = "/api/v1/schema/index.json";
-  else if (/^\/api\/v1\/(gateways|methodology|benchmarks\/latest|gateways\/[a-z0-9-]+|benchmarks\/(?:dataset-[a-f0-9]{64}|run-[a-z0-9-]+-[a-f0-9]{64}))$/.test(path)) asset += ".json";
+  else if (/^\/api\/v1\/(summary|gateways|methodology|benchmarks\/latest|gateways\/[a-z0-9-]+|benchmarks\/(?:dataset-[a-f0-9]{64}|run-[a-z0-9-]+-[a-f0-9]{64}))$/.test(path)) asset += ".json";
   else if (path === "/") asset = "/index.html";
   else if (!path.split("/").at(-1).includes(".")) asset += ".html";
   const response = await env.ASSETS.fetch(new Request(ORIGIN + asset));

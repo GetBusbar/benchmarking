@@ -45,8 +45,9 @@ export function dataArticle(publication) {
 <p>Published collection: ${esc(publication.dataset_id)}. Generated ${esc(publication.generated_at)}; measurements ${esc(publication.measured_range.earliest)} through ${esc(publication.measured_range.latest)}. Metadata refresh is separate from measurement time. This is a collection of independent runs, not a claim of one complete simultaneous field run.</p>
 <p><a href="/api/v1">API discovery</a> · <a href="/api/v1/benchmarks/latest">Latest JSON</a> · <a href="/gateways/index.md">Markdown</a> · <a href="/gateways/data.csv">CSV</a> · <a href="/openapi.json">OpenAPI</a> · <a href="/api/v1/schema">JSON schemas</a> · <a href="/gateways/runs">Historical runs</a></p>
 <p><a href="/llms.txt">Agent discovery (llms.txt)</a> · <a href="/llms-full.txt">Full agent guide</a> · <a href="/api/v1/schema/measurement.json">Version 1 measurement schema</a></p>
-<h2>Retrieval</h2><p>All resources are public and read-only. HTML contains measurements without JavaScript. Explicit Markdown and JSON links avoid content negotiation. Query endpoints return 400 for invalid filters and 404 for unknown entities.</p>
-<pre>GET /api/v1/gateways
+<h2>Compact results and freshness</h2><p>Start with <a href="/api/v1/summary">the compact summary</a> (one protocol pair, core metrics and provenance). Filter with gateway, ingress and egress. Full collections may exceed retrieval-tool limits; follow paginated measurement links for details. Each compact result and comparison measurement includes measured_at, published_at, generated_at, age, age_days and age_as_of. Age is measured at collection generation, not at request time. published_at is null when the actual deployment timestamp is unknown.</p><p>current_metadata contains repository stars and their stars_as_of date. Legacy gateway.stars fields refer to that same metadata snapshot, not the benchmark date. Stars at measurement time were not recorded and are not inferred.</p><h2>Retrieval</h2><p>All resources are public and read-only. HTML contains measurements without JavaScript. Explicit Markdown and JSON links avoid content negotiation. Query endpoints return 400 for invalid filters and 404 for unknown entities.</p>
+<pre>GET /api/v1/summary?ingress=openai&amp;egress=openai
+GET /api/v1/gateways
 GET /api/v1/gateways/busbar
 GET /api/v1/measurements?gateway=busbar&amp;ingress=openai&amp;egress=openai&amp;limit=50
 GET /api/v1/compare?a=busbar&amp;b=bifrost&amp;ingress=openai&amp;egress=openai&amp;metric=added_latency_p99_us</pre>
@@ -65,23 +66,4 @@ GET /api/v1/compare?a=busbar&amp;b=bifrost&amp;ingress=openai&amp;egress=openai&
 export function schemaIndex() {
   return { schema_version: "1.0", schemas: { measurement: ORIGIN + "/api/v1/schema/measurement.json" }, states: ["valid", "below_resolution", "not_measured", "not_configured", "untestable", "rig_limited", "harness_error", "not_served"], comparison_policy: POLICY };
 }
-export function measurementSchema() {
-  return { $schema: "https://json-schema.org/draft/2020-12/schema", $id: ORIGIN + "/api/v1/schema/measurement.json", title: "On the Bench per-cell measurement", type: "object", required: ["schema_version", "gateway_id", "test", "status", "metrics", "provenance"], properties: {
-    schema_version: { const: "1.0" }, measurement_id: { type: ["string", "null"] }, gateway_id: { type: "string" }, run_id: { type: ["string", "null"] }, measured_at: { type: ["string", "null"] },
-    status: { type: "object", required: ["state"], properties: { state: { type: "string" } } }, test: { type: "object", required: ["ingress_protocol", "upstream_protocol"] },
-    metrics: { type: "object", additionalProperties: { type: "object", required: ["value", "state", "reason"], properties: { value: { type: ["number", "null"] }, state: { type: "string" }, reason: { type: ["string", "null"] }, definition: { type: ["string", "null"] } } } }, provenance: { type: "object" },
-  } };
-}
-export function openapi() {
-  const get = (description, parameters = []) => ({ get: { description, parameters, responses: { "200": { description: "Published benchmark evidence", content: { "application/json": { schema: { type: "object" } } } }, "400": { description: "Invalid query" }, "404": { description: "Unknown entity" } } } });
-  const query = (name, type = "string") => ({ name, in: "query", schema: { type } });
-  const path = name => ({ name, in: "path", required: true, schema: { type: "string" } });
-  return { openapi: "3.1.0", info: { title: "On the Bench", version: "1.0.0", description: POLICY.description }, servers: [{ url: ORIGIN }], paths: {
-    "/api/v1": get("Discovery"), "/api/v1/gateways": get("Gateway catalog"), "/api/v1/gateways/{id}": get("Gateway evidence and history", [path("id")]),
-    "/api/v1/benchmarks/latest": get("Latest published collection of independently measured gateways"), "/api/v1/benchmarks/{id}": get("Immutable published collection or run", [path("id")]),
-    "/api/v1/measurements": get("Paginated per-cell evidence", ["gateway", "ingress", "egress", "metric"].map(n => query(n)).concat([query("limit", "integer"), query("offset", "integer")])),
-    "/api/v1/compare": get("Conservative comparison; throughput_rps accepts bound=1|5|10|50|100|none and requires matched operating concurrency", ["a", "b", "ingress", "egress", "metric", "bound"].map(n => query(n))),
-    "/api/v1/methodology": get("Methodology and metric definitions"), "/api/v1/schema": get("Schemas"),
-    "/api/v1/runs/{id}/raw.json": get("Exact immutable raw record", [path("id")]),
-  } };
-}
+export { measurementSchema, openapi } from "./api-contract.mjs";

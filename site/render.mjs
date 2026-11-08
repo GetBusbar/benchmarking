@@ -66,6 +66,11 @@ export function renderDashboard(template, data, path, publication) {
     const rows = app.chartRows(metric, app.applyFilters(data.gateways, state), state);
     document.getElementById("chart-panel")?.insertAdjacentHTML("beforeend", `<table class="sr-only" id="chart-canvas-data"><caption>${esc(metric.label)}</caption><thead><tr><th>Gateway</th><th>Value</th><th>Unit</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${esc(r.v)}</td><td>${esc(metric.unit)}</td></tr>`).join("")}</tbody></table>`);
   }
+  const method = document.querySelector("#view-method article");
+  if (method && publication) {
+    const runs = [...new Map(publication.measurements.filter(m => m.run_id).map(m => [m.run_id, m])).values()];
+    method.insertAdjacentHTML("afterbegin", `<section id="recorded-methodology"><h2>Methodology recorded with this collection</h2><p>Measured ${esc(publication.measured_range.earliest)} through ${esc(publication.measured_range.latest)}. Collection generated ${esc(publication.generated_at)}. The essay below describes the design and its history; recorded definitions and pinned harness versions govern each numerical claim.</p><details><summary>Versioned definitions and instrument sources</summary>${runs.map(m => `<h3>${esc(m.gateway_id)} — ${esc(m.measured_at)}</h3><p><a href="${esc(m.provenance.run_url)}">Immutable run</a> · Harness ${esc(m.test.harness_commit || "not recorded")}${m.test.harness_commit && /^[a-f0-9]{7,40}$/.test(m.test.harness_commit) ? ` · <a href="https://github.com/GetBusbar/benchmarking/tree/${esc(m.test.harness_commit)}/engine">Pinned source</a>` : ""}</p><dl>${Object.entries(m.test.definitions || {}).map(([key,value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join("") || "<dd>Definitions not recorded; consult raw evidence.</dd>"}</dl>`).join("")}</details></section>`);
+  }
   const title = state.view === "gateways"
     ? "AI Gateway Benchmarks: Latency, Throughput & Protocol Support | On the Bench"
     : app.pageTitle(state);
@@ -83,8 +88,8 @@ export function renderDashboard(template, data, path, publication) {
 
 export function datasetMetadata(publication, path = "/gateways") {
   return {
-    "@context": "https://schema.org", "@type": path === "/" ? "WebSite" : "Dataset",
-    "@id": ORIGIN + path + (path === "/" ? "#website" : "#dataset"),
+    "@context": "https://schema.org", "@type": "Dataset",
+    "@id": ORIGIN + path + ("#dataset"),
     name: "On the Bench AI Gateway Benchmarks", url: ORIGIN + path,
     description: "Gateway measurements against a local mock upstream. Independent runs; compare only matched test conditions. Operated by the Busbar team, also a benchmark participant.",
     creator: { "@type": "Organization", name: "Busbar team" }, isAccessibleForFree: true,

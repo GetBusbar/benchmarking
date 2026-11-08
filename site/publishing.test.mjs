@@ -118,3 +118,91 @@ test("published HTTP interface works without JavaScript", { skip: !artifact }, a
   assert.ok(!doc.querySelector("[data-wired]"), "SSR must not prevent client event wiring");
   assert.match(htmlToMarkdown(html), /req\/s|Throughput|throughput/);
 });
+
+test("agent contract: bounded retrieval, schemas, freshness and provenance", { skip: !artifact }, async () => {
+  const { default: Ajv } = await import("ajv/dist/2020.js");
+  const env = { ASSETS: fileAssets(artifact) };
+  const call = path => worker.fetch(new Request("https://onthebench.ai" + path), env);
+  const spec = await (await call("/openapi.json")).json();
+  const ajv = new Ajv({ strict: false, allErrors: true });
+  ajv.addSchema({ $id: "otb", components: spec.components });
+  function validate(name, value) {
+    const check = ajv.compile({ $ref: `otb#/components/schemas/${name}` });
+    assert.ok(check(value), `${name}: ${JSON.stringify(check.errors)?.slice(0,2500)}`);
+  }
+  const pub = await (await call("/api/v1/benchmarks/latest")).json(); validate("LatestCollection", pub);
+  const first = pub.gateways[0].id, second = pub.gateways[1].id;
+  for (const [path, schema] of [["/api/v1", "Discovery"], ["/api/v1/gateways", "Catalog"], [`/api/v1/gateways/${first}`, "GatewayEvidence"], ["/api/v1/methodology", "Methodology"], ["/api/v1/schema", "SchemaIndex"], ["/api/v1/measurements?limit=2", "MeasurementPage"], [`/api/v1/benchmarks/${pub.dataset_id}`, "BenchmarkResource"], [`/api/v1/benchmarks/${pub.measurements.find(m => m.run_id).run_id}`, "BenchmarkResource"]]) validate(schema, await (await call(path)).json());
+  const body = await (await call("/api/v1/summary")).text();
+  assert.ok(Buffer.byteLength(body) < 64 * 1024, "summary fits a small retrieval context");
+  const summary = JSON.parse(body); validate("Summary", summary);
+  assert.equal(summary.results.length, pub.gateways.length);
+  for (const row of summary.results) {
+    const source = pub.measurements.find(m => m.gateway_id === row.gateway_id && m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai");
+    if (source) {
+      assert.deepEqual(row.provenance, source.provenance);
+      assert.equal(row.measured_at, source.measured_at);
+      if (source.metrics.added_latency_p99_us) assert.deepEqual(row.metrics.added_latency_p99_us, source.metrics.added_latency_p99_us);
+    }
+    assert.equal(row.age_as_of, pub.generated_at);
+    assert.equal(row.published_at, null, "unknown deployment time is not fabricated");
+    const gateway = await (await call(`/api/v1/gateways/${row.gateway_id}`)).json();
+    assert.equal(row.current_metadata.stars, gateway.gateway.stars);
+    assert.equal(row.current_metadata.stars_as_of, gateway.gateway.stars_as_of);
+  }
+  for (const suffix of ["", "&ingress=openai&egress=openai", "&metric=throughput_rps&bound=none"]) {
+    const c = await (await call(`/api/v1/compare?a=${first}&b=${second}${suffix}`)).json(); validate("Comparison", c);
+    for (const side of [c.results.gateway_a,c.results.gateway_b].filter(Boolean)) {
+      assert.deepEqual(side, pub.measurements.find(m => m.measurement_id === side.measurement_id));
+      assert.equal(side.age_as_of, pub.generated_at);
+    }
+    if (c.comparability.status !== "comparable") assert.equal(c.results.gateway_b_over_a, null);
+  }
+  const filtered = await (await call(`/api/v1/summary?gateway=${first}&ingress=anthropic&egress=openai`)).json();
+  validate("Summary", filtered); assert.equal(filtered.results.length, 1);
+  for (const query of ["gateway=", "ingress=invalid", "offset=1", "gateway=x&gateway=y"]) {
+    const r = await call(`/api/v1/summary?${query}`); assert.equal(r.status, 400); validate("Error", await r.json());
+  }
+  assert.equal((await call("/api/v1/summary?gateway=missing-gateway")).status, 404);
+  assert.match(await (await call("/robots.txt")).text(), /User-agent: \*\nAllow: \//);
+  const sitemap = await (await call("/sitemap.xml")).text();
+  for (const path of ["/gateways", "/gateways/data", "/gateways/method", `/gateways/${first}`]) assert.ok(sitemap.includes(`<loc>https://onthebench.ai${path}</loc>`));
+  for (const path of ["/", "/gateways/method", "/gateways/data", `/gateways/${first}`]) {
+    const doc = parseHTML(await (await call(path)).text()).document;
+    assert.ok(doc.querySelector('link[rel="canonical"]'));
+    const metadata = JSON.parse(doc.querySelector('script[type="application/ld+json"][data-publication]').textContent);
+    assert.ok(["Dataset", "DataCatalog"].includes(metadata["@type"]));
+    assert.ok(!JSON.stringify(metadata).includes("aggregateRating"));
+  }
+});
+
+test("OpenAPI generates a usable typed client with nullable metrics", async () => {
+  const { default: openapiTS, astToString } = await import("openapi-typescript");
+  const { openapi } = await import("./api-contract.mjs");
+  const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const base = process.env.OTB_BUILD_ROOT || (process.platform === "darwin" ? "/Users/matthew/Developer/tmp" : process.env.TMPDIR || "/tmp");
+  mkdirSync(base, { recursive: true });
+  const dir = mkdtempSync(join(base, "otb-typed-client-"));
+  try {
+    writeFileSync(join(dir, "api.d.ts"), astToString(await openapiTS(openapi())));
+    writeFileSync(join(dir, "client.ts"), `import type { paths } from "./api";
+      type Summary = paths["/api/v1/summary"]["get"]["responses"][200]["content"]["application/json"];
+      async function readSummary(): Promise<Summary> { return (await fetch("https://onthebench.ai/api/v1/summary")).json(); }
+      async function consume() { const s = await readSummary(); for (const row of s.results) {
+        const value: number | null = row.metrics.added_latency_p99_us.value;
+        const run: string | null = row.provenance.run_url;
+        const measured: string | null = row.measured_at;
+        const age: string = row.age;
+        // @ts-expect-error Null must not silently become a quantitative value.
+        const unsafe: number = row.metrics.added_latency_p99_us.value;
+      } }
+      type Query = paths["/api/v1/compare"]["get"]["parameters"]["query"];
+      const query: Query = { a: "busbar", b: "litellm-python", ingress: "openai" };
+      // @ts-expect-error Comparisons require both gateway IDs.
+      const missing: Query = { a: "busbar" };
+    `);
+    execFileSync(process.execPath, [new URL("./node_modules/typescript/bin/tsc", import.meta.url).pathname, "--strict", "--noEmit", "--skipLibCheck", "--lib", "es2022,dom", join(dir, "client.ts")], { stdio: "pipe" });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
