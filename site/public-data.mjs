@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Public records are a projection of the checked board, never a new measurement.
+import { canonicalCellState } from "./states.mjs";
 export const ORIGIN = "https://onthebench.ai";
 export const DISCLOSURE = { operator: "Busbar team", operator_is_entrant: true };
 export const PROTOCOLS = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"];
@@ -20,9 +21,7 @@ export function metricRecord(envelope) {
   };
 }
 export function cellStatus(cell) {
-  if (cell.served === true) return "served";
-  if (cell.served === false) return "not_configured";
-  return typeof cell.served === "string" ? cell.served : "not_measured";
+  return canonicalCellState(cell);
 }
 function groupDefinition(definitions, section, key) {
   const prefix = section === "perf" ? (key.includes("latency") || key.includes("c1_p99") ? "perf.added_latency" : key.includes("rps_") || key.startsWith("cpu_") || key.startsWith("cost_") ? "perf.cost" : "perf.frontier")
@@ -55,7 +54,7 @@ export function projectMeasurements(gateway, archivesByFile) {
         gateway_id: gateway.key,
         gateway_build: cell.__run?.build ?? matrix.build ?? null,
         run_id: archive?.id ?? null, measured_at: measuredAt,
-        status: { state: cellStatus(cell), reason: cell.reason ?? null, detail: cell.verdict_note || cell.probe_note || null },
+        status: { state: cellStatus(cell), raw_state: cell.served ?? null, reason: cell.reason ?? null, detail: cell.probe_note || cell.verdict_note || null, evidence_scope: cell.served === "not_configurable" ? "Historical capability research, not a fresh probe of the tested build. Referenced versions may differ from gateway_build; do not infer current capability." : "Recorded run evidence", probe_http_status: cell.status || null, response_excerpt: cell.body_snippet || null },
         test: {
           ingress_protocol: ingress, upstream_protocol: egress,
           hardware: raw?.hardware ?? matrix.hardware ?? null,
@@ -168,20 +167,39 @@ export function freshness(measuredAt, generatedAt, publishedAt = null) {
 export function compactSummary(publication, query = {}) {
   const ingress = query.ingress || "openai", egress = query.egress || "openai";
   const keys = ["added_latency_p50_us", "added_latency_p99_us", "added_ttft_p99_us"];
+  const compact = compactRecords(publication.measurements.map(m => ({ ...m, test: { ...m.test, definitions: {} }, metrics: Object.fromEntries(Object.entries(m.metrics).filter(([key]) => keys.includes(key))) })));
   return {
-    schema_version: "1.0", dataset_id: publication.dataset_id, generated_at: publication.generated_at,
-    published_at: publication.published_at, selected_protocol_pair: { ingress_protocol: ingress, upstream_protocol: egress },
+    schema_version: "1.1", definitions: compact.definitions, dataset_id: publication.dataset_id, generated_at: publication.generated_at,
+    published_at: publication.published_at, license: publication.license, selected_protocol_pair: { ingress_protocol: ingress, upstream_protocol: egress },
     results: publication.gateways.filter(g => !query.gateway || g.id === query.gateway).map(g => {
-      const m = publication.measurements.find(m => m.gateway_id === g.id && m.test.ingress_protocol === ingress && m.test.upstream_protocol === egress);
+      const m = compact.measurements.find(m => m.gateway_id === g.id && m.test.ingress_protocol === ingress && m.test.upstream_protocol === egress);
       return { gateway_id: g.id, name: g.name, gateway_build: m?.gateway_build ?? null,
         ...freshness(m?.measured_at, publication.generated_at, publication.published_at),
         current_metadata: g.current_metadata,
         status: m?.status ?? { state: "not_measured", reason: "requested_cell_not_measured", detail: null },
-        metrics: Object.fromEntries(keys.map(k => [k, m?.metrics[k] ?? { value: null, state: "not_measured", reason: "metric_not_recorded", definition: null }])),
+        metrics: Object.fromEntries(keys.map(k => [k, m?.metrics[k] ?? { value: null, state: "not_measured", reason: "metric_not_recorded", definition_id: null }])),
         provenance: m?.provenance ?? { source_url: g.url, raw_result_url: null, run_url: null, methodology_url: `${ORIGIN}/gateways/method`, raw_sha256: null },
         evidence_url: `${ORIGIN}/api/v1/measurements?gateway=${g.id}&ingress=${ingress}&egress=${egress}` };
     }),
     comparison_policy: POLICY, disclosure: DISCLOSURE,
-    interpretation: "Selected protocol cells, not a ranking. Check /api/v1/compare before calculating ratios. Null and below-resolution values are not zero. Repository statistics are dated metadata, not measurements. published_at is null when the actual deployment time is not recorded; generated_at is the collection build time.",
+    interpretation: "Selected protocol cells, not a ranking. Check /api/v1/compare before calculating ratios. Null and below-resolution values are not zero. Repository statistics are dated metadata, not measurements. published_at is the recorded release timestamp, not the first publication of historical runs; null means unrecorded. generated_at is collection build time. Resolve metric definition_id through definitions.",
   };
+}
+
+// Deduplicate exact definitions without treating text from different harnesses
+// as equivalent. IDs are local to the response's dictionary.
+export function compactRecords(records) {
+  const definitions = {}, ids = new Map();
+  const intern = text => {
+    if (text == null) return null;
+    if (!ids.has(text)) { const id = `definition-${ids.size + 1}`; ids.set(text, id); definitions[id] = text; }
+    return ids.get(text);
+  };
+  const measurements = records.map(m => ({ ...m,
+    test: { ...m.test, definitions: {}, definition_ids: Object.fromEntries(Object.entries(m.test.definitions || {}).map(([key, text]) => [key, intern(text)])) },
+    metrics: Object.fromEntries(Object.entries(m.metrics).map(([key, metric]) => {
+      const { definition, ...rest } = metric; return [key, { ...rest, definition_id: intern(definition) }];
+    })),
+  }));
+  return { measurements, definitions };
 }

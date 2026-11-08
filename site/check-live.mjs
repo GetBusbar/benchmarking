@@ -45,6 +45,8 @@ for (const userAgent of ["GPTBot/1.3", "Googlebot/2.1", "ChatGPT-User/1.0", "OAI
     const robots = await get("/robots.txt", userAgent);
     assert.match(await robots.text(), /User-agent: \*\nAllow: \//);
     assert.equal(robots.headers.get("cf-mitigated"), null);
+    const sitemap = await get("/sitemap.xml", userAgent);
+    assert.match(await sitemap.text(), /<urlset[^>]*>[\s\S]*<loc>https:\/\/onthebench.ai\/gateways<\/loc>/);
     const r = await get("/llms.txt", userAgent);
     assert.match(r.headers.get("Content-Type"), /text\/plain/);
     assert.match(await r.text(), /# On the Bench/);
@@ -73,3 +75,35 @@ if (failures.length) {
   console.error(`Deployment checks failed: ${failures.join("; ")}. The deployment may already be live; inspect HTTP/CDN behavior before declaring the release complete.`);
   process.exitCode = 1;
 }
+await check("query filters are preserved on measurements", async () => {
+  const catalog = await (await get("/api/v1/gateways")).json();
+  const gateway = catalog.gateways.find(g => g.id === "busbar")?.id || catalog.gateways[0].id;
+  const r = await get(`/api/v1/measurements?gateway=${gateway}&ingress=openai&egress=openai&limit=2&compact=1`);
+  assert.ok(new URL(r.url).searchParams.has("gateway"));
+  const page = await r.json(); assert.equal(page.limit, 2);
+  assert.ok(page.measurements.length > 0);
+  assert.ok(page.measurements.every(m => m.gateway_id === gateway && m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai"));
+});
+await check("root and tab HTML are thin, self-canonical and discoverable", async () => {
+  for (const path of ["/", "/gateways", "/gateways/performance", "/gateways/memory", "/gateways/charts"]) {
+    const html = await (await get(path)).text();
+    assert.ok(html.includes(`href="${origin}${path}"`));
+    assert.equal((html.match(/<h1[ >]/g) || []).length, 1);
+    assert.ok(!html.includes('id="matrix-grid"'));
+    assert.ok(!html.includes('id="view-method"'));
+    for (const link of ["/llms.txt", "/api/v1", "/gateways/data"]) assert.ok(html.includes(`href="${link}"`));
+    assert.ok(!html.includes("coming soon"));
+    if (path === "/" || path === "/gateways") assert.match(html, /<tbody>[\s\S]*?<tr[\s>]/);
+  }
+});
+await check("semantic guide, dataset license and recorded release time", async () => {
+  const guide = await (await get("/llms-full.txt")).text();
+  assert.ok(Buffer.byteLength(guide) < 64 * 1024);
+  assert.equal((guide.match(/^# /gm) || []).length, 1);
+  assert.doesNotMatch(guide, /\d+ of \d+|coming soon/);
+  const summary = await (await get("/api/v1/summary")).json();
+  assert.equal(summary.license, "https://creativecommons.org/licenses/by/4.0/");
+  assert.ok(Number.isFinite(Date.parse(summary.published_at)));
+  await get("/social-card.png"); await get("/gateways/license"); await get("/api/v1/runs?limit=2");
+});
+if (failures.length) process.exitCode = 1;

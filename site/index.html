@@ -52,11 +52,11 @@
       <span class="tt-label tt-sun">Light</span>
       <span class="tt-label tt-moon">Dark</span>
     </button>
-    <h1 class="brand"><a id="brand-link" href="/" aria-label="On the Bench home">
+    <div class="brand"><a id="brand-link" href="/" aria-label="On the Bench home">
       <img class="brand-mark" src="/favicon.svg" alt="" width="28" height="28">
       <span class="brand-name">On the Bench</span>
       <span class="brand-sub">AI tool benchmarks</span>
-    </a></h1>
+    </a></div>
     <p class="tagline" id="tagline">Reproducible gateway overhead measurement on neutral hardware. Same box, same mock upstream, same load, same CPU pin for every gateway; every number regenerates from committed JSON.</p>
     <!-- Benchmark category row (populated by app.js from CATEGORIES): the thing
          being benchmarked. Gateways today; future categories slot in beside it. -->
@@ -201,10 +201,13 @@
   <section id="view-matrix" class="view hidden">
     <h2>Protocol support matrix (6x6)</h2>
     <ul class="matrix-legend" aria-label="cell legend">
-      <li><span class="lg lg-pass"></span>probe passed (translation verified)</li>
+      <li><span class="lg lg-pass"></span>served (probe passed)</li>
+      <li><span class="lg lg-notconf"></span>not declared (historical capability research; not a probe)</li>
       <li><span class="lg lg-notconf"></span>not configured (probe failed; evidence on hover)</li>
       <li><span class="lg lg-unverified"></span>not verified (harness could not get it serving)</li>
-      <li><span class="lg lg-untestable"></span>untestable (mock limit)</li>
+      <li><span class="lg lg-untestable"></span>untestable (recorded harness limitation)</li>
+      <li><span class="lg lg-unprobed"></span>unprobed auth (authentication was not tested in this run)</li>
+      <li><span class="lg lg-failed"></span>not served (the gateway declined a pairing it is set up for; evidence on hover)</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
     </ul>
     <p class="matrix-legend-note muted">Probe-first: every ingress&#8594;upstream pairing of every gateway is attempted with a correctness-checked round trip (response validated in the ingress protocol's shape, upstream leg verified against the recording mock). A green cell passed; a grey cell's probe failed and its hover shows the probe's own evidence. No gateway is graded red for a pairing it does not serve.</p>
@@ -280,7 +283,7 @@
       <p>What we will not do is pick a faster route to flatter a gateway. Some offer a shortcut endpoint pinned to one provider that skips translation entirely. Where that is not the address a normal client would use for the job being measured, we do not use it, because measuring a shortcut against everyone else's real work is not a comparison. The code is public if you want to check any of this: a run is driven by <a id="lnk-matrix" target="_blank" rel="noopener">run-on-ec2.sh</a>, and every measurement, the memory window included, is taken by <a id="lnk-memory" target="_blank" rel="noopener">the engine</a>.</p>
 
       <h3>When we refuse to grade</h3>
-      <p>Some protocols expect requests to be cryptographically signed. Bedrock is the clear case: a real client signs with AWS SigV4. Authentication support depends on the recorded harness version and configuration. A rejection caused by unsupported client authentication is a harness limitation. Marking that as a failure would be marking a gateway down for doing its job, on evidence that is entirely about our limitations. Those cells are recorded as unprobed rather than failed, and they are grey on the board, not red.</p>
+      <p>Some protocols expect requests to be cryptographically signed. Bedrock is the clear case: a real client signs with AWS SigV4. Authentication support depends on the recorded harness version and configuration. A rejection caused by unsupported client authentication is a harness limitation. Marking that as a failure would be marking a gateway down for doing its job, on evidence that is entirely about our limitations. Read the cell state: unprobed auth means authentication was not tested, while untestable means the recorded harness could not pose the test. Neither establishes a gateway failure.</p>
       <p>A route that is not offered, a harness limitation, and a measured gateway failure are different states. Metrics close to the mock ceiling must be interpreted using the state and qualification evidence recorded by that run. Missing and below-resolution values are not exact zeroes.</p>
     </article>
 
