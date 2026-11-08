@@ -34,9 +34,10 @@ export function metadata(document, path, title, description, structured, markdow
   ]) document.querySelector(selector)?.setAttribute(attr, value);
   document.querySelectorAll('[data-publication]').forEach(n => n.remove());
   document.head.insertAdjacentHTML("beforeend",
+    `<link data-publication rel="alternate" type="text/plain" href="${esc(ORIGIN + markdown.replace(/\.md(?=\?|$)/, ".txt"))}">` +
     `<link data-publication rel="alternate" type="text/markdown" href="${esc(ORIGIN + markdown)}">` +
     `<link data-publication rel="alternate" type="application/json" href="${ORIGIN}/api/v1/summary">` +
-    `<link data-publication rel="service-desc" type="application/json" href="${ORIGIN}/openapi.json"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/llms.txt"><link data-publication rel="help" href="${ORIGIN}/gateways/data"><meta data-publication property="og:image" content="${ORIGIN}/social-card.png">` +
+    `<link data-publication rel="service-desc" type="application/json" href="${ORIGIN}/openapi.json"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/llms.txt"><link data-publication rel="sitemap" type="application/xml" href="${ORIGIN}/sitemap.xml"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/robots.txt"><link data-publication rel="help" href="${ORIGIN}/gateways/data"><meta data-publication property="og:image" content="${ORIGIN}/social-card.png">` +
     `<script data-publication type="application/ld+json">${jsonScript(structured)}</script>`);
 }
 
@@ -82,6 +83,7 @@ export function renderDashboard(template, data, path, publication) {
     `${title}. ${state.view === "memory" ? "Per-cell idle, loaded and recovery memory with recorded conditions." : state.view === "charts" ? "Charts with accessible data tables for the selected metric." : state.view === "method" ? "Versioned instrument definitions, provenance and comparison limitations." : state.view === "matrix" ? "Per-protocol support states and probe evidence." : "Protocol-selected gateway measurements against a local mock; not model inference latency."}`,
     datasetMetadata(publication, url.pathname), markdown);
   document.head.insertAdjacentHTML("beforeend", '<style data-publication>.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style>');
+  document.querySelectorAll("canvas").forEach(n => { n.setAttribute("role", "img"); n.setAttribute("aria-label", "Benchmark chart; equivalent values in the associated data table"); n.setAttribute("aria-describedby", "chart-canvas-data"); });
   document.documentElement.setAttribute("data-prerendered", "true");
   document.documentElement.setAttribute("data-thin-publication", "true");
   // Keep only the selected view in crawler HTML. The browser restores the small
@@ -92,19 +94,19 @@ export function renderDashboard(template, data, path, publication) {
     const rows = publication.measurements.filter(m => m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai");
     document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${esc(m.gateway_id)}</a></td><td>${esc(m.metrics.added_latency_p99_us?.value ?? "unavailable")}</td><td>${esc(m.metrics.added_latency_p99_us?.state || m.status.state)}</td><td>${esc(m.measured_at)}</td></tr>`).join("")}</tbody></table></section>`);
   }
-  document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal}</style></noscript>`);
+  document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><nav aria-label="Crawler discovery" class="crawler-links"><p>Discovery: <a href="${ORIGIN}/robots.txt">${ORIGIN}/robots.txt</a> · <a href="${ORIGIN}/sitemap.xml">${ORIGIN}/sitemap.xml</a> · <a href="${ORIGIN}/llms.txt">${ORIGIN}/llms.txt</a></p></nav><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal}</style></noscript>`);
   document.querySelector("main").insertAdjacentHTML("beforeend",
-    `<nav class="muted" aria-label="Benchmark data"><a href="/gateways/data">Data and API documentation</a> · <a href="/api/v1">API discovery</a> · <a href="/api/v1/summary">Compact results</a> · <a href="/llms.txt">Agent guide</a> · <a href="/gateways/runs">Historical measurements</a></nav>`);
+    `<nav class="data-links" aria-label="Benchmark data"><a href="/gateways/data">Data and API documentation</a> · <a href="/api/v1">API discovery</a> · <a href="/api/v1/summary">Compact results</a> · <a href="/llms.txt">Agent guide</a> · <a href="/gateways/runs">Historical measurements</a></nav>`);
   return document.toString();
 }
 
 export function datasetMetadata(publication, path = "/gateways") {
   return {
     "@context": "https://schema.org", "@type": "Dataset",
-    "@id": ORIGIN + path + ("#dataset"),
+    "@id": publication.immutable_url || ORIGIN + "/api/v1/benchmarks/" + publication.dataset_id,
     name: "On the Bench AI Gateway Benchmarks", url: ORIGIN + path,
     description: "Gateway measurements against a local mock upstream. Independent runs; compare only matched test conditions. Operated by the Busbar team, also a benchmark participant.",
-    license: publication.license, creator: { "@type": "Organization", name: "Busbar team" }, isAccessibleForFree: true,
+    license: publication.license, creator: { "@type": "Organization", name: "Busbar team", "@id": ORIGIN + "/#organization" }, measurementTechnique: ORIGIN + "/gateways/method", isAccessibleForFree: true,
     ...(publication.measured_range?.latest ? { temporalCoverage: `${publication.measured_range.earliest}/${publication.measured_range.latest}` } : {}),
     distribution: [{ "@type": "DataDownload", encodingFormat: "application/json", contentUrl: ORIGIN + "/api/v1/benchmarks/latest" },
       { "@type": "DataDownload", encodingFormat: "text/csv", contentUrl: ORIGIN + "/gateways/data.csv?compact=1" }],
@@ -134,7 +136,8 @@ export function htmlToMarkdown(html) {
     if (n.nodeType !== 1) return "";
     const content = () => [...n.childNodes].map(visit).join("");
     const tag = n.localName;
-    if (tag === "a") return n.getAttribute("href") ? `[${content().trim()}](${new URL(n.getAttribute("href"), ORIGIN).href})` : content();
+    if (tag === "svg") return " " + (n.getAttribute("aria-label") || [...n.querySelectorAll("title")].map(t => t.textContent).join("; ")) + " ";
+    if (tag === "a") return n.getAttribute("href") ? ` [${content().trim()}](${new URL(n.getAttribute("href"), ORIGIN).href}) ` : content();
     if (/^h[1-6]$/.test(tag)) return `\n\n${"#".repeat(Number(tag[1]))} ${content().trim()}\n\n`;
     if (tag === "table") {
       const rows = [...n.querySelectorAll("tr")].map(row => [...row.querySelectorAll("th,td")].map(cell => visit(cell).trim().replace(/\|/g, "\\|").replace(/\n/g, " ")));
@@ -149,5 +152,5 @@ export function htmlToMarkdown(html) {
     if (tag === "li") return `\n- ${content().trim()}`;
     return ["p", "div", "section", "article", "nav", "details", "summary"].includes(tag) ? `\n\n${content().trim()}\n\n` : content();
   }
-  return `# ${document.title}\n\n${visit(document.querySelector("main") || document.body).replace(/\n{3,}/g, "\n\n").trim()}\n`;
+  return `${document.querySelector("main h1") ? "" : "# " + document.title + "\n\n"}${visit(document.querySelector("main") || document.body).replace(/\n{3,}/g, "\n\n").trim()}\n`;
 }

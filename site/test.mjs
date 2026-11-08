@@ -1088,8 +1088,8 @@ test("a throughput hole is an ABSENCE with the engine's reason, never a zero", (
      the reader sees a gateway that carried nothing under a tight tail, which is the finding, not a hole. */
   const tooSlow = { best_cell: bcCell({ dialect: "openai", frontier: { 1: null, 10: 18, none: 20 } }) };
   const slow1 = app.frontierCell(tooSlow.best_cell, 1);
-  assert.equal(slow1.v, 0, "no rung held this bound ranks as zero throughput under it");
-  assert.equal(slow1.text, "0");
+  assert.equal(slow1.v, null, "no certified rung is unavailable, not zero");
+  assert.equal(slow1.text, "n/a");
   // AND IT SAYS SO ON THE CELL. On the field data plano is this state at five of six bounds; a bare cell
   // there would read as five missing measurements instead of the one damning finding it is.
   assert.equal(slow1.why, "no rung held this tail");

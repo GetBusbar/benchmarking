@@ -210,7 +210,7 @@
       <li><span class="lg lg-failed"></span>not served (the gateway declined a pairing it is set up for; evidence on hover)</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
     </ul>
-    <p class="matrix-legend-note muted">Probe-first: every ingress&#8594;upstream pairing of every gateway is attempted with a correctness-checked round trip (response validated in the ingress protocol's shape, upstream leg verified against the recording mock). A green cell passed; a grey cell's probe failed and its hover shows the probe's own evidence. No gateway is graded red for a pairing it does not serve.</p>
+    <p class="matrix-legend-note muted">Served means a recorded probe passed. Not declared means historical capability research, not an attempted probe. Not configured means a probe did not complete correctly. Untestable marks a harness limitation. Inspect each cell’s evidence and pinned harness version; a passing probe does not establish complete semantic equivalence.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">No protocol matrix measurements are available in this collection.</p>
@@ -223,7 +223,7 @@
       <p class="essay-standfirst"><strong>Who runs this.</strong> Built and operated by the Busbar team; busbar is one of the entrants. Same shared harness for every gateway, no per-gateway special-casing, every number from committed JSON, fully open source. <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">Read the code and re-run it yourself</a>. Gateway creators are welcome to PR and maintain their gateway manifest and configuration.</p>
 
       <p class="essay-lede">A benchmark is only worth reading if you can see what it did. Every gateway here gets its own machine, its own dedicated cores, the same local upstream, the same measuring tools, and the kind of configuration a real operator would actually deploy. Nothing is tuned to make anyone look good, including us. What follows is how it works, why we chose it, and where it can still be wrong.</p>
-      <p>The short version: one gateway per machine so nobody inherits anyone else's mess. Fixed cores so the load generator can never steal from the thing being measured. A local fake provider so we are timing the gateway and not the internet. Default configuration, because a benchmark of how well we tuned thirteen products is not a benchmark of the products. And when we are not sure a number is real, we do not print it.</p>
+      <p>The short version: one gateway per machine so nobody inherits anyone else's mess. Fixed cores so the load generator can never steal from the thing being measured. A local fake provider so we are timing the gateway and not the internet. Default configuration, because a benchmark of how well we tuned the published entrants is not a benchmark of the products. And when we are not sure a number is real, we do not print it.</p>
 
       <h3>One gateway, one machine</h3>
       <p>Each gateway is measured alone. It gets a fresh AWS <code>m7g.4xlarge</code>, sixteen real Graviton3 cores and 64&nbsp;GB of memory on Ubuntu 24.04, launched for that gateway and terminated when its run finishes. Nothing another gateway built, pulled, cached or left behind in page cache is ever on the box. The field can also be run on an Intel instance of the same size, and every result records which architecture produced it, because a number from one architecture is not a number from the other.</p>
@@ -270,9 +270,9 @@
 
       <h3>Where this can still be wrong</h3>
       <p>The uncomfortable part first: the same gateway, same version, same config, same instance type can produce materially different numbers on two different boxes. A cloud instance is a slice of shared physical hardware, and a neighbour on that host can take cycles our core pinning cannot see or prevent. We measure isolation inside our own box. We cannot measure who else is on the machine underneath it.</p>
-      <p>So every box measures its own floor before it is trusted. Before the gateway is even built, the load generator hits the mock directly with no gateway in the path and records the p99 of that direct hit. That number describes the hardware, not the entrant. It is compared against a rolling baseline built from that same gateway's recent qualified runs, with a band of four percent, and after the gateway boots a second and stronger check replays that gateway's own last peak cell against its recorded throughput. Both verdicts are written into the result file, so the state of the box that produced a number travels with the number.</p>
+      <p>So every box measures its own floor before it is trusted. Before the gateway is even built, the load generator hits the mock directly with no gateway in the path and records the p99 of that direct hit. That number describes the hardware, not the entrant. It is compared against a rolling baseline built from that same gateway's recent qualified runs, using the qualification band recorded in that run, and after the gateway boots a second and stronger check replays that gateway's own last peak cell against its recorded throughput. Both verdicts are written into the result file, so the state of the box that produced a number travels with the number.</p>
       <p>The band is deliberately one-sided, and the reasoning is the interesting part. Contention only ever adds latency and removes throughput. Nothing about sharing a host makes a box faster than its own clean hardware, so a box cannot randomly beat its own baseline. A floor that comes in faster than history predicts is not a fault, it is the box showing its true uncontended speed, and it suggests the earlier baseline run was the noisy one. Only the slow side is treated as a problem.</p>
-      <p>We should also be honest about where four percent came from. It is provisional. It was calibrated against variance measured on a harness that had its own bugs at the time, including a mock relaunch race and a couple of frozen probe paths, all since fixed, so some real share of that spread was our own noise rather than genuine box-to-box variance. We expect to tighten it once we have repeat runs on a frozen codebase to calibrate against properly.</p>
+      <p>Qualification thresholds are versioned evidence, not universal constants. Consult test.qualification in the measurement record for the actual band and verdict; missing qualification evidence remains unknown.</p>
       <p>A concrete case makes the risk clearer than the mechanism. One box measured a gateway's peak throughput at eighty six percent below that gateway's own recent baseline, a sevenfold miss, while the rig's floor on that same box had drifted only about five percent, small enough to pass for ordinary noise on its own. Nothing about the gateway had changed. That pairing, a large collapse sitting on top of a barely moved floor, is the signature this check exists to catch, and it is why the box's own qualifying measurement is recorded rather than discarded.</p>
       <p>Beyond the hardware, the honest limits are these. The upstream is a mock, so nothing here describes behaviour against a slow or failing real provider. The gateway gets four cores, so nothing here describes scaling on a much larger machine. The configuration is a competent default rather than an expert tuning, so a determined operator can very likely beat these numbers.</p>
 
@@ -299,15 +299,14 @@
   </section>
 </main>
 
-<footer class="site-footer">
-  <div class="wrap">
-    <p id="hw-stamp" class="muted"></p>
-    <p class="muted">Built and operated by the Busbar team; busbar is one of the entrants. Same harness for every gateway, every number from the committed JSON, open source, re-runnable by anyone.</p>
-    <p class="muted">Reproduce this: <code>git clone https://github.com/GetBusbar/benchmarking && cd benchmarking && ./run-on-ec2.sh</code> (needs only a configured AWS CLI; the script launches a fresh Graviton box, runs the full suite, pulls the results back and terminates the box).</p>
-    <p><a id="repo-link" target="_blank" rel="noopener">Benchmark repository on GitHub</a></p>
-    <p class="muted"><strong>Feedback &amp; corrections.</strong> The config shown for each gateway is our best-effort out-of-the-box attempt, published for transparency. Anyone, not just maintainers, can propose a fix: <a href="https://github.com/GetBusbar/benchmarking/issues/new?template=config-correction.yml" target="_blank" rel="noopener">open an issue</a> in the benchmarking repo.</p>
-  </div>
-</footer>
+<footer class="site-footer"><div class="wrap footer-content">
+<p class="footer-credit">On the Bench · Built and operated by the Busbar team, also a benchmark entrant.</p>
+<nav aria-label="Project resources"><a id="repo-link" href="https://github.com/GetBusbar/benchmarking">Source &amp; reproduction</a> · <a href="/gateways/method">Methodology</a> · <a href="/gateways/license">Dataset license</a> · <a href="https://github.com/GetBusbar/benchmarking/issues/new?template=config-correction.yml">Feedback &amp; corrections</a></nav>
+<details><summary>Test environment &amp; freshness</summary><p id="hw-stamp" class="muted"></p></details>
+<details><summary>Reproduce these measurements</summary><p>Each published number links to its committed evidence. Run the harness using a configured AWS CLI:</p><pre><code>git clone https://github.com/GetBusbar/benchmarking
+cd benchmarking
+./run-on-ec2.sh</code></pre><p>The script launches a fresh Graviton box, runs the suite, retrieves results and terminates the box. Gateway configurations are best-effort attempts; corrections are welcome.</p></details>
+</div></footer>
 
 <div id="compare-bar" class="compare-bar hidden"></div>
 

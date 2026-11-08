@@ -228,7 +228,7 @@ test("thin HTML, semantic guide, compact exports and run discovery", { skip: !ar
   const call = path => worker.fetch(new Request("https://onthebench.ai" + path), env);
   const pub = await (await call("/api/v1/benchmarks/latest")).json();
   const first = pub.gateways[0].id;
-  const full = await (await call(`/api/v1/measurements?gateway=${first}&limit=2`)).json();
+  const full = await (await call(`/api/v1/measurements?gateway=${first}&compact=0&limit=2`)).json();
   assert.equal(full.applied_filters.gateway, first); assert.equal(full.limit, 2); assert.ok(full.measurements.every(m => m.gateway_id === first));
   const compactResponse = await call(`/api/v1/measurements?gateway=${first}&compact=1&limit=2`);
   const compact = await compactResponse.json();
@@ -246,13 +246,18 @@ test("thin HTML, semantic guide, compact exports and run discovery", { skip: !ar
   assert.match(csv, /definition_id/); assert.match(csv, /\/api\/v1\/definitions/);
   const dictionaryResponse = await call(`/api/v1/definitions/${pub.dataset_id}`);
   assert.equal(dictionaryResponse.status, 200); assert.match(dictionaryResponse.headers.get("Cache-Control"), /immutable/);
-  assert.ok(csv.length < (await (await call(`/gateways/data.csv?gateway=${first}`)).text()).length);
+  assert.ok(csv.length < (await (await call(`/gateways/data.csv?gateway=${first}&compact=0`)).text()).length);
   const runs = await (await call("/api/v1/runs?family=busbar&limit=2")).json();
   assert.ok(runs.runs.every(r => r.gateway_family === "busbar")); assert.equal(runs.limit, 2); assert.ok(runs.next);
   assert.equal((await call("/api/v1/runs?family=nonexistent")).status, 404);
   for (const path of ["/", "/gateways", "/gateways/performance", "/gateways/memory", "/gateways/charts"]) {
     const html = await (await call(path)).text(), doc = parseHTML(html).document;
     assert.equal(doc.querySelectorAll("h1").length, 1, path);
+    const discovery = doc.querySelector('nav[aria-label="Crawler discovery"]');
+    for (const file of ["robots.txt", "sitemap.xml", "llms.txt"]) {
+      const url = `https://onthebench.ai/${file}`;
+      assert.equal(discovery.querySelector(`a[href="${url}"]`)?.textContent, url);
+    }
     assert.equal(doc.querySelectorAll("main > .view.hidden").length, 0, path);
     assert.ok(!doc.querySelector("#view-method"), path);
     assert.ok(!doc.querySelector("#matrix-grid"), path);
@@ -283,4 +288,19 @@ test("UI and API state vocabulary agree without rewriting raw evidence", async (
   for (const served of [true, false, "failed", "not_configurable", "not_configured", "untestable", "unprobed_auth", "not_verified", "not_probed", "not_measured", "future_token"]) {
     assert.equal(app.cellState({ served })[1].replaceAll(" ", "_"), canonicalCellState({ served }));
   }
+});
+
+ test("Markdown separates inline evidence and SVG bounds without duplicate headings", () => {
+ const md = htmlToMarkdown('<html><head><title>Title</title></head><body><main><h1>Title</h1><p><a href="/a">A</a><a href="/b">B</a></p><svg><title>1 ms: 20 req/s</title><title>5 ms: 30 req/s</title></svg></main></body></html>');
+ assert.equal((md.match(/^# /gm) || []).length, 1);
+ assert.match(md, /\) +\[/); assert.match(md, /req\/s; 5 ms/);
+ });
+
+test("default exports are compact and plain-text alternatives retain evidence", { skip: !artifact }, async () => {
+ const env = { ASSETS: fileAssets(artifact) }; const call = p => worker.fetch(new Request("https://onthebench.ai" + p), env);
+ const page = await (await call("/api/v1/measurements?gateway=busbar&ingress=openai&egress=openai&limit=2")).json();
+ assert.ok(page.definitions); assert.ok(page.measurements.every(m => m.gateway_id === "busbar"));
+ const txt = await call("/gateways/index.txt"); assert.equal(txt.status, 200); assert.match(txt.headers.get("Content-Type"), /text\/plain/);
+ assert.equal(await txt.text(), await (await call("/gateways/index.md")).text());
+ const csv = await (await call("/gateways/data.csv?gateway=busbar")).text(); assert.match(csv.split("\n")[0], /definition_id/); assert.doesNotMatch(csv.split("\n")[0], /"definition",/);
 });

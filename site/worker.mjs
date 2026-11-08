@@ -55,6 +55,12 @@ async function route(request, env) {
   if (path.length > 500 || url.search.length > 2000) return error(400, "Request URL too long");
   if (path.length > 1 && path.endsWith("/")) { url.pathname = path.slice(0, -1); return Response.redirect(url.href, 308); }
   if (path === "/gateways/methodology" || path === "/gateways/methodology.md") { url.pathname = path.replace("methodology", "method"); return Response.redirect(url.href, 308); }
+  if (path.endsWith(".txt") && path !== "/robots.txt" && !path.startsWith("/llms")) {
+    const alternate = new URL(url); alternate.pathname = path.replace(/\.txt$/, ".md");
+    const response = await route(new Request(alternate, request), env);
+    const headers = new Headers(response.headers); headers.set("Content-Type", "text/plain; charset=utf-8");
+    return new Response(response.body, { status: response.status, headers });
+  }
   const input = inputs(env);
   const getPublication = () => input("/_publication/records.json");
   if (path === "/api/v1/summary" && url.search) {
@@ -66,9 +72,9 @@ async function route(request, env) {
     const q = filterQuery(url, publication, path.endsWith(".csv") ? ["gateway", "ingress", "egress", "metric", "compact"] : ["gateway", "ingress", "egress", "metric", "limit", "offset", "compact"]);
     if (q.compact && !["0", "1"].includes(q.compact)) throw new RangeError("compact must be 0 or 1");
     const rows = select(publication.measurements, q);
-    if (path.endsWith(".csv")) return text(q.compact === "1" ? compactCsv(rows, publication.measurements, publication.dataset_id) : measurementsCsv(rows), "text/csv");
+    if (path.endsWith(".csv")) return text(q.compact !== "0" ? compactCsv(rows, publication.measurements, publication.dataset_id) : measurementsCsv(rows), "text/csv");
     const limit = integer(q.limit, 50, 1, 100), offset = integer(q.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const page = measurementPage(rows, { datasetId: publication.dataset_id, limit, offset, url, compact: q.compact === "1" });
+    const page = measurementPage(rows, { datasetId: publication.dataset_id, limit, offset, url, compact: q.compact !== "0" });
     if (!page) return error(413, "One measurement exceeds the response budget. Filter by gateway, ingress, egress and metric, or use /api/v1/summary and its raw evidence links.");
     return json(page);
   }
