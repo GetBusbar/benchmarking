@@ -16,8 +16,8 @@ try {
   const out = join(scratch, "site");
   const { publication } = build({ root, out, publishedAt: process.argv.includes("--dry-run") ? null : new Date().toISOString() });
   const retained = JSON.parse(readFileSync(join(out, '_publication/retention.json'), 'utf8'));
-  rmSync(join(out, '_publication/retention.json'));
   execFileSync(process.execPath, ["--test", join(here, "publishing.test.mjs"), join(here, "history.test.mjs"), join(here, "retention-upload.test.mjs")], { stdio: "inherit", env: { ...process.env, OTB_TEST_ARTIFACT: out } });
+  rmSync(join(out, '_publication/retention.json'));
   const config = JSON.parse(readFileSync(join(here, "wrangler.jsonc"), "utf8"));
   config.main = join(here, "worker.mjs"); config.assets.directory = out;
   const configPath = join(scratch, "wrangler.json"); writeFileSync(configPath, JSON.stringify(config));
