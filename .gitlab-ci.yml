@@ -4,9 +4,37 @@
 workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+    - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
+    - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
+      changes: [site/**/*, .gitlab-ci.yml]
     - when: never
 
-stages: [publish]
+stages: [verify, publish]
+
+verify-website:
+  stage: verify
+  tags: [onthebench-production]
+  timeout: 30m
+  image: node:22-bookworm
+  rules:
+    - if: '$VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/ || $CI_PIPELINE_SOURCE == "push"'
+  variables:
+    OTB_SINGLE_ENGINE: "1"
+  script:
+    # The protected controller can check an exact release candidate without
+    # publishing it or changing the main branch's human promotion policy.
+    - verify_dir="$CI_BUILDS_DIR/onthebench-verify-$CI_JOB_ID"
+    - trap 'rm -rf "$verify_dir"' EXIT
+    - git clone --quiet "$CI_REPOSITORY_URL" "$verify_dir"
+    - git -C "$verify_dir" checkout --quiet --detach "${VERIFY_WEBSITE_REF:-$CI_COMMIT_SHA}"
+    - cd "$verify_dir"
+    - npm ci --prefix site --ignore-scripts
+    - node site/gen-data.mjs
+    - node site/check-consistency.mjs site/data.json
+    - node site/test-coverage.mjs
+    - node site/test.mjs
+    - node site/build.mjs "$verify_dir" "$verify_dir/publication"
+    - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs
 
 refresh-gateway-stars:
   stage: publish
@@ -14,6 +42,8 @@ refresh-gateway-stars:
   timeout: 30m
   image: node:22-bookworm
   resource_group: onthebench-production
+  rules:
+    - if: '$REFRESH_GATEWAY_STARS == "1"'
   variables:
     OTB_SINGLE_ENGINE: "1"
     WRANGLER_SEND_METRICS: "false"

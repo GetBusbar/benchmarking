@@ -65,7 +65,14 @@ async function route(request, env) {
     return json({ schema_version: "1.0", dataset_id: publication.dataset_id, total: rows.length, offset, limit, next: offset + limit < rows.length ? next.href : null, measurements: rows.slice(offset, offset + limit) });
   }
   const pair = path.match(/^\/gateways\/compare\/([a-z0-9-]+)-vs-([a-z0-9-]+?)(\.md)?$/);
-  if (path === "/api/v1/compare" || pair) {
+  if (path === "/api/v1/compare" && [...url.searchParams.keys()].every(k => k === "a" || k === "b")) {
+    const q = parameters(url, ["a", "b"]);
+    if (/^[a-z0-9-]+$/.test(q.a || "") && /^[a-z0-9-]+$/.test(q.b || "") && q.a !== q.b) {
+      const staticPair = await env.ASSETS.fetch(new Request(`${ORIGIN}/api/v1/comparisons/${q.a}-vs-${q.b}.json`));
+      if (staticPair.ok) return staticPair;
+    }
+  }
+  if (path === "/api/v1/compare" || (pair && url.search)) {
     const publication = await getPublication();
     if (pair) { url.searchParams.set("a", pair[1]); url.searchParams.set("b", pair[2]); }
     const q = filterQuery(url, publication, ["a", "b", "ingress", "egress", "metric", "bound"]);

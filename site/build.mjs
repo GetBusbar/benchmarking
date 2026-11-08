@@ -8,8 +8,8 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata } from "./render.mjs";
-import { projectMeasurements, measurementsCsv, DISCLOSURE, POLICY, ORIGIN } from "./public-data.mjs";
-import { gatewayArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
+import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN } from "./public-data.mjs";
+import { gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -21,12 +21,13 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   if (existsSync(join(out, ".onthebench-build"))) rmSync(out, { recursive: true });
   else if (existsSync(out) && readdirSync(out).length) throw new Error("Use an empty output directory; source and previous unrelated files are never overwritten");
   mkdirSync(out, { recursive: true });
-  writeFileSync(join(out, ".onthebench-build"), "generated artifact\n");
   // OUT is explicit so local checks can keep all generated files under task tmp.
   if (generate) {
     execFileSync(process.execPath, [join(root, "site/gen-data.mjs"), root, out], { stdio: "inherit", env: { ...process.env, OTB_SINGLE_ENGINE: "1" } });
     execFileSync(process.execPath, [join(root, "site/check-consistency.mjs"), join(out, "data.json")], { stdio: "inherit" });
   }
+  // gen-data replaces its output directory, so record ownership afterwards.
+  writeFileSync(join(out, ".onthebench-build"), "generated artifact\n");
   const data = JSON.parse(readFileSync(join(out, "data.json"), "utf8"));
   // gen-data still supports the old Pages shell. This artifact has real routes
   // and must never inherit its soft-200 catch-all.
@@ -94,7 +95,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     license: null, archive_history_included: history,
     source_url: `${ORIGIN}/gateways`, immutable_url: `${ORIGIN}/api/v1/benchmarks/${datasetId}`,
     gateways: data.gateways.map(g => ({ id: g.key, name: g.display, url: `${ORIGIN}/gateways/${g.key}`, json_url: `${ORIGIN}/api/v1/gateways/${g.key}` })),
-    metrics: [...new Set(measurements.flatMap(m => Object.keys(m.metrics)))].sort(),
+    metrics: [...new Set(["throughput_rps", ...measurements.flatMap(m => Object.keys(m.metrics))])].sort(),
   };
   json(`/api/v1/benchmarks/${datasetId}.json`, { ...evidence, dataset_id: datasetId });
   json("/api/v1/benchmarks/latest.json", publication);
@@ -111,6 +112,14 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     const histories = archives.filter(r => r.gateway_id === g.key);
     json(`/api/v1/gateways/${g.key}.json`, { schema_version: "1.0", gateway: g, measurements: records, history: histories, generated_at: data.generated_at, disclosure: DISCLOSURE });
     page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, body: gatewayArticle(g, records, histories, data.gateways) }));
+  }
+  // Common comparison URLs cost only a static read, and are discoverable in the
+  // sitemap. Both orders are useful: the ratio explicitly names its denominator.
+  for (const a of data.gateways) for (const b of data.gateways) if (a.key !== b.key) {
+    const comparison = compareMeasurements(measurements, { a: a.key, b: b.key });
+    const pair = `${a.key}-vs-${b.key}`;
+    json(`/api/v1/comparisons/${pair}.json`, comparison);
+    page(`/gateways/compare/${pair}`, renderArticle(template, { path: `/gateways/compare/${pair}`, title: `${a.display} vs ${b.display}`, body: comparisonArticle(comparison) }));
   }
   // Retired entrants retain independently addressable history and evidence.
   for (const key of new Set(archives.map(r => r.gateway_id))) if (!data.gateways.some(g => g.key === key)) {
