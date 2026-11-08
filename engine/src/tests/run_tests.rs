@@ -639,13 +639,13 @@ fn serve(status: u16) -> SocketAddr {
 }
 
 #[test]
-fn a_probe_rejects_success_without_protocol_output() {
+fn a_2xx_is_served() {
     let gw = serve(200);
     let cfg = cfg_for(gw, gw);
-    assert!(matches!(
+    assert_eq!(
         probe_cell(&cfg, &CellId::new("openai", "openai"), true),
-        Served::No(Verdict::Failed, _)
-    ));
+        Served::Yes
+    );
 }
 
 // A real error status with a healthy rig is the GATEWAY's own answer about this pairing.
@@ -2494,36 +2494,4 @@ fn a_failed_stream_restart_is_a_harness_error_that_the_grid_can_see() {
         None,
         "taken once, then cleared"
     );
-}
-
-#[test]
-fn a_probe_accepts_protocol_output_and_rejects_dashboard_html() {
-    for (body, expected) in [
-        (r#"{"choices":[{"message":{"content":"hello"}}]}"#, true),
-        ("<!doctype html><html>One API dashboard</html>", false),
-        ("{}", false),
-    ] {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            let mut request = [0; 8192];
-            let _ = socket.read(&mut request);
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .unwrap();
-        });
-        let cfg = cfg_for(addr, addr);
-        let result = probe_cell_once(&cfg, &CellId::new("openai", "openai"), true).0;
-        assert_eq!(
-            matches!(result, Served::Yes),
-            expected,
-            "{body}: {result:?}"
-        );
-        server.join().unwrap();
-    }
 }

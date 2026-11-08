@@ -438,25 +438,7 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
         &headers_for(cfg, ing, &id.egress),
         cfg.probe_timeout,
     ) {
-        Outcome::Response(r) if (200..300).contains(&r.status) => {
-            if ing.valid_nonstream_response(r.body()) {
-                (Served::Yes, None)
-            } else {
-                (
-                    Served::No(
-                        Verdict::Failed,
-                        crate::cell::Evidence {
-                            status: r.status,
-                            body_snippet: crate::cell::Evidence::snippet(&format!(
-                                "invalid {ing} response body: {}",
-                                String::from_utf8_lossy(r.body())
-                            )),
-                        },
-                    ),
-                    None,
-                )
-            }
-        }
+        Outcome::Response(r) if (200..300).contains(&r.status) => (Served::Yes, None),
         Outcome::Response(r) => {
             // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
             // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.

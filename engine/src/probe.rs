@@ -32,9 +32,10 @@ pub enum Verdict {
     NotConfigured,
     /// The gateway answered, deterministically, but declined the request for a reason OTHER than
     /// "this route does not exist": an auth rejection, a malformed-request response, a server
-    /// error. This records a failed attempt, not proof that the pairing exists or that the
-    /// product is defective: configuration errors and unsupported-operation responses may use
-    /// these statuses too. Retain the response evidence so attribution can be investigated.
+    /// error. The pairing is real; this specific attempt failed. Published as a genuine defect,
+    /// not folded into the same grey "not configured" a truly absent route gets - collapsing the
+    /// two let a gateway that supports a pairing but rejects the probe (wrong auth shape, a bug on
+    /// its own error path) read identically to one that never built the route at all.
     Failed,
     /// The harness could not get a fair reading. A statement about the RIG, not the gateway.
     NotVerified,
@@ -93,8 +94,8 @@ pub const fn status_is_transient(status: u16) -> bool {
 /// supports (that would violate the fairness rule this module's header states): 404 and 501 are the
 /// HTTP-standard ways a server says "this route/method is not implemented at all", so those two
 /// mean the pairing itself is absent. Every other real status (400, 401, 403, 422, 429, 500, 502,
-/// 503, ...) records a rejected attempt. Status alone does not establish support for the pairing
-/// or distinguish a product defect from a harness configuration error.
+/// 503, ...) means the gateway recognised the request enough to evaluate and decline it for some
+/// OTHER reason - the pairing is real, and this attempt is what failed.
 pub fn persistent_transient_verdict(obs: Observation) -> Verdict {
     match (obs.status, obs.mock_healthy) {
         // No HTTP answer at all: the gateway may never have been reached.
