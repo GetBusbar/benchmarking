@@ -432,38 +432,11 @@ fi
 # rig.box_qualify.outcome is "pass" or "seed" contributes, and only a numeric observed_rps. A grep of
 # every "observed_rps" took failed boxes' observations too (dragging the median toward the boxes the
 # gate exists to reject) and read an unmeasured `null` as an empty value that awk counted as 0.
-OTB_QUALIFY_BASELINE="$(python3 - "$HERE/results/snapshots" <<'PY' 2>/dev/null
-import json, os, sys
-d = sys.argv[1]
-vals = []
-try:
-    names = sorted(os.listdir(d))
-except OSError:
-    names = []
-for n in names:
-    if not (n.startswith("result_") and n.endswith(".json")):
-        continue
-    try:
-        with open(os.path.join(d, n)) as fh:
-            j = json.load(fh)
-        bq = (j.get("rig") or {}).get("box_qualify") or {}
-    except Exception:
-        continue
-    if not isinstance(bq, dict):
-        continue
-    v = bq.get("observed_rps")
-    if bq.get("outcome") in ("pass", "seed") and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
-        vals.append(float(v))
-vals.sort()
-if vals:
-    m = len(vals)
-    med = vals[m // 2] if m % 2 else (vals[m // 2 - 1] + vals[m // 2]) / 2
-    sys.stdout.write("%.0f" % med)
-PY
-)"
+OTB_QUALIFY_BASELINE="$(python3 "$HERE/lib/qualification_baseline.py" "$HERE" "$BENCH_RIG_DIR" "$BENCH_ENGINE_COMMIT" "$ARCH" "${ITYPE:-m7g.4xlarge}")" || exit 1
+
 if [ -n "$OTB_QUALIFY_BASELINE" ]; then
   export OTB_QUALIFY_BASELINE
-  echo "box qualification baseline: ${OTB_QUALIFY_BASELINE} rps (median of prior observations)"
+  echo "box qualification baseline: ${OTB_QUALIFY_BASELINE} rps (instrument-matched control/history)"
 else
   echo "box qualification: no prior observations, this run seeds the baseline"
 fi
