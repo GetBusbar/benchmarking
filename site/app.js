@@ -712,22 +712,8 @@ function frontierCell(rec, boundMs) {
       note: `this record publishes no reading at ${boundLabel(boundMs)}` };
   const c = metric(rd.rps, fmtRate);
   if (c.na) return c;   // the engine's absence reason, rendered by the one accessor
-  /* "MEASURED, AND IT CANNOT DO THIS" IS NOT "NOT MEASURED", and the two must never look alike.
-     `below_resolution` is how the engine says "rungs served cleanly, but NONE held THIS bound, so the
-     gateway carried no measurable throughput under it" (frontier.rs `absence_for`). On the field data that
-     is the majority of some rows: plano's tail is ~890 ms at c=8, so five of its six columns are this state
-     and only the unbounded reading carries a rate. A dash or an "n/a" there would read as "no data", which
-     is a NEUTRAL impression of a DAMNING measurement - and it would flatter the slowest gateways on the
-     board, which is the worst direction for an error like this to run.
-     So it ranks as the 0 it is (metric() already does that, which is why it is not `na`), and it SAYS what
-     it is on the cell: "0" with "no rung held this tail" underneath, distinct at a glance from the "no
-     frontier" of a record that was never measured at all. The engine's own prose stays on the tooltip.
-     No reading sentence is composed on top: "0 req/s while 99% of requests finished under 1 ms" describes a
-     measurement that did not happen, and it would talk over the reason that did.
-     Detected through mcode(), not by reading the envelope's raw `.value` (invariant C5 forbids that here,
-     and rightly: the display rule must live in the accessors). mcode is exactly the accessor that returns
-     null for a below-resolution absence while mval coerces it to 0. */
-  if (mcode(rd.rps) == null) return { ...c, text: "0", why: "no rung held this tail", reading: rd };
+  /* An uncertified bound is unavailable, never numeric zero. Preserve its recorded reason. */
+  if (mcode(rd.rps) == null) return { ...c, v: null, na: true, text: "n/a", why: "no rung held this tail", reading: rd };
   const floor = rd.lower_bound === true;
   return { ...c, text: floor ? `≥ ${c.text}` : c.text, note: readingSentence(rd, c.v), reading: rd, floor };
 }
@@ -4718,7 +4704,7 @@ function renderMatrix() {
   }
   /* per-gateway tallies over the full grid; sorted by measurement: pass count desc, then name */
   const tally = (g) => {
-    const t = { pass: 0, fail: 0, notconf: 0, unprobed: 0, unverified: 0, untestable: 0 };
+    const t = { pass: 0, fail: 0, notconf: 0, notdeclared: 0, unprobed: 0, unverified: 0, untestable: 0 };
     // THE TALLY COUNTS WHAT THE GRID PAINTS: one classifier (cellState), so a header can never report a
     // cell as "unverified" that the grid beneath it draws red, or the other way round.
     const BUCKET = { served: "pass", notconf: "notconf", unprobed: "unprobed", untestable: "untestable",
@@ -4726,7 +4712,8 @@ function renderMatrix() {
     for (const e of MATRIX_CELLS) for (const c of MATRIX_CELLS) {
       const cell = matrixCell(g, e, c);
       if (!cell) continue;
-      t[BUCKET[cellState(cell)[0]]]++;
+      if (["not_configurable", "not_declared"].includes(cell.served)) t.notdeclared++;
+      else t[BUCKET[cellState(cell)[0]]]++;
     }
     return t;
   };
@@ -4740,6 +4727,7 @@ function renderMatrix() {
       ? [`<b class="pass-count">0</b>/36 pass`, `<span class="matrix-nores">${esc(matrixFailureReason(g))}</span>`]
       : [`<b class="pass-count">${t.pass}</b>/36 pass`];
     if (t.fail) bits.push(`${t.fail} fail`);
+    if (t.notdeclared) bits.push(`${t.notdeclared} not declared`);
     if (t.notconf) bits.push(`${t.notconf} not configured`);
     if (t.untestable) bits.push(`${t.untestable} untestable (mock limit)`);
     if (t.unverified) bits.push(`${t.unverified} not verified`);

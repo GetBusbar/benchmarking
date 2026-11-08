@@ -8,11 +8,11 @@ export const disclosureHtml = `<p class="muted">Operated by the ${esc(DISCLOSURE
 const table = (headers, rows) => `<div class="table-scroll"><table><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 const metricText = m => m?.state === "valid" ? `${esc(m.value)}${m.note ? ` (${esc(m.note)})` : ""}` : esc(m?.state || "not_measured");
 export function measurementTable(measurements) {
-  return table(["Ingress → upstream", "Metric", "Value", "State / reason"], measurements.flatMap(m => {
+  return table(["Ingress → upstream", "Metric", "Value", "State / reason", "p99 bound (ms)"], measurements.flatMap(m => {
     const path = `${m.test.ingress_protocol} → ${m.test.upstream_protocol}`;
-    if (!Object.keys(m.metrics).length) return [[esc(path), "—", "—", esc(m.status.state + (m.status.detail ? `: ${m.status.detail}` : ""))]];
-    const rows = Object.entries(m.metrics).map(([key, v]) => [esc(path), esc(key), metricText(v), esc(v.reason || v.state)]);
-    for (const f of m.frontier) rows.push([esc(path), `Throughput at p99 ${f.bound_ms == null ? "unbounded" : `≤ ${esc(f.bound_ms)} ms`}`, metricText(f.rps) + " req/s", `${f.lower_bound ? "lower bound; " : ""}concurrency ${esc(f.concurrency ?? "not recorded")}`]);
+    if (!Object.keys(m.metrics).length) return [[esc(path), "—", "—", esc(m.status.state + (m.status.detail ? `: ${m.status.detail}` : "")), "—"]];
+    const rows = Object.entries(m.metrics).map(([key, v]) => [esc(path), esc(key), metricText(v), esc(v.reason || v.state), "—"]);
+    for (const f of m.frontier) rows.push([esc(path), "throughput_rps", metricText(f.rps) + " req/s", `${f.lower_bound ? "lower bound; " : ""}concurrency ${esc(f.concurrency ?? "not recorded")}`, esc(f.bound_ms ?? "unbounded")]);
     return rows;
   }));
 }

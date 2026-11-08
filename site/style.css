@@ -867,3 +867,6 @@ tbody tr.tied-above > td {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
 }
+
+/* Publication resources stay readable without dominating the results. */
+.data-links{display:flex;flex-wrap:wrap;gap:.4rem .7rem;padding:1.2rem 0;font-size:.8rem;border-top:1px solid var(--border);margin-top:1.5rem}.crawler-links{font-size:.72rem;margin:.3rem 0 1rem;overflow-wrap:anywhere}.crawler-links p{margin:0}.footer-content{display:grid;gap:.7rem}.footer-content p{max-width:85ch}.footer-content details{max-width:85ch}.footer-content summary{cursor:pointer}.footer-content pre{overflow:auto;font-size:.78rem}.footer-credit{font-weight:500}
