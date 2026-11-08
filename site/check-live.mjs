@@ -110,3 +110,13 @@ await check("semantic guide, dataset license and recorded release time", async (
   await get("/social-card.png"); await get("/gateways/license"); await get("/api/v1/runs?limit=2");
 });
 if (failures.length) process.exitCode = 1;
+
+await check("one published snapshot across summary, collection, page and guide", async () => {
+ const paths = ["/api/v1/summary", "/api/v1/benchmarks/latest", "/api/v1/measurements?limit=1"];
+ const records = await Promise.all(paths.map(async path => (await get(path)).json()));
+ for (const record of records.slice(1)) for (const key of ["dataset_id", "generated_at", "published_at"]) assert.equal(record[key], records[0][key], key);
+ const guide = await (await get("/llms-full.txt")).text();
+ for (const key of ["dataset_id", "generated_at", "published_at"]) assert.ok(guide.includes(records[0][key]));
+ const html = await (await get("/gateways/busbar")).text(); assert.ok(Buffer.byteLength(html) < 20000);
+});
+if (failures.length) process.exitCode = 1;

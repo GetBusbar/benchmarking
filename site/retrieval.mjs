@@ -4,8 +4,8 @@ export const PAGE_MAX_BYTES = 1024 * 1024;
 export const DATA_LICENSE = "https://creativecommons.org/licenses/by/4.0/";
 export { METRIC_STATES, CELL_STATES } from "./states.mjs";
 const bytes = text => new TextEncoder().encode(text).length;
-export function measurementPage(rows, { datasetId, limit, offset, url, compact = false }, maxBytes = PAGE_MAX_BYTES) {
-  const page = { schema_version: "1.0", dataset_id: datasetId, total: rows.length, offset, limit, returned: 0, max_response_bytes: maxBytes, request_url: String(url), applied_filters: Object.fromEntries([...new URL(url).searchParams].filter(([key]) => ["gateway", "ingress", "egress", "metric"].includes(key))), next: null, measurements: [] };
+export function measurementPage(rows, { datasetId, generatedAt = null, publishedAt = null, limit, offset, url, compact = false }, maxBytes = PAGE_MAX_BYTES) {
+  const page = { schema_version: "1.0", dataset_id: datasetId, generated_at: generatedAt, published_at: publishedAt, total: rows.length, offset, limit, returned: 0, max_response_bytes: maxBytes, request_url: String(url), applied_filters: Object.fromEntries([...new URL(url).searchParams].filter(([key]) => ["gateway", "ingress", "egress", "metric"].includes(key))), next: null, measurements: [] };
   const next = new URL(url);
   function advance(count) {
     next.searchParams.set("offset", String(offset + count)); next.searchParams.set("limit", String(limit));

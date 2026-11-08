@@ -74,7 +74,7 @@ async function route(request, env) {
     const rows = select(publication.measurements, q);
     if (path.endsWith(".csv")) return text(q.compact !== "0" ? compactCsv(rows, publication.measurements, publication.dataset_id) : measurementsCsv(rows), "text/csv");
     const limit = integer(q.limit, 50, 1, 100), offset = integer(q.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const page = measurementPage(rows, { datasetId: publication.dataset_id, limit, offset, url, compact: q.compact !== "0" });
+    const page = measurementPage(rows, { datasetId: publication.dataset_id, generatedAt: publication.generated_at, publishedAt: publication.published_at, limit, offset, url, compact: q.compact !== "0" });
     if (!page) return error(413, "One measurement exceeds the response budget. Filter by gateway, ingress, egress and metric, or use /api/v1/summary and its raw evidence links.");
     return json(page);
   }
