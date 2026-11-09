@@ -21,6 +21,19 @@ function inputs(env) {
 function error(status, message) { return new Response(JSON.stringify({ error: message, status }) + "\n", { status, headers: { "Content-Type": "application/json; charset=utf-8" } }); }
 function json(value) { return new Response(JSON.stringify(value) + "\n", { headers: { "Content-Type": "application/json; charset=utf-8" } }); }
 function text(value, type) { return new Response(value, { headers: { "Content-Type": `${type}; charset=utf-8` } }); }
+// WITHDRAWN MEANS GONE FROM EVERY SURFACE. Retained releases, fields and datasets live in the
+// PUBLICATIONS store from before a withdrawal, so anything read from there that names a withdrawn
+// run's sha256 is refused (single resources) or dropped (lists), exactly like /api/v1/runs/<id>.
+async function withdrawnShas(env) {
+  const response = await env.ASSETS.fetch(new Request(`${ORIGIN}/_publication/withdrawn-runs.json`));
+  return response.ok ? Object.keys(await response.json()) : [];
+}
+const namesWithdrawn = (text, shas) => typeof text === "string" && shas.some(sha => text.includes(sha));
+async function storedFieldWithdrawn(env, id, shas) {
+  if (!shas.length) return false;
+  return namesWithdrawn(await env.PUBLICATIONS?.get(`fields/${id}`), shas) || namesWithdrawn(await env.PUBLICATIONS?.get(`field-evidence/${id}`), shas);
+}
+const WITHDRAWN = () => error(410, "This publication includes withdrawn runs and is unavailable.");
 const dashboard = new Set(["/", "/gateways", ...["memory", "performance", "frontier", "streaming", "matrix", "charts", "method"].map(v => `/gateways/${v}`)]);
 function parameters(url, allowed) {
   for (const key of url.searchParams.keys()) {
@@ -142,13 +155,25 @@ async function route(request, env) {
     const fields=await input('/_publication/history/fields.json');
     const collection=fields.some(f=>f.field_id===fieldRanks[1]) ? await input(`/_publication/history/fields/${fieldRanks[1]}.json`) : JSON.parse(await env.PUBLICATIONS?.get(`field-evidence/${fieldRanks[1]}`) || 'null');
     if(!collection) throw new URIError('Unknown field');
+    if (!fields.some(f=>f.field_id===fieldRanks[1]) && namesWithdrawn(JSON.stringify(collection), await withdrawnShas(env))) return WITHDRAWN();
     return json({schema_version:'1.0',field_id:fieldRanks[1],...fieldRankings(collection,q)});
   }
   if (path === '/api/v1/releases' && env.PUBLICATIONS) {
     const q=parameters(url,['limit','cursor']);
     const limit=integer(q.limit,20,1,100);
     const list=await env.PUBLICATIONS.list({prefix:'releases/',limit,...(q.cursor?{cursor:q.cursor}:{})});
-    const releases=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+    const shas=await withdrawnShas(env);
+    const raw=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean);
+    const kept=[];
+    for (const text of raw) {
+      if (namesWithdrawn(text, shas)) continue;
+      const ids=[...new Set(text.match(/field-[a-f0-9]{64}/g)||[])], datasets=[...new Set(text.match(/dataset-[a-f0-9]{64}/g)||[])];
+      let hidden=false;
+      for (const id of ids) if (await storedFieldWithdrawn(env,id,shas)) { hidden=true; break; }
+      for (const d of datasets) if (!hidden && namesWithdrawn(await env.PUBLICATIONS.get(`datasets/${d}`), shas)) hidden=true;
+      if (!hidden) kept.push(JSON.parse(text));
+    }
+    const releases=kept;
     const next=new URL(url);if(list.cursor)next.searchParams.set('cursor',list.cursor);
     return json({schema_version:'1.0',limit,next:list.list_complete?null:next.href,releases});
   }
@@ -158,7 +183,10 @@ async function route(request, env) {
       if(q.offset) throw new RangeError('Follow cursor pagination for retained fields');
       const limit=integer(q.limit,20,1,100);
       const list=await env.PUBLICATIONS.list({prefix:'field-index/',limit,...(q.cursor?{cursor:q.cursor}:{})});
-      const fields=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+      const shas=await withdrawnShas(env);
+      const all=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+      const fields=[];
+      for (const f of all) if (!(await storedFieldWithdrawn(env,f.field_id,shas))) fields.push(f);
       const next=new URL(url);if(list.cursor)next.searchParams.set('cursor',list.cursor);
       return json({schema_version:'1.0',total:null,limit,offset:0,next:list.list_complete?null:next.href,fields});
     }
@@ -246,11 +274,13 @@ async function route(request, env) {
     const field=path.match(/^\/api\/v1\/fields\/(field-[a-f0-9]{64})(?:\.json)?$/);
     if(field && env.PUBLICATIONS) {
       const stored=await env.PUBLICATIONS.get(`fields/${field[1]}`);
+      if(stored && namesWithdrawn(stored, await withdrawnShas(env))) return WITHDRAWN();
       if(stored) return new Response(stored,{headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=31536000, immutable'}});
     }
     const dataset = path.match(/^\/api\/v1\/benchmarks\/(dataset-[a-f0-9]{64})(?:\.json)?$/);
     if (dataset && env.PUBLICATIONS) {
       const stored = await env.PUBLICATIONS.get(`datasets/${dataset[1]}`);
+      if (stored != null && namesWithdrawn(stored, await withdrawnShas(env))) return WITHDRAWN();
       if (stored != null) return new Response(stored, { headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=31536000, immutable" } });
     }
     return error(404, "Not found");
