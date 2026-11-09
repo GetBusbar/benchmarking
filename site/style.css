@@ -928,3 +928,31 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
 /* Short identifiers (build tag, engine commit, evidence link) never split mid-token; prose cells wrap. */
 .publication-article td.nw { white-space: nowrap; overflow-wrap: normal; }
 .history-controls label:has(select[name="metric"]) { flex: 1.6 1 13rem; }
+
+/* ---- Article pages: readable recorded facts, notes and history (sign-off audit) ----------------------
+   Facts recorded by a run read as label/value pairs rather than run-on sentences or JSON dumps. */
+.publication-article .record-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem 1rem; margin: .8rem 0; }
+.publication-article .record-facts dt { font-weight: 600; color: var(--fg-mute); }
+.publication-article .record-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.publication-article .record-facts .record-facts { margin: 0; }
+.publication-article .recorded-definitions dt, #recorded-methodology .recorded-definitions dt { margin-top: 1rem; font-weight: 600; }
+.publication-article .recorded-definitions dd, #recorded-methodology .recorded-definitions dd { margin: .3rem 0 0; max-width: 90ch; }
+.publication-article .recorded-notes li { margin: .45rem 0; max-width: 90ch; }
+/* Every history filter control has one height, so the labels above them line up (date inputs ran taller). */
+.publication-article .history-controls input, .publication-article .history-controls select, .publication-article .history-controls button { box-sizing: border-box; height: 2.6rem; line-height: 1.2; }
+/* The recorded-methodology block sits above the method essay; give the essay's heading room. */
+#recorded-methodology { margin-bottom: 2.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+#recorded-methodology details { margin-top: .75rem; }
+#recorded-methodology h3 { margin-top: 1.5rem; }
+#recorded-methodology thead th, #recorded-methodology tbody td { text-align: left; }
+/* PHONE: a seven-column history table squeezed every cell to a few characters and rows grew hundreds of
+   pixels tall. Under 640px each run becomes a card of label/value lines. */
+@media (max-width: 640px) {
+  .publication-article table.history-runs, .publication-article table.cards, .publication-article table.history-runs tbody, .publication-article table.cards tbody, .publication-article table.history-runs tr, .publication-article table.cards tr, .publication-article table.history-runs tbody td, .publication-article table.cards tbody td { display: block; width: auto; }
+  .publication-article table.history-runs thead, .publication-article table.cards thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .publication-article table.history-runs tr, .publication-article table.cards tr { border: 1px solid var(--border); border-radius: .5rem; padding: .55rem .75rem; margin: 0 0 .75rem; }
+  .publication-article table.history-runs tbody td, .publication-article table.cards tbody td { display: flow-root; padding: .25rem 0 .25rem 7rem; border: 0; white-space: normal; text-align: left; }
+  .publication-article table.history-runs tbody td::before, .publication-article table.cards tbody td::before { content: attr(data-label); float: left; width: 6.5rem; margin-left: -7rem; font-weight: 600; color: var(--fg-mute); }
+  .publication-article .record-facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .publication-article .record-facts dd { margin-bottom: .45rem; }
+}

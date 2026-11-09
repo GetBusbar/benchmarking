@@ -8,6 +8,87 @@ export const esc = (value) => String(value ?? "").replace(/[&<>"']/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 export const jsonScript = value => JSON.stringify(value).replace(/</g, "\\u003c");
 
+// ---- HTML presentation of recorded values ------------------------------------------------------------
+// These helpers change how a recorded value LOOKS on a human page and never what it is. The exact
+// recorded value stays reachable on the element (title / datetime) and in `data-md`, which
+// htmlToMarkdown emits verbatim, so the Markdown and text twins keep the engine's field names and values.
+export const mdSpan = (html, raw) => `<span data-md="${esc(raw)}">${html}</span>`;
+const PROTOCOL_NAMES = { openai: "OpenAI", "openai-responses": "OpenAI Responses", anthropic: "Anthropic", gemini: "Gemini", cohere: "Cohere", bedrock: "Bedrock" };
+export const protocolName = p => PROTOCOL_NAMES[p] || String(p ?? "");
+export const pairHtml = (ingress, egress) => mdSpan(`${esc(protocolName(ingress))} → ${esc(protocolName(egress))}`, `${ingress} → ${egress}`);
+const METRIC_LABELS = {
+  added_latency_p50_us: "Added latency p50 (µs)", added_latency_p99_us: "Added latency p99 (µs)",
+  gateway_c1_p99_us: "Gateway p99 at concurrency 1 (µs)", direct_c1_p99_us: "Direct-to-mock p99 at concurrency 1 (µs)",
+  cpu_us_per_request: "CPU per request (µs)", rps_per_cpu_second: "Requests per CPU-second",
+  cost_window_conc: "Cost window concurrency", cost_core_utilisation: "Cost window core utilisation",
+  cost_window_ok: "Cost window successful requests", cost_window_rps: "Cost window throughput (req/s)",
+  cost_threads: "Cost window threads", cost_nonvol_ctxt_per_request: "Non-voluntary context switches per request",
+  cost_majflt: "Cost window major page faults",
+  added_ttft_p50_us: "Added time to first event p50 (µs)", added_ttft_p99_us: "Added time to first event p99 (µs)",
+  added_gap_p50_us: "Added inter-frame gap p50 (µs)", added_gap_p99_us: "Added inter-frame gap p99 (µs)",
+  streams_sustained: "Streams sustained", streams_sustained_fps: "Streams sustained (frames/s)",
+  idle_rss_mib: "Idle RSS (MiB)", steady_state_rss_mib: "Steady-state RSS (MiB)", recovered_rss_mib: "Recovered RSS (MiB)",
+  peak_rss_mib: "Peak RSS (MiB)", peak_rss_hwm_mib: "Peak RSS high-water mark (MiB)", time_to_plateau_s: "Time to plateau (s)",
+  growth_rate_mib_per_min: "Memory growth (MiB/min)", load_s: "Memory load duration (s)", shape: "Memory shape under load",
+  idle_shape: "Idle memory shape", idle_static: "Idle memory static", idle_growth_rate_mib_per_min: "Idle memory growth (MiB/min)",
+  throughput_rps: "Throughput (req/s)",
+};
+const UNITS = [[/_mib_per_min$/, "MiB/min"], [/_us$/, "µs"], [/_ms$/, "ms"], [/_mib$/, "MiB"], [/_rps$/, "req/s"], [/_s$/, "s"]];
+export function metricLabel(key) {
+  const name = String(key ?? "");
+  if (METRIC_LABELS[name]) return METRIC_LABELS[name];
+  const unit = UNITS.find(([re]) => re.test(name));
+  const words = (unit ? name.replace(unit[0], "") : name).replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1) + (unit ? ` (${unit[1]})` : "");
+}
+export const metricLabelHtml = key => `<span data-md="${esc(key)}" title="${esc(key)}">${esc(metricLabel(key))}</span>`;
+export const stateLabel = state => { const t = String(state ?? "").replaceAll("_", " "); return t.charAt(0).toUpperCase() + t.slice(1); };
+const grouped = new Intl.NumberFormat("en-US");
+export function formatNumber(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return String(v ?? "");
+  if (Number.isInteger(v)) return grouped.format(v);
+  const a = Math.abs(v);
+  if (a < 0.001) return v.toPrecision(3);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: a >= 100 ? 1 : a >= 1 ? 2 : 3 }).format(v);
+}
+// A number keeps its exact recorded form on hover and in the Markdown twin.
+export const numberHtml = (v, raw = v) => {
+  const shown = formatNumber(v);
+  return shown === String(raw) ? esc(shown) : `<span data-md="${esc(raw)}" title="${esc(v)}">${esc(shown)}</span>`;
+};
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// One human format everywhere ("9 Nov 2026, 05:55 UTC"); the exact ISO string stays in datetime/title.
+export function formatTimestamp(iso) {
+  if (typeof iso !== "string" || !iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const day = `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(iso)) return day;
+  const pad = n => String(n).padStart(2, "0");
+  return `${day}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+export const timeHtml = (iso, missing = "Not recorded") => {
+  const shown = formatTimestamp(iso);
+  return shown ? `<time datetime="${esc(iso)}" title="${esc(iso)}" data-md="${esc(iso)}">${esc(shown)}</time>` : esc(iso || missing);
+};
+// The engine's recorded prose uses ALL-CAPS lead-ins and Markdown code spans. Render them as sentence
+// case and <code>; the words are unchanged and the verbatim text stays in data-md.
+const ACRONYMS = new Set(["SSE", "CPU", "RSS", "TTFT", "HTTP", "HTTPS", "API", "ID", "OK", "TCP", "SHA", "JSON", "UTC", "MIB", "RPS", "IO", "OS", "LLM", "VMHWM", "P50", "P99", "AWS", "URL", "DNS", "TLS", "OOTB"]);
+export function proseHtml(text) {
+  const raw = String(text ?? "");
+  const decap = segment => segment.replace(/\b[A-Z][A-Z0-9'’-]*(?:[ ,;:-]+[A-Z][A-Z0-9'’-]*)*\b/g, (run, offset, whole) => {
+    const words = run.split(/([ ,;:-]+)/);
+    const lower = w => /^[A-Z][A-Z0-9'’-]*$/.test(w) && !ACRONYMS.has(w.toUpperCase().replace(/[’']S$/, ""));
+    if (!words.some(lower) || (words.length === 1 && run.length < 3)) return run;
+    const sentenceStart = !whole.slice(0, offset).trim() || /[.!?:]\s*$/.test(whole.slice(0, offset));
+    const lowered = words.map(w => lower(w) ? w.toLowerCase() : w).join("");
+    return sentenceStart ? lowered.charAt(0).toUpperCase() + lowered.slice(1) : lowered;
+  });
+  const html = raw.split(/(`[^`]*`)/).map(part => part.startsWith("`") && part.endsWith("`") && part.length > 1
+    ? `<code>${esc(part.slice(1, -1))}</code>` : esc(decap(part))).join("");
+  return html === esc(raw) ? html : mdSpan(html, raw);
+}
+
 function dom(html) {
   const { document, HTMLSelectElement } = parseHTML(html);
   // linkedom exposes the standard select getter but not its setter.
@@ -105,7 +186,11 @@ export function renderDashboard(template, data, path, publication) {
   const method = document.querySelector("#view-method article");
   if (method && publication) {
     const runs = [...new Map(publication.measurements.filter(m => m.run_id).map(m => [m.run_id, m])).values()];
-    method.insertAdjacentHTML("afterbegin", `<section id="recorded-methodology"><h2>Methodology recorded with this collection</h2><p>Measured ${esc(publication.measured_range.earliest)} through ${esc(publication.measured_range.latest)}. Collection generated ${esc(publication.generated_at)}. The essay below describes the design and its history; recorded definitions and pinned harness versions govern each numerical claim.</p><details><summary>Versioned definitions and instrument sources</summary>${runs.map(m => `<h3>${esc(m.gateway_id)} — ${esc(m.measured_at)}</h3><p><a href="${esc(m.provenance.run_url)}">Immutable run</a> · Harness ${esc(m.test.harness_commit || "not recorded")}${m.test.harness_commit && /^[a-f0-9]{7,40}$/.test(m.test.harness_commit) ? ` · <a href="https://github.com/GetBusbar/benchmarking/tree/${esc(m.test.harness_commit)}/engine">Pinned source</a>` : ""}</p><dl>${Object.entries(m.test.definitions || {}).map(([key,value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join("") || "<dd>Definitions not recorded; consult raw evidence.</dd>"}</dl>`).join("")}</details></section>`);
+    // One row per run; the recorded definitions are listed once per distinct set rather than once per gateway.
+    const names = new Map(publication.gateways.map(g => [g.id, g.name]));
+    const sets = [...new Map(runs.map(m => [JSON.stringify(m.test.definitions || {}), m.test.definitions || {}])).values()];
+    const definitionsHtml = defs => `<dl class="recorded-definitions">${Object.entries(defs).map(([key, value]) => `<dt><code>${esc(key)}</code></dt><dd>${proseHtml(value)}</dd>`).join("") || "<dd>Definitions not recorded; consult raw evidence.</dd>"}</dl>`;
+    method.insertAdjacentHTML("afterbegin", `<section id="recorded-methodology"><h2>Methodology recorded with this collection</h2><p>Measured ${timeHtml(publication.measured_range.earliest)} through ${timeHtml(publication.measured_range.latest)}. Collection generated ${timeHtml(publication.generated_at)}. The essay below describes the design and its history; recorded definitions and pinned harness versions govern each numerical claim.</p><details><summary>Versioned definitions and instrument sources</summary><div class="table-scroll"><table><thead><tr><th>Gateway</th><th>Measured</th><th>Harness</th><th>Evidence</th></tr></thead><tbody>${runs.map(m => `<tr><td>${mdSpan(esc(names.get(m.gateway_id) || m.gateway_id), m.gateway_id)}</td><td>${timeHtml(m.measured_at)}</td><td>${m.test.harness_commit && /^[a-f0-9]{7,40}$/.test(m.test.harness_commit) ? `<a href="https://github.com/GetBusbar/benchmarking/tree/${esc(m.test.harness_commit)}/engine" title="${esc(m.test.harness_commit)}"><code>${esc(m.test.harness_commit.slice(0, 12))}</code></a>` : esc(m.test.harness_commit || "not recorded")}</td><td><a href="${esc(m.provenance.run_url)}">Immutable run</a></td></tr>`).join("")}</tbody></table></div>${sets.map((defs, i) => `<h3>Recorded metric definitions${sets.length > 1 ? ` (set ${i + 1} of ${sets.length}: ${runs.filter(m => JSON.stringify(m.test.definitions || {}) === JSON.stringify(defs)).map(m => esc(names.get(m.gateway_id) || m.gateway_id)).join(", ")})` : " (identical for every run above)"}</h3>${definitionsHtml(defs)}`).join("")}</details></section>`);
   }
   const title = state.view === "gateways"
     ? "AI Gateway Benchmarks: Latency, Throughput & Protocol Support | On the Bench"
@@ -124,9 +209,12 @@ export function renderDashboard(template, data, path, publication) {
   document.querySelectorAll("select option").forEach(n => { if (!n.hasAttribute("selected")) n.remove(); });
   if (url.pathname === "/") {
     const rows = publication.gateways.map(g => publication.measurements.find(m => m.gateway_id === g.id && m.test.ingress_protocol === "openai" && m.test.upstream_protocol === "openai") || { gateway_id:g.id, metrics:{}, status:{state:"not_measured"}, measured_at:null });
-    document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${esc(m.gateway_id)}</a></td><td>${esc(m.metrics.added_latency_p99_us?.value ?? "n/a")}</td><td>${esc(m.metrics.added_latency_p99_us?.state || m.status.state)}</td><td>${esc(m.measured_at)}</td></tr>`).join("")}</tbody></table></section>`);
+    // Home carries no performance table (index.html). This is the no-JavaScript and assistive equivalent
+    // of the published data, laid out like the chart data table: visually hidden, shown under <noscript>.
+    const names = new Map(publication.gateways.map(g => [g.id, g.name]));
+    document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements" class="sr-only"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => { const metric = m.metrics.added_latency_p99_us; return `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${mdSpan(esc(names.get(m.gateway_id) || m.gateway_id), m.gateway_id)}</a></td><td>${metric?.value == null ? "n/a" : numberHtml(metric.value)}</td><td>${mdSpan(esc(stateLabel(metric?.state || m.status.state)), metric?.state || m.status.state)}</td><td>${timeHtml(m.measured_at, "")}</td></tr>`; }).join("")}</tbody></table></section>`);
   }
-  document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal}</style></noscript>`);
+  document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data,#home-measurements{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal;margin:0}</style></noscript>`);
   document.querySelector("main").insertAdjacentHTML("beforeend",
     resourceLinks());
   return document.toString();
@@ -172,6 +260,8 @@ export function htmlToMarkdown(html) {
   function visit(n) {
     if (n.nodeType === 3) return n.textContent.replace(/\s+/g, " ");
     if (n.nodeType !== 1) return "";
+    // Presentation helpers keep the exact recorded value here (see mdSpan).
+    if (n.hasAttribute("data-md")) return n.getAttribute("data-md");
     const content = () => [...n.childNodes].map(visit).join("");
     const tag = n.localName;
     if (tag === "svg") return " " + (n.getAttribute("aria-label") || [...n.querySelectorAll("title")].map(t => t.textContent).join("; ")) + " ";
@@ -188,6 +278,8 @@ export function htmlToMarkdown(html) {
     if (tag === "code") return `\`${content()}\``;
     if (tag === "br") return "\n";
     if (tag === "li") return `\n- ${content().trim()}`;
+    if (tag === "dt") return `\n\n**${content().trim()}**: `;
+    if (tag === "dd") return `${content().trim()}\n`;
     return ["p", "div", "section", "article", "nav", "details", "summary"].includes(tag) ? `\n\n${content().trim()}\n\n` : content();
   }
   return `${document.querySelector("main h1") ? "" : "# " + document.title + "\n\n"}${visit(document.querySelector("main") || document.body).replace(/\n{3,}/g, "\n\n").trim()}\n`;
