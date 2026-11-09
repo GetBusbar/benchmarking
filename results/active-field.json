@@ -1,7 +1,7 @@
 {
-  "id": "otb-20261109T015651Z",
-  "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
-  "started_at": "2026-11-09T01:56:51Z",
+  "id": "otb-20261109T052740Z",
+  "engine_commit": "c4965b2b4cc89f9730f207ceed91232c314a5a28",
+  "started_at": "2026-11-09T05:27:40Z",
   "gateways": [
     "agentgateway",
     "aisix",
@@ -18,7 +18,5 @@
     "plano",
     "portkey",
     "tensorzero"
-  ],
-  "status": "under_review",
-  "notice": "This field was halted for measurement-engine corrections. Results are provisional diagnostic evidence; no further results will be added to this instrument."
+  ]
 }
