@@ -2529,6 +2529,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                 }
                             } else {
                                 first_fps = w.fps();
+                                // A seed that HOLDS supersedes an earlier rung's seed failure: if
+                                // the budget runs out from here, that is how the search ended.
+                                stop = StreamStop::BudgetExhausted;
                             }
                         }
                         None => {
