@@ -1,5 +1,5 @@
 {
-  "withdrawn_at": "2026-11-08T23:20:43.767262+00:00",
+  "withdrawn_at": "2026-11-09T03:06:45.087921+00:00",
   "runs": {
     "009d8f059eec771b295e9a09029c3d299282c0eafe88315849db78425ba0ebd4": {
       "gateway": "bifrost",
@@ -36,6 +36,10 @@
     "ca81771742261dc1af26cb5a3dba33e76f8769e3ddacbd7f107be190fc3751a0": {
       "gateway": "kong",
       "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "fe194b1716c365f8f2a85363caa026398c368fd35dc78c3c74e03e75d601302b": {
+      "gateway": "one-api",
+      "reason": "Publication withheld pending attribution of two missing CPU-cost measurements: c=8 windows reported 2/198 and 1/205 failed/successful requests, but retained only aggregate failure counts. Exact raw result remains in Git; review: results/diagnostics/field-2026-11-08/one-api-result-review.json. No replacement run authorized or launched."
     }
   }
 }
