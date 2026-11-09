@@ -17,7 +17,8 @@
     "openai",
     "anthropic",
     "gemini",
-    "bedrock"
+    "bedrock",
+    "cohere"
   ],
   "lang": "Other",
   "launch": {
@@ -40,5 +41,14 @@
   "runtime": {
     "container": "kong-bench",
     "kind": "docker"
-  }
+  },
+  "matrix": [
+    "101111",
+    "000000",
+    "000000",
+    "000100",
+    "000000",
+    "000001"
+  ],
+  "matrix_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json"
 }

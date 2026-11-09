@@ -1,0 +1,66 @@
+{
+  "checked_at": "2026-11-08T23:41:29.275428+00:00",
+  "image": "tensorzero/gateway:2026.6.0@sha256:9133135ccdaa23c0fffc2965f20b2a89b077ea3ad9a86a6f15b2a641bff67c89",
+  "kind": "local correctness preflight; not performance measurements",
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "{\"id\":\"01a1bd89-d52f-7a73-9d2d-051ea6ce4ac1\",\"episode_id\":\"01a1bd89-d52f-7a73-9d2d-0522521a6bad\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1794181289,\"model\":\"tensorzero::model_name::mock-anthropic\",\"system_fingerprint\":\"\",\"service_tier\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"tensorzero_cost\":null}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"max_tokens\":16,\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "status": 200,
+      "body": "{\"id\":\"01a1bd89-d533-7173-8013-155ca9ce7b1c\",\"episode_id\":\"01a1bd89-d533-7173-8013-156d24b9a946\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1794181289,\"model\":\"tensorzero::model_name::mock-bedrock\",\"system_fingerprint\":\"\",\"service_tier\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"tensorzero_cost\":null}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-sonnet-20240229-v1%3A0/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"inferenceConfig\":{\"maxTokens\":16}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "body": "{\"id\":\"01a1bd89-d535-73d3-b140-1584a06aee65\",\"episode_id\":\"01a1bd89-d535-73d3-b140-15952f732109\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1794181289,\"model\":\"tensorzero::model_name::mock-openai\",\"system_fingerprint\":\"\",\"service_tier\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"tensorzero_cost\":null}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\",\"max_completion_tokens\":16,\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai-responses",
+      "status": 200,
+      "body": "{\"id\":\"01a1bd89-d537-7270-ade5-5cda15c49cd2\",\"episode_id\":\"01a1bd89-d537-7270-ade5-5ce9fbf6b7d1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1794181289,\"model\":\"tensorzero::model_name::mock-openai-responses\",\"system_fingerprint\":\"\",\"service_tier\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"tensorzero_cost\":null}}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"id\":null,\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}],\"text\":{\"format\":{\"type\":\"text\"}},\"tools\":[],\"max_output_tokens\":16,\"stream"
+        }
+      }
+    }
+  ],
+  "source_revision": "62eb8f63e8ec62018d70420dbf1a8c5d1c026315",
+  "definition_sha256": "235b6506aa3b789d4b952c3a4c716de0d8b5eff0e4f61517163a3c188f1ca0a3",
+  "config_template_sha256": "a0283ea0e4eb6c8ec86171ea158e0edca0358b2607ea68bf60a2e62aff85f828"
+}

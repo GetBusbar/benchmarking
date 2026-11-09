@@ -1,0 +1,301 @@
+{
+  "image": "justsong/one-api:v0.6.10@sha256:af6b361630bdf408b86fce7aa8fc131b37ea5177ae866d121ba7c002e773e477",
+  "checks": [
+    {
+      "model": "gpt-4o-mini",
+      "expected_egress": "openai",
+      "status": 200,
+      "body": {
+        "id": "chatcmpl-x",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "mock",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 2,
+          "total_tokens": 12
+        }
+      },
+      "recorder": {
+        "recording": true,
+        "dialects": {
+          "openai": {
+            "count": 1,
+            "body_ok": true,
+            "last_path": "/v1/chat/completions",
+            "last_snippet": "{\"model\": \"gpt-4o-mini\", \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}], \"max_tokens\": 1}"
+          },
+          "openai-responses": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "anthropic": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "gemini": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "cohere": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "bedrock": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "other": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          }
+        }
+      }
+    },
+    {
+      "model": "claude-3-5-sonnet-20240620",
+      "expected_egress": "anthropic",
+      "status": 200,
+      "body": {
+        "id": "chatcmpl-msg_x",
+        "model": "claude-3-5-sonnet-20240620",
+        "object": "chat.completion",
+        "created": 1794180623,
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 2,
+          "total_tokens": 12
+        }
+      },
+      "recorder": {
+        "recording": true,
+        "dialects": {
+          "openai": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "openai-responses": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "anthropic": {
+            "count": 1,
+            "body_ok": true,
+            "last_path": "/v1/messages",
+            "last_snippet": "{\"model\":\"claude-3-5-sonnet-20240620\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}],\"max_tokens\":1}"
+          },
+          "gemini": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "cohere": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "bedrock": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "other": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          }
+        }
+      }
+    },
+    {
+      "model": "gemini-1.5-pro",
+      "expected_egress": "gemini",
+      "status": 200,
+      "body": {
+        "id": "chatcmpl-50959e2247e347d9b925d95381ed1b94",
+        "model": "gemini-1.5-pro",
+        "object": "chat.completion",
+        "created": 1794180623,
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 8,
+          "completion_tokens": 1,
+          "total_tokens": 9
+        }
+      },
+      "recorder": {
+        "recording": true,
+        "dialects": {
+          "openai": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "openai-responses": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "anthropic": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "gemini": {
+            "count": 1,
+            "body_ok": true,
+            "last_path": "/v1/models/gemini-1.5-pro:generateContent",
+            "last_snippet": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"safety_settings\":[{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"},{\"category\":\"HARM_CATEGORY_HATE_SPEECH\",\"threshold\":\"BLOCK_NON"
+          },
+          "cohere": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "bedrock": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "other": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          }
+        }
+      }
+    },
+    {
+      "model": "command-r-plus",
+      "expected_egress": "cohere",
+      "status": 200,
+      "body": {
+        "id": "chatcmpl-x",
+        "model": "command-r-plus",
+        "object": "chat.completion",
+        "created": 1794180623,
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "ok"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 10,
+          "completion_tokens": 2,
+          "total_tokens": 12
+        }
+      },
+      "recorder": {
+        "recording": true,
+        "dialects": {
+          "openai": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "openai-responses": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "anthropic": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "gemini": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "cohere": {
+            "count": 1,
+            "body_ok": true,
+            "last_path": "/v1/chat",
+            "last_snippet": "{\"message\":\"hi\",\"model\":\"command-r-plus\",\"max_tokens\":1}"
+          },
+          "bedrock": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          },
+          "other": {
+            "count": 0,
+            "body_ok": false,
+            "last_path": "",
+            "last_snippet": ""
+          }
+        }
+      }
+    }
+  ],
+  "checked_at": "2026-11-08T23:30:31.084765+00:00",
+  "kind": "local correctness preflight; not performance measurements",
+  "source_revision": "3915ce9814b8261a1ab13ed93adec58b463cd75c",
+  "mock_source_sha256": "215f29a59a551ae2e766c4630b547bc605080e2de568d9e324105b2c421fac48"
+}

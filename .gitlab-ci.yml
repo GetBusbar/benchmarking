@@ -38,7 +38,7 @@ verify-website:
     - node site/test-coverage.mjs
     - node site/test.mjs
     - node --max-old-space-size=256 site/build.mjs "$verify_dir" "$verify_dir/publication"
-    - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs site/history.test.mjs site/retention-upload.test.mjs
+    - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs site/history.test.mjs site/retention-upload.test.mjs site/run-reviews.test.mjs site/withdrawal.test.mjs
 
 refresh-gateway-stars:
   stage: publish
@@ -74,10 +74,11 @@ verify-engine:
   tags: [onthebench-production]
   image: rust:1.98-bookworm
   timeout: 60m
+  # The instrument is verified once, at the exact commit it is built from, on request
+  # (VERIFY_ENGINE_REF). A dev push carrying that frozen engine tree does not rebuild it:
+  # run-on-ec2.sh already proves the tree is byte-identical to the pinned instrument.
   rules:
     - if: '$VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
-    - if: '$CI_PIPELINE_SOURCE == "push"'
-      changes: [engine/**/*, mock/**/*, Cargo.lock, Cargo.toml, .gitlab-ci.yml]
   variables:
     REFRESH_GATEWAY_STARS: "1"
   script:

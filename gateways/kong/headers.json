@@ -8,5 +8,8 @@
   "gemini": [
     "x-llm-provider: gemini"
   ],
-  "openai": []
+  "openai": [],
+  "cohere": [
+    "x-llm-provider: cohere"
+  ]
 }

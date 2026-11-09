@@ -14,13 +14,15 @@
     "openai",
     "openai-responses",
     "anthropic",
-    "gemini"
+    "gemini",
+    "bedrock"
   ],
   "egress_models": {
     "anthropic": "anthropic/claude-3-5-sonnet",
     "gemini": "gemini/gemini-1.5-pro",
     "openai": "openai/gpt-4o-mini",
-    "openai-responses": "openai/gpt-4o-mini"
+    "openai-responses": "openai/gpt-4o-mini",
+    "bedrock": "amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0"
   },
   "lang": "Rust",
   "launch": {
@@ -43,5 +45,14 @@
   "runtime": {
     "container": "plano-bench",
     "kind": "docker"
-  }
+  },
+  "matrix": [
+    "100001",
+    "010001",
+    "101001",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream."
 }

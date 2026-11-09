@@ -1,5 +1,5 @@
 _format_version: "3.0"
-# ONE static config, four upstream providers. The client picks the upstream with a request header on
+# ONE static config, five upstream providers and two native ingress routes. The client picks the upstream with a request header on
 # the SAME uniform OpenAI path: \`x-llm-provider: anthropic|gemini|bedrock\`; no header = openai.
 # Route priority puts every header-matched route above the header-less openai fallback
 # (kong/router/transform.lua get_priority: match_weight occupies the top 3 bits).
@@ -53,6 +53,57 @@ services:
           - name: ai-proxy
             config:
               route_type: llm/v1/chat
+              auth:
+                aws_access_key_id: "AKIAMOCKACCESSKEY"
+                aws_secret_access_key: "mock-secret-access-key"
+              model:
+                provider: bedrock
+                name: {KONG_MODEL}
+                options:
+                  bedrock:
+                    aws_region: "us-east-1"
+                  upstream_url: "{url}/model/{KONG_MODEL}/converse"
+      - name: chat-cohere
+        paths: ["/v1/chat/completions"]
+        headers:
+          x-llm-provider: ["cohere"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: cohere
+                name: {KONG_MODEL}
+                options:
+                  upstream_url: "{url}/v1/chat"
+      - name: native-gemini
+        paths: ["/v1beta/models/{KONG_MODEL}:generateContent"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              llm_format: gemini
+              auth:
+                header_name: Authorization
+                header_value: "Bearer dummy"
+              model:
+                provider: gemini
+                name: {KONG_MODEL}
+                options:
+                  upstream_url: "{url}/v1beta/models/{KONG_MODEL}:generateContent"
+      - name: native-bedrock
+        paths: ["/model/{KONG_MODEL}/converse"]
+        strip_path: false
+        plugins:
+          - name: ai-proxy
+            config:
+              route_type: llm/v1/chat
+              llm_format: bedrock
               auth:
                 aws_access_key_id: "AKIAMOCKACCESSKEY"
                 aws_secret_access_key: "mock-secret-access-key"

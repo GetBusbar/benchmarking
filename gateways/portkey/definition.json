@@ -26,5 +26,27 @@
   "runtime": {
     "container": "portkey-bench",
     "kind": "docker"
-  }
+  },
+  "egress_models": {
+    "openai": "gpt-4o-mini",
+    "openai-responses": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "gemini": "gemini-1.5-pro",
+    "cohere": "command-r-plus",
+    "bedrock": "anthropic.claude-3-5-sonnet-v1:0"
+  },
+  "cell_paths": {
+    "gemini>gemini": "/v1/proxy/v1beta/models/gemini-1.5-pro:generateContent",
+    "cohere>cohere": "/v1/proxy/v2/chat",
+    "bedrock>bedrock": "/v1/proxy/model/anthropic.claude-3-5-sonnet-v1:0/converse"
+  },
+  "matrix": [
+    "101111",
+    "010000",
+    "001001",
+    "000100",
+    "000010",
+    "000001"
+  ],
+  "matrix_note": "Pinned v1.15.2 source ca7712947ec8c0887803990b746740d36011c697: src/index.ts registers chat-completions, messages, responses and raw proxy routes; provider operation tables determine translations. Recorder preflight proves 11 exact protocol pairs. Raw proxy passes native requests through without cross-protocol conversion, so only its matching diagonal is enabled. OpenAI Chat Completions and Responses share a provider but remain distinct upstream operations. Evidence: results/diagnostics/refresh-configuration/portkey-protocol-preflight.json"
 }

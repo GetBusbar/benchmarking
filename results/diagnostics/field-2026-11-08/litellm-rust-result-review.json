@@ -1,0 +1,685 @@
+{
+  "gateway": "litellm-rust",
+  "raw_path": "results/snapshots/result_litellm-rust_2026-11-09T02-01-52Z.json",
+  "raw_sha256": "953b9d142836b5f083cda599ba66a977cfaf9f3e885c493d03aa140626939c18",
+  "reviewed_at": "2026-11-09T03:33:11.668578+00:00",
+  "publication_status": "checked_with_gateway_failures_retained",
+  "qualification": {
+    "band_pct": 20.0,
+    "baseline_rps": 94065.0,
+    "baseline_samples": 1,
+    "concurrency": 32,
+    "drift_pct": 6.815499920267899,
+    "observed_absent_detail": null,
+    "observed_absent_reason": null,
+    "observed_rps": 100476.0,
+    "outcome": "pass"
+  },
+  "invariants": "PASS; cost arithmetic excluded by existing low-utilisation/sample-count rule",
+  "supported_cells": 5,
+  "served_cells": 4,
+  "failed_cells": 1,
+  "unsupported_cells": 31,
+  "attribution": {
+    "openai>bedrock": {
+      "classification": "supported gateway failure",
+      "field_http_status": 501,
+      "field_body": "{\"error\":{\"message\":\"unsupported by the rust path: unrecognized request parameter\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "request_and_recorder_corroboration": {
+        "ingress": "openai",
+        "egress": "bedrock",
+        "path": "/v1/chat/completions",
+        "request_headers": [
+          [
+            "authorization",
+            "Bearer gwbench"
+          ]
+        ],
+        "request_body": {
+          "max_tokens": 16,
+          "messages": [
+            {
+              "content": "hello",
+              "role": "user"
+            }
+          ],
+          "model": "bench-bedrock"
+        },
+        "declared": true,
+        "status": 501,
+        "body": "{\"error\":{\"message\":\"unsupported by the rust path: unrecognized request parameter\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+        "mock_observed": {},
+        "correct_upstream": false,
+        "valid_response": false
+      },
+      "corroboration_scope": "Pre-field correctness evidence from same pinned gateway source and audited configuration; field snapshot independently retains the same 501 error. Do not mislabel the preflight mock recorder as a field recorder.",
+      "source_commit": "b7d579fab2818968322ef96e5b8e98dc8178fafc",
+      "source_paths": [
+        "litellm-rust/crates/llms/src/bedrock/chat/converse_transformation.rs",
+        "litellm-rust/crates/llms/src/base_llm/chat/transformation.rs",
+        "litellm-rust/crates/inference-chat/src/prepare.rs"
+      ],
+      "cause": "The adapter maps max_tokens to maxTokens but the unsupported-parameter check rejects the standard max_tokens before transformation. No parameter removed or gateway patch applied."
+    },
+    "native_chat_streaming": {
+      "classification": "confirmed gateway rejection",
+      "pairs": [
+        "openai>openai",
+        "openai>anthropic"
+      ],
+      "field_observation": "Both c=1 requests answer HTTP 501, deliver zero content frames, and have no stream to time. Sustained count is zero; timing/headroom are absent.",
+      "source_and_raw_corroboration": "results/diagnostics/refresh-configuration/litellm-rust-final-config-correctness-preflight.json contains raw 501 unsupported-by-rust-path streaming responses and empty upstream recorder observations; pinned source explicitly rejects streaming."
+    },
+    "anthropic>anthropic_sustained_streams": {
+      "classification": "unconfirmed performance boundary; not a protocol failure or an invented ceiling",
+      "observation": "Prior bisection c=2312 did not hold on reconfirmation; stepped-down c=2064 failed the gate. Final three retained c=2048 windows delivered all 126976 expected content frames / 131072 SSE frames with zero stream errors, but counted 78, 3166 and 2396 gaps beyond the unchanged 200ms stall bound.",
+      "missing_metric_justification": "The stream is implemented and frame delivery succeeds, but repeat windows do not establish a sustained ceiling under the declared stall bound. Published sustained metrics remain absent; raw gap/frame counts and host snapshots are retained. This does not identify an implementation bug or independently isolate scheduler cause."
+    },
+    "other_omissions": "Native Responses stream mock limitation, oscillating memory windows with no plateau time, below-resolution differences and settled-window shapes are recorded per metric. No cost-window failure or interrupted throughput sweep."
+  },
+  "cells": [
+    {
+      "pair": "cohere>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>anthropic",
+      "served": true,
+      "reason": null,
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.time_to_plateau_s": {
+          "reason": "not_measured",
+          "detail": "memory was still oscillating with no net trend - it returns to where it was, which is not a leak when the 300s load window closed, so it has no time-to-plateau; its rate is published beside this"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21069us) came in under the mock's (21071us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21139us) came in under the mock's (21215us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.streams_sustained": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=2312, but it did not hold on re-measurement and the stepped-down rung at c=2064 failed the stream gate on its first window"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=2312, but it did not hold on re-measurement and the stepped-down rung at c=2064 failed the stream gate on its first window"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=2312, but it did not hold on re-measurement and the stepped-down rung at c=2064 failed the stream gate on its first window"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=2312, but it did not hold on re-measurement and the stepped-down rung at c=2064 failed the stream gate on its first window"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "anthropic>anthropic is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "bedrock>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>anthropic",
+      "served": true,
+      "reason": null,
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "not_measured",
+          "detail": "the sustained figure was measured but the rig could not derive the mock's frame ceiling for this cell, so there is nothing to state this as a fraction of"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "not_measured",
+          "detail": "the sustained figure was measured but the rig could not derive the mock's frame ceiling for this cell, so there is nothing to state this as a fraction of"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        }
+      },
+      "stream_error": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai-responses",
+      "served": true,
+      "reason": null,
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.time_to_plateau_s": {
+          "reason": "not_measured",
+          "detail": "memory was still oscillating with no net trend - it returns to where it was, which is not a leak when the 300s load window closed, so it has no time-to-plateau; its rate is published beside this"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "openai-responses>openai-responses is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "anthropic>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai",
+      "served": true,
+      "reason": null,
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.time_to_plateau_s": {
+          "reason": "not_measured",
+          "detail": "memory was still oscillating with no net trend - it returns to where it was, which is not a leak when the 300s load window closed, so it has no time-to-plateau; its rate is published beside this"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "not_measured",
+          "detail": "the sustained figure was measured but the rig could not derive the mock's frame ceiling for this cell, so there is nothing to state this as a fraction of"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "not_measured",
+          "detail": "the sustained figure was measured but the rig could not derive the mock's frame ceiling for this cell, so there is nothing to state this as a fraction of"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "not_measured",
+          "detail": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time"
+        }
+      },
+      "stream_error": "no stream frame arrived from the gateway: it answered HTTP 501, not 2xx, so what it sent is an error response rather than a stream to time",
+      "egress_reverified": null,
+      "reverify_note": "openai>openai is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>bedrock",
+      "served": "failed",
+      "reason": "failed",
+      "status": "501",
+      "body_snippet": "{\"error\":{\"message\":\"unsupported by the rust path: unrecognized request parameter\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "verdict_note": "probed and answered failed (HTTP 501)",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "status": "",
+      "body_snippet": "",
+      "verdict_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    }
+  ],
+  "publication_consistency_warnings": [
+    "check-consistency: WARNING: litellm-rust.anthropic->anthropic.memory: sampled peak_rss 20.1484375 MiB > kernel peak_rss_hwm 19.8828125 MiB (a 1.34% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)",
+    "check-consistency: WARNING: litellm-rust.openai->anthropic.memory: sampled peak_rss 18.609375 MiB > kernel peak_rss_hwm 18.3359375 MiB (a 1.49% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)",
+    "check-consistency: WARNING: litellm-rust.openai-responses->openai-responses.memory: sampled peak_rss 19.0859375 MiB > kernel peak_rss_hwm 18.828125 MiB (a 1.37% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)",
+    "check-consistency: WARNING: litellm-rust.openai->openai.memory: sampled peak_rss 19.18359375 MiB > kernel peak_rss_hwm 18.83203125 MiB (a 1.87% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)"
+  ],
+  "memory_warning_policy": "Existing checker accepts small process-tree sampling-time differences; raw sampled RSS and later VmHWM sum retained unchanged. No stronger cause inferred from this discrepancy."
+}

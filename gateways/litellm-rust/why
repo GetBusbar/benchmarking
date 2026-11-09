@@ -2,6 +2,10 @@ Standalone Rust gateway from LiteLLM's official v1.108.3 tag, pinned to commit b
 
 The upstream release has no verified ARM64 image of this standalone Rust server. Build its locked Rust workspace in release mode before measurement, recording the exact source commit, lockfile and executable hashes. No Python interpreter or Python config bridge is used.
 
-One static YAML configuration wires OpenAI and Anthropic models to the local mock. Fresh correctness probes determine which protocol pairs actually work in this configuration. Missing adapters and failed probes remain explicit results; they are not converted into zero measurements.
+One static YAML configuration wires OpenAI Chat, OpenAI Responses and Anthropic models to the local mock. The release's native Responses handler uses the openai provider, while its chat handler uses openai_like for the local compatible endpoint. Each model declaration selects that upstream wire; no performance settings are changed. Fresh correctness probes determine which protocol pairs actually work in this configuration. Missing adapters and failed probes remain explicit results; they are not converted into zero measurements.
 
 The standalone release uses its openai_like chat provider for a local OpenAI-compatible endpoint; openai is rejected by its native chat provider dispatch. The full native executable path identifies live processes without matching a Linux defunct entry containing only the 15-character executable name.
+
+bench-bedrock upstream # Released native Converse adapter, api_base redirected to the mock; dummy api_key uses its native bearer-token authentication and aws_region_name selects the required region. No token-limit/drop-parameter override.
+
+The adapter is enabled even though the common max_tokens request returns 501: supported_openai_param_mappings maps max_tokens to maxTokens, but the standalone inference path checks the untranslated parameter against provider names. This is retained as a supported-cell failure. The minimal no-limit diagnostic proves the route exists but is not the field workload.

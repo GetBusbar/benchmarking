@@ -53,5 +53,14 @@
   "runtime": {
     "container": "apisix-bench",
     "kind": "docker"
-  }
+  },
+  "matrix": [
+    "100000",
+    "010000",
+    "101000",
+    "000000",
+    "000000",
+    "000001"
+  ],
+  "matrix_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json"
 }

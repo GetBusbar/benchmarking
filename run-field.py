@@ -20,7 +20,7 @@ from bench_network import create, cleanup, save
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('gateways',nargs='*')
-    parser.add_argument('--placement',choices=['same-region','cheapest'],default='cheapest')
+    parser.add_argument('--placement',choices=['same-region','cheapest'],default='same-region')
     parser.add_argument('--region',help='Optional explicit region; otherwise choose from current prices')
     parser.add_argument('--state-dir',type=Path,required=True,help='Private directory outside the source tree for logs and SSH keys')
     parser.add_argument('--rig-dir',type=Path,required=True)
@@ -53,7 +53,9 @@ def main():
     networks={};children=[];images={}
     def interrupt(signum,frame):
         # Send exactly one signal in finally: a second TERM can interrupt the
-        # shell's teardown trap while its instances are still billing.
+        # shell's teardown trap while its instances are still billing. Later
+        # signals are ignored so a repeated Ctrl-C cannot skip network cleanup.
+        signal.signal(signal.SIGTERM,signal.SIG_IGN);signal.signal(signal.SIGINT,signal.SIG_IGN)
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM,interrupt);signal.signal(signal.SIGINT,interrupt)
     try:
@@ -71,7 +73,9 @@ def main():
             state=create(client,run_id,group[0]['zone'],journal);networks[region]=(client,state,journal)
             env={**os.environ,'OTB_AWS_REGION':region,'AWS_DEFAULT_REGION':region,'BENCH_AMI_ID':ami,'BENCH_VPC_ID':state['vpc_id'],'BENCH_SUBNET_ID':state['subnet_id'],'BENCH_STATE_DIR':str(directory/region),'BENCH_RIG_DIR':str(args.rig_dir.resolve()),'RUN_ID':run_id+'-'+region,'PUBLISH':'0'}
             log=(directory/f'run-{region}.log').open('w')
-            child=subprocess.Popen(['bash',str(ROOT/'run-on-ec2.sh'),*[a['gateway'] for a in group]],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT)
+            # Own session: a terminal Ctrl-C reaches only this orchestrator, which then
+            # signals the child exactly once below.
+            child=subprocess.Popen(['bash',str(ROOT/'run-on-ec2.sh'),*[a['gateway'] for a in group]],env=env,cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             log.close();children.append(child)
         failed=0
         for child in children:failed+=child.wait()!=0

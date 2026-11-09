@@ -1,0 +1,93 @@
+{
+  "checked_at": "2026-11-09T01:17:08.512509+00:00",
+  "gateway": "litellm-python",
+  "decision": "Remove the global use_chat_completions_url_for_anthropic_messages override. Keep the per-model upstream selector and supported Messages-to-Chat cell.",
+  "reason": "Both configurations reach the same correct Chat upstream with a valid request. The default internal bridge returns empty content; switching internal bridges masks the failure. Documentation alone does not justify a workaround.",
+  "comparisons": [
+    {
+      "configuration": "global_override_enabled",
+      "checked_at": "2026-11-09T01:07:04.158305+00:00",
+      "observation": {
+        "ingress": "anthropic",
+        "egress": "openai",
+        "path": "/v1/messages",
+        "request_headers": [
+          [
+            "x-api-key",
+            "sk-otb-local-mock-benchmark"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "request_body": {
+          "max_tokens": 64,
+          "messages": [
+            {
+              "content": "hello",
+              "role": "user"
+            }
+          ],
+          "model": "gpt-4o-mini"
+        },
+        "declared": true,
+        "status": 200,
+        "body": "{\"id\":\"chatcmpl-x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-4o-mini\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_details\":null}",
+        "mock_observed": {
+          "openai": {
+            "count": 1,
+            "body_ok": true,
+            "last_path": "/v1/chat/completions",
+            "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":64}"
+          }
+        },
+        "correct_upstream": true,
+        "valid_response": true
+      }
+    },
+    {
+      "configuration": "global_override_absent",
+      "checked_at": "2026-11-09T01:16:41.632956+00:00",
+      "observation": {
+        "ingress": "anthropic",
+        "egress": "openai",
+        "path": "/v1/messages",
+        "request_headers": [
+          [
+            "x-api-key",
+            "sk-otb-local-mock-benchmark"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "request_body": {
+          "max_tokens": 64,
+          "messages": [
+            {
+              "content": "hello",
+              "role": "user"
+            }
+          ],
+          "model": "gpt-4o-mini"
+        },
+        "declared": true,
+        "status": 200,
+        "body": "{\"id\":\"resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOm9wZW5haTttb2RlbF9pZDo1OTExYjM2OTRjMmM2OTgxOTJkMDIyMDZlYmEyMmI3MjgwNDIwYjJlNjlkNWQxZGM0ZmMwMWI0NThjMGM2ZWJmO3Jlc3BvbnNlX2lkOmNoYXRjbXBsLXg=\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-4o-mini\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"content\":[],\"stop_reason\":\"end_turn\",\"stop_details\":null}",
+        "mock_observed": {
+          "openai": {
+            "count": 1,
+            "body_ok": true,
+            "last_path": "/v1/chat/completions",
+            "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"max_tokens\":64}"
+          }
+        },
+        "correct_upstream": true,
+        "valid_response": false
+      }
+    }
+  ],
+  "performance_measurements": false
+}

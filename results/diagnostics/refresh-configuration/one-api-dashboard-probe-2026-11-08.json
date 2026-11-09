@@ -1,0 +1,34 @@
+{
+  "image": "justsong/one-api:v0.6.10@sha256:af6b361630bdf408b86fce7aa8fc131b37ea5177ae866d121ba7c002e773e477",
+  "checked_at": "2026-11-08T22:58:47.382680+00:00",
+  "responses": [
+    {
+      "path": "/v2/chat",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "body_sha256": "9f6662d698f1233a689463405d791bc8bed5adcf5f1e3eadccff39116d8445c7",
+      "body_start": "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"/><link rel=\"icon\" href=\"logo.png\"/><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/><meta name=\"theme-color\" content=\"#ffffff\"/><meta name="
+    },
+    {
+      "path": "/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "body_sha256": "9f6662d698f1233a689463405d791bc8bed5adcf5f1e3eadccff39116d8445c7",
+      "body_start": "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"/><link rel=\"icon\" href=\"logo.png\"/><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/><meta name=\"theme-color\" content=\"#ffffff\"/><meta name="
+    },
+    {
+      "path": "/v1/chat/completions",
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "body_sha256": "9327f2ad6af816d98f2067bc8d9e73b9dcb54bd80506792c7fb92ddfa0e31c9e",
+      "body_start": "{\"error\":{\"message\":\"\u65e0\u6548\u7684\u4ee4\u724c (request id: 2026110822584738328200149096195)\",\"type\":\"one_api_error\"}}"
+    },
+    {
+      "path": "/v1/messages",
+      "status": 404,
+      "content_type": "application/json; charset=utf-8",
+      "body_sha256": "5da3585a6e4baa49966da02dbb193fdc6cba3c5647b9e37c1ee2ccde346d8e19",
+      "body_start": "{\"error\":{\"message\":\"Invalid URL (POST /v1/messages)\",\"type\":\"invalid_request_error\",\"param\":\"\",\"code\":\"\"}}"
+    }
+  ]
+}

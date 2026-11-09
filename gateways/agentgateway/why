@@ -20,3 +20,9 @@ awsRegion  boot      # local.rs: \"bedrock requires aws_region\" - boot fails wi
 AWS_ACCESS_KEY_ID     boot   # the bedrock provider signs SigV4 from the AWS env; absent = no egress
 AWS_SECRET_ACCESS_KEY boot
 AWS_REGION            boot
+
+custom     upstream  # v1.7.0 public custom-provider schema describes the mock upstream API formats
+formats    upstream  # Chat and Responses aliases select distinct matrix wires; no scheduler/cache/retry change
+type       upstream  # completions or responses; CHAT_TRANSLATIONS only selects supported wire formats
+
+Source: https://github.com/agentgateway/agentgateway/blob/26f5aebe99a36a037fe54f8080a608aca5547e15/crates/agentgateway/src/llm/mod.rs (CHAT_TRANSLATIONS and supported_chat_formats). Without a Chat-only upstream declaration, Messages prefers Responses and the requested Chat column is never exercised. This is upstream wiring, not a performance override.

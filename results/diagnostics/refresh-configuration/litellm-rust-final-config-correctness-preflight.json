@@ -1,0 +1,1131 @@
+{
+  "checked_at": "2026-11-09T01:02:46.874778+00:00",
+  "gateway": "litellm-rust",
+  "kind": "local single-request correctness checks; no performance measurements",
+  "request_source": "Canonical engine Dialect bodies; model_for/path_for/header precedence reproduced from engine/src/run.rs",
+  "image": null,
+  "binary_sha256": "d09eeac4ea66bacafbac65617cf038daa03e6ae84f82b54c630ea3c7b058d820",
+  "mock_binary_sha256": "95b7bbc5c91cdcc0a74050ee9a6cd6dc9e80a30224a9a660cbee52a6d3bb5256",
+  "local_substitutions": [
+    "gateway published/bound to 23982",
+    "mock bound to 19801",
+    "Docker loopback rewritten to host.docker.internal"
+  ],
+  "gateway_files_sha256": {
+    "gateways/litellm-rust/why": "7f03e4ca75f5ebcd81ff9163bb6b2305445d142494744596ec809e16e46edc75",
+    "gateways/litellm-rust/env": "0485ecba56b3b58514dff1e5e3ca203f5d55a282a7a572bcaf947d97ea7e59a1",
+    "gateways/litellm-rust/build.sh": "ef263b02fa5e113169eb9b2f3102f71723fbe33aceffca7f754657e434a0b173",
+    "gateways/litellm-rust/commands": "b327c6637a254cd6e33a39249f3732306abe54be3ffea467c9affe0a7b486205",
+    "gateways/litellm-rust/config.gen.yaml.tmpl": "7b35aaa3d1574810269be4329c7f2659d2acc955f3f80150e54a428e741ae5bf",
+    "gateways/litellm-rust/definition.json": "7fea4bec8121159cc5cabdc512f4a12597be29060aa6c25557352ba9331a2026"
+  },
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":0}}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai-responses",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-responses"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"invalid provider: openai\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":400}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-anthropic"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"created\":1794186165,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":10}}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"max_tokens\":16}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "gemini",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 200,
+      "body": "{\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":0}}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      },
+      "correct_upstream": false,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "cohere",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 200,
+      "body": "{\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":0}}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      },
+      "correct_upstream": false,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-bedrock"
+      },
+      "declared": true,
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: unrecognized request parameter\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai-responses",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bench-responses"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"model\":\"mock\",\"output\":[{\"type\":\"message\",\"id\":\"msg_x\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12},\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"parallel_tool_calls\":true,\"tools\":[],\"tool_choice\":\"auto\",\"temperature\":1.0,\"top_p\":1.0,\"metadata\":{},\"previous_response_id\":null,\"truncation\":\"disabled\",\"max_output_tokens\":null,\"store\":false}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"input\":\"hello\"}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "anthropic",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bench-anthropic"
+      },
+      "declared": false,
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "gemini",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "cohere",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "bedrock",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bench-bedrock"
+      },
+      "declared": false,
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "gwbench"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid provider: openai_like\"}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai-responses",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "gwbench"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-responses"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid provider: openai\"}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "gwbench"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-anthropic"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":64}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "gemini",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "gwbench"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid provider: openai_like\"}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "cohere",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "gwbench"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid provider: openai_like\"}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "bedrock",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "gwbench"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-bedrock"
+      },
+      "declared": false,
+      "status": 501,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"unsupported by the rust path: Bedrock invoke messages request shaping\"}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai",
+      "path": "/v1beta/models/bench-openai:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "gwbench"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai-responses",
+      "path": "/v1beta/models/bench-responses:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "gwbench"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "anthropic",
+      "path": "/v1beta/models/bench-anthropic:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "gwbench"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "gemini",
+      "path": "/v1beta/models/bench-openai:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "gwbench"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "cohere",
+      "path": "/v1beta/models/bench-openai:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "gwbench"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "bedrock",
+      "path": "/v1beta/models/bench-bedrock:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "gwbench"
+        ],
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "openai",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "openai-responses",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-responses"
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "anthropic",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-anthropic"
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "gemini",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "cohere",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-openai"
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "bedrock",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bench-bedrock"
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "openai",
+      "path": "/model/bench-openai/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "openai-responses",
+      "path": "/model/bench-responses/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "anthropic",
+      "path": "/model/bench-anthropic/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "gemini",
+      "path": "/model/bench-openai/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "cohere",
+      "path": "/model/bench-openai/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "bedrock",
+      "path": "/model/bench-bedrock/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer gwbench"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 404,
+      "body": "",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    }
+  ],
+  "streams": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: streaming\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "terminal": false,
+      "content_frames": 0,
+      "terminal_kind": null,
+      "frame_count_method": "JSON parsing matching engine Dialect::sse_event_is_content; whitespace-independent",
+      "assessment": "Released gateway explicitly rejects streaming; retain this behavior, do not force an alternate implementation."
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: streaming\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {},
+      "terminal": false,
+      "content_frames": 0,
+      "terminal_kind": null,
+      "frame_count_method": "JSON parsing matching engine Dialect::sse_event_is_content; whitespace-independent",
+      "assessment": "Released gateway explicitly rejects streaming; retain this behavior, do not force an alternate implementation."
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"0xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"1xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"2xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"3xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"4xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"5xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"6xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"7xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"8xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"9xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"10xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"11xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"12xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"13xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"14xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"15xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"16xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"17xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"18xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"19xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"20xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"21xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"22xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"23xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"24xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"25xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"26xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"27xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"28xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"29xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"30xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"31xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"32xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"33xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"34xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"35xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"36xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"37xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"38xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"39xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"40xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"41xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"42xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"43xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"44xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"45xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"46xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"47xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"48xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"49xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"50xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"51xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"52xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"53xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"54xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"55xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"56xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"57xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"58xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"59xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"60xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"61xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"62xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"63xxxxxxxxxxxxxx\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":64}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":64,\"stream\":true}"
+        }
+      },
+      "terminal": true,
+      "content_frames": 64,
+      "terminal_kind": "message_stop",
+      "frame_count_method": "JSON parsing matching engine Dialect::sse_event_is_content; whitespace-independent"
+    }
+  ],
+  "engine_stream_scope": "Only OpenAI Chat and Anthropic ingress/egress are supported by the streaming rig; no performance interpretation of these single requests."
+}

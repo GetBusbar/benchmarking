@@ -1,0 +1,704 @@
+{
+  "gateway": "kong",
+  "raw_path": "results/snapshots/result_kong_2026-11-09T02-01-47Z.json",
+  "raw_sha256": "3165c43e6130084b393b6b4f0e430964f52d61b56f019961e2c6de565430075b",
+  "reviewed_at": "2026-11-09T03:43:47.627856+00:00",
+  "publication_status": "checked_with_unconfirmed_stream_ceiling_retained",
+  "qualification": {
+    "band_pct": 20.0,
+    "baseline_rps": 94065.0,
+    "baseline_samples": 1,
+    "concurrency": 32,
+    "drift_pct": 10.627757401796629,
+    "observed_absent_detail": null,
+    "observed_absent_reason": null,
+    "observed_rps": 104062.0,
+    "outcome": "pass"
+  },
+  "invariants": "PASS; cost arithmetic excluded by existing low-utilisation/sample-count rule",
+  "supported_cells": 7,
+  "unsupported_cells": 29,
+  "attribution": {
+    "openai>openai_sustained_streams": {
+      "classification": "performance boundary not reconfirmed; no ceiling claimed",
+      "observation": "Bisection c=132 did not hold on reconfirmation; stepping down found no confirmed ceiling within the existing four-attempt policy. Last three c=128 rungs delivered all 8064 expected content frames / 8192 SSE frames with zero stream errors, but counted 13, 5 and 16 gaps beyond the unchanged 200ms stall bound.",
+      "evidence": "Raw stream.sweep_streams contains frame counts, gap violations and host_before snapshots. This is a failed timing criterion, not an unsupported protocol or a proven implementation bug."
+    },
+    "bedrock>bedrock_memory": "The 300s load window remained oscillatory with no net trend; no plateau time is claimed, while the rate and raw RSS series remain.",
+    "other_omissions": "Native Gemini/Cohere/Bedrock event-stream mock limitations, below-resolution latency/frontier values and settled-window shape absences are recorded per cell. No failed cost window or interrupted throughput boundary.",
+    "wire_proof": "All cross-protocol cells independently reverified their upstream request shape. Same-dialect cells explicitly state that translation cannot be inferred from a forwarding route."
+  },
+  "cells": [
+    {
+      "pair": "gemini>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.time_to_plateau_s": {
+          "reason": "not_measured",
+          "detail": "memory was still oscillating with no net trend - it returns to where it was, which is not a leak when the 300s load window closed, so it has no time-to-plateau; its rate is published beside this"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "bedrock>bedrock is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>gemini",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "gemini>gemini is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai-responses>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>gemini",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer gemini with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (0us) came in under the mock's (21073us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.streams_sustained": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=132, but that concurrency did not hold the stream gate on re-measurement and stepping down found none that did within 4 attempts"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=132, but that concurrency did not hold the stream gate on re-measurement and stepping down found none that did within 4 attempts"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=132, but that concurrency did not hold the stream gate on re-measurement and stepping down found none that did within 4 attempts"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "not_measured",
+          "detail": "the bisection proved c=132, but that concurrency did not hold the stream gate on re-measurement and stepping down found none that did within 4 attempts"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "openai>openai is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "bedrock>openai",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>anthropic",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (0us) came in under the mock's (21069us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>cohere",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer cohere with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "verdict_note": "Pinned Kong 3.9.4 ai-proxy schema supports OpenAI ingress plus native Gemini and Bedrock llm_format, with native formats restricted to their matching provider. OpenAI ingress is configured for five providers including Cohere v1. Seven exact pairs passed local response and upstream-recorder preflight. OpenAI Responses and native Anthropic/Cohere ingress are not exposed by this ai-proxy schema. Evidence: results/diagnostics/refresh-configuration/kong-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    }
+  ]
+}

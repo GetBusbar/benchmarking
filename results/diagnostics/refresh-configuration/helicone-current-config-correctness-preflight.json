@@ -1,0 +1,866 @@
+{
+  "checked_at": "2026-11-09T00:57:13.432826+00:00",
+  "gateway": "helicone",
+  "kind": "single-request correctness checks; no performance measurement",
+  "source_commit": "081f310be779f27122e6038e81e2359c44db4ecb",
+  "release_url": "https://github.com/Helicone/ai-gateway/releases/tag/v0.2.0-beta.30",
+  "binary_kind": "official macOS ARM64 release asset; not the future Linux release build",
+  "binary_sha256": "978360cec6177a0a28dec4de331726c0f08540918f895ffb64b09392142c053a",
+  "mock_binary_sha256": "95b7bbc5c91cdcc0a74050ee9a6cd6dc9e80a30224a9a660cbee52a6d3bb5256",
+  "request_source": "Canonical bodies and auth copied from engine-generated preflight; model and paths resolved from current manifest",
+  "gateway_files_sha256": {
+    "gateways/helicone/why": "c6787b195b710b1ee07d6f8d818ebc8c51bb70c60490c3556ae2630cc65b6d8e",
+    "gateways/helicone/env": "416f914ab79849000737f6820637955e9f8e9cf679aa1701943f539ea53ba0ec",
+    "gateways/helicone/build.sh": "794cd57073e63278700de461b23d1caf0d6880a22cb056389fb9db126acb2c85",
+    "gateways/helicone/config.gen.yaml.tmpl": "bafabc7a19c2947db718911eaa1d7560e1dc2be416d8a85e66f0ec04056ef6eb",
+    "gateways/helicone/definition.json": "5925a97ffa61338e8a43f373e2f1389f5949531183c664d77bc41169c6683290"
+  },
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "path": "/router/openai/chat/completions",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "status": 200,
+      "body": "{\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":null,\"completion_tokens_details\":null}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\",\"max_tokens\":16}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai-responses",
+      "path": "/router/openai/chat/completions",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "gpt-4o-mini"
+      },
+      "status": 500,
+      "body": "{\"error\":{\"message\":\"Mapper error: Invalid model name: Model string must be in format '{provider}/{model_name}', got 'gpt-4o-mini'\",\"type\":\"server_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "path": "/router/anthropic/chat/completions",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":null,\"completion_tokens_details\":null}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"claude-3-5-sonnet-latest\"}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "gemini",
+      "path": "/router/openai/chat/completions",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "gemini-1.5-pro"
+      },
+      "status": 500,
+      "body": "{\"error\":{\"message\":\"Mapper error: Invalid model name: Model string must be in format '{provider}/{model_name}', got 'gemini-1.5-pro'\",\"type\":\"server_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "cohere",
+      "path": "/router/openai/chat/completions",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "command-r-plus"
+      },
+      "status": 500,
+      "body": "{\"error\":{\"message\":\"Mapper error: Invalid model name: Model string must be in format '{provider}/{model_name}', got 'command-r-plus'\",\"type\":\"server_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "path": "/router/bedrock/chat/completions",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "status": 200,
+      "body": "{\"id\":\"6e4ae2b4-edde-4a78-a3e9-b160aae0ba88\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"audio_tokens\":null,\"cached_tokens\":null},\"completion_tokens_details\":null}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+          "last_snippet": "{\"modelId\":\"anthropic.claude-3-5-sonnet-v1:0\",\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"system\":null,\"inferenceConfig\":{\"maxTokens\":2000,\"temperature\":0.0,\"topP\":0.0,\"stopSequences\":n"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai",
+      "path": "/v1/responses",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "input": "hello",
+        "model": "openai/gpt-4o-mini"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai-responses",
+      "path": "/v1/responses",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "input": "hello",
+        "model": "gpt-4o-mini"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "anthropic",
+      "path": "/v1/responses",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "input": "hello",
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "gemini",
+      "path": "/v1/responses",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "input": "hello",
+        "model": "gemini-1.5-pro"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "cohere",
+      "path": "/v1/responses",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "input": "hello",
+        "model": "command-r-plus"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "bedrock",
+      "path": "/v1/responses",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "input": "hello",
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai",
+      "path": "/v1/messages",
+      "request_headers": {
+        "x-api-key": "dummy",
+        "anthropic-version": "2023-06-01"
+      },
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai-responses",
+      "path": "/v1/messages",
+      "request_headers": {
+        "x-api-key": "dummy",
+        "anthropic-version": "2023-06-01"
+      },
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "gpt-4o-mini"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "path": "/anthropic/v1/messages",
+      "request_headers": {
+        "x-api-key": "dummy",
+        "anthropic-version": "2023-06-01"
+      },
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\": 64, \"messages\": [{\"content\": \"hello\", \"role\": \"user\"}], \"model\": \"anthropic/claude-3-5-sonnet\"}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "gemini",
+      "path": "/v1/messages",
+      "request_headers": {
+        "x-api-key": "dummy",
+        "anthropic-version": "2023-06-01"
+      },
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "gemini-1.5-pro"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "cohere",
+      "path": "/v1/messages",
+      "request_headers": {
+        "x-api-key": "dummy",
+        "anthropic-version": "2023-06-01"
+      },
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "command-r-plus"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "bedrock",
+      "path": "/v1/messages",
+      "request_headers": {
+        "x-api-key": "dummy",
+        "anthropic-version": "2023-06-01"
+      },
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai",
+      "path": "/v1beta/models/openai/gpt-4o-mini:generateContent",
+      "request_headers": {
+        "x-goog-api-key": "dummy"
+      },
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai-responses",
+      "path": "/v1beta/models/gpt-4o-mini:generateContent",
+      "request_headers": {
+        "x-goog-api-key": "dummy"
+      },
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "anthropic",
+      "path": "/v1beta/models/anthropic/claude-3-5-sonnet:generateContent",
+      "request_headers": {
+        "x-goog-api-key": "dummy"
+      },
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "gemini",
+      "path": "/v1beta/models/gemini-1.5-pro:generateContent",
+      "request_headers": {
+        "x-goog-api-key": "dummy"
+      },
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "cohere",
+      "path": "/v1beta/models/command-r-plus:generateContent",
+      "request_headers": {
+        "x-goog-api-key": "dummy"
+      },
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "bedrock",
+      "path": "/v1beta/models/bedrock/anthropic.claude-3-5-sonnet-v1:0:generateContent",
+      "request_headers": {
+        "x-goog-api-key": "dummy"
+      },
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "openai",
+      "path": "/v2/chat",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "openai-responses",
+      "path": "/v2/chat",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "gpt-4o-mini"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "anthropic",
+      "path": "/v2/chat",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "gemini",
+      "path": "/v2/chat",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "gemini-1.5-pro"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "cohere",
+      "path": "/v2/chat",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "command-r-plus"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "bedrock",
+      "path": "/v2/chat",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "openai",
+      "path": "/model/openai/gpt-4o-mini/converse",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "openai-responses",
+      "path": "/model/gpt-4o-mini/converse",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "anthropic",
+      "path": "/model/anthropic/claude-3-5-sonnet/converse",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "gemini",
+      "path": "/model/gemini-1.5-pro/converse",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "cohere",
+      "path": "/model/command-r-plus/converse",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "bedrock",
+      "path": "/bedrock/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+      "request_headers": {
+        "authorization": "Bearer dummy"
+      },
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "status": 200,
+      "body": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+          "last_snippet": "{\"messages\": [{\"content\": [{\"text\": \"hello\"}], \"role\": \"user\"}]}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    }
+  ],
+  "scope": "Superseded exploratory diagnostic. Its unsupported-column fallback paths are not evidence of product capability. Use helicone-final-config-correctness-preflight.json and the pinned source-backed five-cell matrix."
+}

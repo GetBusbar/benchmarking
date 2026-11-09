@@ -1,6 +1,8 @@
 {
   "auth": "dummy",
   "cell_paths": {
+    "anthropic>anthropic": "/anthropic/v1/messages",
+    "bedrock>bedrock": "/bedrock/model/anthropic.claude-3-5-sonnet-v1:0/converse",
     "openai>anthropic": "/router/anthropic/chat/completions",
     "openai>bedrock": "/router/bedrock/chat/completions",
     "openai>openai": "/router/openai/chat/completions"
@@ -44,5 +46,14 @@
   "runtime": {
     "kind": "native",
     "proc_match": "target/release/ai-gateway"
-  }
+  },
+  "matrix": [
+    "101001",
+    "000000",
+    "001000",
+    "000000",
+    "000000",
+    "000001"
+  ],
+  "matrix_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json"
 }

@@ -12,13 +12,37 @@
       "template": "data/mcpbridges/default.gen.yaml.tmpl"
     },
     {
-      "output": "data/ingresses/bench.gen.yaml",
-      "template": "data/ingresses/bench.gen.yaml.tmpl"
+      "output": "data/ingresses/anthropic.gen.yaml",
+      "template": "data/ingresses/anthropic.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/ingresses/bedrock.gen.yaml",
+      "template": "data/ingresses/bedrock.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/ingresses/cohere.gen.yaml",
+      "template": "data/ingresses/cohere.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/ingresses/gemini.gen.yaml",
+      "template": "data/ingresses/gemini.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/ingresses/openai-responses.gen.yaml",
+      "template": "data/ingresses/openai-responses.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/ingresses/openai.gen.yaml",
+      "template": "data/ingresses/openai.gen.yaml.tmpl"
+    },
+    {
+      "output": "data/wasmplugins/bench.gen.yaml",
+      "template": "data/wasmplugins/bench.gen.yaml.tmpl"
     }
   ],
   "constants": {
     "HIGRESS_BEDROCK_MODEL": "anthropic.claude-3-sonnet-20240229-v1:0",
-    "HIGRESS_GEMINI_MODEL": "gpt-4o-mini-gemini"
+    "HIGRESS_GEMINI_MODEL": "gemini-1.5-pro"
   },
   "display": "Higress",
   "egress": [
@@ -41,8 +65,38 @@
         "read_only": true
       },
       {
-        "container_path": "/data/ingresses/bench.yaml",
-        "host_path": "data/ingresses/bench.gen.yaml",
+        "container_path": "/data/ingresses/anthropic.yaml",
+        "host_path": "data/ingresses/anthropic.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/ingresses/bedrock.yaml",
+        "host_path": "data/ingresses/bedrock.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/ingresses/cohere.yaml",
+        "host_path": "data/ingresses/cohere.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/ingresses/gemini.yaml",
+        "host_path": "data/ingresses/gemini.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/ingresses/openai-responses.yaml",
+        "host_path": "data/ingresses/openai-responses.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/ingresses/openai.yaml",
+        "host_path": "data/ingresses/openai.gen.yaml",
+        "read_only": true
+      },
+      {
+        "container_path": "/data/wasmplugins/bench.yaml",
+        "host_path": "data/wasmplugins/bench.gen.yaml",
         "read_only": true
       }
     ]
@@ -55,5 +109,22 @@
   "runtime": {
     "container": "higress-bench",
     "kind": "docker"
-  }
+  },
+  "egress_models": {
+    "openai": "gpt-4o-mini",
+    "openai-responses": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "gemini": "gemini-1.5-pro",
+    "cohere": "command-r-plus",
+    "bedrock": "anthropic.claude-3-sonnet-20240229-v1:0"
+  },
+  "matrix": [
+    "101111",
+    "010000",
+    "101110",
+    "000100",
+    "000010",
+    "000001"
+  ],
+  "matrix_note": "Higress 2.2.5 with bundled AI Proxy 2.0.3. Source 4deae1dd3b4cb2707273748985e55bef28e747d1 and pinned-image probes establish 13 configured exact-wire pairs, including two Cohere translations that currently fail response correctness and must remain failures. Original passthrough-only configuration omitted supported translations. Responses cross-conversion is not implemented; Messages-to-Bedrock uses Anthropic Mantle rather than Converse. Other unsupported translations pass through original wire or return unsupported API errors. Evidence: results/diagnostics/refresh-configuration/higress-adapter-preflight.json"
 }

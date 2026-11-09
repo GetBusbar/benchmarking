@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { absentEntryFor, sealMatrixCellsInPlace, sealPerfCell, sealStreaming, cpuFpsSourceFor, matrixHasCellMemory } from "./seal-matrix.mjs";
 import { snapshotCellCoords, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
+import { applyRunReview } from "./run-reviews.mjs";
 import { instrumentOf } from "./check-consistency.mjs";
 import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
 
@@ -37,6 +38,15 @@ const activeFieldPath = join(ROOT, "results", "active-field.json");
 const activeField = existsSync(activeFieldPath) ? JSON.parse(readFileSync(activeFieldPath, "utf8")) : null;
 if (activeField && (!/^[a-f0-9]{40}$/.test(activeField.engine_commit) || !Number.isFinite(Date.parse(activeField.started_at)))) {
   throw new Error("Invalid active field engine or start timestamp");
+}
+// THE BOARD'S ENGINE AND THE PINNED INSTRUMENT ARE ONE FACT. When they disagree every row is blanked as
+// "awaiting" while each check still passes, which is how a green deploy shipped an empty board.
+const enginePinPath = join(ROOT, "ENGINE_PIN");
+if (activeField && existsSync(enginePinPath)) {
+  const pinned = readFileSync(enginePinPath, "utf8").split(/\s+/)[0];
+  if (pinned !== activeField.engine_commit) {
+    throw new Error(`results/active-field.json engine_commit ${activeField.engine_commit} differs from ENGINE_PIN ${pinned}`);
+  }
 }
 
 // GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board - the governed
@@ -221,6 +231,10 @@ function readJson(path) {
 }
 
 const SNAP_DIR = join(ROOT, "results", "snapshots");
+const withdrawnPath = join(ROOT, "results", "withdrawn-runs.json");
+const withdrawnRuns = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, "utf8")).runs : {};
+const reviewPath = join(ROOT, "results", "run-reviews.json");
+const runReviews = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, "utf8")) : {};
 
 /* The snapshot the board should render for `key`: the newest FULL run, with every strictly-scoped
    newer run layered over it oldest-first (so the newest measurement of any cell wins). */
@@ -229,7 +243,9 @@ function resolvedSnapshot(key) {
   const snaps = [];
   for (const f of readdirSync(SNAP_DIR)) {
     if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
-    const snap = readJson(join(SNAP_DIR, f));
+    if (withdrawnRuns[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]) continue;
+    let snap = readJson(join(SNAP_DIR, f));
+    if (snap) snap = applyRunReview(snap, runReviews[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]);
     if (!snap) continue;
     snap.__file = f;
     snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
@@ -602,6 +618,14 @@ const wasMeasured = (g) => Boolean(g.matrix || g.snapshot_file || g.perf || g.st
 // no snapshots, so this file would otherwise die at its own gen-data call before its first
 // assertion - a suite that gates nothing while reading as an unrelated failure).
 // A refresh explicitly retains every entrant, withholding all earlier runs.
+// A run measured on the active engine that the start time then excludes is the same silent blank.
+if (activeField) {
+  const onEngine = allGateways.filter((g) => g.rig?.engine?.commit === activeField.engine_commit);
+  const excluded = onEngine.filter((g) => !(displayedMeasuredMs(g) >= Date.parse(activeField.started_at)));
+  if (excluded.length) {
+    throw new Error(`active field ${activeField.id} started_at ${activeField.started_at} excludes runs measured on its own engine: ${excluded.map((g) => g.key).join(", ")}`);
+  }
+}
 if (activeField) for (const g of allGateways) {
   const current = g.rig?.engine?.commit === activeField.engine_commit &&
     displayedMeasuredMs(g) >= Date.parse(activeField.started_at);

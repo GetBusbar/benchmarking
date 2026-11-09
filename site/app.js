@@ -3738,7 +3738,8 @@ const isHarnessGap = (cell) => {
   return cell.status === "000" || (note.includes("never served") && note.includes("warm-up"));
 };
 const cellState = (cell) =>
-  cell.served === true ? ["served", "served"]
+  cell.perf?.egress_reverified === false ? ["failed", "not served"]
+    : cell.served === true ? ["served", "served"]
     : cell.served === "not_measured" ? ["unverified", "not measured"]
     : cell.served === "unprobed_auth" ? ["unprobed", "unprobed auth"]
       // PROBE-FIRST (matrix v3): every cell is probed; a failed probe is "not configured" with the
@@ -4656,7 +4657,7 @@ function cellPopFull(g, ingress, egress) {
   const perfBlock = rows.length
     ? `<div class="pop-metrics">${rows.join("")}</div>`
     // A served cell with no per-cell perf (unswept), or a non-green cell: honest "not measured".
-    : (cell.served === true ? `<div class="pop-perf muted">served, not measured on this cell</div>` : "");
+    : (cellState(cell)[0] === "served" ? `<div class="pop-perf muted">served, not measured on this cell</div>` : "");
   // The delta: this cell vs the gateway's own REPRESENTATIVE diagonal (best_cell). "" for that cell itself.
   const cellPerf = chooserCellPerf(g, st);
   // THE CELL'S CURVE, in the popup that is the visual face of Custom mode. A single rate tells a reader
@@ -4686,10 +4687,10 @@ function cellPopFull(g, ingress, egress) {
   const reverify = (ingress !== egress && cellPerf && cellPerf.egress_reverified != null)
     ? `<div class="pop-note ${rv ? "" : "warn"}">${rv
       ? "egress re-verified: the request reaching the mock was in the egress dialect, not the ingress one"
-      : "egress NOT re-verified: the mock saw the ingress shape, so this cell may be a verbatim proxy rather than a translation"}${
+      : "upstream verification failed: the observed request did not match this cell’s upstream protocol"}${
       cellPerf.reverify_note ? ` - ${esc(cellPerf.reverify_note)}` : ""}</div>`
     : "";
-  const cta = cell.served === true ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
+  const cta = cellState(cell)[0] === "served" ? `<div class="pop-cta muted">click → Performance (Custom, this cell)</div>` : "";
   return head + perfBlock + shapeBlock + deltaBlock + verdict + reverify + cta;
 }
 /* hasMatrixGrid(g): did this gateway produce a protocol matrix at all? */
@@ -4751,7 +4752,7 @@ function renderMatrix() {
     if (t.fail) bits.push(`${t.fail} fail`);
     if (t.notdeclared) bits.push(`${t.notdeclared} not declared`);
     if (t.notconf) bits.push(`${t.notconf} not configured`);
-    if (t.untestable) bits.push(`${t.untestable} untestable (mock limit)`);
+    if (t.untestable) bits.push(`${t.untestable} untestable (rig limit)`);
     if (t.unverified) bits.push(`${t.unverified} not verified`);
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
     return `<section class="matrix-gw">
@@ -4820,7 +4821,7 @@ function renderMatrix() {
     el.addEventListener("click", () => {
       const g = state.data.gateways.find((x) => x.key === el.dataset.gw);
       const cell = g && matrixCell(g, el.dataset.egress, el.dataset.cell);
-      if (!cell || cell.served !== true) return;
+      if (!cell || cellState(cell)[0] !== "served") return;
       state.view = "performance"; state.mode = "custom";
       state.xlateIn = el.dataset.cell; state.xlateOut = el.dataset.egress;
       state.sortCol = VIEW_SORT.performance; state.sortDesc = true;

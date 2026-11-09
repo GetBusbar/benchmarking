@@ -1,0 +1,512 @@
+{
+  "gateway": "apisix",
+  "raw_path": "results/snapshots/result_apisix_2026-11-09T02-01-33Z.json",
+  "raw_sha256": "d51bb4cf969f13b635245fa757bd0c2714c73362193bfc76b5b2de11699146a9",
+  "reviewed_at": "2026-11-09T03:22:25.587940+00:00",
+  "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
+  "mock_sha256": "7150734b700340a9031720299d3bfa50b0a0ac746c87360c623831db48187d54",
+  "bundle_verification": "Both engine and mock checksums passed in worker fanout log",
+  "qualification": {
+    "band_pct": 20.0,
+    "baseline_rps": 94065.0,
+    "baseline_samples": 1,
+    "concurrency": 32,
+    "drift_pct": 19.509913357784512,
+    "observed_absent_detail": null,
+    "observed_absent_reason": null,
+    "observed_rps": 112417.0,
+    "outcome": "pass"
+  },
+  "build": "apache/apisix:3.19.0-debian@sha256:7401ce7cfd56de1b9dcecfe7d7c7e5a681bc29222767fd28391995a0936eaa38",
+  "cells": [
+    {
+      "pair": "gemini>openai",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (20070us) came in under the mock's (21068us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (20065us) came in under the mock's (21072us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "openai>openai is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai-responses>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>anthropic",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (20068us) came in under the mock's (21066us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "anthropic>anthropic is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.time_to_plateau_s": {
+          "reason": "not_measured",
+          "detail": "memory was still oscillating with no net trend - it returns to where it was, which is not a leak when the 300s load window closed, so it has no time-to-plateau; its rate is published beside this"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "bedrock>bedrock is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai-responses>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai-responses",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "openai-responses>openai-responses is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "verdict_note": "Pinned APISIX 3.19.0 source 473043623c161966f3f6ef4e8f12d2d8667a12d2: ai-providers capability tables and ai-protocols/converters registry support four native chat protocol paths plus Anthropic Messages to OpenAI Chat Completions conversion. The Gemini provider uses an OpenAI-compatible endpoint, not native Gemini generateContent; provider brands are not protocol support. Five exact pairs passed local response and recorder checks. Evidence: results/diagnostics/refresh-configuration/apisix-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    }
+  ],
+  "publication_status": "checked",
+  "invariants": "PASS: all applicable result invariants; CPU-cost arithmetic excluded by existing low-utilisation/sample-count check",
+  "attribution": {
+    "gateway_failed_cells": 0,
+    "unsupported_cells": 31,
+    "served_cells": 5,
+    "omissions": [
+      "Native Responses and Bedrock event streams are not implemented by the mock; retained as untestable streaming metrics.",
+      "Native Bedrock memory load remained oscillatory without net trend; no plateau time is claimed, with memory rate and raw series retained.",
+      "Below-resolution latency/frontier values and settled-window shape fields carry per-metric evidence in cells."
+    ]
+  }
+}

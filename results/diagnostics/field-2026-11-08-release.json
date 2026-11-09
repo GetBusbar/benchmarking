@@ -1,0 +1,86 @@
+{
+  "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
+  "source_commit": "f389a8879882a04db169f1df4caadcdab667c043",
+  "ci_pipeline": "https://github.com/GetBusbar/benchmarking/-/pipelines/412",
+  "ci_job": "https://github.com/GetBusbar/benchmarking/-/jobs/552",
+  "engine_sha256": "c5ddd560011cc82569ec4816299f40ded520168e4a4712dd040888027daee6c0",
+  "mock_sha256": "7150734b700340a9031720299d3bfa50b0a0ac746c87360c623831db48187d54",
+  "calibration": "results/calibrations/2026-11-08-09547897-arm64.json",
+  "field_state": "/Users/matthew/Developer/tmp/otb-august-readiness-20261108/field",
+  "run_id": "otb-20261109T015651Z",
+  "status": "HALTED_FOR_ENGINE_CORRECTION",
+  "workers": 15,
+  "results_checked": 0,
+  "automatic_worker_publication": false,
+  "publication_policy": "Publish valid measurements from completed runs. Keep affected metrics unavailable with hash-scoped evidence notes; preserve unknown causes and every raw observation. No whole-run exclusion merely for an explained missing metric.",
+  "blank_website_version": "361d1b37-1dc0-46b5-bfa7-754a4c1e7898",
+  "promotion_status": "MR26 remains opened in last API check despite owner reporting merged",
+  "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
+  "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
+  "results_harvested": 7,
+  "results_published": 7,
+  "harvested_results": {
+    "one-api": {
+      "raw": "results/snapshots/result_one-api_2026-11-09T02-01-58Z.json",
+      "review": "results/diagnostics/field-2026-11-08/one-api-result-review.json",
+      "publication": "published_valid_metrics_with_scoped_notes",
+      "instance_id": "i-0fc939cbd74bda7b7",
+      "instance_state": "terminated"
+    },
+    "apisix": {
+      "raw": "results/snapshots/result_apisix_2026-11-09T02-01-33Z.json",
+      "review": "results/diagnostics/field-2026-11-08/apisix-result-review.json",
+      "publication": "published_checked",
+      "instance_id": "i-054a0b7bf43b7eb6c",
+      "instance_state": "terminated"
+    },
+    "plano": {
+      "raw": "results/snapshots/result_plano_2026-11-09T02-02-01Z.json",
+      "review": "results/diagnostics/field-2026-11-08/plano-result-review.json",
+      "publication": "published_valid_metrics_with_scoped_notes",
+      "instance_id": "i-03f003891cd4d8d4d",
+      "instance_state": "terminated"
+    },
+    "helicone": {
+      "raw": "results/snapshots/result_helicone_2026-11-09T02-01-40Z.json",
+      "review": "results/diagnostics/field-2026-11-08/helicone-result-review.json",
+      "publication": "published_valid_metrics_with_scoped_notes",
+      "instance_id": "i-01f8b7caf56fa3c15",
+      "instance_state": "terminated"
+    },
+    "tensorzero": {
+      "raw": "results/snapshots/result_tensorzero_2026-11-09T02-02-05Z.json",
+      "review": "results/diagnostics/field-2026-11-08/tensorzero-result-review.json",
+      "publication": "published_checked",
+      "instance_id": "i-0744599d2300b7e60",
+      "instance_state": "terminated"
+    },
+    "litellm-rust": {
+      "raw": "results/snapshots/result_litellm-rust_2026-11-09T02-01-52Z.json",
+      "review": "results/diagnostics/field-2026-11-08/litellm-rust-result-review.json",
+      "publication": "published_checked",
+      "instance_id": "i-080e8438e2f043d18",
+      "instance_state": "terminated"
+    },
+    "kong": {
+      "raw": "results/snapshots/result_kong_2026-11-09T02-01-47Z.json",
+      "review": "results/diagnostics/field-2026-11-08/kong-result-review.json",
+      "publication": "published_checked",
+      "instance_id": "i-09cc29fca9554ce53",
+      "instance_state": "terminated"
+    }
+  },
+  "all_15_engine_mock_hash_verifications": true,
+  "latest_production_version": "4badcfc7-f42e-4b1e-9e43-91a9528a486f",
+  "publication_correction": "Resolved by b7eabc6d: active-field selects corrected run; live summary exposes exactly APISIX/TensorZero and both downloaded raw hashes/engine/mock stamps match.",
+  "completed_runs": 7,
+  "interrupted_runs": 8,
+  "owned_compute_active": 0,
+  "owned_network_deleted": true,
+  "engine_correction_scope": [
+    "Failed stream reconfirmation was attributed to rig residue without independent proof.",
+    "Interrupted throughput sweeps erase every derived frontier although clean partial rungs are retained; stop cause is not recorded.",
+    "Cost and stream failure examples are insufficient for request/response attribution."
+  ],
+  "publication_status": "provisional_diagnostic_evidence"
+}

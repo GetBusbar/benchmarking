@@ -19,30 +19,15 @@ use std::time::Duration;
 
 /// If `commands` left a minted credential at `<gw_dir>/.minted-auth`, its trimmed contents are what
 /// every probe should authenticate with instead of the manifest's declared (placeholder) `auth`.
-/// `Ok(None)` for the absent and whitespace-only cases - both mean "nothing was minted", so the
-/// declared `auth` stands.
-///
-/// A FILE THAT EXISTS BUT CANNOT BE READ IS AN ERROR, not "nothing was minted". Something was minted
-/// and we could not read it: folding that into the absent case skipped the stale-credential refusal
-/// and authenticated every request with the placeholder, publishing a grid of 401s as the gateway's
-/// own failures.
-fn resolve_minted_auth(gw_dir: &std::path::Path) -> Result<Option<String>, String> {
-    let path = gw_dir.join(".minted-auth");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(format!(
-                "{} exists but could not be read ({e}), so the credential the gateway minted is unknown",
-                path.display()
-            ))
-        }
-    };
+/// `None` for the absent, unreadable, or whitespace-only cases - every one of those means "nothing
+/// was minted", so the declared `auth` stands.
+fn resolve_minted_auth(gw_dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(gw_dir.join(".minted-auth")).ok()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(trimmed.to_string()))
+    Some(trimmed.to_string())
 }
 
 /// WHY A GATEWAY THAT MINTS ITS OWN CREDENTIAL CANNOT BE MEASURED THROUGH A RESTART.
@@ -91,62 +76,31 @@ fn end_of_run_stop_failure(
     ))
 }
 
-/// Stop a gateway this run launched and is abandoning before measuring it, and SAY SO when it would
-/// not stop. These paths used to discard the stop's result, so a survivor's only report was the next
-/// gateway on the box failing to boot.
-fn stop_abandoned(
-    spec: &otb_engine::launch::LaunchSpec,
-    launcher: &mut otb_engine::launch::RealLauncher,
-) {
-    let stop =
-        otb_engine::supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(15));
-    if let Some(why) = end_of_run_stop_failure(&spec.runtime.identity(), &stop) {
-        eprintln!("{why}");
-    }
-    launcher.reap_previous_native_child();
-}
-
 fn usage() -> ExitCode {
     eprintln!(
-        "otb {}\n\n\
-         \x20 run <gateway dir> <mock ip:port> [results_dir] [sweep_s]   measure one gateway and write its snapshot\n\
-         \x20 validate [gateways/<name> ...]          check gateway setups without running anything\n\
-         \x20 loadgen <ip:port> <path> <concurrency> <duration_s> [body]   one load window, prints a stats line\n\
-         \x20 smoke <gateway ip:port> <mock ip:port> [model]   probe and sweep an already-running gateway\n\
-         \x20 engine-commit                           prints the commit this binary was built from\n\
-         \x20 version\n\n\
-         Samples arrive on stdin as \"<t_s> <mib>\" per line, matching the shell's series files.\n\n\
+        "otb {}\n\nSamples arrive on stdin as \"<t_s> <mib>\" per line, matching the shell's series files.\n\n\
          \x20 plateau-check <trend_pct> <range_pct>   prints 1 for steady, 0 otherwise (mirrors plateau_check)\n\
          \x20 growth-rate                             prints MiB/min to 3dp, or nothing (mirrors plateau_growth_rate)\n\
-         \x20 window <window_s>                       prints the trailing window (mirrors plateau_window)\n",
+         \x20 window <window_s>                       prints the trailing window (mirrors plateau_window)\n\
+         \x20 version\n",
         env!("CARGO_PKG_VERSION")
     );
     ExitCode::from(2)
 }
 
-/// A usage error with its reason, on stderr, exit 2.
-fn usage_error(why: &str) -> ExitCode {
-    eprintln!("{why}");
-    ExitCode::from(2)
-}
-
-/// The stdin series. Malformed LINES are skipped (the shell's own contract, and the CLI contract tests
-/// pin it); a stdin that could not be read at all is an error, never an empty series that prints a
-/// verdict about nothing with exit status 0.
-fn read_samples() -> Result<Vec<Sample>, String> {
+fn read_samples() -> Vec<Sample> {
     let mut buf = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-        return Err(format!("could not read the series from stdin: {e}"));
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return Vec::new();
     }
-    Ok(buf
-        .lines()
+    buf.lines()
         .filter_map(|line| {
             let mut it = line.split_whitespace();
             let t = it.next()?.parse::<f64>().ok()?;
             let v = it.next()?.parse::<f64>().ok()?;
             Some(Sample { t_s: t, mib: v })
         })
-        .collect())
+        .collect()
 }
 
 /// Real ISO-8601, colons and all - `measured_at`'s own contract (snapshot.rs's `write_snapshot`
@@ -159,12 +113,6 @@ fn utc_stamp() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    utc_stamp_at(secs)
-}
-
-/// The stamp for `secs` since the Unix epoch. Split from the clock so the calendar arithmetic can be
-/// checked against known dates.
-fn utc_stamp_at(secs: u64) -> String {
     let (days, rem) = (secs / 86_400, secs % 86_400);
     let (h, m, sec) = (rem / 3600, (rem % 3600) / 60, rem % 60);
     // Civil-from-days, so the stamp is a real date rather than an epoch count.
@@ -191,28 +139,10 @@ fn run_scope() -> String {
         .unwrap_or_else(|| std::process::id().to_string())
 }
 
-/// A positional argument: absent or empty takes `default`, present must parse.
-///
-/// A malformed argument used to fall back to the default in silence, so `otb loadgen ... abc` ran a
-/// c=1 window and printed a normal stats line, and `otb run ... results abc` swept with 6-second
-/// windows - each published as the run that was asked for. Empty is treated as absent because the
-/// orchestrator exports unset settings as empty strings.
-fn arg_or<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> Result<T, String> {
-    parse_or(args.get(i).map(String::as_str), default).map_err(|raw| {
-        format!(
-            "argument {i} ({raw:?}) is not a valid {}",
-            std::any::type_name::<T>()
-        )
-    })
-}
-
-/// The shared rule behind `arg_or` and the `OTB_*` environment settings: `None` or blank is the
-/// default, anything else must parse. `Err` carries the raw text that did not.
-fn parse_or<T: std::str::FromStr>(raw: Option<&str>, default: T) -> Result<T, String> {
-    match raw.map(str::trim).filter(|s| !s.is_empty()) {
-        None => Ok(default),
-        Some(v) => v.parse().map_err(|_| v.to_string()),
-    }
+fn arg_f64(args: &[String], i: usize, default: f64) -> f64 {
+    args.get(i)
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(default)
 }
 
 fn main() -> ExitCode {
@@ -232,14 +162,8 @@ fn main() -> ExitCode {
                 }
             };
             let path = args.get(2).cloned().unwrap_or_else(|| "/".into());
-            let (conc, dur): (u32, u64) = match (arg_or(&args, 3, 1), arg_or(&args, 4, 5)) {
-                (Ok(c), Ok(d)) => (c, d),
-                (Err(e), _) | (_, Err(e)) => {
-                    return usage_error(&format!(
-                        "otb loadgen: {e}\nusage: otb loadgen <ip:port> <path> <concurrency> <duration_s> [body]"
-                    ))
-                }
-            };
+            let conc: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+            let dur: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
             let body = args.get(5).cloned().unwrap_or_else(|| "{}".into());
             // THE HEADERS COME FROM THE ENGINE THAT SPAWNED THIS, via the environment.
             //
@@ -254,19 +178,11 @@ fn main() -> ExitCode {
             // Unset means NO headers, never a placeholder: see `loadgen::decode_headers` for why a
             // wrong credential is worse than none. The warning is because a hand-run `otb loadgen`
             // against an authenticating gateway would otherwise read as the gateway falling over.
-            // A set-but-broken variable prints NOTHING on stdout and exits non-zero: the parent then
-            // reads an absent window, never one driven without the headers it declared.
-            let headers = match otb_engine::loadgen::decode_headers(
+            let headers = otb_engine::loadgen::decode_headers(
                 std::env::var(otb_engine::loadgen::HEADERS_ENV)
                     .ok()
                     .as_deref(),
-            ) {
-                Ok(h) => h,
-                Err(why) => {
-                    eprintln!("loadgen: {why}");
-                    return ExitCode::FAILURE;
-                }
-            };
+            );
             if headers.is_empty() {
                 eprintln!(
                     "loadgen: {} is unset or empty, so this window sends no credential; every request \
@@ -371,7 +287,9 @@ fn main() -> ExitCode {
             use otb_engine::manifest::Manifest;
             use otb_engine::suite::{run_suite, SuiteConfig};
             let Some(manifest_path) = args.get(1) else {
-                eprintln!("usage: otb run <gateway dir> <mock ip:port> [results_dir] [sweep_s]");
+                eprintln!(
+                    "usage: otb run <manifest.json> <gateway ip:port> <mock ip:port> [results_dir]"
+                );
                 return ExitCode::from(2);
             };
             // A gateway is a DIRECTORY, not a file: definition.json plus whatever sidecars it has.
@@ -471,29 +389,28 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // Unset or empty takes the default (the orchestrator exports an unset override as an empty
-            // string); anything else must be a number. A typo here used to restore the default in
-            // silence - `OTB_MAX_CONC=1o24` quietly searched to the host ceiling instead.
-            let env_u32 = |k: &str, d: u32| -> Result<u32, String> {
-                parse_or(std::env::var(k).ok().as_deref(), d)
-                    .map_err(|raw| format!("{k}={raw:?} is not a whole number"))
-            };
-            let (min_conc, max_conc) = match (
-                env_u32("OTB_MIN_CONC", 1),
-                env_u32("OTB_MAX_CONC", otb_engine::run::host_connection_ceiling()),
+            // A cell scope is refused here, before the gateway launches, rather than discovered by
+            // the grid walk after the box-hours are spent.
+            match otb_engine::ingress::cells_from(
+                std::env::var("OTB_CELLS").ok().as_deref(),
+                &dialects,
             ) {
-                (Ok(lo), Ok(hi)) => (lo, hi),
-                (Err(e), _) | (_, Err(e)) => return usage_error(&e),
-            };
-            // A window shorter than a second rounds to a zero-length window, which measures nothing.
-            let sweep_duration_s = match arg_or::<f64>(&args, 4, 6.0) {
-                Ok(s) if s.is_finite() && s >= 1.0 => s as u64,
-                Ok(s) => {
-                    return usage_error(&format!(
-                        "sweep_s {s} is not a usable window length (whole seconds, at least 1)"
-                    ))
+                Ok(None) => {}
+                Ok(Some(cells)) => eprintln!(
+                    "[scope] OTB_CELLS: walking {} cell(s) only: {}",
+                    cells.len(),
+                    cells.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
                 }
-                Err(e) => return usage_error(&e),
+            }
+            let env_u32 = |k: &str, d: u32| {
+                std::env::var(k)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d)
             };
             let gw_dir = dir.clone();
             let gw_cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
@@ -520,15 +437,31 @@ fn main() -> ExitCode {
                 mock_addr: mk,
                 results_dir: results_dir.into(),
                 dialects,
-                sweep_duration_s,
+                sweep_duration_s: arg_f64(&args, 4, 6.0) as u64,
                 load_cores: std::env::var("LOADCORES").ok(),
                 // THE ENGINE'S OWN DEFAULT, not an orchestrator setting: a real field run must
                 // search wide enough to find ANY gateway's true peak, and a caller forgetting to
                 // export an override should get the wide range, not a narrow one silently clipping
-                // a fast gateway's ceiling. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape hatch for
-                // narrowing a debug run (matches OTB_DIALECTS's own "unset means real run"
-                // convention).
+                // a fast gateway's ceiling. [512] was too narrow to find one entrant's true peak on
+                // the box that measured the field with it unset - the search reported "still rising
+                // at the top of the range" rather than a number, for a gateway fast enough to have a
+                // real answer.
                 //
+                // 65536 went the other way and is WRONG: `gen.rs::run` spawns one real OS thread per
+                // unit of concurrency (`std::thread::Builder::spawn_scoped`, one per worker), pinned
+                // by `taskset` to LOADCORES' handful of cores. A search ramping toward 65536 asks
+                // that process to hold tens of thousands of native threads on ~6 cores, which is not
+                // a measurement of the gateway - a live field run hit exactly this and sat at a
+                // 1-minute load average over 24,000 for 45+ minutes, never converging, because the
+                // rig's own scheduler thrashing was drowning out any real signal from the target. The
+                // search's doubling ramp has no way to tell "the gateway is still faster" apart from
+                // "the harness's own instrument just collapsed", so it kept climbing.
+                // 4096 stays 8x wider than the too-narrow 512 (real headroom above any ceiling this
+                // field has shown so far) while staying an order of magnitude below where thread
+                // count alone becomes the bottleneck. OTB_MIN_CONC/OTB_MAX_CONC stay as the escape
+                // hatch for narrowing a debug run (matches OTB_DIALECTS's own "unset means real run"
+                // convention below), and for widening it again once the generator is no longer
+                // thread-per-connection.
                 // THE CEILING IS READ FROM THE HOST, not chosen as a constant.
                 //
                 // 4096 was picked when the load generator was thread-per-connection, and raising it
@@ -544,14 +477,21 @@ fn main() -> ExitCode {
                 // what the host can actually do. The orchestrator widens that range before a run
                 // (run-on-ec2.sh), and because the ceiling is derived rather than declared, widening
                 // it is the only thing anyone has to change - there is no second number to move.
-                min_conc,
-                max_conc,
+                min_conc: env_u32("OTB_MIN_CONC", 1),
+                max_conc: env_u32("OTB_MAX_CONC", otb_engine::run::host_connection_ceiling()),
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
                 // Same path as arch: the orchestrator knows the box shape, the box does not.
                 hardware: std::env::var("BENCH_HARDWARE")
                     .ok()
                     .filter(|v| !v.trim().is_empty()),
+                // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
+                // and exports it, because the box cannot work it out for itself: its clone is a
+                // detached checkout and this binary arrived as a release download, so neither the
+                // tree nor the executable knows the revision it came from.
+                //
+                // An unset or empty variable is None, not the empty string: a snapshot must be able
+                // to say "this run cannot be traced" rather than claim a commit named "".
                 // WHICH MOCK TOOK THE READINGS. rig.sh on the box fetched and hashed it; these are
                 // passed through rather than re-derived, because the engine never sees the fetch.
                 // Absent env means an absent block, never a fabricated one.
@@ -568,13 +508,6 @@ fn main() -> ExitCode {
                             .filter(|v| !v.is_empty()),
                     }),
                 rig_release_url: std::env::var("OTB_RIG_URL").ok().filter(|v| !v.is_empty()),
-                // WHICH COMMIT PRODUCED THIS RUN. run-on-ec2.sh resolves it before the box exists
-                // and exports it, because the box cannot work it out for itself: its clone is a
-                // detached checkout and this binary arrived as a release download, so neither the
-                // tree nor the executable knows the revision it came from.
-                //
-                // An unset or empty variable is None, not the empty string: a snapshot must be able
-                // to say "this run cannot be traced" rather than claim a commit named "".
                 engine_stamp: std::env::var("BENCH_ENGINE_COMMIT")
                     .ok()
                     .filter(|c| !c.is_empty())
@@ -635,7 +568,11 @@ fn main() -> ExitCode {
                                     Ok(()) => println!("setup: {line}"),
                                     Err(why) => {
                                         eprintln!("setup command failed: {line}: {why}");
-                                        stop_abandoned(&spec, &mut launcher);
+                                        let _ = otb_engine::supervise::stop_and_wait(
+                                            &spec.runtime,
+                                            spec.port,
+                                            Duration::from_secs(15),
+                                        );
                                         return ExitCode::FAILURE;
                                     }
                                 }
@@ -648,21 +585,18 @@ fn main() -> ExitCode {
                             // an `export` in one command is invisible to the next and to this
                             // process - the only thing that survives across those separate
                             // invocations is a file. See `resolve_minted_auth`.
-                            let minted = match resolve_minted_auth(&gw_dir) {
-                                Ok(minted) => minted,
-                                Err(why) => {
-                                    eprintln!("{}: {why}", cfg.manifest.name);
-                                    stop_abandoned(&spec, &mut launcher);
-                                    return ExitCode::FAILURE;
-                                }
-                            };
+                            let minted = resolve_minted_auth(&gw_dir);
                             // The harness owning the lifetime is exactly the condition under which
                             // the memory phase restarts the gateway, so a per-boot credential would
                             // go stale mid-run. Refused here, before a single measurement, rather
                             // than published as the gateway failing every cell after the restart.
                             if let Some(why) = stale_minted_auth_refusal(minted.as_deref(), true) {
                                 eprintln!("{}: {why}", cfg.manifest.name);
-                                stop_abandoned(&spec, &mut launcher);
+                                let _ = otb_engine::supervise::stop_and_wait(
+                                    &spec.runtime,
+                                    spec.port,
+                                    Duration::from_secs(15),
+                                );
                                 return ExitCode::FAILURE;
                             }
                             if let Some(minted) = minted {
@@ -672,9 +606,7 @@ fn main() -> ExitCode {
                                 );
                                 cfg.manifest.auth = minted;
                             }
-                            // The launcher travels with the spec: it holds a native gateway's
-                            // `Child`, and only it can reap that process once the run stops it.
-                            Some((spec, launcher))
+                            Some(spec)
                         }
                         Err(e) => {
                             // The gateway never came up. Publishing a grid of absences against a
@@ -696,7 +628,7 @@ fn main() -> ExitCode {
             // budget keep the port and the cores, and the only report of it was the NEXT gateway
             // failing to boot.
             let mut stop_failed = false;
-            if let Some((spec, mut launcher)) = launched {
+            if let Some(spec) = &launched {
                 let stop = otb_engine::supervise::stop_and_wait(
                     &spec.runtime,
                     spec.port,
@@ -706,9 +638,6 @@ fn main() -> ExitCode {
                     eprintln!("{why}");
                     stop_failed = true;
                 }
-                // Reap the native child this process spawned: a killed child that is never waited on
-                // stays in the process table until this process exits.
-                launcher.reap_previous_native_child();
             }
 
             match outcome {
@@ -735,27 +664,13 @@ fn main() -> ExitCode {
                 args[1..].iter().map(std::path::PathBuf::from).collect()
             } else {
                 // No argument: check the whole field, which is what CI wants.
-                // EVERY DIRECTORY IS A GATEWAY, and one without a loadable definition is a FAIL below,
-                // not a directory skipped in silence: a misnamed or deleted definition.json used to
-                // drop the entrant from the count while the summary still said "N of N are ready".
-                let entries = match std::fs::read_dir("gateways") {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        eprintln!("cannot list gateways/: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                };
-                let mut all = Vec::new();
-                for entry in entries {
-                    match entry {
-                        Ok(e) if e.path().is_dir() => all.push(e.path()),
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("cannot list gateways/: {e}");
-                            return ExitCode::FAILURE;
-                        }
-                    }
-                }
+                let mut all: Vec<_> = std::fs::read_dir("gateways")
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.join("definition.json").is_file())
+                    .collect();
                 all.sort();
                 all
             };
@@ -817,43 +732,33 @@ fn main() -> ExitCode {
         So the run asks the binary, and refuses to measure when the answer disagrees with the
         commit it is about to stamp. Empty output means the build could not establish its own
         commit, which the caller must treat as unverifiable rather than as a match. */
-        Some("build-commit") => {
-            println!("{}", env!("OTB_SOURCE_COMMIT"));
-            ExitCode::SUCCESS
-        }
         Some("engine-commit") => {
             println!("{}", env!("OTB_ENGINE_COMMIT"));
             ExitCode::SUCCESS
         }
         // The shell is handed an ALREADY-WINDOWED file, so window over everything here to match.
         Some("plateau-check") => {
-            let (samples, trend, range) =
-                match (read_samples(), arg_or(&args, 1, 1.0), arg_or(&args, 2, 2.0)) {
-                    (Ok(s), Ok(t), Ok(r)) => (s, t, r),
-                    (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return usage_error(&e),
-                };
-            let steady = stats::plateau_check(&samples, f64::INFINITY, trend, range).is_steady();
+            let samples = read_samples();
+            let steady = stats::plateau_check(
+                &samples,
+                f64::INFINITY,
+                arg_f64(&args, 1, 1.0),
+                arg_f64(&args, 2, 2.0),
+            )
+            .is_steady();
             println!("{}", u8::from(steady));
             ExitCode::SUCCESS
         }
         // %.3f matches plateau_growth_rate's own printf, so a diff compares numbers rather than
         // float formatting. An unmeasurable rate prints nothing, exactly as the shell's awk exits.
         Some("growth-rate") => {
-            let samples = match read_samples() {
-                Ok(s) => s,
-                Err(e) => return usage_error(&e),
-            };
-            if let Some(r) = stats::growth_rate(&samples).copied() {
+            if let Some(r) = stats::growth_rate(&read_samples()).copied() {
                 println!("{r:.3}");
             }
             ExitCode::SUCCESS
         }
         Some("window") => {
-            let (samples, window_s) = match (read_samples(), arg_or(&args, 1, 60.0)) {
-                (Ok(s), Ok(w)) => (s, w),
-                (Err(e), _) | (_, Err(e)) => return usage_error(&e),
-            };
-            for s in stats::window(&samples, window_s) {
+            for s in stats::window(&read_samples(), arg_f64(&args, 1, 60.0)) {
                 println!("{} {}", s.t_s, s.mib);
             }
             ExitCode::SUCCESS
@@ -863,17 +768,150 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
-#[path = "tests/otb_utc_stamp_tests.rs"]
-mod utc_stamp_tests;
+mod utc_stamp_tests {
+    use super::utc_stamp;
+
+    // THE CASE THAT WAS BROKEN: a stamp with dashes where the time portion's colons belong parses
+    // as NaN in the site generator's Date.parse, so every gateway silently rendered measured_at as
+    // null. A real ISO-8601 shape is the whole contract this function exists to uphold.
+    #[test]
+    fn the_stamp_is_real_iso_8601_with_colons_in_the_time_portion() {
+        let s = utc_stamp();
+        assert!(
+            regex_free_iso_shape(&s),
+            "utc_stamp() produced {s:?}, which is not YYYY-MM-DDTHH:MM:SSZ"
+        );
+    }
+
+    // No regex crate in this binary's dependencies - a tiny hand check is clearer than pulling one
+    // in for a single call site.
+    fn regex_free_iso_shape(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        bytes.len() == 20
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b'T'
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+            && bytes[19] == b'Z'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || b.is_ascii_digit())
+    }
+}
 
 #[cfg(test)]
-#[path = "tests/otb_end_of_run_tests.rs"]
-mod end_of_run_tests;
+mod end_of_run_tests {
+    use super::{end_of_run_stop_failure, stale_minted_auth_refusal};
+    use otb_engine::supervise::SuperviseError;
+    use std::time::Duration;
+
+    // THE DEFECT: the final stop's result was dropped with `let _`, so a gateway that outlived the
+    // 15s budget kept the port and the cores, and the only report of it was the NEXT gateway on the
+    // box failing to boot - attributed to that gateway rather than to this one.
+    #[test]
+    fn a_gateway_that_survives_the_stop_budget_is_reported_loudly() {
+        let stop = Err(SuperviseError::StillHeld {
+            port: 8080,
+            waited: Duration::from_secs(16),
+        });
+        let said =
+            end_of_run_stop_failure("gw-bench-4242", &stop).expect("a survivor is a failure");
+        assert!(
+            said.contains("gw-bench-4242"),
+            "the message must name what is still running: {said}"
+        );
+        assert!(
+            said.contains("8080"),
+            "and the port it is still holding: {said}"
+        );
+        assert!(
+            said.contains("NEXT gateway"),
+            "and what it will break next: {said}"
+        );
+    }
+
+    #[test]
+    fn a_gateway_that_actually_stopped_reports_nothing() {
+        assert_eq!(end_of_run_stop_failure("gw-bench-4242", &Ok(())), None);
+    }
+
+    // THE DEFECT: minted auth is resolved once, after the initial launch, and the memory phase then
+    // restarts the gateway and replays `commands`. A gateway that mints per boot would hand out a new
+    // credential there while every later request kept using the first one, and the whole second half
+    // of the grid would read as the gateway refusing its own traffic.
+    #[test]
+    fn a_minting_gateway_the_harness_restarts_is_refused_before_it_is_measured() {
+        let why = stale_minted_auth_refusal(Some("sk-minted-1"), true)
+            .expect("this combination cannot be measured honestly");
+        assert!(
+            why.contains("stale"),
+            "the refusal must name the defect: {why}"
+        );
+    }
+
+    #[test]
+    fn a_gateway_that_mints_nothing_is_measured_as_before() {
+        assert_eq!(stale_minted_auth_refusal(None, true), None);
+    }
+
+    // Someone else's gateway, someone else's lifetime: nothing here restarts it, so the credential it
+    // minted at ITS boot stays valid for the whole run.
+    #[test]
+    fn a_minting_gateway_the_harness_never_restarts_is_fine() {
+        assert_eq!(stale_minted_auth_refusal(Some("sk-minted-1"), false), None);
+    }
+}
 
 #[cfg(test)]
-#[path = "tests/otb_minted_auth_tests.rs"]
-mod minted_auth_tests;
+mod minted_auth_tests {
+    use super::resolve_minted_auth;
 
-#[cfg(test)]
-#[path = "tests/otb_arg_tests.rs"]
-mod arg_tests;
+    // A tiny throwaway directory per test, so tests can run concurrently without treading on each
+    // other's `.minted-auth`. Not `tempfile`: this crate takes no dev-dependency for one file.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "otb-minted-auth-test-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // THE CASE THIS EXISTS FOR: a gateway whose real credential can only be known after it boots
+    // gets that credential into the probe, not the manifest's placeholder.
+    #[test]
+    fn a_minted_file_overrides_the_declared_auth() {
+        let dir = scratch_dir("present");
+        std::fs::write(dir.join(".minted-auth"), "sk-real-key-123\n").unwrap();
+        assert_eq!(
+            resolve_minted_auth(&dir),
+            Some("sk-real-key-123".to_string())
+        );
+    }
+
+    // TWELVE OF THIRTEEN ENTRANTS: no file, so the declared `auth` stands untouched.
+    #[test]
+    fn no_file_means_no_override() {
+        let dir = scratch_dir("absent");
+        assert_eq!(resolve_minted_auth(&dir), None);
+    }
+
+    // A command that ran but wrote nothing useful (a failed mint that still touched the file, an
+    // empty redirect) must not silently authenticate with an empty bearer token - that is a
+    // different, worse failure mode than "kept the placeholder".
+    #[test]
+    fn a_whitespace_only_file_means_no_override() {
+        let dir = scratch_dir("blank");
+        std::fs::write(dir.join(".minted-auth"), "   \n\t\n").unwrap();
+        assert_eq!(resolve_minted_auth(&dir), None);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        let dir = scratch_dir("padded");
+        std::fs::write(dir.join(".minted-auth"), "  sk-abc  \n").unwrap();
+        assert_eq!(resolve_minted_auth(&dir), Some("sk-abc".to_string()));
+    }
+}

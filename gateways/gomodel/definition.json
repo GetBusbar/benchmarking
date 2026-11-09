@@ -8,6 +8,7 @@
     "openai-responses",
     "anthropic",
     "gemini",
+    "cohere",
     "bedrock"
   ],
   "egress_models": {
@@ -15,12 +16,13 @@
     "bedrock": "anthropic.claude-3-sonnet-20240229-v1:0",
     "gemini": "gemini-1.5-pro",
     "openai": "openai/gpt-4o-mini",
-    "openai-responses": "openai/gpt-4o-mini"
+    "openai-responses": "openai/gpt-4o-mini",
+    "cohere": "command-r-plus"
   },
   "lang": "Go",
   "launch": {
     "args": [],
-    "image": "enterpilot/gomodel:0.2.2@sha256:24860e4bf777a01773ca322bf2d348700649df09b01ed798eb94eba6f5d15cef",
+    "image": "enterpilot/gomodel:0.2.3@sha256:c50627e093ff88bff311e582a43d7de14e0be29d52cb333ecb3191eac7874f05",
     "kind": "docker",
     "mounts": []
   },
@@ -32,5 +34,14 @@
   "runtime": {
     "container": "gomodel-bench",
     "kind": "docker"
-  }
+  },
+  "matrix": [
+    "101111",
+    "011111",
+    "101111",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "GoModel v0.2.3 source 86dbeffc254e0166367d72e0404f5a27aceeeaaa: local single-request checks using the engine's request bodies and authentication headers establish 16 exact protocol pairs; 15 are enabled on the pinned image. The 0.2.3 default configured-model allowlist remains enabled; no legacy fallback override is applied. OpenAI CompatibleProvider uses Chat Completions for chat/messages ingress and native Responses for responses ingress; the other OpenAI cross-operation cells do not select the requested upstream wire. Cohere supports translated chat/responses/messages. Native Cohere passthrough is opt-in (not in the default ENABLED_PASSTHROUGH_PROVIDERS), so cohere>cohere is left disabled under the out-of-the-box mandate. Gemini and Bedrock implement upstream adapters but no native ingress/passthrough interface. This verifies protocol routing, not performance or OOTB approval of the November configuration additions. Evidence: results/diagnostics/refresh-configuration/gomodel-0.2.3-correctness-preflight.json"
 }

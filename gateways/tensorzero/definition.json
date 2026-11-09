@@ -49,5 +49,14 @@
   "untestable": [
     "openai/gemini"
   ],
-  "untestable_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production"
+  "untestable_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production",
+  "matrix": [
+    "111001",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json"
 }

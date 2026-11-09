@@ -344,3 +344,17 @@ test('table trends are compact position changes and respect the neutral band', a
  assert.doesNotMatch(render({...trend,rank_change:null}),/metric-trend/);
  assert.doesNotMatch(render(trend),/<a /);
 });
+
+ test("refuted upstream verification cannot appear as a served matrix pairing", async () => {
+  const { default: app } = await import("./app.js");
+  const { canonicalCellState } = await import("./states.mjs");
+  const cell = {served:true,perf:{egress_reverified:false,reverify_note:"Observed a different upstream dialect"}};
+  assert.deepEqual(app.cellState(cell),["failed","not served"]);
+  assert.equal(canonicalCellState(cell),"not_served");
+  assert.equal(cell.served,true); // Original raw observation remains available.
+  for (const checked of [true,null,undefined]) {
+    const valid = {served:true,perf:{egress_reverified:checked}};
+    assert.equal(canonicalCellState(valid),"served");
+    assert.equal(app.cellState(valid)[0],"served");
+  }
+ });
