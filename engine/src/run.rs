@@ -2200,6 +2200,13 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
     })
 }
 
+/// May the stream search fall back to confirming its proven floor? Only when there is one, when the
+/// way the search ended leaves the host unaccused (`StreamStop::floor_fallback_ok`), and when that
+/// floor has not already failed a full confirmation of its own in this search.
+fn floor_fallback_due(proven_clean: u32, floor_refuted: bool, stop: StreamStop) -> bool {
+    proven_clean > 0 && !floor_refuted && stop.floor_fallback_ok()
+}
+
 /// Find the highest concurrency at which the gateway still carries clean streams.
 ///
 /// `bisect_ceiling`, not `saturation_plateau`: this is a monotone pass/fail gate in concurrency, exactly like
@@ -2264,6 +2271,10 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 // Defaults to the budget case, which is what the loop ends on when nothing else
                 // interrupts it; every other exit overwrites this at its own `break`.
                 let mut stop = StreamStop::BudgetExhausted;
+                // Whether `proven_clean` itself has already had a FULL confirmation and lost it.
+                // The floor fallback below exists to give that rung the vote the search never
+                // gave it; a rung that already had the vote and failed must not get a second one.
+                let mut floor_refuted = false;
                 /* A STEPPED RUNG WHOSE SEED WINDOW FAILS MUST STEP DOWN AGAIN, NOT END THE SEARCH.
                    plano `anthropic>anthropic` is what this costs: the ascending sweep carried c=64,
                    the bisection settled on c=79, confirmation failed, the step-down bisected to
@@ -2341,6 +2352,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             wanted: crate::search::WINDOWS_PER_RUNG,
                         };
                         break;
+                    }
+                    if ceiling == proven_clean {
+                        floor_refuted = true;
                     }
                     }
                     /* STEP DOWN INSIDE THE BRACKET, NOT BY HALVING.
@@ -2532,8 +2546,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 
                    It costs WINDOWS_PER_RUNG windows and only on the failure path. It cannot inflate a
                    result: `proven_clean` is a rung this cell drove cleanly during its own ascent, and
-                   it still has to hold a majority now to be published at all. */
-                if winner.is_none() && proven_clean > 0 && stop.floor_fallback_ok() {
+                   it still has to hold a majority now to be published at all - and only if it has not
+                   ALREADY failed a full confirmation in this search (`floor_refuted`): when the
+                   bisection's answer IS the floor, the floor has had its vote, and re-voting it after
+                   the rungs below it failed would publish a ceiling the evidence does not support. */
+                if winner.is_none() && floor_fallback_due(proven_clean, floor_refuted, stop) {
                     eprintln!(
                         "streams: the ceiling search is out of budget; confirming the floor this cell \
                          already carried (c={proven_clean}) rather than publishing nothing"
@@ -3822,25 +3839,54 @@ while True:
             Some(1),
             "the stepped-down rung must not publish on the strength of its own failing seed window"
         );
-        /* AND WHAT IT PUBLISHES INSTEAD IS THE FLOOR IT ACTUALLY CARRIED.
-        This asserted `None` - correct while a search out of budget gave up entirely. It no longer
-        does: the rung the cell proved on its own ascent gets the same confirmation the bisected
-        rung got, so a cell that demonstrably carries c=2 publishes 2 rather than an absence
-        claiming nothing is known. This fixture serves every rung at or below 3, so 2 is a true
-        reading, and it is conservative - the real ceiling is somewhere above it.
+        /* This fixture is scripted by ACCEPT ORDER, not by concurrency. The ascent carries c=2,
+        the bisection lands on c=2 (the floor), and both of its confirmation windows fail. Then
+        c=1's seed fails. The floor already lost its full vote (`floor_refuted`), so a second
+        confirmation would only cherry-pick the later healthy connections: nothing is published. */
+        assert!(
+            r.concurrency.value().is_none(),
+            "a refuted floor must not be re-voted into a ceiling"
+        );
+        assert!(r.fps.value().is_none());
+        let floor_votes: Vec<bool> = r
+            .points
+            .iter()
+            .filter(|p| p.concurrency == 2)
+            .map(|p| p.passed)
+            .collect();
+        assert_eq!(floor_votes, vec![true, false, false]);
+        let last = r
+            .points
+            .last()
+            .expect("the failed step-down seed is retained");
+        assert_eq!(last.concurrency, 1);
+        assert!(!last.passed);
+    }
 
-        THE INVARIANT THIS TEST IS NAMED FOR IS UNTOUCHED AND IS THE ASSERTION ABOVE: the stepped
-        rung that could not seed (c=1) never voted for itself. What is published is a rung that held
-        a majority of fresh windows, which is the bar every other rate on this board has to clear. */
-        assert_eq!(
-            r.concurrency.value().copied(),
-            Some(2),
-            "the floor this cell proved on its own ascent is published, not the rung that failed to seed"
+    // THE FLOOR FALLBACK IS A VOTE FOR A RUNG THAT NEVER HAD ONE, NOT A SECOND VOTE.
+    //
+    // When every bisection probe above the ascending prefix failed, the bisected ceiling IS the
+    // proven floor. Its confirmation then fails, the rungs below it fail too, and the fallback used
+    // to re-vote that same rung with its failed windows discarded - publishing a ceiling above rungs
+    // that failed.
+    #[test]
+    fn a_floor_that_already_failed_its_confirmation_gets_no_second_vote() {
+        let stop = StreamStop::SteppedRungFailed { at: 32 };
+        assert!(
+            floor_fallback_due(64, false, stop),
+            "an unvoted floor gets its confirmation"
         );
         assert!(
-            r.fps.value().is_some_and(|v| *v > 0.0),
-            "a published ceiling carries the rate that was measured at it: {:?}",
-            r.fps
+            !floor_fallback_due(64, true, stop),
+            "a floor that already lost a full confirmation must not be re-voted"
+        );
+        assert!(
+            !floor_fallback_due(0, false, stop),
+            "no floor, nothing to confirm"
+        );
+        assert!(
+            !floor_fallback_due(64, false, StreamStop::RestartFailed { at: 32, proven: 64 }),
+            "a host we could not even restart the gateway on is not one to publish from"
         );
     }
 
