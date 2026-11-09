@@ -1248,6 +1248,25 @@ impl Metric for Streaming {
         // A leg that produced no frame has no time to first token. Subtracting against a missing
         // reference would publish the gateway's own latency as its ADDED latency, which reads as the
         // gateway being slower than it is.
+        //
+        // AN ERROR ANSWER IS NOT A STREAM. A leg that answered non-2xx (a 401, a 429, a 5xx sent
+        // with an event-stream content type or none) still yields frames, and timing them would
+        // publish how fast the gateway REFUSED as how fast it streamed. Worded like the no-frame
+        // case below because it is that case: none of those frames is a stream frame.
+        for (which, o) in [
+            ("the gateway", &through_gateway),
+            ("the mock directly", &direct),
+        ] {
+            if let Some(s) = o.status.filter(|s| !(200..300).contains(s)) {
+                return all(Measurement::absent_because(
+                    Absent::NotMeasured,
+                    format!(
+                        "no stream frame arrived from {which}: it answered HTTP {s}, not 2xx, so \
+                         what it sent is an error response rather than a stream to time"
+                    ),
+                ));
+            }
+        }
         let (Some(&gw_ttft), Some(&direct_ttft)) = (
             through_gateway.frame_offsets_us.first(),
             direct.frame_offsets_us.first(),
@@ -1292,7 +1311,7 @@ impl Metric for Streaming {
             |addr: std::net::SocketAddr, path: &str, headers: &[(String, String)]| -> Vec<u64> {
                 (0..STREAM_TTFT_SAMPLES)
                     .filter_map(|_| {
-                        crate::http::post_json_sse(
+                        let o = crate::http::post_json_sse(
                             addr,
                             path,
                             body.as_bytes(),
@@ -1300,10 +1319,12 @@ impl Metric for Streaming {
                             STREAM_TIMEOUT,
                             1,
                             Some(ctx.dialect),
-                        )
-                        .frame_offsets_us
-                        .first()
-                        .copied()
+                        );
+                        // A non-2xx answer is a lost probe, never a time-to-first-event.
+                        if !answered_2xx(&o) {
+                            return None;
+                        }
+                        o.frame_offsets_us.first().copied()
                     })
                     .collect()
             };
@@ -1829,6 +1850,12 @@ pub struct Cost;
 /// entrant, the column stops being a comparison.
 pub const COST_WINDOW_CONCURRENCY: u32 = 8;
 
+/// Whether a streaming probe was answered with a 2xx. A probe with no status line, or a refusal sent
+/// with an event-stream content type, still carries frames, and none of them is a stream to time.
+fn answered_2xx(o: &crate::http::SseOutcome) -> bool {
+    o.status.is_some_and(|s| (200..300).contains(&s))
+}
+
 /// Why a cell has no time-to-plateau, in the words a reader sees.
 ///
 /// IT NAMES THE SHAPE, because "no steady state" describes two opposite gateways. busbar
@@ -2064,6 +2091,24 @@ mod tests {
             !undecidable.contains("climbing") && !undecidable.contains("falling"),
             "{undecidable}"
         );
+    }
+
+    // AN ERROR EVENT IS NOT A FIRST TOKEN. A refusal sent with an event-stream content type still
+    // carries frames; its offset must not enter the TTFT sample set.
+    #[test]
+    fn a_ttft_probe_counts_only_when_it_was_answered_2xx() {
+        let probe = |status: Option<u16>| crate::http::SseOutcome {
+            status,
+            frames: vec!["{\"error\":\"rate limited\"}".to_string()],
+            frame_offsets_us: vec![120],
+            content_frames: 1,
+            end: crate::http::SseEnd::FrameBudgetReached,
+        };
+        assert!(answered_2xx(&probe(Some(200))));
+        assert!(answered_2xx(&probe(Some(204))));
+        for s in [Some(401), Some(429), Some(503), Some(302), None] {
+            assert!(!answered_2xx(&probe(s)), "{s:?} is not a stream to time");
+        }
     }
 
     /* A TIME-TO-PLATEAU IS ONLY PUBLISHED BESIDE A WINDOW THAT SETTLED. The load loop notes the
