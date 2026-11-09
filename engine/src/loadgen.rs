@@ -236,13 +236,19 @@ pub fn encode_headers(headers: &[(String, String)]) -> String {
 
 /// Decode what `encode_headers` wrote.
 ///
-/// An unset or unparseable variable yields NO headers, never a default credential. A wrong credential
+/// An unset or empty variable yields NO headers, never a default credential. A wrong credential
 /// is worse than none: no credential is a 401 the operator can read off the stats line as a total
 /// failure, whereas the placeholder that used to be hardcoded here was a wrong credential that looked
 /// exactly like a gateway falling over under load.
-pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
-    raw.and_then(|s| serde_json::from_str::<Vec<(String, String)>>(s).ok())
-        .unwrap_or_default()
+///
+/// SET BUT UNREADABLE IS AN ERROR, not "no headers": a list that fails to decode used to become an
+/// empty one, so the window ran with no credential and every failure was charged to the gateway.
+pub fn decode_headers(raw: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    match raw.filter(|s| !s.trim().is_empty()) {
+        None => Ok(Vec::new()),
+        Some(s) => serde_json::from_str::<Vec<(String, String)>>(s)
+            .map_err(|e| format!("{HEADERS_ENV} is set but is not a header list ({e})")),
+    }
 }
 
 #[cfg(test)]
@@ -443,7 +449,7 @@ mod tests {
     fn every_dialects_own_header_shape_survives_the_process_boundary() {
         for d in crate::ingress::Dialect::ALL {
             let sent = d.auth_headers("a-real-token");
-            let back = decode_headers(Some(&encode_headers(&sent)));
+            let back = decode_headers(Some(&encode_headers(&sent))).expect("decodes");
             assert_eq!(back, sent, "{d}'s header shape must cross unchanged");
         }
     }
@@ -463,7 +469,7 @@ mod tests {
                 "  spaces and \"quotes\"  ".to_string(),
             ),
         ];
-        assert_eq!(decode_headers(Some(&encode_headers(&hostile))), hostile);
+        assert_eq!(decode_headers(Some(&encode_headers(&hostile))), Ok(hostile));
     }
 
     // Duplicates survive as duplicates: `http::Headers`' own doc says a map would collapse repeated
@@ -474,17 +480,18 @@ mod tests {
             ("x-h".to_string(), "one".to_string()),
             ("x-h".to_string(), "two".to_string()),
         ];
-        assert_eq!(decode_headers(Some(&encode_headers(&dupes))), dupes);
+        assert_eq!(decode_headers(Some(&encode_headers(&dupes))), Ok(dupes));
     }
 
     // NO HEADERS, never a default credential. The placeholder that used to be hardcoded here is
     // precisely what made a credential fault indistinguishable from a gateway collapsing under load.
+    // And a list that is set but does not decode is refused rather than read as "none".
     #[test]
-    fn an_unset_or_broken_header_variable_sends_nothing_rather_than_a_placeholder() {
-        assert!(decode_headers(None).is_empty());
-        assert!(decode_headers(Some("")).is_empty());
-        assert!(decode_headers(Some("not json")).is_empty());
-        assert!(decode_headers(Some("{\"authorization\":\"Bearer dummy\"}")).is_empty());
+    fn an_unset_header_variable_sends_nothing_and_a_broken_one_is_refused() {
+        assert_eq!(decode_headers(None), Ok(Vec::new()));
+        assert_eq!(decode_headers(Some("")), Ok(Vec::new()));
+        assert!(decode_headers(Some("not json")).is_err());
+        assert!(decode_headers(Some("{\"authorization\":\"Bearer dummy\"}")).is_err());
     }
 }
 
