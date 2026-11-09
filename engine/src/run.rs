@@ -4290,6 +4290,7 @@ while True:
             rig_refused: 0,
             budget_exceeded: 0,
             spawn_failed: false,
+            failure_samples: Vec::new(),
         };
         let collapsed = gen_stats_from_child(line(0, 0, 0));
         assert_eq!(collapsed.p50_us, None, "{collapsed:?}");
