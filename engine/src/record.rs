@@ -139,6 +139,11 @@ pub struct RigProvenance {
     /// The box-qualification verdict this run's box carried, folded in by rig_provenance_json. No
     /// committed snapshot has ever carried a non-null value here, so the stage bodies are passed
     /// through as opaque JSON rather than typed against a shape nothing has confirmed.
+    ///
+    /// The engine's own verdict (suite.rs `qualify_box_with_retry`) may carry an optional
+    /// `attempts: [{outcome, rps, drift_pct}, ...]` when a failed qualification was re-taken; the
+    /// top-level fields are always the deciding attempt, so a reader that ignores `attempts` reads
+    /// the same shape as before.
     #[serde(default)]
     pub box_qualify: Option<serde_json::Value>,
     /// The box's effective `net.core.somaxconn`, which caps the mock's listen backlog. Read from

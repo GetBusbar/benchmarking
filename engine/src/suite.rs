@@ -745,10 +745,8 @@ const QUALIFY_BAND_PCT: f64 = 20.0;
 /// BASELINE was the noisy run, and failing on it would terminate healthy boxes and burn the
 /// replacement budget. Only degradation counts.
 ///
-/// This RECORDS the verdict; it does not yet stop a failing run. `qualify`'s own header says the
-/// incident it exists to prevent is running a full matrix on a bad box, so gating the run on a Fail
-/// is the natural next step - but that changes what a run DOES, and it is a decision to take
-/// deliberately rather than as a side effect of wiring the module in.
+/// This takes ONE observation and judges it; `qualify_box_with_retry` decides what a Fail does to
+/// the run.
 fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     let direct = RunConfig {
         gateway_addr: cfg.mock_addr,
@@ -812,6 +810,62 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     })
 }
 
+/// How long to wait before re-taking a failed box qualification.
+const QUALIFY_RETRY_PAUSE: Duration = Duration::from_secs(5);
+
+/// Qualify the box, re-taking a Fail once, and refuse the run only if the retry fails too.
+///
+/// A FAIL REFUSES THE GATEWAY (`BOX_QUALIFICATION_FAILED`, the marker an orchestrator greps for): the
+/// incident `qualify` exists to prevent is a whole grid measured on a bad box. But the observation
+/// is a single c=32 window, and one transient bad window would otherwise throw away a gateway's whole
+/// run - August drift was -3.3..+2.7 % against a 20 % band, so a real fail is a broken box and a
+/// broken box fails twice. So a Fail is re-taken once after `pause`, and the second verdict decides.
+/// Seed and skip keep their meaning and are never retried or refused.
+///
+/// WHEN A RETRY HAPPENED, BOTH OBSERVATIONS ARE PUBLISHED: the top-level fields are the deciding
+/// (second) verdict, exactly the shape a single-attempt verdict has, and `attempts` lists both. The
+/// attempt entries name their rate `rps`, not `observed_rps`, on purpose: run-on-ec2.sh builds the
+/// next run's baseline by grepping every `"observed_rps"` out of the snapshots, and a failed first
+/// attempt must not enter that median. A verdict with no retry carries no `attempts` key at all, so
+/// it is byte-for-byte the August shape.
+///
+/// `measure` and `pause` are injected so the rule is testable without a mock or a 5 s sleep.
+fn qualify_box_with_retry(
+    mut measure: impl FnMut() -> serde_json::Value,
+    mut pause: impl FnMut(Duration),
+) -> Result<serde_json::Value, SnapshotError> {
+    fn failed(v: &serde_json::Value) -> bool {
+        v.get("outcome").and_then(serde_json::Value::as_str) == Some("fail")
+    }
+    fn attempt(v: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "outcome": v.get("outcome").cloned().unwrap_or(serde_json::Value::Null),
+            "rps": v.get("observed_rps").cloned().unwrap_or(serde_json::Value::Null),
+            "drift_pct": v.get("drift_pct").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    let first = measure();
+    if !failed(&first) {
+        return Ok(first);
+    }
+    eprintln!(
+        "suite: box qualification failed ({}) - re-taking it once after {}s",
+        attempt(&first),
+        QUALIFY_RETRY_PAUSE.as_secs()
+    );
+    pause(QUALIFY_RETRY_PAUSE);
+    let mut second = measure();
+    let attempts = serde_json::Value::Array(vec![attempt(&first), attempt(&second)]);
+    if let Some(obj) = second.as_object_mut() {
+        obj.insert("attempts".to_string(), attempts);
+    }
+    if failed(&second) {
+        return Err(SnapshotError::BoxQualificationFailed { verdict: second });
+    }
+    Ok(second)
+}
+
 /// Every previous box-qualification observation available to this run.
 ///
 /// TWO SOURCES, BECAUSE THE BOX HAS NO HISTORY OF ITS OWN.
@@ -832,11 +886,18 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
 /// which is why one pooled baseline across gateways is the right comparison and not a per-gateway
 /// one: it is the box being qualified.
 fn qualify_history(results_dir: &Path) -> Vec<f64> {
+    qualify_history_with(
+        results_dir,
+        std::env::var("OTB_QUALIFY_BASELINE").ok().as_deref(),
+    )
+}
+
+/// `qualify_history` over the env value as an argument (`None` when unset), so a test can exercise
+/// the rule without mutating a process-global that every concurrently running suite test reads -
+/// and that, now a confirmed Fail refuses the run, would turn those tests into refusals.
+fn qualify_history_with(results_dir: &Path, handed: Option<&str>) -> Vec<f64> {
     let mut out = qualify_history_on_disk(results_dir);
-    if let Some(v) = std::env::var("OTB_QUALIFY_BASELINE")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-    {
+    if let Some(v) = handed.and_then(|v| v.trim().parse::<f64>().ok()) {
         if v > 0.0 {
             out.push(v);
         }
@@ -903,6 +964,20 @@ pub fn run_suite_with(
     cfg: &SuiteConfig,
     gateway_addr: SocketAddr,
     metrics: &[&dyn crate::metric::Metric],
+) -> Result<Paths, SnapshotError> {
+    run_suite_qualified(cfg, gateway_addr, metrics, qualify_box, std::thread::sleep)
+}
+
+/// `run_suite_with` with the box qualification and its retry pause injected, so a test can drive
+/// the qualification gate through the whole suite without a real c=32 window or a 5 s sleep. (Under
+/// `cargo test` the load generator's child is the test binary, so a real qualification window never
+/// measures and `qualify::judge` reads that as a Fail.)
+fn run_suite_qualified(
+    cfg: &SuiteConfig,
+    gateway_addr: SocketAddr,
+    metrics: &[&dyn crate::metric::Metric],
+    mut qualify: impl FnMut(&SuiteConfig, &[f64]) -> serde_json::Value,
+    pause: impl FnMut(Duration),
 ) -> Result<Paths, SnapshotError> {
     // A HEADER THIS MANIFEST DECLARES THAT THE RIG ALREADY SENDS ITSELF, said once per gateway
     // before anything is measured.
@@ -1039,7 +1114,11 @@ pub fn run_suite_with(
     // THE BOX IS QUALIFIED BEFORE THE GRID, not after. The verdict is about the machine every
     // number below is measured on, so taking it afterwards would judge a box using a reading taken
     // once the run had already finished loading it.
-    let box_qualify = qualify_box(cfg, &qualify_history(Path::new(&cfg.results_dir)));
+    //
+    // A FAIL CONFIRMED BY ONE RETRY REFUSES THE GATEWAY before anything is measured: no snapshot is
+    // written, so the board keeps whatever it already had for this gateway.
+    let history = qualify_history(Path::new(&cfg.results_dir));
+    let box_qualify = qualify_box_with_retry(|| qualify(cfg, &history), pause)?;
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
     let mut any_served = false;
@@ -1727,7 +1806,7 @@ mod tests {
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
         let paths =
-            run_suite_with(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
+            run_suite_seeded(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
 
@@ -1889,7 +1968,7 @@ mod tests {
             template: "config.gen.yaml.tmpl".into(),
             output: "config.gen.yaml".into(),
         }];
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the run should complete");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the run should complete");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         assert_eq!(
@@ -1928,7 +2007,7 @@ mod tests {
             seen: std::sync::Arc::clone(&seen),
         };
         let metrics: Vec<&dyn crate::metric::Metric> = vec![&watcher];
-        run_suite_with(&cfg, gw, &metrics).expect("the run should complete");
+        run_suite_seeded(&cfg, gw, &metrics).expect("the run should complete");
 
         let seen = seen.lock().expect("watcher lock").clone();
         assert_eq!(seen.len(), 4, "two dialects is a 2x2 grid: {seen:?}");
@@ -2019,7 +2098,7 @@ mod tests {
         };
         crate::snapshot::write_snapshot(&dir, &seed).expect("seed snapshot should write");
 
-        let result = run_suite_with(&cfg, gw, &[]);
+        let result = run_suite_seeded(&cfg, gw, &[]);
         assert!(
             result.is_ok(),
             "a checkpoint guard trip must not abort the run: {result:?}"
@@ -2054,7 +2133,7 @@ mod tests {
         let dir = tmpdir("ok");
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite should write a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite should write a snapshot");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         assert_eq!(back.gateway, "gw");
@@ -2116,7 +2195,7 @@ mod tests {
         let dir = tmpdir("unserved");
         let gw = serve(404);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite_with(&cfg, gw, &[]).expect("a refusing gateway is still a result");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("a refusing gateway is still a result");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("parse");
         let up = back
@@ -2132,6 +2211,137 @@ mod tests {
             "a column none of whose cells was served must not publish served: true"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn verdict(outcome: &str, rps: f64) -> serde_json::Value {
+        serde_json::json!({"outcome": outcome, "observed_rps": rps, "drift_pct": -1.0})
+    }
+
+    /// The suite with a box that seeds. Under `cargo test` a real qualification window cannot
+    /// measure (the load generator's child is the test binary), which `qualify::judge` reads as a
+    /// Fail and which would now refuse every run; tests about the grid are not tests of the box.
+    fn run_suite_seeded(
+        cfg: &SuiteConfig,
+        gw: SocketAddr,
+        metrics: &[&dyn crate::metric::Metric],
+    ) -> Result<Paths, SnapshotError> {
+        run_suite_qualified(
+            cfg,
+            gw,
+            metrics,
+            |_, _| verdict("seed", 1.0),
+            |_| panic!("a seeding box never pauses"),
+        )
+    }
+
+    // The gate through the WHOLE suite: a judge that fails once and then passes lets the run go on
+    // and write its snapshot, carrying both observations in rig.box_qualify.
+    #[test]
+    fn a_suite_whose_box_fails_qualification_once_still_measures_and_records_both_attempts() {
+        let dir = tmpdir("qualify-retry-pass");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut script = vec![verdict("fail", 10.0), verdict("pass", 20.0)].into_iter();
+        let mut pauses = 0;
+        let paths = run_suite_qualified(
+            &cfg,
+            gw,
+            &[],
+            |_, _| script.next().expect("exactly two qualification attempts"),
+            |_| pauses += 1,
+        )
+        .expect("a pass on the retry lets the suite proceed");
+        assert_eq!(pauses, 1);
+        let back: ResultSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
+                .expect("parse");
+        let bq = back
+            .rig
+            .and_then(|r| r.box_qualify)
+            .expect("box_qualify published");
+        assert_eq!(bq["outcome"], "pass");
+        assert_eq!(bq["attempts"].as_array().map(Vec::len), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // fail, fail: the gateway is refused before any grid is measured, and nothing is written.
+    #[test]
+    fn a_suite_whose_box_fails_qualification_twice_is_refused_and_writes_nothing() {
+        let dir = tmpdir("qualify-retry-fail");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let err = run_suite_qualified(&cfg, gw, &[], |_, _| verdict("fail", 10.0), |_| {})
+            .expect_err("a confirmed fail refuses the gateway");
+        assert!(
+            matches!(err, SnapshotError::BoxQualificationFailed { .. }),
+            "{err:?}"
+        );
+        let written = std::fs::read_dir(&dir)
+            .map(|d| d.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(written, 0, "a refused gateway must not write a snapshot");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ONE TRANSIENT BAD WINDOW DOES NOT THROW AWAY A GATEWAY'S RUN: a fail followed by a pass
+    // proceeds, after exactly one pause, publishing the passing verdict with both attempts.
+    #[test]
+    fn a_box_qualification_that_fails_once_then_passes_lets_the_suite_proceed() {
+        let mut script = vec![verdict("fail", 100.0), verdict("pass", 200.0)].into_iter();
+        let mut pauses = Vec::new();
+        let v = qualify_box_with_retry(|| script.next().expect("two attempts"), |d| pauses.push(d))
+            .expect("a pass on the retry qualifies the box");
+        assert_eq!(pauses, vec![QUALIFY_RETRY_PAUSE]);
+        assert_eq!(v["outcome"], "pass");
+        assert_eq!(
+            v["observed_rps"], 200.0,
+            "the deciding attempt is the top level"
+        );
+        let attempts = v["attempts"]
+            .as_array()
+            .expect("both observations recorded");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["outcome"], "fail");
+        assert_eq!(attempts[0]["rps"], 100.0);
+        assert_eq!(attempts[1]["outcome"], "pass");
+        // run-on-ec2.sh greps every "observed_rps" for the next baseline; a failed attempt's rate
+        // must not be one of them.
+        assert_eq!(v.to_string().matches("\"observed_rps\"").count(), 1);
+    }
+
+    #[test]
+    fn a_box_qualification_that_fails_twice_refuses_the_gateway() {
+        let mut script = vec![verdict("fail", 100.0), verdict("fail", 90.0)].into_iter();
+        let mut pauses = 0;
+        let err = qualify_box_with_retry(|| script.next().expect("two attempts"), |_| pauses += 1)
+            .expect_err("a confirmed fail refuses");
+        assert_eq!(pauses, 1);
+        let SnapshotError::BoxQualificationFailed { verdict } = &err else {
+            panic!("expected BoxQualificationFailed, got {err:?}");
+        };
+        assert_eq!(verdict["attempts"].as_array().map(Vec::len), Some(2));
+        assert!(
+            err.to_string().starts_with("BOX_QUALIFICATION_FAILED:"),
+            "an orchestrator greps for this marker: {err}"
+        );
+    }
+
+    // Pass, seed and skip are taken once: no pause, no retry, no `attempts` key.
+    #[test]
+    fn a_box_qualification_that_does_not_fail_is_taken_once_and_unchanged() {
+        for outcome in ["pass", "seed", "skip"] {
+            let mut calls = 0;
+            let v = qualify_box_with_retry(
+                || {
+                    calls += 1;
+                    verdict(outcome, 1.0)
+                },
+                |_| panic!("no pause without a fail"),
+            )
+            .expect("not a fail");
+            assert_eq!(calls, 1);
+            assert_eq!(v, verdict(outcome, 1.0));
+        }
     }
 
     // `served` on an egress column is observed from its cells: any served cell makes it served, and
@@ -2438,7 +2648,7 @@ mod tests {
         let mut cfg = cfg_for(&dir, gw);
         // Two dialects, so the grid contains a translation cell rather than only the diagonal.
         cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
 
@@ -2495,7 +2705,8 @@ mod tests {
         let mock = serve(200);
         let mut cfg = cfg_for(&dir, gw);
         cfg.mock_addr = mock;
-        let paths = run_suite_with(&cfg, gw, &[]).expect("a declining gateway still writes a row");
+        let paths =
+            run_suite_seeded(&cfg, gw, &[]).expect("a declining gateway still writes a row");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         let cell = back
@@ -2529,14 +2740,13 @@ mod tests {
     fn a_handed_baseline_lets_the_box_qualification_actually_judge() {
         let empty = std::path::Path::new("/nonexistent-results-dir-for-this-test");
         // What the field had: nothing on disk, and nothing handed over.
-        std::env::remove_var("OTB_QUALIFY_BASELINE");
         assert!(
-            qualify_history(empty).is_empty(),
+            qualify_history_with(empty, None).is_empty(),
             "with no history the baseline is absent and the qualification can only seed"
         );
         let (outcome, drift) = crate::qualify::judge(
             Measurement::Measured(500_000.0),
-            crate::qualify::rolling_baseline(qualify_history(empty)),
+            crate::qualify::rolling_baseline(qualify_history_with(empty, None)),
             QUALIFY_BAND_PCT,
             crate::qualify::Sense::HigherIsBetter,
         );
@@ -2548,14 +2758,13 @@ mod tests {
         );
 
         // What the orchestrator can hand over, since it holds the record the box does not.
-        std::env::set_var("OTB_QUALIFY_BASELINE", "497862");
-        assert_eq!(qualify_history(empty), vec![497_862.0]);
+        assert_eq!(qualify_history_with(empty, Some("497862")), vec![497_862.0]);
 
         // A healthy box - the widest real deviation across the 2026-07-28 field was 4.4% - passes.
         let judge_at = |rps: f64| {
             crate::qualify::judge(
                 Measurement::Measured(rps),
-                crate::qualify::rolling_baseline(qualify_history(empty)),
+                crate::qualify::rolling_baseline(qualify_history_with(empty, Some("497862"))),
                 QUALIFY_BAND_PCT,
                 crate::qualify::Sense::HigherIsBetter,
             )
@@ -2571,8 +2780,6 @@ mod tests {
         // The box this guard exists for: far enough under that its gateway's whole column would
         // have been measured on a rig nothing compared against anything.
         assert_eq!(judge_at(300_000.0), "fail");
-
-        std::env::remove_var("OTB_QUALIFY_BASELINE");
     }
 
     // WHAT IT RAN ON MUST REACH THE ARTIFACT.
@@ -2588,7 +2795,7 @@ mod tests {
         let mut cfg = cfg_for(&dir, gw);
         let label = "AWS m7g.4xlarge (16 cores / 64 GB), gateway pinned to 4";
         cfg.hardware = Some(label.into());
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let snap: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
                 .expect("parse");
@@ -2602,7 +2809,7 @@ mod tests {
         let dir2 = tmpdir("hardware-absent");
         let mut cfg2 = cfg_for(&dir2, gw);
         cfg2.hardware = None;
-        let paths2 = run_suite_with(&cfg2, gw, &[]).expect("the suite writes a snapshot");
+        let paths2 = run_suite_seeded(&cfg2, gw, &[]).expect("the suite writes a snapshot");
         let snap2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths2.current).expect("read"))
                 .expect("parse");
@@ -2624,7 +2831,7 @@ mod tests {
         let gw = serve(200);
         let mut cfg = cfg_for(&dir, gw);
         cfg.hardware = Some("AWS m7g.4xlarge (16 cores / 64 GB)".into());
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let back: ResultSnapshot =
             serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
                 .expect("its own output must parse");
