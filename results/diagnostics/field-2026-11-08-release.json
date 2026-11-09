@@ -1,0 +1,32 @@
+{
+  "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
+  "source_commit": "f389a8879882a04db169f1df4caadcdab667c043",
+  "ci_pipeline": "https://github.com/GetBusbar/benchmarking/-/pipelines/412",
+  "ci_job": "https://github.com/GetBusbar/benchmarking/-/jobs/552",
+  "engine_sha256": "c5ddd560011cc82569ec4816299f40ded520168e4a4712dd040888027daee6c0",
+  "mock_sha256": "7150734b700340a9031720299d3bfa50b0a0ac746c87360c623831db48187d54",
+  "calibration": "results/calibrations/2026-11-08-09547897-arm64.json",
+  "field_state": "/Users/matthew/Developer/tmp/otb-august-readiness-20261108/field",
+  "run_id": "otb-20261109T015651Z",
+  "status": "running",
+  "workers": 15,
+  "results_checked": 0,
+  "automatic_worker_publication": false,
+  "publication_policy": "Owner subsequently authorized blank production board and incremental publication of checked results",
+  "blank_website_version": "361d1b37-1dc0-46b5-bfa7-754a4c1e7898",
+  "promotion_status": "MR26 remains opened in last API check despite owner reporting merged",
+  "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
+  "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
+  "results_harvested": 1,
+  "results_published": 0,
+  "harvested_results": {
+    "one-api": {
+      "raw": "results/snapshots/result_one-api_2026-11-09T02-01-58Z.json",
+      "review": "results/diagnostics/field-2026-11-08/one-api-result-review.json",
+      "publication": "withheld_pending_attribution",
+      "instance_id": "i-0fc939cbd74bda7b7",
+      "instance_state": "terminated"
+    }
+  },
+  "all_15_engine_mock_hash_verifications": true
+}
