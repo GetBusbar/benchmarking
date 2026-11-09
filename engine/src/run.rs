@@ -464,17 +464,25 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
                 return (Served::UnprobedAuth(evidence), None);
             }
             // The verdict decides which of the three this is, and they are NOT interchangeable.
-            // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
-            // the gateway's own answer that it reached and declined this attempt at a pairing that
-            // is otherwise real. NotVerified means the rig could not get a fair reading, so nothing
-            // was learned about the gateway, and recording it as "does not serve" would convict on
-            // the rig's failure.
+            // A cell the manifest DECLARES supported stays a failure when it rejects the common
+            // request, even with 404/501: those statuses cannot erase researched support and turn
+            // a broken cell grey. Only an undeclared pairing can receive the NotConfigured routing
+            // observation. NotVerified means the rig could not get a fair reading, regardless of
+            // support, and recording it as "does not serve" would convict on the rig's failure.
             let retry = crate::probe::status_is_transient(r.status)
                 .then(|| format!("HTTP {} is transient", r.status));
-            match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
+            match persistent_transient_verdict(Observation {
+                status: Some(r.status),
+                mock_healthy,
+                pairing_supported: crate::manifest::matrix_declared_capable(
+                    &cfg.matrix,
+                    &id.ingress,
+                    &id.egress,
+                ) == Some(true),
+            }) {
                 v @ (Verdict::NotConfigured | Verdict::Failed) => {
-                    // Only a Failed verdict is worth another ask: NotConfigured is the gateway
-                    // stating the route does not exist, which asking again cannot change.
+                    // Retry only transient statuses: a supported 404/501 is Failed but
+                    // deterministic, and NotConfigured cannot change by asking again.
                     let retry = if v == Verdict::Failed { retry } else { None };
                     (Served::No(v, evidence), retry)
                 }
@@ -4022,6 +4030,37 @@ while True:
         );
     }
 
+    // A pairing the manifest DECLARES supported cannot turn grey by answering 404/501: that is a
+    // broken cell (red), not an absent one. The undeclared case above keeps NotConfigured, and an
+    // unconfirmed rig still makes the observation unattributable whatever the declaration says.
+    #[test]
+    fn a_supported_cell_cannot_turn_grey_when_its_route_rejects_the_request() {
+        for status in [404, 501] {
+            let gw = serve(status);
+            let mut cfg = cfg_for(gw, gw);
+            cfg.matrix = vec!["111111".into(); 6];
+            let id = CellId::new("openai", "bedrock");
+            let served = probe_cell(&cfg, &id, true);
+            assert!(
+                matches!(
+                    served,
+                    Served::No(crate::probe::Verdict::Failed, ref evidence) if evidence.status == status
+                ),
+                "a declared-supported {status} must be Failed with its evidence: {served:?}"
+            );
+            assert!(matches!(
+                probe_cell(&cfg, &id, false),
+                Served::Untestable(_)
+            ));
+            // A '0' declaration is not a support claim: the routing observation stands.
+            cfg.matrix = vec!["000000".into(); 6];
+            assert!(matches!(
+                probe_cell(&cfg, &id, true),
+                Served::No(crate::probe::Verdict::NotConfigured, _)
+            ));
+        }
+    }
+
     // THE RED WE WOULD NOT HAVE EARNED. On a dialect whose real clients sign their requests, the
     // harness sends a bearer token and refuses to forge a signature, so a gateway that checks
     // credentials properly answers 401/403 - correctly. Publishing that as a refusal would state
@@ -5061,10 +5100,12 @@ while True:
             let confirmed = persistent_transient_verdict(Observation {
                 status: Some(status),
                 mock_healthy: true,
+                pairing_supported: false,
             });
             let unconfirmed = persistent_transient_verdict(Observation {
                 status: Some(status),
                 mock_healthy: false,
+                pairing_supported: false,
             });
             assert_ne!(
                 confirmed, unconfirmed,
@@ -5081,14 +5122,16 @@ while True:
         assert_eq!(
             persistent_transient_verdict(Observation {
                 status: Some(404),
-                mock_healthy: true
+                mock_healthy: true,
+                pairing_supported: false,
             }),
             Verdict::NotConfigured
         );
         assert_eq!(
             persistent_transient_verdict(Observation {
                 status: Some(503),
-                mock_healthy: true
+                mock_healthy: true,
+                pairing_supported: false,
             }),
             Verdict::Failed
         );
