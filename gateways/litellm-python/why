@@ -17,3 +17,12 @@ aws_bedrock_runtime_endpoint upstream  # bedrock's own base-URL override -> the 
 aws_access_key_id     boot   # the SigV4 signer needs some credential; the mock ignores the signature
 aws_secret_access_key boot
 aws_region_name       boot
+master_key           boot   # v1.108.3 refuses an unset or known-default master key; the rig uses its declared nonempty mock credential without weakening the shipped check
+
+use_chat_completions_api upstream # Only the Chat model alias declares its upstream operation. litellm/responses/main.py documents this switch for Responses-to-Chat bridging; the separate Responses alias retains native Responses. This chooses the matrix wire, without changing request contents, caches, retries, concurrency or timeouts.
+
+The global use_chat_completions_url_for_anthropic_messages override is deliberately absent. With the Chat upstream already selected per model, the default Messages bridge reaches the correct wire but returns empty content. Switching the global bridge would hide that released failure. Keep the supported cell enabled and retain the invalid response as evidence.
+
+COHERE_API_BASE upstream # Native /cohere/v2/chat passthrough has a separate documented base override; redirect it to the same mock.
+COHERE_API_KEY boot # Dummy upstream credential for the native passthrough route.
+cell_paths ingress # Native Cohere and Bedrock passthrough require /cohere and /bedrock prefixes. Bedrock resolves its existing configured model alias; Cohere uses the native command-r model id.

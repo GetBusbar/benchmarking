@@ -11,7 +11,9 @@
   "display": "LiteLLM \u00b7 Rust",
   "egress": [
     "openai",
-    "anthropic"
+    "openai-responses",
+    "anthropic",
+    "bedrock"
   ],
   "headers": [
     "Authorization: Bearer {GW_AUTH}"
@@ -36,6 +38,17 @@
   },
   "egress_models": {
     "openai": "bench-openai",
-    "anthropic": "bench-anthropic"
-  }
+    "openai-responses": "bench-responses",
+    "anthropic": "bench-anthropic",
+    "bedrock": "bench-bedrock"
+  },
+  "matrix": [
+    "101001",
+    "010000",
+    "001000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned v1.108.3 standalone Rust source b7d579fab2818968322ef96e5b8e98dc8178fafc: gateway-inference/src/lib.rs registers Chat, Responses and Messages ingress. inference-chat/src/common_utils.rs registers OpenAI-like, Anthropic and Bedrock Converse adapters; inference-responses/src/prepare.rs supports native OpenAI Responses; inference-messages/src/common_utils.rs has native Anthropic, but no OpenAI cross-conversion. Its Bedrock Messages path uses Invoke, not this matrix's Converse wire. Native Gemini, Cohere and Bedrock ingress are not registered. Chat-to-Bedrock is SUPPORTED and enabled despite the released parameter-mapping failure: the standard max_tokens request returns 501. Do not remove max_tokens, drop parameters, or turn this supported failure into a grey. Evidence: results/diagnostics/refresh-configuration/litellm-rust-exploratory-preflight.json"
 }

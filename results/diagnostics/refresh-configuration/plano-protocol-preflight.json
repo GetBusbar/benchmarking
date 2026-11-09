@@ -352,5 +352,6 @@
   ],
   "scope": "Nonstream protocol correctness only; streaming and measurement readiness outstanding.",
   "source_commit": "b13ddd632bde1fea7678386c345665ea5fa671af",
-  "definition_sha256": "ca22e6bfab213794d9ac4e7cb50f5c5f5501cbf9e9d55f9d8382729f50845748"
+  "definition_sha256": "ca22e6bfab213794d9ac4e7cb50f5c5f5501cbf9e9d55f9d8382729f50845748",
+  "configuration_status": "Superseded exploratory configuration; adapter substitution withdrawn. Evidence does not verify current OOTB setup."
 }

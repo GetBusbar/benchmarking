@@ -1,5 +1,5 @@
 {
-  "scope": "Eleven revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
+  "scope": "Exploratory capability comparison only. NOT OOTB configuration approval. Reassessment against recorded historical configurations required after owner clarification.",
   "gateways": [
     {
       "gateway": "one-api",
@@ -23,7 +23,8 @@
         "openai>gemini"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 5
+      "historical_snapshots_checked": 5,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "bifrost",
@@ -95,7 +96,8 @@
         "openai-responses>openai"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 5
+      "historical_snapshots_checked": 5,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "portkey",
@@ -133,7 +135,8 @@
         "gemini>gemini"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 4
+      "historical_snapshots_checked": 4,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "kong",
@@ -163,7 +166,8 @@
         "openai>cohere"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 5
+      "historical_snapshots_checked": 5,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "tensorzero",
@@ -186,7 +190,8 @@
       "removed_since_latest": [],
       "added_since_latest": [],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 4
+      "historical_snapshots_checked": 4,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "aisix",
@@ -228,7 +233,8 @@
         "openai>gemini"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 5
+      "historical_snapshots_checked": 5,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "apisix",
@@ -254,7 +260,8 @@
         "anthropic>openai"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 5
+      "historical_snapshots_checked": 5,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "gomodel",
@@ -302,7 +309,8 @@
         "openai>cohere"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 5
+      "historical_snapshots_checked": 5,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "agentgateway",
@@ -342,7 +350,8 @@
         "openai>gemini"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 6
+      "historical_snapshots_checked": 6,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "higress",
@@ -384,7 +393,8 @@
         "openai>gemini"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 1
+      "historical_snapshots_checked": 1,
+      "ootb_approval": "not established"
     },
     {
       "gateway": "plano",
@@ -416,7 +426,8 @@
         "openai>bedrock"
       ],
       "earlier_served_not_in_current_configuration": [],
-      "historical_snapshots_checked": 6
+      "historical_snapshots_checked": 6,
+      "ootb_approval": "not established"
     }
   ]
 }

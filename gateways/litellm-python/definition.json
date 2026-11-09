@@ -20,7 +20,7 @@
   "egress_models": {
     "anthropic": "gpt-4o-mini-anthropic",
     "bedrock": "gpt-4o-mini-bedrock",
-    "cohere": "gpt-4o-mini-cohere",
+    "cohere": "command-r",
     "gemini": "gpt-4o-mini-gemini",
     "openai": "gpt-4o-mini",
     "openai-responses": "gpt-4o-mini-responses"
@@ -51,5 +51,18 @@
   "runtime": {
     "container": "litellm-python-bench",
     "kind": "docker"
-  }
+  },
+  "cell_paths": {
+    "cohere>cohere": "/cohere/v2/chat",
+    "bedrock>bedrock": "/bedrock/model/gpt-4o-mini-bedrock/converse"
+  },
+  "matrix": [
+    "111111",
+    "111111",
+    "111111",
+    "111111",
+    "000010",
+    "000001"
+  ],
+  "matrix_note": "Pinned v1.108.3 source b7d579fab2818968322ef96e5b8e98dc8178fafc: Chat, Responses, Messages and Gemini ingress translate to all six configured upstream wires. The per-model upstream setting selects Chat versus Responses without changing workload parameters. The default Messages-to-Chat bridge reaches the correct wire but returns empty content; that supported failure stays enabled without a global bridge override. Native Cohere and Bedrock ingress use the shipped /cohere and /bedrock provider-prefixed passthrough routes in litellm/proxy/pass_through_endpoints/llm_passthrough_endpoints.py; passthrough is same-dialect only. Supported-cell failures remain enabled. Evidence: results/diagnostics/refresh-configuration/litellm-python-final-config-correctness-preflight.json"
 }

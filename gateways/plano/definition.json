@@ -14,12 +14,14 @@
     "openai",
     "openai-responses",
     "anthropic",
+    "gemini",
     "bedrock"
   ],
   "egress_models": {
-    "openai": "gemini/gemini-1.5-pro",
-    "openai-responses": "openai/gpt-4o-mini",
     "anthropic": "anthropic/claude-3-5-sonnet",
+    "gemini": "gemini/gemini-1.5-pro",
+    "openai": "openai/gpt-4o-mini",
+    "openai-responses": "openai/gpt-4o-mini",
     "bedrock": "amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0"
   },
   "lang": "Rust",
@@ -46,11 +48,11 @@
   },
   "matrix": [
     "100001",
-    "110001",
+    "010001",
     "101001",
     "000000",
     "000000",
     "000000"
   ],
-  "matrix_note": "Plano 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: SupportedAPIsFromClient accepts Chat, Responses and Messages only. Gemini provider uses OpenAI compatibility, not native Gemini wire; it explicitly selects the Chat upstream for all three ingress protocols, while the OpenAI provider selects Responses for Responses ingress. Bedrock model enables three Converse translations. Recorder and response-content checks prove eight pairs. No Cohere adapter or native Gemini/Bedrock ingress exists in the supported API enums. Corrected standard Responses mock fields are required. Evidence: results/diagnostics/refresh-configuration/plano-protocol-preflight.json"
+  "matrix_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream."
 }

@@ -7,3 +7,5 @@ bedrock upstream # Pinned adapter accepts api_base plus explicit dummy AWS crede
 apis upstream # Empty API declaration on Chat-only provider prevents Responses ingress silently selecting the Responses upstream; separate alias retains Responses routing
 
 Thirteen pairs passed exact recorder and response-content checks in aisix-protocol-preflight.json. Cohere chat is not one of the five native adapter families; specialized Cohere embedding/reranking support is outside this chat matrix.
+
+The pinned ProviderApis schema documents an explicit empty apis map as a Chat-only upstream contract; dispatch.rs::serves_natively_with then bridges Responses ingress into Chat. The separate Responses provider retains its native default. These are static upstream contracts, not per-cell reconfiguration or performance settings. Source: https://github.com/api7/aisix/blob/7e070f0bde3f653c3b197ed18c5b9205b866a4c5/crates/aisix-core/src/models/provider_key.rs

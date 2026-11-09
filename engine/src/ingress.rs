@@ -212,7 +212,7 @@ impl Dialect {
     ///
     /// Four of six dialects use a bearer token; Anthropic and Gemini carry the key in headers of their
     /// own, and sending them a bearer draws a 401. `probe.rs` publishes a 401 from a healthy rig as
-    /// `Failed` (only 404/501 are `NotConfigured`), so a wrong auth shape would mislabel whole ROWS of
+    /// `Failed`, so a wrong auth shape would mislabel whole ROWS of
     /// the grid as the gateway's own failure - red on the board - when the cause is our request.
     pub fn auth_headers(&self, auth: &str) -> Vec<(String, String)> {
         match self {

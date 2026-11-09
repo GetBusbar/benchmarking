@@ -1,0 +1,141 @@
+{
+  "checked_at": "2026-11-09T00:15:59.330150+00:00",
+  "kind": "local correctness preflight; not performance measurements",
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "body": "{\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":0}}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai-responses",
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"invalid provider: openai\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":400}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "{\"created\":1794183359,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":10}}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: unrecognized request parameter\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai",
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai-responses",
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"model\":\"mock\",\"output\":[{\"type\":\"message\",\"id\":\"msg_x\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12},\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"parallel_tool_calls\":true,\"tools\":[],\"tool_choice\":\"auto\",\"temperature\":1.0,\"top_p\":1.0,\"metadata\":{},\"previous_response_id\":null,\"truncation\":\"disabled\",\"max_output_tokens\":null,\"store\":false}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"gpt-4o-mini\",\"input\":\"hello\"}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "anthropic",
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "bedrock",
+      "status": 501,
+      "body": "{\"error\":{\"message\":\"unsupported by the rust path: native HTTP responses provider\",\"type\":\"api_error\",\"param\":null,\"code\":501}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai",
+      "status": 400,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid provider: openai_like\"}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai-responses",
+      "status": 400,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid provider: openai\"}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "bedrock",
+      "status": 501,
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"unsupported by the rust path: Bedrock invoke messages request shaping\"}}",
+      "mock_observed": {}
+    }
+  ],
+  "source_commit": "b7d579fab2818968322ef96e5b8e98dc8178fafc",
+  "binary_sha256": "d09eeac4ea66bacafbac65617cf038daa03e6ae84f82b54c630ea3c7b058d820",
+  "scope": "Exploratory configuration check, not full readiness.",
+  "bedrock_without_max_tokens": {
+    "ingress": "openai",
+    "egress": "bedrock",
+    "status": 200,
+    "body": "{\"created\":1794183396,\"model\":\"amazon.nova-micro-v1:0\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_creation_tokens\":0,\"text_tokens\":10}}}",
+    "mock_observed": {
+      "bedrock": {
+        "count": 1,
+        "body_ok": true,
+        "last_path": "/model/amazon.nova-micro-v1:0/converse",
+        "last_snippet": "{\"inferenceConfig\":{},\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}]}"
+      }
+    }
+  },
+  "findings": [
+    "Native OpenAI Responses adapter is omitted from repository configuration and passes with explicit openai model.",
+    "Bedrock Converse adapter is omitted; Chat works without max_tokens but returns 501 unrecognized request parameter with standard OpenAI max_tokens. Source unsupported_param checks mapped provider names while HTTP path passes this name through.",
+    "Messages-to-Bedrock invoke request shaping explicitly unsupported; Responses supports native HTTP OpenAI/OpenRouter providers, not generic cross-provider conversion.",
+    "Do not classify supported Bedrock Chat as absent solely from the parameter rejection. Final handling and stream checks remain outstanding."
+  ]
+}

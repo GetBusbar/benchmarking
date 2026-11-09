@@ -1,54 +1,42 @@
-# Why each declared setting exists. One claim per setting; the config lint fails on any setting
-# that is declared and not claimed here.
+# Minimal standalone AI-gateway deployment; unchanged performance defaults.
 
-image higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:2.2.4
-  The project's official standalone artifact (one container: file-based apiserver + controller +
-  pilot + Envoy gateway + console), pinned to the 2.2.4 release. Verified multi-arch against the
-  registry manifest on 2026-08-25: linux/amd64 + linux/arm64, so it runs natively on both arches
-  this benchmark fields. The registry is Aliyun Hangzhou; a pull from an AWS box is slow but
-  unauthenticated and works.
+image 2.2.5
+  Official all-in-one ARM64 image pinned by digest in definition.json. Full mode retains the
+  console and control plane shipped in this artifact; their memory remains part of the result.
 
-port 8080
-  The image's own GATEWAY_HTTP_PORT default. Nothing in this harness depends on the number; we do
-  not restate the env var, we just bind the gateway where it already listens.
+GATEWAY_CONCURRENCY={NCORE} bind
+  The existing methodology's core-binding exception. The same four-core allocation is used for
+  every entrant; no independent worker, buffer, connection-pool or timeout tuning is applied.
 
-env GATEWAY_CONCURRENCY={NCORE}
-  bind. start-gateway.sh launches Envoy with --concurrency=${GATEWAY_CONCURRENCY:-16}; the image
-  default of 16 workers on the 4 pinned cores would oversubscribe the box the mock and load
-  generator share. This is the gateway's own knob (the harness sets only runtime-standard names
-  like GOMAXPROCS centrally), so it is declared per-gateway, from {NCORE}, exactly as the manifest
-  spec's one exception allows.
+port 8080 bind
+  The image's default gateway listener.
 
-mount data/mcpbridges/default.gen.yaml -> /data/mcpbridges/default.yaml (read-only)
-  upstream. The all-in-one bootstrap (start-apiserver.sh) copies its defaults into /data with
-  cp -n, so an existing file at this path survives and ours - pointing the sole static registry at
-  the mock - is the config the controller actually loads. Read-only because the gateway has no
-  reason to rewrite its own input, and a writable mount would let a run mutate what the next run
-  reads. The rest of /data stays container-writable, which the bootstrap needs.
+mcpbridges/default.yaml upstream
+  File-based service discovery points the static upstream at the local mock. The bootstrap's
+  cp -n preserves this mounted file. Other boot state remains writable as the image requires.
 
-mount data/ingresses/bench.gen.yaml -> /data/ingresses/bench.yaml (read-only)
-  ingress. One Ingress with the six canonical dialect paths, all to mock.static: each is a prefix
-  route in the dialect's own shape, so every served cell is same-dialect passthrough. The gemini
-  and bedrock paths embed their cell's model constants, and cell_paths mirrors the same constants
-  into the probe path, so route and probe agree by construction.
+ingresses/*.yaml ingress
+  Provider-selected ingress routes expose the wire APIs the matrix exercises. The Host header
+  selects an upstream column in one static configuration. The gateway does not restart with a
+  different configuration for different cells.
 
-matrix: the diagonal only
-  This manifest configures no ai-proxy plugin, so it makes no translation claim: an openai request
-  leaves as openai, /v1/messages in leaves as /v1/messages. The cross-dialect cells would need a
-  WasmPlugin with per-ingress provider bindings; that is a real capability of the project but one
-  this one-static-config manifest has not been verified against, and an unverified green is the
-  one thing this benchmark refuses to publish. They are grey (undeclared), not red.
+wasmplugins/bench.yaml upstream
+  The bundled AI Proxy 2.0.3 is the project's documented provider adapter. Provider type,
+  dummy apiTokens, modelMapping and awsRegion select the upstream dialect/model and credential.
+  matchRules binds each adapter to its ingress. defaultConfigDisable leaves it inactive outside
+  these explicit routes. No external or patched plugin is installed and protocol detection stays
+  at its shipped default. Without this provider wiring the container is an ordinary passthrough
+  proxy and the benchmark would incorrectly grey out its documented AI translations.
 
-auth dummy
-  The routes forward whatever credential the client presents; the mock accepts any. The value
-  satisfies the manifest's own field, it is not a secret.
+  Source: https://github.com/higress-group/higress/blob/4deae1dd3b4cb2707273748985e55bef28e747d1/plugins/wasm-go/extensions/ai-proxy/README.md
+  The source documents automatic OpenAI/Anthropic detection and provider bindings, including
+  Cohere. provider/cohere.go declares chat completion support and translates the request, but
+  supplies no response converter. The two malformed Cohere translation replies remain genuine
+  failures of the supported cells; they are not removed from the matrix or worked around.
 
-RSS includes the console JVM
-  MODE=full is required for a self-contained container (MODE=gateway hangs waiting for a pilot that
-  is not running), and full mode includes the console - a JVM. The memory figures therefore report
-  the whole all-in-one process tree, which is the honest cost of running Higress the way this
-  artifact ships; quoting an Envoy-only number would describe a deployment that does not exist.
+auth dummy boot
+  Public local test credential; the mock accepts it. Native passthrough forwards the caller's
+  credential while the AI provider bindings supply the adapter's dummy upstream key.
 
 lang Other
-  The data plane is Envoy (C++) and the control plane is Go; the board colours by one
-  implementation language, and mixed does not get to pick the flattering half.
+  Envoy data plane and Go control plane; no single-language attribution for the combined artifact.

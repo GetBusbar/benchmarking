@@ -57,5 +57,6 @@
   ],
   "scope": "Local stream correctness only; not performance measurements or full readiness.",
   "definition_sha256": "ca22e6bfab213794d9ac4e7cb50f5c5f5501cbf9e9d55f9d8382729f50845748",
-  "mock_binary_sha256": "95b7bbc5c91cdcc0a74050ee9a6cd6dc9e80a30224a9a660cbee52a6d3bb5256"
+  "mock_binary_sha256": "95b7bbc5c91cdcc0a74050ee9a6cd6dc9e80a30224a9a660cbee52a6d3bb5256",
+  "configuration_status": "Superseded exploratory configuration; adapter substitution withdrawn. Evidence does not verify current OOTB setup."
 }

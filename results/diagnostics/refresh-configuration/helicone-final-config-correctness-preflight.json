@@ -1,0 +1,1089 @@
+{
+  "checked_at": "2026-11-09T01:02:44.894611+00:00",
+  "gateway": "helicone",
+  "kind": "local single-request correctness checks; no performance measurements",
+  "request_source": "Canonical engine Dialect bodies; model_for/path_for/header precedence reproduced from engine/src/run.rs",
+  "image": null,
+  "binary_sha256": "978360cec6177a0a28dec4de331726c0f08540918f895ffb64b09392142c053a",
+  "mock_binary_sha256": "95b7bbc5c91cdcc0a74050ee9a6cd6dc9e80a30224a9a660cbee52a6d3bb5256",
+  "local_substitutions": [
+    "gateway published/bound to 23982",
+    "mock bound to 19801",
+    "Docker loopback rewritten to host.docker.internal"
+  ],
+  "gateway_files_sha256": {
+    "gateways/helicone/why": "c6787b195b710b1ee07d6f8d818ebc8c51bb70c60490c3556ae2630cc65b6d8e",
+    "gateways/helicone/env": "416f914ab79849000737f6820637955e9f8e9cf679aa1701943f539ea53ba0ec",
+    "gateways/helicone/build.sh": "794cd57073e63278700de461b23d1caf0d6880a22cb056389fb9db126acb2c85",
+    "gateways/helicone/config.gen.yaml.tmpl": "bafabc7a19c2947db718911eaa1d7560e1dc2be416d8a85e66f0ec04056ef6eb",
+    "gateways/helicone/definition.json": "0ad9eec952ebaef620bca3779bece4282710fa031365901ce92a4ad3ae972b44"
+  },
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "path": "/router/openai/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":null,\"completion_tokens_details\":null}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\",\"max_tokens\":16}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai-responses",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "path": "/router/anthropic/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":null,\"completion_tokens_details\":null}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"claude-3-5-sonnet-latest\"}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai",
+      "egress": "gemini",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "cohere",
+      "path": "/v1/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "path": "/router/bedrock/chat/completions",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"id\":\"0176fca0-58af-4819-99a3-42b8a5b3452c\",\"choices\":[{\"index\":0,\"message\":{\"content\":\"ok\",\"refusal\":null,\"tool_calls\":null,\"role\":\"assistant\",\"function_call\":null,\"audio\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"audio_tokens\":null,\"cached_tokens\":null},\"completion_tokens_details\":null}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+          "last_snippet": "{\"modelId\":\"anthropic.claude-3-5-sonnet-v1:0\",\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"system\":null,\"inferenceConfig\":{\"maxTokens\":2000,\"temperature\":0.0,\"topP\":0.0,\"stopSequences\":n"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai-responses",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "anthropic",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "gemini",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "cohere",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "bedrock",
+      "path": "/v1/responses",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "input": "hello",
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "dummy"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai-responses",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "dummy"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "path": "/anthropic/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "dummy"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\": 64, \"messages\": [{\"content\": \"hello\", \"role\": \"user\"}], \"model\": \"anthropic/claude-3-5-sonnet\"}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "gemini",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "dummy"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "cohere",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "dummy"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "bedrock",
+      "path": "/v1/messages",
+      "request_headers": [
+        [
+          "x-api-key",
+          "dummy"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ]
+      ],
+      "request_body": {
+        "max_tokens": 64,
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai",
+      "path": "/v1beta/models/openai/gpt-4o-mini:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "dummy"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai-responses",
+      "path": "/v1beta/models/openai/gpt-4o-mini:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "dummy"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "anthropic",
+      "path": "/v1beta/models/anthropic/claude-3-5-sonnet:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "dummy"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "gemini",
+      "path": "/v1beta/models/openai/gpt-4o-mini:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "dummy"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "cohere",
+      "path": "/v1beta/models/openai/gpt-4o-mini:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "dummy"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "gemini",
+      "egress": "bedrock",
+      "path": "/v1beta/models/bedrock/anthropic.claude-3-5-sonnet-v1:0:generateContent",
+      "request_headers": [
+        [
+          "x-goog-api-key",
+          "dummy"
+        ]
+      ],
+      "request_body": {
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v1beta\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "openai",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "openai-responses",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "anthropic",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "anthropic/claude-3-5-sonnet"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "gemini",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "cohere",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "openai/gpt-4o-mini"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "cohere",
+      "egress": "bedrock",
+      "path": "/v2/chat",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": "hello",
+            "role": "user"
+          }
+        ],
+        "model": "bedrock/anthropic.claude-3-5-sonnet-v1:0"
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: v2\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "openai",
+      "path": "/model/openai/gpt-4o-mini/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "openai-responses",
+      "path": "/model/openai/gpt-4o-mini/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "anthropic",
+      "path": "/model/anthropic/claude-3-5-sonnet/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "gemini",
+      "path": "/model/openai/gpt-4o-mini/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "cohere",
+      "path": "/model/openai/gpt-4o-mini/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": false,
+      "status": 400,
+      "body": "{\"error\":{\"message\":\"Unsupported provider: model\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      "mock_observed": {},
+      "correct_upstream": false,
+      "valid_response": false
+    },
+    {
+      "ingress": "bedrock",
+      "egress": "bedrock",
+      "path": "/bedrock/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+      "request_headers": [
+        [
+          "authorization",
+          "Bearer dummy"
+        ]
+      ],
+      "request_body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "hello"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "declared": true,
+      "status": 200,
+      "body": "{\"output\":{\"message\":{\"role\":\"assistant\",\"content\":[{\"text\":\"ok\"}]}},\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":10,\"outputTokens\":2,\"totalTokens\":12}}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/model/anthropic.claude-3-5-sonnet-v1:0/converse",
+          "last_snippet": "{\"messages\": [{\"content\": [{\"text\": \"hello\"}], \"role\": \"user\"}]}"
+        }
+      },
+      "correct_upstream": true,
+      "valid_response": true
+    }
+  ],
+  "streams": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "body": "data: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"function_call\":null,\"tool_calls\":null,\"role\":\"assistant\",\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"0xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"1xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"2xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"3xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"4xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"5xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"6xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"7xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"8xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"9xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"10xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"11xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"12xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"13xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"14xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"15xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"16xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"17xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"18xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"19xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"20xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"21xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"22xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"23xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"24xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"25xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"26xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"27xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"28xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"29xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"30xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"31xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"32xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"33xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"34xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"35xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"36xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"37xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"38xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"39xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"40xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"41xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"42xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"43xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"44xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"45xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"46xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"47xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"48xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"49xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"50xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"51xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"52xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"53xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"54xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"55xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"56xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"57xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"58xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"59xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"60xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"61xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"62xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"63xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"created\":1,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\",\"max_tokens\":16,\"stream\":true}"
+        }
+      },
+      "terminal": true,
+      "content_frames": 64,
+      "terminal_kind": "finish_reason",
+      "frame_count_method": "JSON parsing matching engine Dialect::sse_event_is_content; whitespace-independent",
+      "assessment": "All 64 content deltas and a finish_reason were delivered; no [DONE] sentinel. The engine streaming measurement stops at its common frame budget."
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "data: {\"id\":\"msg_x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"function_call\":null,\"tool_calls\":[],\"role\":\"assistant\",\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"mock\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10,\"prompt_tokens_details\":null,\"completion_tokens_details\":null}}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"0xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"1xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"2xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"3xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"4xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"5xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"6xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"7xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"8xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"9xxxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"10xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"11xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"12xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"13xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"14xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"15xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"16xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"17xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"18xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"19xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"20xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"21xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"22xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"23xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"24xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"25xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"26xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"27xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"28xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"29xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"30xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"31xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"32xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"33xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"34xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"35xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"36xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"37xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"38xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"39xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"40xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"41xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"42xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"43xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"44xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"45xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"46xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"47xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"48xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"49xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"50xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"51xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"52xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"53xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"54xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"55xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"56xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"57xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"58xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"59xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"60xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"61xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"62xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"63xxxxxxxxxxxxxx\",\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":null,\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":null}\n\ndata: {\"id\":\"anthropic-stream-id\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"function_call\":null,\"tool_calls\":null,\"role\":null,\"refusal\":null},\"finish_reason\":\"stop\",\"logprobs\":null}],\"created\":0,\"model\":\"anthropic-model\",\"service_tier\":null,\"system_fingerprint\":null,\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":64,\"total_tokens\":64,\"prompt_tokens_details\":null,\"completion_tokens_details\":null}}\n\n",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"claude-3-5-sonnet-latest\",\"stream\":true}"
+        }
+      },
+      "terminal": true,
+      "content_frames": 64,
+      "terminal_kind": "finish_reason",
+      "frame_count_method": "JSON parsing matching engine Dialect::sse_event_is_content; whitespace-independent",
+      "assessment": "All 64 content deltas and a finish_reason were delivered; no [DONE] sentinel. The engine streaming measurement stops at its common frame budget."
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "status": 200,
+      "body": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"0xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"1xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"2xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"3xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"4xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"5xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"6xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"7xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"8xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"9xxxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"10xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"11xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"12xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"13xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"14xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"15xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"16xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"17xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"18xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"19xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"20xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"21xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"22xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"23xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"24xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"25xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"26xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"27xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"28xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"29xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"30xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"31xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"32xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"33xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"34xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"35xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"36xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"37xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"38xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"39xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"40xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"41xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"42xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"43xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"44xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"45xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"46xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"47xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"48xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"49xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"50xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"51xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"52xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"53xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"54xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"55xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"56xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"57xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"58xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"59xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"60xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"61xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"62xxxxxxxxxxxxxx\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"63xxxxxxxxxxxxxx\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":64}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\": 64, \"messages\": [{\"content\": \"hello\", \"role\": \"user\"}], \"model\": \"anthropic/claude-3-5-sonnet\", \"stream\": true}"
+        }
+      },
+      "terminal": true,
+      "content_frames": 64,
+      "terminal_kind": "message_stop",
+      "frame_count_method": "JSON parsing matching engine Dialect::sse_event_is_content; whitespace-independent"
+    }
+  ],
+  "engine_stream_scope": "Only OpenAI Chat and Anthropic ingress/egress are supported by the streaming rig; no performance interpretation of these single requests."
+}

@@ -690,6 +690,30 @@ fn a_not_found_and_a_rejection_carry_different_verdicts_through_probe_cell() {
     );
 }
 
+#[test]
+fn a_supported_cell_cannot_turn_grey_when_its_route_rejects_a_parameter() {
+    let body = r#"{"error":{"message":"unrecognized request parameter"}}"#;
+    for status in [404, 501] {
+        let gw = serve_body(status, body);
+        let mut cfg = cfg_for(gw, gw);
+        cfg.matrix = vec!["111111".into(); 6];
+        let id = CellId::new("openai", "bedrock");
+        let served = probe_cell(&cfg, &id, true);
+        assert!(
+            matches!(
+                served,
+                Served::No(Verdict::Failed, ref evidence)
+                    if evidence.status == status && evidence.body_snippet.contains("unrecognized request parameter")
+            ),
+            "supported rejection must retain failure evidence: {served:?}"
+        );
+        assert!(matches!(
+            probe_cell(&cfg, &id, false),
+            Served::Untestable(_)
+        ));
+    }
+}
+
 // THE RED WE WOULD NOT HAVE EARNED. On a dialect whose real clients sign their requests, the
 // harness sends a bearer token and refuses to forge a signature, so a gateway that checks
 // credentials properly answers 401/403 - correctly. Publishing that as a refusal would state
@@ -1706,10 +1730,12 @@ fn an_unconfirmed_rig_makes_the_same_observation_unattributable() {
         let confirmed = persistent_transient_verdict(Observation {
             status: Some(status),
             mock_healthy: true,
+            pairing_supported: false,
         });
         let unconfirmed = persistent_transient_verdict(Observation {
             status: Some(status),
             mock_healthy: false,
+            pairing_supported: false,
         });
         assert_ne!(
             confirmed, unconfirmed,
@@ -1726,14 +1752,16 @@ fn an_unconfirmed_rig_makes_the_same_observation_unattributable() {
     assert_eq!(
         persistent_transient_verdict(Observation {
             status: Some(404),
-            mock_healthy: true
+            mock_healthy: true,
+            pairing_supported: false,
         }),
         Verdict::NotConfigured
     );
     assert_eq!(
         persistent_transient_verdict(Observation {
             status: Some(503),
-            mock_healthy: true
+            mock_healthy: true,
+            pairing_supported: false,
         }),
         Verdict::Failed
     );

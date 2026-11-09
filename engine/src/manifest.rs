@@ -230,8 +230,8 @@ pub struct Manifest {
     #[serde(default)]
     pub headers: Vec<String>,
     pub runtime: Runtime,
-    /// Egress dialects the manifest configures. NOT a capability claim: the matrix probes every cell
-    /// regardless and publishes what it observes. This only says which upstreams are wired.
+    /// Egress dialects the manifest configures. This only says which upstreams are wired;
+    /// `matrix` declares support and `untestable` identifies rig limitations.
     #[serde(default)]
     pub egress: Vec<String>,
     /// THE DECLARED 6x6 CAPABILITY GRID: which (ingress, egress) pairings this gateway is expected
@@ -248,8 +248,9 @@ pub struct Manifest {
     /// specific pairing, because it fires before routing ever gets a chance to say "no such route".
     /// Grading that status as a probed failure would publish the gateway's own front-door behaviour
     /// as a genuine capability defect on a translation it never offered. A `'1'` cell, or any cell
-    /// when this field is empty, is measured exactly as before: the observed status alone decides
-    /// `NotConfigured` vs `Failed` (see `probe::persistent_transient_verdict`).
+    /// when this field is empty, is probed. A `'1'` cell's rejection is `Failed` even for 404/501;
+    /// those statuses cannot erase researched support. Undeclared cells retain the legacy status
+    /// classification (see `probe::persistent_transient_verdict`).
     #[serde(default)]
     pub matrix: Vec<String>,
     /// The cited, source-referenced reasoning behind `matrix`'s `'0'` cells, shown to a reader

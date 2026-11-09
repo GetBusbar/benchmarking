@@ -1,83 +1,35 @@
-# Why each declared setting exists. One claim per setting; the config lint fails on any setting that
-# is declared and not claimed here.
+# Minimal documented model-listener deployment of the pinned 0.4.39 image.
 
-port 10000
-  Plano's own example LLM listener port (config/test_passthrough.yaml). Nothing in this harness
-  depends on the number; it is Plano's default rather than one we chose.
+version boot
+  The image accepts the v0.3.0 configuration schema used by the accepted August deployment.
+listeners/type boot
+  type:model exposes the LLM gateway rather than adding an agent-orchestration hop.
+listeners/port bind
+  12000 is the model listener port; 10000 is occupied by the separately generated prompt listener.
+mount /app/plano_config.yaml boot
+  The image reads this path without entrypoint arguments or PLANO_CONFIG_FILE. The file is read-only.
+model_providers/model upstream
+  Normal provider/model prefixes select the released adapter. The August OpenAI, Anthropic and
+  Gemini entries are retained. The documented amazon_bedrock provider adds its omitted Converse
+  upstream; it is not a replacement for another provider or a performance override.
+model_providers/base_url upstream
+  Redirect every configured backend to the mock.
+model_providers/access_key boot
+  Dummy upstream key required by the deployment; the mock accepts it.
+model_providers/default upstream
+  The existing OpenAI default model is retained. Each measured cell selects its explicit model.
 
-path /v1/chat/completions
-  The OpenAI ingress route the crate serves (70 references in crates/, against 14 for /v1/messages).
+No provider_interface override is needed for these recognized prefixes. No tracing override is
+needed: config/envoy.template.yaml activates tracing only for an explicitly positive random_sampling.
+The redundant random_sampling:0 was removed, leaving the shipped default behavior.
 
-auth dummy
-  Plano requires access_key on a model_provider that is not passthrough_auth. The mock accepts any
-  credential, so this is a placeholder that satisfies Plano's own validation, not a secret.
+The source's hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress.
+providers/id.rs::compatible_api_for_client selects native Responses for Responses-to-OpenAI,
+Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic and Converse for all three
+client APIs to amazon_bedrock. Gemini uses Google's OpenAI-compatible endpoint, which is not the
+native Gemini wire tested by this matrix. No native Gemini, Cohere or Bedrock ingress is registered.
+Source: https://github.com/katanemo/plano/blob/b13ddd632bde1fea7678386c345665ea5fa671af/crates/hermesllm/src/providers/id.rs
 
-launch.args: none
-  The image's ENTRYPOINT is supervisord (Dockerfile), which accepts no positional arguments.
-  `planoai up <config>` is the CLI's interface, not the container's - passing it made the container
-  refuse to start with "positional arguments are not supported". Nothing needs to be passed: the
-  config is mounted where the image already looks for it.
-
-mount conf/config.yaml -> /app/plano_config.yaml (read-only)
-  The path the image's config generator reads by default (cli/planoai/config_generator.py:205), so
-  Plano is launched the same way as the other file-configured entrants - kong mounts one file to
-  /kong/kong.yml, apisix two into its conf dir - rather than through an environment variable only
-  this gateway would use. Read-only because the gateway has no reason to write to it, and a writable
-  mount would let a run mutate the input the next run reads.
-
-listeners[].type: model
-  Selects the LLM gateway listener rather than the agent-orchestration listener. Measuring the agent
-  listener would put Plano's router and an agent hop inside a number every other entrant reports
-  without one.
-
-model_providers[].base_url
-  Points every upstream at the harness mock. This is the setting that makes Plano measurable here at
-  all; without it the cells would be untestable, as they are for the entrants that pin the vendor host.
-
-model_providers[].provider_interface
-  Selects the egress dialect per upstream (openai / claude / gemini). This is what the egress axis of
-  the matrix is measuring, so it has to be stated per provider rather than inferred from the model
-  name.
-
-tracing.random_sampling: 0
-  Tracing off. It is observability work the other entrants are not doing in their measured path, and
-  Plano's default of 100 would sample every request on the hot path.
-
-PLANO_CONFIG_FILE=/etc/plano/config.yaml
-  boot. The image's entrypoint is supervisord, which accepts no arguments, so the config path cannot
-  be passed on the command line - the first attempt did and the container refused to start with
-  "positional arguments are not supported: ['up', '/etc/plano/config.yaml']". Its config generator
-  reads this variable (cli/planoai/config_generator.py:205) and defaults to /app/plano_config.yaml,
-  a path our read-only mount deliberately does not occupy.
-
-KNOWN, UNRESOLVED: Plano dies after the first cell, and this harness cannot yet say why.
-  In both field runs of 2026-07-28 (engines dd26a54 and 8f2af5d) Plano served openai>openai
-  completely - every metric, including the memory phase's cold restart, 66s of load at c=32 and the
-  60s idle after it - and then the next two cells recorded "no connection to the gateway: Connection
-  refused (os error 111)". The same shape twice, so it reproduces; the process is simply gone by the
-  time the second cell is probed.
-
-  What has been ruled out, each by measurement rather than by argument:
-    - load, on its own: 1280 requests at c=32 locally left the container up and serving.
-    - a slow restart: a cold start to first 200 is 6 seconds, well inside the readiness budget.
-    - a container-name collision on relaunch: the harness's stop path is `docker rm -f`, so the
-      name is free before the next launch.
-    - a container memory cap: none is set; the box has 64 GB and Plano's steady state is ~1 GB.
-
-  The likely mechanism, unproven: Plano's supervisord tears the whole container down when any
-  managed child exits - observed directly when config generation failed earlier, where a single
-  child's exit took envoy and brightstaff with it. If envoy or brightstaff dies under the streaming
-  phases, the container exits and nothing inside it restarts. That is consistent with everything
-  above but has not been caught in the act.
-
-  What the harness does about it now, which is a floor and not a fix: a probe that finds the
-  connection refused is retried across the transient budget, and if it is still refused the grid
-  restarts the gateway once before writing off the remaining cells (run.rs). So one death costs the
-  cells it actually broke rather than every pairing measured after it. If Plano still lands
-  partial, the published cells are honest and the absent ones carry the refusal as their reason -
-  a gateway that stopped answering is recorded as exactly that, not as a gateway that cannot serve
-  the pairing.
-
-  This is deliberately NOT worked around by narrowing Plano's declared matrix. Declaring fewer cells
-  to avoid a crash would publish "Plano does not do this" when what happened is "Plano stopped
-  running", and those are different claims about someone else's software.
+Fresh single-request checks on the pinned image retain all three accepted August pairs, verify
+Messages-to-Chat, and verify the three newly configured Converse pairs. Historical July process
+exit observations do not establish a current failure; genuine failures in the field remain results.

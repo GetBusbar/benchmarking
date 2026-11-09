@@ -4,12 +4,11 @@ fn obs(status: Option<u16>, mock_healthy: bool) -> Observation {
     Observation {
         status,
         mock_healthy,
+        pairing_supported: false,
     }
 }
 
-// The verdict must depend only on what was observed, so two cells that differ ONLY in what the
-// gateway claimed about them must classify identically. There is no capability argument to
-// pass: the API makes that unrepresentable, not merely unlikely.
+// Identical observations and support declarations use the same rule for every gateway.
 #[test]
 fn the_same_observation_always_gets_the_same_verdict() {
     let a = persistent_transient_verdict(obs(Some(503), true));
@@ -32,12 +31,35 @@ fn the_budget_is_the_same_for_every_cell() {
 // but a 404/501 (route not implemented at all) is a different claim from every other status
 // (the route exists and this attempt was declined), and they must not collapse into one label.
 #[test]
-fn not_found_and_not_implemented_mean_the_pairing_is_absent() {
+fn undeclared_not_found_and_not_implemented_retain_the_routing_observation() {
     for status in [404u16, 501] {
         assert_eq!(
             persistent_transient_verdict(obs(Some(status), true)),
             Verdict::NotConfigured,
-            "status {status} with a healthy rig means the pairing does not exist"
+            "an undeclared status {status} retains the routing observation"
+        );
+    }
+}
+
+#[test]
+fn a_supported_pairing_rejecting_the_request_is_failed_even_for_404_or_501() {
+    for status in [404, 501] {
+        let observation = Observation {
+            status: Some(status),
+            mock_healthy: true,
+            pairing_supported: true,
+        };
+        assert_eq!(persistent_transient_verdict(observation), Verdict::Failed);
+        assert_eq!(
+            persistent_transient_verdict(Observation {
+                mock_healthy: false,
+                ..observation
+            }),
+            Verdict::NotVerified,
+        );
+        assert!(
+            !status_is_transient(status),
+            "support must not buy extra retries"
         );
     }
 }

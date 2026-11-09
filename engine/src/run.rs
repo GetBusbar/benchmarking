@@ -344,8 +344,8 @@ fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
 /// disable the restart and forfeit the rest of the grid after the first gateway death.
 const NO_CONNECTION_PREFIX: &str = "no connection to the gateway";
 
-/// Ask the gateway whether it serves this pairing. The answer comes only from what was OBSERVED:
-/// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
+/// Probe the pairing with the common request. Observations retain a researched support declaration:
+/// a failed supported request stays failed; an unhealthy rig cannot establish a gateway verdict.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
     probe_cell_within(
@@ -474,18 +474,20 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
             if ing.auth_is_unforgeable_by_the_rig() && matches!(r.status, 401 | 403) {
                 return (Served::UnprobedAuth(evidence), None);
             }
-            // The verdict decides which of the three this is, and they are NOT interchangeable.
-            // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
-            // the gateway's own answer that it reached and declined this attempt at a pairing that
-            // is otherwise real. NotVerified means the rig could not get a fair reading, so nothing
-            // was learned about the gateway, and recording it as "does not serve" would convict on
-            // the rig's failure.
+            // A supported cell stays a failure when it rejects the common request, even with
+            // 404/501. Only an undeclared pairing can receive the legacy NotConfigured observation.
+            // An unconfirmed mock still makes the observation unattributable, regardless of support.
             let retry = crate::probe::status_is_transient(r.status)
                 .then(|| format!("HTTP {} is transient", r.status));
-            match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
+            match persistent_transient_verdict(Observation {
+                status: Some(r.status),
+                mock_healthy,
+                pairing_supported: crate::manifest::matrix_declared_capable(
+                    &cfg.matrix, &id.ingress, &id.egress,
+                ) == Some(true),
+            }) {
                 v @ (Verdict::NotConfigured | Verdict::Failed) => {
-                    // Only a Failed verdict is worth another ask: NotConfigured is the gateway
-                    // stating the route does not exist, which asking again cannot change.
+                    // Retry only transient statuses. A supported 404/501 is Failed but deterministic.
                     let retry = if v == Verdict::Failed { retry } else { None };
                     (Served::No(v, evidence), retry)
                 }
