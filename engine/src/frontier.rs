@@ -140,6 +140,8 @@ pub struct Reading {
     /// about the range: the gateway held this tail all the way up, and the reading is simply the best
     /// RATE among those rungs.
     pub first_disqualified_conc: Option<u32>,
+    /// The successful requests the winning window completed: the latencies `p99_us` was taken over.
+    pub samples: u64,
     /// The highest concurrency this sweep probed at all, qualifying or not.
     ///
     /// Carried so `is_lower_bound` can tell "we ran out of ladder" from "throughput turned over",
@@ -232,6 +234,7 @@ pub fn read_at(rungs: &[Rung], bound: Option<u64>) -> Option<Reading> {
         concurrency: best.concurrency,
         p99_us: best.p99_us,
         first_disqualified_conc,
+        samples: best.ok,
         top_probed_conc,
     })
 }
@@ -594,6 +597,23 @@ mod tests {
         let b = absence_for(&slow, Some(1_000));
         assert_eq!(b.reason(), Some(&Absent::BoundNotMet));
         assert!(b.detail().unwrap().contains("1ms"), "{:?}", b.detail());
+    }
+
+    // The reading carries the sample count behind its p99: the winning window's completed requests.
+    #[test]
+    fn a_reading_carries_the_completed_requests_its_tail_was_taken_over() {
+        let rungs = vec![
+            Rung {
+                ok: 4_200,
+                ..rung(64, 700.0, 3, 0)
+            },
+            Rung {
+                ok: 9_100,
+                ..rung(128, 1_500.0, 8, 0)
+            },
+        ];
+        assert_eq!(read_at(&rungs, Some(5_000)).map(|r| r.samples), Some(4_200));
+        assert_eq!(read_at(&rungs, None).map(|r| r.samples), Some(9_100));
     }
 
     // The bounds must be ascending and distinct, or the published sequence stops reading as a curve

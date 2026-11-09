@@ -320,6 +320,7 @@ pub(crate) fn frontier_for_perf(
                             .to_string(),
                     ),
                 },
+                samples: Measurement::Measured(r.samples as i64),
                 lower_bound: perf.interrupted.is_some() || r.is_lower_bound(),
             },
             // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
@@ -367,6 +368,7 @@ pub(crate) fn frontier_for_perf(
                     concurrency: carry_i(()),
                     p99_us: carry_i(()),
                     first_disqualified_conc: carry_i(()),
+                    samples: carry_i(()),
                     lower_bound: false,
                 }
             }

@@ -185,6 +185,8 @@ fn judge_added_latency(
     out.added_latency_p99_us = as_i64(metrics.get("added_latency_p99_us"));
     out.gateway_c1_p99_us = as_i64(metrics.get("gateway_c1_p99_us"));
     out.direct_c1_p99_us = as_i64(metrics.get("direct_c1_p99_us"));
+    out.gateway_c1_samples = as_i64(metrics.get("gateway_c1_samples"));
+    out.direct_c1_samples = as_i64(metrics.get("direct_c1_samples"));
     out.c1_note = c1_note(metrics);
 }
 
@@ -452,6 +454,8 @@ fn cell_stream(
         stream_c1_note: stream_c1_note(metrics),
         ttft_gw_samples: as_i64(metrics.get("ttft_gw_samples")),
         ttft_direct_samples: as_i64(metrics.get("ttft_direct_samples")),
+        gap_gw_samples: gap_samples(metrics, "gateway_c1_frames"),
+        gap_direct_samples: gap_samples(metrics, "direct_c1_frames"),
         // THE RUNGS THE TWO STREAM SEARCHES WALKED, published whatever the verdict, for the same
         // reason `sweep_max_proxy` is: when a ceiling is suppressed as mock-bound or absent because
         // the search ran out of range, the rungs are the only thing that explains why.
@@ -460,6 +464,16 @@ fn cell_stream(
     };
     judge_streams_sustained(cfg, dialect, &mut out, metrics);
     out
+}
+
+/// The inter-frame gaps one c=1 stream yielded, from its frame count: a stream of n frames has n-1
+/// gaps, which is exactly the population `metric::gap_percentile_us` ranks over. Absent with the
+/// frame count's own reason.
+fn gap_samples(
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+    frames_key: &str,
+) -> Measurement<i64> {
+    as_i64(metrics.get(frames_key)).map(|f| (f - 1).max(0))
 }
 
 /// What the concurrency-1 streaming legs were actually taken over.
@@ -1452,6 +1466,8 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         added_latency_p99_us: withheld(),
         gateway_c1_p99_us: withheld(),
         direct_c1_p99_us: withheld(),
+        gateway_c1_samples: withheld(),
+        direct_c1_samples: withheld(),
         // THE COST GOES TOO, for exactly the reason the latency legs do: CPU burned serving a wire
         // that is not this pairing is not this pairing's cost. Withholding the rate while publishing
         // what it cost would leave a cost-per-request for a request the cell never served.
@@ -1541,6 +1557,8 @@ fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::re
         // withheld number would describe the weight of a figure this cell is refusing to state.
         ttft_gw_samples: withheld(&detail),
         ttft_direct_samples: withheld(&detail),
+        gap_gw_samples: withheld(&detail),
+        gap_direct_samples: withheld(&detail),
         added_gap_p50_us: withheld(&detail),
         added_gap_p99_us: withheld(&detail),
         streams_sustained: withheld(&detail),
@@ -2590,6 +2608,39 @@ mod tests {
             note.contains("5003"),
             "the direct leg's own count must appear: {note}"
         );
+    }
+
+    // The counts are published as fields too, not only as prose in the note.
+    #[test]
+    fn the_c1_sample_counts_reach_the_record_as_fields() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert("gateway_c1_samples", Measurement::Measured(4_812.0));
+        metrics.insert("direct_c1_samples", Measurement::Measured(5_003.0));
+        judge_added_latency(&mut out, &metrics);
+        assert_eq!(out.gateway_c1_samples.copied(), Some(4_812));
+        assert_eq!(out.direct_c1_samples.copied(), Some(5_003));
+    }
+
+    #[test]
+    fn the_gap_sample_count_is_frames_minus_one_and_absent_with_the_frames_reason() {
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert("gateway_c1_frames", Measurement::Measured(64.0));
+        metrics.insert("direct_c1_frames", Measurement::Measured(0.0));
+        assert_eq!(
+            gap_samples(&metrics, "gateway_c1_frames").copied(),
+            Some(63)
+        );
+        assert_eq!(gap_samples(&metrics, "direct_c1_frames").copied(), Some(0));
+        metrics.insert(
+            "gateway_c1_frames",
+            Measurement::absent_because(Absent::Untestable, "no SSE for this dialect"),
+        );
+        let g = gap_samples(&metrics, "gateway_c1_frames");
+        assert_eq!(g.reason(), Some(&Absent::Untestable));
+        assert_eq!(g.detail(), Some("no SSE for this dialect"));
     }
 
     // No counts means the group never completed a c=1 window, and the added-latency fields are
