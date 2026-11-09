@@ -96,22 +96,44 @@ pub struct AbsentEntry {
     pub detail: Option<String>,
 }
 
-impl<T> Measurement<T> {
+impl<T: 'static> Measurement<T> {
     /// If absent, inserts `key` -> this measurement's reason and detail into `out`. A no-op for a
-    /// measured value: there is nothing to explain.
+    /// measured finite value: there is nothing to explain.
+    ///
+    /// A MEASURED NON-FINITE FLOAT is recorded as a `HarnessError`. serde_json writes NaN and the
+    /// infinities as `null`, indistinguishable on the wire from an absence, and every null this
+    /// artifact publishes is supposed to carry a reason. An impossible number is the engine's fault
+    /// by this project's own rule, and saying so beats a silent null.
     pub fn record_absence(
         &self,
         key: &str,
         out: &mut std::collections::BTreeMap<String, AbsentEntry>,
     ) {
-        if let Measurement::Absent { reason, detail } = self {
-            out.insert(
-                key.to_string(),
-                AbsentEntry {
-                    reason: reason.clone(),
-                    detail: detail.clone(),
-                },
-            );
+        match self {
+            Measurement::Absent { reason, detail } => {
+                out.insert(
+                    key.to_string(),
+                    AbsentEntry {
+                        reason: reason.clone(),
+                        detail: detail.clone(),
+                    },
+                );
+            }
+            Measurement::Measured(v) => {
+                if let Some(x) = (v as &dyn std::any::Any).downcast_ref::<f64>() {
+                    if !x.is_finite() {
+                        out.insert(
+                            key.to_string(),
+                            AbsentEntry {
+                                reason: Absent::HarnessError,
+                                detail: Some(format!(
+                                    "the engine computed a non-finite value ({x}), which publishes as null"
+                                )),
+                            },
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -251,6 +273,21 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Measurement<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A MEASURED NaN IS A NULL WITH NO REASON unless it is recorded: serde_json writes a non-finite
+    // float as null, indistinguishable on the wire from an absence, and the artifact's rule is that
+    // every null carries a reason.
+    #[test]
+    fn a_measured_non_finite_float_is_recorded_as_a_harness_error() {
+        let mut out = std::collections::BTreeMap::new();
+        Measurement::Measured(f64::NAN).record_absence("nan", &mut out);
+        Measurement::Measured(f64::INFINITY).record_absence("inf", &mut out);
+        Measurement::Measured(1.5f64).record_absence("finite", &mut out);
+        Measurement::Measured(7i64).record_absence("integer", &mut out);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out["nan"].reason, Absent::HarnessError);
+        assert_eq!(out["inf"].reason, Absent::HarnessError);
+    }
 
     // The whole point, stated as a test: an absence has no number in it, by any route the API offers.
     #[test]
