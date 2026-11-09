@@ -391,8 +391,10 @@ fi
 BENCH_ENGINE_COMMIT="${BENCH_ENGINE_COMMIT:-${_engine_pin:-$BENCH_COMMIT}}"
 if [ "$_NOGATE" = 0 ] && [ -n "$BENCH_ENGINE_COMMIT" ] && [ "$BENCH_ENGINE_COMMIT" != "$BENCH_COMMIT" ]; then
   for _sub in engine mock Cargo.toml Cargo.lock .cargo rust-toolchain.toml; do
-    _tree_sub="$(git -C "$HERE" rev-parse "${BENCH_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
-    _eng_sub="$(git -C "$HERE" rev-parse "${BENCH_ENGINE_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
+    # --verify -q prints nothing for a path absent from the commit; a bare rev-parse echoes its
+    # argument first, so two absences would compare as different strings.
+    _tree_sub="$(git -C "$HERE" rev-parse --verify -q "${BENCH_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
+    _eng_sub="$(git -C "$HERE" rev-parse --verify -q "${BENCH_ENGINE_COMMIT}:${_sub}" 2>/dev/null || echo 'absent')"
     if [ "$_tree_sub" != "$_eng_sub" ]; then
       # Only these cfg(test)-gated fixtures are exempt; release source and build
       # inputs still have to match the commit recorded by the frozen binary.

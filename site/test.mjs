@@ -2129,8 +2129,10 @@ test("Performance Custom (openai->anthropic) has no silent all-n/a served row", 
       assert.ok(!anyVal, `${g.key}: unswept cell must read n/a on every metric, not a fabricated value`);
       continue;
     }
-    const anyVal = KEYS.some((k) => app.chooserPerfCell(g, k, String, st).v != null);
-    assert.ok(anyVal, `${g.key} serves the pinned cell but every metric is n/a`);
+    // A metric the engine withheld WITH a stated reason (e.g. re-verification proved the gateway did not
+    // translate - higress openai->anthropic on the 2026-11-09 field) is an explained absence, not a silent one.
+    const anyVal = KEYS.some((k) => { const m = app.chooserPerfCell(g, k, String, st); return m.v != null || !!m.note; });
+    assert.ok(anyVal, `${g.key} serves the pinned cell but every metric is n/a with no stated reason`);
   }
   // Whether the CURRENT live bundle happens to have a gateway serving openai->anthropic is a fact
   // about the field, not something this test can guarantee - so a live-bundle miss only logs. The
