@@ -316,6 +316,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   page("/gateways/license", renderArticle(template, { path: "/gateways/license", title: "Dataset reuse and attribution", body: `<h1>Dataset reuse and attribution</h1>${licenseText.split(/\n\n/).filter(block => !block.startsWith("# ")).map(block => `<p>${esc(block).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`).join("")}<p><a href="${DATA_LICENSE}">CC BY 4.0</a> · <a href="${DATA_LICENSE}legalcode">Legal terms</a></p>` }));
   write("/DATA-LICENSE.md", licenseText);
   write("/robots.txt", `User-agent: *\nAllow: /\nDisallow: /_publication/\nSitemap: ${ORIGIN}/sitemap.xml\n`);
+  // RFC 9116. Expires is tied to the publication time so a stale build cannot advertise a live contact forever.
+  const securityExpires = new Date(Date.parse(data.generated_at) + 365 * 864e5).toISOString().replace(/\.\d{3}Z$/, "Z");
+  write("/.well-known/security.txt", `Contact: https://github.com/GetBusbar/benchmarking/security/advisories/new\nExpires: ${securityExpires}\nPreferred-Languages: en\nCanonical: ${ORIGIN}/.well-known/security.txt\nPolicy: https://github.com/GetBusbar/benchmarking/security/policy\n`);
+  write("/humans.txt", `/* TEAM */\nOperator: Busbar team (also a benchmark entrant)\nSite: https://getbusbar.com\nGitHub: https://github.com/GetBusbar\n\n/* SITE */\nSource: https://github.com/GetBusbar/benchmarking\nData license: CC BY 4.0 (${ORIGIN}/gateways/license)\nMethodology: ${ORIGIN}/gateways/method\nAgent guide: ${ORIGIN}/llms.txt\nPublished: ${data.generated_at}\n`);
   // No lastmod is preferable to an invented timestamp on every metadata refresh.
   write("/sitemap.xml", `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${routes.map(r => `<url><loc>${ORIGIN}${esc(r.path)}</loc></url>`).join("")}</urlset>\n`);
   write("/404.html", renderArticle(template, { path: "/404", title: "Page not found", body: '<h1>Page not found</h1><p><a href="/gateways">Browse published gateway benchmarks</a>.</p>' }));
