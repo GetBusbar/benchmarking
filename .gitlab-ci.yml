@@ -39,7 +39,13 @@ verify-website:
 
 refresh-gateway-stars:
   stage: publish
-  tags: [onthebench-production]
+  # Protected deploy runner (GCP, example-project): its own worker pool, no shared cache,
+  # one job per VM. The Cloudflare credentials are scoped to the production environment,
+  # so only this job receives them.
+  tags: [otb-deploy]
+  environment:
+    name: production
+    url: https://onthebench.ai
   timeout: 30m
   image: node:22-bookworm
   resource_group: onthebench-production
