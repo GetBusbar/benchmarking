@@ -130,6 +130,7 @@ fn sum_field_mib<S: ProcSource>(source: &S, root_pid: u32, field: &str) -> Measu
 
     let mut total_kb: u64 = 0;
     let mut read_any = false;
+    let mut root_read = false;
     for pid in pids {
         let Some(status) = source.status(pid) else {
             continue;
@@ -138,7 +139,22 @@ fn sum_field_mib<S: ProcSource>(source: &S, root_pid: u32, field: &str) -> Measu
             continue;
         };
         read_any = true;
+        root_read |= pid == root_pid;
         total_kb += kb;
+    }
+
+    // THE ROOT ITSELF MUST BE READ. A worker that exits mid-scan legitimately drops out, but the
+    // root is the gateway's own process: summing its children without it published a figure missing
+    // the largest member as a complete tree total, and memory is ranked ascending, so the hole
+    // flattered the gateway.
+    if read_any && !root_read {
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            format!(
+                "{field} of the tree's root pid {root_pid} was unreadable while its descendants were \
+                 readable, so the tree total would be missing its root"
+            ),
+        );
     }
 
     if !read_any {
@@ -182,8 +198,15 @@ pub fn hwm_tree_mib(root_pid: u32) -> Measurement<f64> {
 /// How the root pid is discovered, abstracted so the resolution logic is testable without docker or
 /// a live process.
 pub trait PidSource {
-    /// The container runtime's reported root pid for a container name.
+    /// The container runtime's reported root pid for a container name, `None` when there is none.
     fn docker_pid(&self, container: &str) -> Option<u32>;
+    /// The same lookup, keeping WHY there is no pid. `Ok(None)` means the runtime answered that no
+    /// such container is running; `Err` means the runtime itself could not be asked (no `docker`
+    /// binary, daemon unreachable, permission denied), which is a rig fault and must not read as the
+    /// gateway having died. Defaults to `docker_pid` for a source that cannot fail that way.
+    fn docker_lookup(&self, container: &str) -> Result<Option<u32>, String> {
+        Ok(self.docker_pid(container))
+    }
     /// The root of the process tree whose command lines match, or why there is no single answer.
     fn matching_pid(&self, pattern: &str) -> PidLookup;
 }
@@ -239,18 +262,28 @@ pub struct RealPids;
 
 impl PidSource for RealPids {
     fn docker_pid(&self, container: &str) -> Option<u32> {
+        self.docker_lookup(container).ok().flatten()
+    }
+
+    fn docker_lookup(&self, container: &str) -> Result<Option<u32>, String> {
         let out = std::process::Command::new("docker")
             .args(["inspect", "-f", "{{.State.Pid}}", container])
             .output()
-            .ok()?;
+            .map_err(|e| format!("could not run `docker inspect`: {e}"))?;
         if !out.status.success() {
-            return None;
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            // "No such object/container" is the runtime's answer about the container; anything else
+            // (daemon unreachable, permission denied) is the runtime failing to answer at all.
+            if why.contains("No such") {
+                return Ok(None);
+            }
+            return Err(format!("`docker inspect` exited {}: {why}", out.status));
         }
         // A stopped container reports pid 0. That is not a process, and summing a tree from it would
         // read whatever pid 0 resolves to rather than nothing.
         match String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
-            Ok(0) | Err(_) => None,
-            Ok(pid) => Some(pid),
+            Ok(0) | Err(_) => Ok(None),
+            Ok(pid) => Ok(Some(pid)),
         }
     }
 
@@ -286,9 +319,20 @@ pub fn root_pid_from<S: PidSource>(source: &S, runtime: &Runtime) -> Measurement
     let found = match runtime {
         // The RUN-SCOPED name, so a concurrent run's container of the same gateway is never the one
         // measured here.
-        Runtime::Docker { .. } => match source.docker_pid(&runtime.identity()) {
-            Some(pid) => PidLookup::Found(pid),
-            None => PidLookup::NotRunning,
+        Runtime::Docker { .. } => match source.docker_lookup(&runtime.identity()) {
+            Ok(Some(pid)) => PidLookup::Found(pid),
+            Ok(None) => PidLookup::NotRunning,
+            // OUR LOOKUP FAILED, which is not the gateway being down: said as a harness error so a
+            // reader does not go looking for a crashed container.
+            Err(why) => {
+                return Measurement::absent_because(
+                    Absent::HarnessError,
+                    format!(
+                        "the container runtime could not be asked for {:?}'s pid: {why}",
+                        runtime.identity()
+                    ),
+                )
+            }
         },
         Runtime::Native { proc_match } => source.matching_pid(proc_match),
     };
@@ -330,6 +374,7 @@ mod pid_tests {
     #[derive(Default)]
     struct FakePids {
         docker: Option<u32>,
+        docker_error: Option<String>,
         native: Option<u32>,
         /// Set to script the "several unrelated processes answer to this pattern" lookup.
         ambiguous: Option<Vec<u32>>,
@@ -342,6 +387,15 @@ mod pid_tests {
             self.seen_docker.borrow_mut().push(container.to_string());
             self.docker
         }
+        fn docker_lookup(&self, container: &str) -> Result<Option<u32>, String> {
+            match &self.docker_error {
+                Some(why) => {
+                    self.seen_docker.borrow_mut().push(container.to_string());
+                    Err(why.clone())
+                }
+                None => Ok(self.docker_pid(container)),
+            }
+        }
         fn matching_pid(&self, pattern: &str) -> PidLookup {
             self.seen_native.borrow_mut().push(pattern.to_string());
             match (&self.native, &self.ambiguous) {
@@ -350,6 +404,26 @@ mod pid_tests {
                 (None, None) => PidLookup::NotRunning,
             }
         }
+    }
+
+    // OUR LOOKUP FAILING IS NOT THE GATEWAY BEING DOWN. A `docker inspect` that could not reach the
+    // daemon used to read as "no running process found for the declared container".
+    #[test]
+    fn a_container_runtime_that_cannot_be_asked_is_a_harness_error_not_a_dead_gateway() {
+        let f = FakePids {
+            docker_error: Some("Cannot connect to the Docker daemon".into()),
+            ..Default::default()
+        };
+        let rt = Runtime::Docker {
+            container: "gw-bench".into(),
+            run_scope: None,
+        };
+        let got = root_pid_from(&f, &rt);
+        assert_eq!(got.reason(), Some(&Absent::HarnessError), "{got:?}");
+        assert!(
+            got.detail().is_some_and(|d| d.contains("Docker daemon")),
+            "{got:?}"
+        );
     }
 
     // THE POINT OF THE BRIDGE: whichever kind the manifest declares, the lookup is driven by
@@ -585,6 +659,20 @@ mod tests {
         // pin that the total is exactly the readable sum and nothing else.
         let wrong_if_missing_were_nonzero = readable_only + 1.0;
         assert_ne!(got, Some(wrong_if_missing_were_nonzero));
+    }
+
+    // THE ROOT IS THE GATEWAY. Summing its children without it published a figure missing the
+    // largest member as a complete tree total, and memory is ranked ascending.
+    #[test]
+    fn an_unreadable_root_with_readable_children_is_absent_not_a_partial_total() {
+        let f = FakeProc::default()
+            .child(2, 1)
+            .rss(2, 2000)
+            .child(3, 1)
+            .rss(3, 3000);
+        let got = rss(&f, 1);
+        assert_eq!(got.reason(), Some(&Absent::NotMeasured), "{got:?}");
+        assert!(got.detail().is_some_and(|d| d.contains("root")), "{got:?}");
     }
 
     #[test]
