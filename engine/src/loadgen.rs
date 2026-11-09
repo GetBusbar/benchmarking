@@ -103,6 +103,9 @@ pub struct UgenStats {
     /// generator's line simply has no such field, and `false` means "none reported". Present, it must
     /// be `0` or `1`.
     pub spawn_failed: bool,
+    /// The child's bounded failure evidence (`failure_samples=`). DIAGNOSTICS ONLY: decoded by
+    /// `parse_failure_samples`, which can never fail the line - see there.
+    pub failure_samples: Vec<crate::gen::FailureSample>,
 }
 
 fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
@@ -124,7 +127,67 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
                 ))
             }
         },
+        failure_samples: parse_failure_samples(fields.get("failure_samples").copied()),
     })
+}
+
+/// Decode the optional `failure_samples=` field (hex of a JSON array of `FailureSample`).
+///
+/// NEVER FATAL. Every other field on this line is a measurement, and refusing a corrupt one is
+/// right; this one is evidence ABOUT a window, and a window's ok/fail/rps must not depend on
+/// whether its diagnostics decoded. A bad or over-limit value is logged (once per process, so a
+/// systematic encoder bug cannot flood the run log) and read as no samples.
+fn parse_failure_samples(hex: Option<&str>) -> Vec<crate::gen::FailureSample> {
+    let Some(hex) = hex else {
+        return Vec::new();
+    };
+    match decode_failure_samples(hex) {
+        Ok(samples) => samples,
+        Err(why) => {
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                eprintln!(
+                    "loadgen: ignoring an unreadable failure_samples field ({why}); the window is \
+                     still measured, only its failure evidence is dropped (further such fields are \
+                     not logged)"
+                );
+            });
+            Vec::new()
+        }
+    }
+}
+
+fn decode_failure_samples(hex: &str) -> Result<Vec<crate::gen::FailureSample>, String> {
+    use crate::gen::{FAILURE_RESPONSE_BYTES, FAILURE_SAMPLES_HEX_CAP, FAILURE_SAMPLE_LIMIT};
+    if hex.len() > FAILURE_SAMPLES_HEX_CAP {
+        return Err(format!(
+            "{} hex characters, over the {FAILURE_SAMPLES_HEX_CAP} cap",
+            hex.len()
+        ));
+    }
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("not an even-length hex string".into());
+    }
+    let digit = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[hi, lo]| digit(*hi) << 4 | digit(*lo))
+        .collect();
+    let samples: Vec<crate::gen::FailureSample> =
+        serde_json::from_slice(&bytes).map_err(|e| format!("not a failure-sample list: {e}"))?;
+    if samples.len() > FAILURE_SAMPLE_LIMIT
+        || samples.iter().any(|s| {
+            s.kind.len() > 64
+                || s.response_hex.len() > 2 * FAILURE_RESPONSE_BYTES
+                || s.response_excerpt.len() > 4 * FAILURE_RESPONSE_BYTES
+        })
+    {
+        return Err("samples exceed the capture limits".into());
+    }
+    Ok(samples)
 }
 
 /// Parse one throughput stats line. Empty input is `Absent(NotMeasured)`: nothing printed, which is
@@ -264,7 +327,8 @@ mod tests {
                 ok: 14_808,
                 rig_refused: 0,
                 budget_exceeded: 0,
-                spawn_failed: false
+                spawn_failed: false,
+                failure_samples: Vec::new(),
             })
         );
     }
@@ -306,6 +370,61 @@ mod tests {
         let m = parse_ugen_line(line);
         assert!(m.is_measured());
         assert_eq!(m.value().map(|s| s.rps), Some(0.0));
+    }
+
+    // THE DIAGNOSTICS FIELD CAN NEVER COST A WINDOW. A corrupt, truncated or over-limit
+    // `failure_samples=` must leave every measured field exactly as it would be without it.
+    #[test]
+    fn a_corrupt_failure_samples_field_still_yields_the_parsed_window() {
+        let clean = parse_ugen_line(UGEN_LINE)
+            .into_value()
+            .expect("the clean line parses");
+        let oversized = "0".repeat(crate::gen::FAILURE_SAMPLES_HEX_CAP + 2);
+        let not_samples =
+            crate::gen::failure_samples_field(&[]) + &format!(" failure_samples={}", "5b7b7d5d"); // `[{}]`: JSON, wrong shape
+        for suffix in [
+            " failure_samples=z".to_string(),
+            " failure_samples=0".to_string(),
+            " failure_samples=00".to_string(),
+            " failure_samples=".to_string(),
+            format!(" failure_samples={oversized}"),
+            not_samples,
+        ] {
+            let line = format!("{UGEN_LINE}{suffix}");
+            let got = parse_ugen_line(&line)
+                .into_value()
+                .unwrap_or_else(|| panic!("a bad diagnostics field must not reject: {suffix}"));
+            assert_eq!(got, clean, "{suffix}");
+        }
+    }
+
+    // And a good one crosses the boundary intact, including the producer's 32 KiB cap.
+    #[test]
+    fn failure_samples_round_trip_and_the_producer_caps_the_field() {
+        let capture = crate::gen::FailureCapture::default();
+        for _ in 0..100 {
+            capture.record_parts(
+                "http_failure",
+                b"HTTP/1.1 503 Unavailable\r\n\r\n",
+                &[0xff; 4096],
+            );
+        }
+        let samples = capture.samples();
+        assert_eq!(samples.len(), crate::gen::FAILURE_SAMPLE_LIMIT);
+        let field = crate::gen::failure_samples_field(&samples);
+        assert!(field.len() <= crate::gen::FAILURE_SAMPLES_HEX_CAP + " failure_samples=".len());
+        let got = parse_ugen_line(&format!("{UGEN_LINE}{field}"))
+            .into_value()
+            .expect("parses");
+        assert!(!got.failure_samples.is_empty());
+        assert_eq!(
+            got.failure_samples[..],
+            samples[..got.failure_samples.len()]
+        );
+        assert!(got.failure_samples[0]
+            .response_excerpt
+            .starts_with("HTTP/1.1 503"));
+        assert_eq!((got.ok, got.fail), (14_808, 3));
     }
 
     #[test]

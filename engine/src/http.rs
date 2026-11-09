@@ -1041,6 +1041,9 @@ pub struct SseReader {
     dialect: Option<crate::ingress::Dialect>,
     content_frames: u64,
     finished: Option<SseEnd>,
+    /// Where the head of a refused response (non-2xx, or not an event stream) is recorded as
+    /// evidence. Diagnostics only: it never changes how the stream is read or classified.
+    failure_capture: Option<std::sync::Arc<crate::gen::FailureCapture>>,
 }
 
 impl SseReader {
@@ -1062,6 +1065,7 @@ impl SseReader {
             dialect,
             content_frames: 0,
             finished: None,
+            failure_capture: None,
         }
     }
 
@@ -1194,6 +1198,13 @@ impl SseReader {
                 .and_then(|t| t.split_once(':'))
             {
                 headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        if let Some(capture) = &self.failure_capture {
+            let not_event_stream = header_value(&headers, "content-type")
+                .is_some_and(|ct| !ct.to_ascii_lowercase().contains("text/event-stream"));
+            if !(200..300).contains(&status) || not_event_stream {
+                capture.record_parts("sse_http_response", &head, &self.raw);
             }
         }
         // A content-type that is present and is not an event stream settles it immediately: waiting
@@ -1564,6 +1575,21 @@ pub async fn post_json_sse_async(
     budget: impl Into<SseBudget>,
     dialect: Option<crate::ingress::Dialect>,
 ) -> SseOutcome {
+    post_json_sse_async_captured(addr, path, body, headers, timeout, budget, dialect, None).await
+}
+
+/// `post_json_sse_async`, recording the head of a refused response into `capture` (diagnostics only).
+#[allow(clippy::too_many_arguments)] // The wire arguments above plus one bounded diagnostic sink.
+pub async fn post_json_sse_async_captured(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    timeout: Duration,
+    budget: impl Into<SseBudget>,
+    dialect: Option<crate::ingress::Dialect>,
+    capture: Option<std::sync::Arc<crate::gen::FailureCapture>>,
+) -> SseOutcome {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Resolved before the first await, so the lane's future carries an `SseBudget` rather than a
@@ -1613,6 +1639,7 @@ pub async fn post_json_sse_async(
     let sent_at = std::time::Instant::now();
     let deadline = lane_deadline;
     let mut reader = SseReader::new(budget, dialect);
+    reader.failure_capture = capture;
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let read = tokio::time::timeout_at(deadline, stream.read(&mut buf)).await;

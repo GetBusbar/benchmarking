@@ -855,7 +855,8 @@ pub fn load_window_at(
                 crate::loadgen::HEADERS_ENV,
                 crate::loadgen::encode_headers(headers),
             )
-            .stderr(std::process::Stdio::inherit())
+            // PIPED, then forwarded below, so the last line can name why a child exited non-zero.
+            .stderr(std::process::Stdio::piped())
             .output();
         // THE ONE FAILURE THAT KILLS EVERY WINDOW IN THE RUN WAS THE SILENT ONE.
         //
@@ -877,8 +878,33 @@ pub fn load_window_at(
                 return None;
             }
         };
+        // Forwarded whole: the child's own diagnostics belong in the run log exactly as before.
+        {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(&out.stderr);
+        }
+        // A CHILD THAT EXITED NON-ZERO DID NOT FINISH ITS WINDOW (the generator exits 0 whenever it
+        // prints a stats line; anything else is a usage error, a kill or an abort), so whatever it
+        // left on stdout is not a window to score.
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("<no stderr>");
+            eprintln!(
+                "[load-window-evidence] load generator exited unsuccessfully ({}) at c={concurrency} \
+                 on {path}; its last stderr line: {last}",
+                out.status
+            );
+            return None;
+        }
         let line = String::from_utf8_lossy(&out.stdout);
         let parsed = crate::loadgen::parse_ugen_line(line.trim());
+        if let Some(u) = parsed.value() {
+            log_load_window_evidence(&addr, path, body, concurrency, u);
+        }
         // OUR OWN WIRE CONTRACT BREAKING IS NOT AN EMPTY WINDOW.
         //
         // `parse_ugen_line` classifies a stats line missing a required field, or carrying a
@@ -939,6 +965,51 @@ fn gen_stats_from_child(u: crate::loadgen::UgenStats) -> GenStats {
         p50_us: percentile(u.p50_us),
         p99_us: percentile(u.p99_us),
     }
+}
+
+/// Log a request body ONCE per (lane, address, path, body): it is constant across every window of
+/// a cell, so repeating it on each failing window only buried the evidence that does change.
+fn log_request_once(lane: &str, addr: &str, path: &str, body: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = format!("{lane}\0{addr}\0{path}\0{body}");
+    let first = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key);
+    if first {
+        eprintln!(
+            "[{lane}-request] {}",
+            serde_json::json!({"address": addr, "path": path, "request_body": body})
+        );
+    }
+}
+
+/// DIAGNOSTICS ONLY: a window that failed, lost a lane, or completed nothing logs its counts and
+/// the child's bounded failure samples. Reads the parsed line; never changes it.
+fn log_load_window_evidence(
+    addr: &str,
+    path: &str,
+    body: &str,
+    concurrency: u32,
+    u: &crate::loadgen::UgenStats,
+) {
+    if !(u.fail > 0 || u.spawn_failed || (u.ok == 0 && u.fail == 0)) {
+        return;
+    }
+    log_request_once("load-window", addr, path, body);
+    eprintln!(
+        "[load-window-evidence] {}",
+        serde_json::json!({
+            "address": addr, "path": path, "concurrency": concurrency,
+            "ok": u.ok, "fail": u.fail, "rig_refused": u.rig_refused,
+            "budget_exceeded": u.budget_exceeded, "spawn_failed": u.spawn_failed,
+            "failure_samples": u.failure_samples,
+            "response_capture_scope": "first bytes available at failure (bounded); a body may not have arrived"
+        })
+    );
 }
 
 pub struct CellPerf {
@@ -1420,6 +1491,9 @@ pub const STREAM_MAX_ERROR_RATIO: f64 = 0.001;
 /// two-populations defect `metric.rs`'s module doc names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamWindow {
+    /// How many lanes ended with each HTTP status (lanes that never got a status are not counted).
+    /// Diagnostics: no verdict reads it.
+    pub http_status_counts: std::collections::BTreeMap<u16, u64>,
     pub concurrency: u32,
     /// Streams opened, and of those, the ones that never became a readable event stream at all
     /// (no connection, a non-2xx, a malformed head, or a peer that answered with something that is
@@ -1923,9 +1997,15 @@ pub fn stream_window(
             return None;
         }
     };
+    let request_path = path.to_string();
+    let request_body = body.to_string();
     let path = path.to_string();
     let body = body.to_string();
     let headers = headers.to_vec();
+
+    // DIAGNOSTICS ONLY: the first bytes of up to eight failing responses, shared by every lane.
+    let failure_capture = std::sync::Arc::new(crate::gen::FailureCapture::default());
+    let lane_capture = std::sync::Arc::clone(&failure_capture);
 
     // SAMPLED HERE, before a single connection is opened, because the question this answers is what
     // the window INHERITED - not what it left behind. Sampling after would measure this window's own
@@ -1939,8 +2019,9 @@ pub fn stream_window(
                 let path = path.clone();
                 let body = body.clone();
                 let headers = headers.clone();
+                let capture = std::sync::Arc::clone(&lane_capture);
                 lanes.push(tokio::spawn(async move {
-                    crate::http::post_json_sse_async(
+                    crate::http::post_json_sse_async_captured(
                         addr,
                         &path,
                         body.as_bytes(),
@@ -1948,6 +2029,7 @@ pub fn stream_window(
                         crate::metric::STREAM_TIMEOUT,
                         lane_budget,
                         Some(dialect),
+                        Some(capture),
                     )
                     .await
                 }));
@@ -1976,6 +2058,7 @@ pub fn stream_window(
             (out, panicked, started.elapsed().as_secs_f64())
         });
     let mut w = StreamWindow {
+        http_status_counts: Default::default(),
         concurrency,
         streams: 0,
         errored: 0,
@@ -2016,6 +2099,9 @@ pub fn stream_window(
         return None;
     }
     for o in outcomes {
+        if let Some(status) = o.status {
+            *w.http_status_counts.entry(status).or_default() += 1;
+        }
         w.streams += 1;
         w.expected_frames += budget as u64;
         w.expected_content_frames += content_budget;
@@ -2026,6 +2112,22 @@ pub fn stream_window(
         w.frames += o.frame_offsets_us.len() as u64;
         w.content_frames += o.content_frames;
         w.stalls += stalls_in(&o.frame_offsets_us);
+    }
+    // DIAGNOSTICS ONLY, after every count above is final: nothing below reads what is logged here.
+    if w.errored > 0 {
+        let addr = addr.to_string();
+        log_request_once("stream-window", &addr, &request_path, &request_body);
+        eprintln!(
+            "[stream-window-evidence] {}",
+            serde_json::json!({
+                "address": addr, "path": request_path, "concurrency": concurrency,
+                "streams": w.streams, "errored": w.errored,
+                "http_status_counts": w.http_status_counts,
+                "failure_samples": failure_capture.samples(),
+                "host_before": w.host_before.to_json(),
+                "response_capture_scope": "first bytes of non-2xx or non-event-stream responses (bounded)"
+            })
+        );
     }
     // A WINDOW MISSING LANES NEVER RAN AT THE CONCURRENCY IT CLAIMS. Identical reasoning to the
     // rig-exhaustion check above, which already refuses a window for the same defect arriving by a
@@ -2133,6 +2235,8 @@ pub struct StreamPoint {
     /// clause that tripped with the counts that tripped it, so "no rung passed" is never a bare
     /// absence a reader has to re-derive from the raw counts.
     pub why: Option<String>,
+    /// Lanes per HTTP status - see `StreamWindow::http_status_counts`.
+    pub http_status_counts: std::collections::BTreeMap<u16, u64>,
 }
 
 impl StreamPoint {
@@ -2165,6 +2269,13 @@ impl StreamPoint {
         if let (Some(why), Some(obj)) = (&self.why, v.as_object_mut()) {
             obj.insert("why".to_string(), serde_json::json!(why));
         }
+        // OPTIONAL, so a point from before this field existed and one with no status read alike.
+        if let (false, Some(obj)) = (self.http_status_counts.is_empty(), v.as_object_mut()) {
+            obj.insert(
+                "http_status_counts".to_string(),
+                serde_json::json!(self.http_status_counts),
+            );
+        }
         v
     }
 }
@@ -2188,6 +2299,7 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
         } else {
             streams_gate_verdict(w)
         },
+        http_status_counts: w.http_status_counts.clone(),
     }
 }
 
@@ -4575,6 +4687,7 @@ while True:
         // that set content == every event would model the very state RIG-11 was about.
         let content = budget - Dialect::Openai.stream_prelude_frames();
         StreamWindow {
+            http_status_counts: Default::default(),
             concurrency,
             streams,
             errored: 0,
@@ -5856,6 +5969,7 @@ while True:
     #[test]
     fn a_window_delivering_exactly_its_content_budget_is_not_a_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 1024,
             streams: 1024,
             errored: 0,
@@ -5878,6 +5992,7 @@ while True:
     #[test]
     fn counting_more_content_than_the_mock_can_send_is_this_engines_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 1024,
             streams: 1024,
             errored: 0,
@@ -5905,6 +6020,7 @@ while True:
     #[test]
     fn a_gateway_that_adds_its_own_framing_is_not_a_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 256,
             streams: 256,
             errored: 0,
@@ -5931,6 +6047,7 @@ while True:
     #[test]
     fn a_rate_that_is_not_finite_is_this_engines_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 8,
             streams: 8,
             errored: 0,

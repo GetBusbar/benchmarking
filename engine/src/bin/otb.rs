@@ -190,7 +190,7 @@ fn main() -> ExitCode {
                     otb_engine::loadgen::HEADERS_ENV
                 );
             }
-            let stats = gen::run(&GenConfig {
+            let (stats, failures) = gen::run_with_evidence(&GenConfig {
                 addr,
                 path,
                 body,
@@ -199,7 +199,13 @@ fn main() -> ExitCode {
                 duration: Duration::from_secs(dur),
                 ttft_ms: 0,
             });
-            println!("{}", stats.stats_line());
+            // The bounded failure evidence rides as an optional trailing field; the parent reads
+            // it as diagnostics only (see `loadgen::parse_failure_samples`).
+            println!(
+                "{}{}",
+                stats.stats_line(),
+                gen::failure_samples_field(&failures)
+            );
             ExitCode::SUCCESS
         }
         // End to end: probe the grid on a live gateway and sweep what it serves.

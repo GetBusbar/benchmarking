@@ -32,8 +32,8 @@
 // those are what the published numbers mean.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -44,6 +44,109 @@ const RESPONSE_BUDGET: Duration = Duration::from_secs(30);
 /// Hard ceiling on ONE connect attempt. A bound of ours exactly as `RESPONSE_BUDGET` is, and named
 /// so the code that charges a connect timeout can say which bound fired.
 const CONNECT_BUDGET: Duration = Duration::from_secs(5);
+
+/// How many failing exchanges a window keeps the bytes of. Diagnostics only: nothing measured
+/// reads them, and they never cross into `GenStats`.
+pub const FAILURE_SAMPLE_LIMIT: usize = 8;
+/// How many response bytes each kept failure holds.
+pub const FAILURE_RESPONSE_BYTES: usize = 1024;
+/// Ceiling on the `failure_samples=` field the child appends to its stats line, in hex characters.
+/// Enforced HERE, at the producer, by dropping whole samples from the end, so the parent never
+/// receives (and the run log never carries) more than this per window.
+pub const FAILURE_SAMPLES_HEX_CAP: usize = 32 * 1024;
+
+/// The first bytes of one failing exchange, kept as evidence of WHAT the peer sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FailureSample {
+    pub kind: String,
+    pub response_hex: String,
+    pub response_excerpt: String,
+    pub prefix_truncated: bool,
+}
+
+/// A bounded sink for failure evidence, shared by every lane of one window.
+///
+/// BOUNDED BY A CLAIM, not by the lock: a slot is claimed with one atomic update and only the
+/// first `FAILURE_SAMPLE_LIMIT` claimants ever allocate or take the mutex, so a window where every
+/// one of 10,000 lanes fails pays one relaxed atomic load per failure past the eighth and nothing
+/// else. Successes never enter this path.
+#[derive(Default)]
+pub struct FailureCapture {
+    claimed: AtomicUsize,
+    samples: Mutex<Vec<FailureSample>>,
+}
+
+impl FailureCapture {
+    pub fn record(&self, kind: &str, response: &[u8]) {
+        self.record_parts(kind, response, &[]);
+    }
+
+    /// Record `first` followed by `second` (a head and whatever body bytes arrived with it).
+    pub fn record_parts(&self, kind: &str, first: &[u8], second: &[u8]) {
+        if self.claimed.load(Ordering::Relaxed) >= FAILURE_SAMPLE_LIMIT
+            || self
+                .claimed
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    (n < FAILURE_SAMPLE_LIMIT).then_some(n + 1)
+                })
+                .is_err()
+        {
+            return;
+        }
+        let prefix: Vec<u8> = first
+            .iter()
+            .chain(second)
+            .take(FAILURE_RESPONSE_BYTES)
+            .copied()
+            .collect();
+        let sample = FailureSample {
+            kind: kind.to_string(),
+            response_hex: hex(&prefix),
+            response_excerpt: String::from_utf8_lossy(&prefix).into_owned(),
+            prefix_truncated: first.len().saturating_add(second.len()) > prefix.len(),
+        };
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sample);
+    }
+
+    pub fn samples(&self) -> Vec<FailureSample> {
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// The ` failure_samples=<hex of JSON>` suffix for the stats line, or an empty string when there is
+/// nothing to say. Capped at `FAILURE_SAMPLES_HEX_CAP` by dropping whole samples from the end, so
+/// the field is always one decodable value rather than a truncated one.
+pub fn failure_samples_field(samples: &[FailureSample]) -> String {
+    let mut keep = samples.len().min(FAILURE_SAMPLE_LIMIT);
+    while keep > 0 {
+        match serde_json::to_vec(&samples[..keep]) {
+            Ok(json) if json.len() * 2 <= FAILURE_SAMPLES_HEX_CAP => {
+                return format!(" failure_samples={}", hex(&json));
+            }
+            Ok(_) => keep -= 1,
+            Err(e) => {
+                eprintln!("loadgen: failure evidence could not be serialised ({e}); omitted");
+                return String::new();
+            }
+        }
+    }
+    String::new()
+}
 
 pub struct GenConfig {
     pub addr: SocketAddr,
@@ -302,6 +405,7 @@ async fn worker(
     req: Arc<String>,
     stop: Arc<AtomicBool>,
     window: Arc<Window>,
+    failures: Arc<FailureCapture>,
 ) -> WorkerStats {
     let mut w = WorkerStats {
         ok: 0,
@@ -341,6 +445,14 @@ async fn worker(
             if let Some(fault) = fault {
                 if window.contains(Instant::now()) {
                     w.charge_connect_fault(fault);
+                    failures.record(
+                        match fault {
+                            ConnectFault::RigExhausted => "host_connect_exhaustion",
+                            ConnectFault::OurConnectBound => "connect_budget_exceeded",
+                            ConnectFault::PeerRefused => "connect_error",
+                        },
+                        &[],
+                    );
                 }
                 // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
                 // loopback) once a gateway stops accepting, burning a core and inflating `fail`
@@ -357,6 +469,8 @@ async fn worker(
             // A write that fails on a REUSED connection is the same stale-connection case as a read
             // that sees nothing: the peer closed it while it sat idle.
             if fresh {
+                // Nothing was read for THIS request; the buffer still holds the previous response.
+                acc.clear();
                 Exchange::Failed
             } else {
                 Exchange::ClosedBeforeAnyBytes
@@ -398,6 +512,7 @@ async fn worker(
                 if counted {
                     w.fail += 1;
                     w.budget_exceeded += 1;
+                    failures.record("response_budget_exceeded", &acc);
                 }
                 conn = None;
             }
@@ -405,6 +520,7 @@ async fn worker(
             Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
                 if counted {
                     w.fail += 1;
+                    failures.record("http_framing_or_connection_failure", &acc);
                 }
                 conn = None; // a broken connection is not reused: the next request would inherit its state
             }
@@ -738,6 +854,14 @@ fn content_length(head_lower: &str) -> Option<usize> {
 /// built here, used, and dropped, so async is an implementation detail of the generator rather than
 /// something the engine has to adopt.
 pub fn run(cfg: &GenConfig) -> GenStats {
+    run_with_evidence(cfg).0
+}
+
+/// `run`, plus the bounded failure evidence the window captured (see `FailureCapture`).
+///
+/// SEPARATE FROM `GenStats` ON PURPOSE: the evidence is diagnostics, and keeping it out of the
+/// struct every measurement reads means no count, rate or percentile can ever come to depend on it.
+pub fn run_with_evidence(cfg: &GenConfig) -> (GenStats, Vec<FailureSample>) {
     // Worker threads default to `available_parallelism`, which honours the CPU affinity mask
     // `taskset -c $LOADCORES` sets, so the generator still runs on exactly the cores it is pinned
     // to. That pinning is the comparability basis of every published number.
@@ -750,10 +874,13 @@ pub fn run(cfg: &GenConfig) -> GenStats {
             // The rig could not pose the question at all. Reported the same way a refused thread
             // was: a window that never ran is not a measurement of the gateway at any concurrency.
             eprintln!("loadgen: could not build the async runtime: {e}");
-            return GenStats {
-                spawn_failed: true,
-                ..Default::default()
-            };
+            return (
+                GenStats {
+                    spawn_failed: true,
+                    ..Default::default()
+                },
+                Vec::new(),
+            );
         }
     };
 
@@ -764,10 +891,13 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         // gateway would be charged with.
         Err(why) => {
             eprintln!("loadgen: refusing to send this window's request: {why}");
-            return GenStats {
-                spawn_failed: true,
-                ..Default::default()
-            };
+            return (
+                GenStats {
+                    spawn_failed: true,
+                    ..Default::default()
+                },
+                Vec::new(),
+            );
         }
     };
     let addr = cfg.addr;
@@ -777,6 +907,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
     rt.block_on(async move {
         let stop = Arc::new(AtomicBool::new(false));
         let window = Arc::new(Window::default());
+        let failures = Arc::new(FailureCapture::default());
         let mut handles = Vec::with_capacity(concurrency as usize);
         for _ in 0..concurrency {
             handles.push(tokio::spawn(worker(
@@ -784,6 +915,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                 Arc::clone(&req),
                 Arc::clone(&stop),
                 Arc::clone(&window),
+                Arc::clone(&failures),
             )));
         }
 
@@ -836,7 +968,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                 }
             }
         }
-        g
+        (g, failures.samples())
     })
 }
 
@@ -1602,6 +1734,86 @@ mod tests {
         });
         assert!(g.spawn_failed, "the rig could not pose the question");
         assert_eq!((g.ok, g.fail), (0, 0), "and nothing is charged to anyone");
+    }
+
+    // ---- failure evidence is bounded diagnostics -------------------------------------------------
+
+    // THE BOUND HOLDS UNDER CONTENTION. Ten thousand lanes failing at once must still leave exactly
+    // FAILURE_SAMPLE_LIMIT samples of at most FAILURE_RESPONSE_BYTES each - the cost a failing
+    // window pays is one atomic per failure, never an allocation per failure.
+    #[test]
+    fn the_failure_capture_bound_holds_under_ten_thousand_concurrent_failures() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .build()
+            .expect("runtime");
+        let capture = Arc::new(FailureCapture::default());
+        rt.block_on(async {
+            let tasks: Vec<_> = (0..10_000)
+                .map(|i| {
+                    let capture = Arc::clone(&capture);
+                    tokio::spawn(async move {
+                        capture.record_parts(
+                            "http_failure",
+                            b"HTTP/1.1 503 x\r\n\r\n",
+                            &[b'x'; 4096],
+                        );
+                        i
+                    })
+                })
+                .collect();
+            for t in tasks {
+                t.await.expect("task");
+            }
+        });
+        let samples = capture.samples();
+        assert_eq!(samples.len(), FAILURE_SAMPLE_LIMIT);
+        assert!(samples.iter().all(|s| s.prefix_truncated
+            && s.response_hex.len() == 2 * FAILURE_RESPONSE_BYTES
+            && s.response_excerpt.starts_with("HTTP/1.1 503")));
+        assert!(
+            failure_samples_field(&samples).len() <= FAILURE_SAMPLES_HEX_CAP + 32,
+            "the producer caps the stats-line field"
+        );
+    }
+
+    // Real failing exchanges leave their first bytes behind, and the counts are unchanged by it.
+    #[test]
+    fn failed_http_requests_retain_response_evidence() {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    while c.read(&mut b).unwrap_or(0) > 0 {
+                        if c.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 2\r\n\r\n{}",
+                        )
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let (g, samples) = run_with_evidence(&GenConfig {
+            addr,
+            path: "/x".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 2,
+            duration: Duration::from_millis(100),
+            ttft_ms: 0,
+        });
+        assert_eq!(g.ok, 0);
+        assert!(g.fail > 0);
+        assert!(!samples.is_empty() && samples.len() <= FAILURE_SAMPLE_LIMIT);
+        assert!(samples
+            .iter()
+            .all(|s| s.response_excerpt.starts_with("HTTP/1.1 503")));
     }
 
     // ---- chunked framing is parsed by size, never searched for ----------------------------------
