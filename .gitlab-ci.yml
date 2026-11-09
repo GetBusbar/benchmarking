@@ -87,7 +87,11 @@ verify-engine:
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     # Library qualification tests spawn the CLI; clippy does not build that executable.
     - cargo build --workspace --bins --locked
-    - RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN="$CI_PROJECT_DIR/target/debug/otb" cargo test --workspace --locked
+    # The old runner executed as an unprivileged user; two tests (read-only directory, fd limits)
+    # assume that, so run the test step unprivileged here as well.
+    - useradd --create-home ci
+    - chown -R ci:ci "$CI_PROJECT_DIR"
+    - su ci -s /bin/bash -c "export PATH='$PATH' CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME'; cd '$CI_PROJECT_DIR' && RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN='$CI_PROJECT_DIR/target/debug/otb' cargo test --workspace --locked"
     - rustup target add aarch64-unknown-linux-musl
     - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
     - mkdir -p rig
