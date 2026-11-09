@@ -591,6 +591,11 @@ fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
 async fn main() {
     let mut port: u16 = 8000;
     let args: Vec<String> = std::env::args().collect();
+    // The tree this binary was built from, from the same build.rs stamp as the engine.
+    if args.len() == 2 && args[1] == "build-commit" {
+        println!("{}", env!("OTB_SOURCE_COMMIT"));
+        return;
+    }
     if args.len() == 2 && args[1] == "engine-commit" {
         println!("{}", env!("OTB_ENGINE_COMMIT"));
         return;

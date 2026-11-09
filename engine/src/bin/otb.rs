@@ -95,6 +95,8 @@ fn usage() -> ExitCode {
          \x20 plateau-check <trend_pct> <range_pct>   prints 1 for steady, 0 otherwise (mirrors plateau_check)\n\
          \x20 growth-rate                             prints MiB/min to 3dp, or nothing (mirrors plateau_growth_rate)\n\
          \x20 window <window_s>                       prints the trailing window (mirrors plateau_window)\n\
+         \x20 engine-commit                           the instrument commit this binary was built from (-dirty/-unverified when not clean)\n\
+         \x20 build-commit                            the git HEAD of the tree this binary was built from\n\
          \x20 version\n",
         env!("CARGO_PKG_VERSION")
     );
@@ -832,9 +834,17 @@ fn main() -> ExitCode {
 
         So the run asks the binary, and refuses to measure when the answer disagrees with the
         commit it is about to stamp. Empty output means the build could not establish its own
-        commit, which the caller must treat as unverifiable rather than as a match. */
+        commit, which the caller must treat as unverifiable rather than as a match. A local build
+        of modified engine/mock sources answers `<sha>-dirty` (`-unverified` when the tree's state
+        could not be read), so it can never match the clean commit a run pins. */
         Some("engine-commit") => {
             println!("{}", env!("OTB_ENGINE_COMMIT"));
+            ExitCode::SUCCESS
+        }
+        // THE TREE THE BINARY WAS BUILT FROM, as git saw it - independent of OTB_BUILD_COMMIT, so a
+        // release whose declared commit and actual checkout disagree can be told apart.
+        Some("build-commit") => {
+            println!("{}", env!("OTB_SOURCE_COMMIT"));
             ExitCode::SUCCESS
         }
         // The shell is handed an ALREADY-WINDOWED file, so window over everything here to match.
