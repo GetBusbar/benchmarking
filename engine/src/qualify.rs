@@ -133,7 +133,12 @@ pub fn judge(
     silently declines to run on a NaN observation is worse than a wrong reason: the box passes.
     A non-finite observation is exactly "the stage produced no usable observation", so it takes
     that branch, with that outcome. */
-    let Some(&obs) = observed.value().filter(|v| v.is_finite()) else {
+    /* AND POSITIVE. A box that measured 0 (or less) - no mock reachable, a direct leg that completed
+    nothing - is not a box with a slow baseline, it is a box that did not measure. With no history
+    it SEEDED, so a dead box was recorded as qualified and its 0 entered the rolling baseline, where
+    `drift_pct`'s zero-baseline arm then skipped the gate on that gateway for good. Every observation
+    this judges (throughput, or a latency floor) is strictly positive when it exists at all. */
+    let Some(&obs) = observed.value().filter(|v| v.is_finite() && **v > 0.0) else {
         return (
             Outcome::Fail,
             Measurement::absent_because(
@@ -183,7 +188,7 @@ pub fn judge(
 /// entries from old or partial runs and drops them, where a non-finite LATENCY sample means the rig
 /// malfunctioned and must refuse. Dropping bad history is not the same act as refusing a bad window.
 pub fn rolling_baseline(mut candidates: Vec<f64>) -> Measurement<f64> {
-    candidates.retain(|v| v.is_finite());
+    candidates.retain(|v| v.is_finite() && *v > 0.0);
     if candidates.is_empty() {
         return Measurement::absent_because(Absent::NotMeasured, "no qualifying history");
     }
@@ -460,5 +465,36 @@ mod nonfinite_observation_tests {
         );
         assert_eq!(outcome, Outcome::Pass);
         assert!(m.value().is_some(), "a judged pair must publish its drift");
+    }
+
+    /* A BOX THAT MEASURED NOTHING DOES NOT SEED. A finite 0 passed the old screen; with no history it
+    became `Seed` (which qualifies as a baseline), the dead box was recorded as qualified, and its 0
+    then sat in the rolling baseline where the zero-baseline arm skipped the gate for good. */
+    #[test]
+    fn a_zero_or_negative_observation_fails_rather_than_seeding_a_baseline() {
+        for bad in [0.0, -1.0] {
+            for baseline in [
+                Measurement::absent(Absent::NotMeasured),
+                Measurement::Measured(100.0),
+            ] {
+                let (outcome, _) = judge(
+                    Measurement::Measured(bad),
+                    baseline,
+                    PEAK_DRIFT_PCT,
+                    Sense::HigherIsBetter,
+                );
+                assert_eq!(outcome, Outcome::Fail, "an observation of {bad} must fail");
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_in_the_history_never_becomes_the_baseline() {
+        assert_eq!(
+            rolling_baseline(vec![0.0, 0.0, 100.0]).copied(),
+            Some(100.0),
+            "a run that measured nothing must not be able to move the median"
+        );
+        assert!(!rolling_baseline(vec![0.0, -5.0]).is_measured());
     }
 }
