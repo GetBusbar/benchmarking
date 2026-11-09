@@ -371,6 +371,16 @@ export function reviewedOracleSnapshot(snapshot, review) {
     cell.probe_note = review.reason; cell.verdict_note = review.reason;
     cell.perf = null; cell.stream = null; cell.memory = null;
   }
+  for (const annotation of review.absence_notes || []) {
+    const cell = copy.matrix?.upstreams?.[annotation.egress]?.cells?.[annotation.ingress]
+      || copy.matrix?.cells?.[annotation.ingress];
+    if (!cell || !annotation.detail || !Array.isArray(annotation.paths) || !annotation.paths.length)
+      throw new Error('Invalid oracle absence review');
+    for (const field of annotation.paths) {
+      if (!cell.absences?.[field]) throw new Error(`Oracle review targets no recorded absence: ${field}`);
+      cell.absences[field].detail = annotation.detail;
+    }
+  }
   return copy;
 }
 export function resolvedSnapshotOnDisk(gwKey, dir = SNAP_DIR) {

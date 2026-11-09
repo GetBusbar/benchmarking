@@ -15,5 +15,19 @@ export function applyRunReview(snapshot, review) {
   };
   for (const upstream of Object.values(result.matrix?.upstreams || {})) withhold(upstream.cells);
   withhold(result.matrix?.cells);
+  // Clarify only an already-recorded absence. A review cannot invent a value,
+  // erase a failure, or discard the rest of a valid cell through this path.
+  for (const note of review.absence_notes || []) {
+    const cell = result.matrix?.upstreams?.[note.egress]?.cells?.[note.ingress]
+      || result.matrix?.cells?.[note.ingress];
+    if (!cell || !note.detail || !Array.isArray(note.paths) || !note.paths.length)
+      throw new Error('Invalid absence review');
+    for (const path of note.paths) {
+      if (!cell.absences?.[path]) throw new Error(`Review targets no recorded absence: ${path}`);
+      cell.absences[path] = { ...cell.absences[path], detail: note.detail };
+    }
+    cell.publication_review = { original_state: cell.served,
+      reviewed_at: review.reviewed_at, evidence: review.evidence };
+  }
   return result;
 }

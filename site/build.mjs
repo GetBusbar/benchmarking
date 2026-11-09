@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // One checked input bundle, one deployable directory. Never upload source/tests.
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
-import { resolve, join, dirname, basename } from "node:path";
+import { resolve, join, dirname, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -82,8 +82,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json('/api/v1/run-reviews.json', runReviews);
   for (const review of Object.values(runReviews)) {
     const name = basename(new URL(review.evidence).pathname);
-    const proof = join(root, 'results/diagnostics/refresh-configuration', name);
-    if (!existsSync(proof)) throw new Error(`Missing review evidence: ${name}`);
+    const diagnosticRoot = resolve(root, 'results/diagnostics');
+    const proof = resolve(diagnosticRoot, review.evidence_file || join('refresh-configuration', name));
+    if (!proof.startsWith(diagnosticRoot + sep) || !existsSync(proof))
+      throw new Error(`Missing or invalid review evidence: ${name}`);
     json(`/api/v1/reviews/${name}`, JSON.parse(readFileSync(proof, 'utf8')));
   }
   const withdrawnPath = join(root, 'results/withdrawn-runs.json');

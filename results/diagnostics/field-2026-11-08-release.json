@@ -12,7 +12,7 @@
   "workers": 15,
   "results_checked": 0,
   "automatic_worker_publication": false,
-  "publication_policy": "Owner subsequently authorized blank production board and incremental publication of checked results",
+  "publication_policy": "Publish valid measurements from completed runs. Keep affected metrics unavailable with hash-scoped evidence notes; preserve unknown causes and every raw observation. No whole-run exclusion merely for an explained missing metric.",
   "blank_website_version": "361d1b37-1dc0-46b5-bfa7-754a4c1e7898",
   "promotion_status": "MR26 remains opened in last API check despite owner reporting merged",
   "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
@@ -23,7 +23,7 @@
     "one-api": {
       "raw": "results/snapshots/result_one-api_2026-11-09T02-01-58Z.json",
       "review": "results/diagnostics/field-2026-11-08/one-api-result-review.json",
-      "publication": "withheld_pending_attribution",
+      "publication": "valid_metrics_ready_with_scoped_absence_notes",
       "instance_id": "i-0fc939cbd74bda7b7",
       "instance_state": "terminated"
     },
@@ -37,14 +37,14 @@
     "plano": {
       "raw": "results/snapshots/result_plano_2026-11-09T02-02-01Z.json",
       "review": "results/diagnostics/field-2026-11-08/plano-result-review.json",
-      "publication": "withheld_pending_interruption_review",
+      "publication": "valid_metrics_ready_with_scoped_absence_notes",
       "instance_id": "i-03f003891cd4d8d4d",
       "instance_state": "terminated"
     },
     "helicone": {
       "raw": "results/snapshots/result_helicone_2026-11-09T02-01-40Z.json",
       "review": "results/diagnostics/field-2026-11-08/helicone-result-review.json",
-      "publication": "withheld_pending_stream_failure_attribution",
+      "publication": "valid_metrics_ready_with_scoped_absence_notes",
       "instance_id": "i-01f8b7caf56fa3c15",
       "instance_state": "terminated"
     },

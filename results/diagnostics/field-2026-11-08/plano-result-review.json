@@ -1123,7 +1123,7 @@
       "reverify_note": null
     }
   ],
-  "publication_status": "withheld_pending_interruption_review",
+  "publication_status": "publish_valid_metrics_with_scoped_absence_notes",
   "invariants": "7 findings in frontier re-derivation check; checker does not account for sweep_max_proxy_interrupted",
   "attribution": {
     "gateway_failed_cells": 0,
@@ -1134,5 +1134,6 @@
     "observed": "All seven raw cells have sweep_max_proxy_interrupted=true. Final retained clean rungs are at concurrency 128 or 256, with multi-second tails. Full run log contains no explicit spawn, rig-refused or stats parse diagnostic.",
     "inference": "An empty measured window is the remaining silent None branch (ok=0 and fail=0). Treat missing throughput boundaries as a rig-window limitation; no gateway ceiling is established. The interrupted window raw stats and responses are not retained, so this is a source-based inference, not a directly observed cause.",
     "unresolved": "Need explicit publication decision after source-based interruption review; do not recompute a frontier from partial rungs or rerun."
-  }
+  },
+  "publication_resolution": "Owner requested metric-scoped explanations instead of withholding the whole run. Raw observations, values, failures and original absence classifications are unchanged; only public absence details clarify evidence limits."
 }

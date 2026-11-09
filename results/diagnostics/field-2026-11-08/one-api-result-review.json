@@ -15,7 +15,7 @@
     "outcome": "pass"
   },
   "invariants": "pass; CPU arithmetic explicitly not audited due low utilisation/sample count or missing metrics",
-  "publication_status": "withheld_pending_attribution",
+  "publication_status": "publish_valid_metrics_with_scoped_absence_notes",
   "unresolved": [
     {
       "pair": "openai>openai",
@@ -668,5 +668,6 @@
       "absences": {},
       "stream_error": null
     }
-  ]
+  ],
+  "publication_resolution": "Owner requested metric-scoped explanations instead of withholding the whole run. Raw observations, values, failures and original absence classifications are unchanged; only public absence details clarify evidence limits."
 }

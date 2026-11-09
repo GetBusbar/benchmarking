@@ -37,3 +37,32 @@ test('independent oracle excludes reviewed values but preserves every unreviewed
  assert.deepEqual(oracle.matrix.upstreams.openai.cells.openai,snapshot.matrix.upstreams.openai.cells.openai);
  assert.equal(snapshot.matrix.upstreams.openai.cells.cohere.perf.added_latency_p99_us,1);
 });
+test('absence clarification preserves valid measurements, failed cells and immutable raw evidence',()=>{
+ const raw=structuredClone(snapshot);
+ const cell=raw.matrix.upstreams.openai.cells.openai;
+ cell.perf.cpu_us_per_request=null;
+ cell.absences={'perf.cpu_us_per_request':{reason:'not_measured',detail:'failed cost window'}};
+ raw.matrix.upstreams.openai.cells.anthropic={served:'failed',status:'501',body_snippet:'unsupported'};
+ const original=JSON.stringify(raw);
+ const annotation={...review,excluded_ingress:[],absence_notes:[{ingress:'openai',egress:'openai',paths:['perf.cpu_us_per_request'],detail:'Two requests failed; their individual responses were not retained. Other measurements remain valid.'}]};
+ const result=applyRunReview(raw,annotation), revised=result.matrix.upstreams.openai.cells.openai;
+ assert.equal(JSON.stringify(raw),original);
+ assert.equal(revised.served,true);
+ assert.equal(revised.perf.added_latency_p99_us,200);
+ assert.equal(revised.perf.cpu_us_per_request,null);
+ assert.equal(revised.absences['perf.cpu_us_per_request'].reason,'not_measured');
+ assert.equal(revised.absences['perf.cpu_us_per_request'].detail,annotation.absence_notes[0].detail);
+ assert.deepEqual(result.matrix.upstreams.openai.cells.anthropic,raw.matrix.upstreams.openai.cells.anthropic);
+ assert.deepEqual(result.matrix.upstreams.openai.cells.cohere,raw.matrix.upstreams.openai.cells.cohere);
+ const historical=historicalMeasurements(raw,{id:'run-one-api-notes',sha256:'raw-hash',review:annotation});
+ const measurement=historical.find(m=>m.test.ingress_protocol==='openai');
+ assert.equal(measurement.metrics.cpu_us_per_request.value,null);
+ assert.equal(measurement.metrics.cpu_us_per_request.detail,annotation.absence_notes[0].detail);
+ assert.equal(measurement.metrics.added_latency_p99_us.value,200);
+ assert.equal(reviewedOracleSnapshot(raw,annotation).matrix.upstreams.openai.cells.openai.perf.added_latency_p99_us,200);
+});
+test('absence reviews cannot target a metric with no recorded absence',()=>{
+ const invalid={...review,excluded_ingress:[],absence_notes:[{ingress:'openai',egress:'openai',paths:['perf.added_latency_p99_us'],detail:'not allowed'}]};
+ assert.throws(()=>applyRunReview(snapshot,invalid),/no recorded absence/);
+ assert.throws(()=>reviewedOracleSnapshot(snapshot,invalid),/no recorded absence/);
+});

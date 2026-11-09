@@ -36,18 +36,6 @@
     "ca81771742261dc1af26cb5a3dba33e76f8769e3ddacbd7f107be190fc3751a0": {
       "gateway": "kong",
       "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
-    },
-    "fe194b1716c365f8f2a85363caa026398c368fd35dc78c3c74e03e75d601302b": {
-      "gateway": "one-api",
-      "reason": "Publication withheld pending attribution of two missing CPU-cost measurements: c=8 windows reported 2/198 and 1/205 failed/successful requests, but retained only aggregate failure counts. Exact raw result remains in Git; review: results/diagnostics/field-2026-11-08/one-api-result-review.json. No replacement run authorized or launched."
-    },
-    "2a0c9a08422b9fc28fd23dd6115f9b40903c907e48d3269425e717acb0f44235": {
-      "gateway": "plano",
-      "reason": "Publication withheld pending rig-interruption attribution: all seven throughput sweeps are marked interrupted and retain partial rungs but no completed frontier. Existing frontier invariant checker ignores the interruption marker. Raw result remains in Git; review: results/diagnostics/field-2026-11-08/plano-result-review.json. No replacement measurement launched."
-    },
-    "225883992e291ef0d0f55bff6e17bae73d884df0df917299f70062ac8de34bd9": {
-      "gateway": "helicone",
-      "reason": "Publication withheld pending attribution of missing native Chat sustained-stream metrics: the instrument labels failed floor reconfirmation harness_error, while retained HTTP-status error counts lack the raw responses needed to distinguish gateway and rig causes. Review: results/diagnostics/field-2026-11-08/helicone-result-review.json. Raw evidence retained; no replacement measurement launched."
     }
   }
 }
