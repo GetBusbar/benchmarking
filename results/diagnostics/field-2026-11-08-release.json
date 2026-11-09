@@ -17,7 +17,7 @@
   "promotion_status": "MR26 remains opened in last API check despite owner reporting merged",
   "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
   "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
-  "results_harvested": 1,
+  "results_harvested": 3,
   "results_published": 0,
   "harvested_results": {
     "one-api": {
@@ -25,6 +25,20 @@
       "review": "results/diagnostics/field-2026-11-08/one-api-result-review.json",
       "publication": "withheld_pending_attribution",
       "instance_id": "i-0fc939cbd74bda7b7",
+      "instance_state": "terminated"
+    },
+    "apisix": {
+      "raw": "results/snapshots/result_apisix_2026-11-09T02-01-33Z.json",
+      "review": "results/diagnostics/field-2026-11-08/apisix-result-review.json",
+      "publication": "checked_ready",
+      "instance_id": "i-054a0b7bf43b7eb6c",
+      "instance_state": "terminated"
+    },
+    "plano": {
+      "raw": "results/snapshots/result_plano_2026-11-09T02-02-01Z.json",
+      "review": "results/diagnostics/field-2026-11-08/plano-result-review.json",
+      "publication": "withheld_pending_interruption_review",
+      "instance_id": "i-03f003891cd4d8d4d",
       "instance_state": "terminated"
     }
   },
