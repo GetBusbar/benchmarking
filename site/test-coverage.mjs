@@ -212,7 +212,7 @@ const OUT = "anthropic";
 // The frontier as it arrives on a projected record: a sealed rate per reading, with the reading's own
 // evidence beside it. Written out rather than built by a helper so each story is visible at its bound.
 const STORY_FRONTIER = [
-  // story A: served, but no rung held this tail. `below_resolution` on a throughput reading is a
+  // story A: served, but no tested concurrency met this bound. `below_resolution` on a throughput reading is a
   // measured nothing, not a missing measurement - the state most likely to be misread as "no data".
   { bound_ms: 1, concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false,
     rps: sealMetric(null, { absent: { reason: "below_resolution",
@@ -259,14 +259,14 @@ test("an uncertified frontier bound preserves its reason without claiming numeri
   assert.equal(table.na, true, "no rung certified a quantitative result");
   assert.equal(table.text, "n/a", "the table does not fabricate zero");
   assert.equal(table.v, null, "unavailable values do not receive a quantitative rank");
-  assert.equal(table.why, "no rung held this tail", "and the cell says WHY, not just '0'");
-  assert.match(app.metricTd(table), /no rung held this tail/, "on the cell itself, not only on hover");
+  assert.equal(table.why, "no tested concurrency met this bound", "and the cell says WHY, not just '0'");
+  assert.match(app.metricTd(table), /no tested concurrency met this bound/, "on the cell itself, not only on hover");
   assert.match(table.note, /no measurable throughput under that bound/, "with the engine's own prose on the tooltip");
 
   const rec = app.laneRecord(perfLane, STORY_GW, CUSTOM);
   assert.ok(rec, "the drawer/compare lane reads the same cell");
   assert.equal(laneRow("1ms").cell(rec).v, null, "drawer/compare preserve the same absence");
-  assert.equal(laneRow("1ms").cell(rec).why, "no rung held this tail", "and tell the same story");
+  assert.equal(laneRow("1ms").cell(rec).why, "no tested concurrency met this bound", "and tell the same story");
 
   const pop = app.cellPopFull(STORY_GW, IN, OUT);
   assert.match(pop, /frontier-spark/, "the popup carries the cell's curve, where that 0 is a tick on the floor");
@@ -432,7 +432,7 @@ test("the DRAWER markup tells all four stories - a measured nothing, below-resol
   const h = app.drawerHtml(STORY_GW, STORY_STATE);
   // A: the measured nothing is a digit with its reason beside it, never a hole and never a blank.
   assert.match(h, /1\s?ms/, "the drawer names the reading's own bound");
-  assert.match(h, /no rung held this tail/, "and says what its 0 means");
+  assert.match(h, /no tested concurrency met this bound/, "and says what its 0 means");
   // B: below-resolution is the ≈0 result, not an absence.
   assert.match(h, /≈0/, "below-resolution reads as approximately zero in the drawer");
   // C: the measured failure keeps its counts and its red class - the clause that survives the na filter.
@@ -453,7 +453,7 @@ test("the COMPARE markup tells all four stories, and the curves sit side by side
   assert.match(h, /failed · 0\/14,201/, "the measured failure carries its counts into compare");
   assert.match(h, /class="na failcell"/, "marked as a failure, not folded in with the untested cells");
   assert.match(h, /≥ 22,000/, "and a floor stays a floor when set beside another gateway's ceiling");
-  assert.match(h, /no rung held this tail/, "the measured nothing keeps its reason here as well");
+  assert.match(h, /no tested concurrency met this bound/, "the measured nothing keeps its reason here as well");
   // EVERY BOUND IS A ROW, so three gateways' whole curves are comparable as digits...
   for (const bound of app.BOUND_CHOICES) assert.ok(h.includes(app.boundColLabel(bound)), `${app.boundLabel(bound)} has a row`);
   // ...and as shapes, which is the comparison a single scalar made impossible.

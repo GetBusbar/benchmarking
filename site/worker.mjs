@@ -21,6 +21,19 @@ function inputs(env) {
 function error(status, message) { return new Response(JSON.stringify({ error: message, status }) + "\n", { status, headers: { "Content-Type": "application/json; charset=utf-8" } }); }
 function json(value) { return new Response(JSON.stringify(value) + "\n", { headers: { "Content-Type": "application/json; charset=utf-8" } }); }
 function text(value, type) { return new Response(value, { headers: { "Content-Type": `${type}; charset=utf-8` } }); }
+// WITHDRAWN MEANS GONE FROM EVERY SURFACE. Retained releases, fields and datasets live in the
+// PUBLICATIONS store from before a withdrawal, so anything read from there that names a withdrawn
+// run's sha256 is refused (single resources) or dropped (lists), exactly like /api/v1/runs/<id>.
+async function withdrawnShas(env) {
+  const response = await env.ASSETS.fetch(new Request(`${ORIGIN}/_publication/withdrawn-runs.json`));
+  return response.ok ? Object.keys(await response.json()) : [];
+}
+const namesWithdrawn = (text, shas) => typeof text === "string" && shas.some(sha => text.includes(sha));
+async function storedFieldWithdrawn(env, id, shas) {
+  if (!shas.length) return false;
+  return namesWithdrawn(await env.PUBLICATIONS?.get(`fields/${id}`), shas) || namesWithdrawn(await env.PUBLICATIONS?.get(`field-evidence/${id}`), shas);
+}
+const WITHDRAWN = () => error(410, "This publication includes withdrawn runs and is unavailable.");
 const dashboard = new Set(["/", "/gateways", ...["memory", "performance", "frontier", "streaming", "matrix", "charts", "method"].map(v => `/gateways/${v}`)]);
 function parameters(url, allowed) {
   for (const key of url.searchParams.keys()) {
@@ -49,7 +62,8 @@ function integer(value, fallback, min, max) {
 }
 async function route(request, env) {
   const url = new URL(request.url), path = decodeURIComponent(url.pathname);
-  if (url.hostname === "www.onthebench.ai") { url.hostname = "onthebench.ai"; return Response.redirect(url.href, 308); }
+  // Plain http and www both land on the one canonical https origin.
+  if (url.hostname.endsWith("onthebench.ai") && (url.protocol === "http:" || url.hostname === "www.onthebench.ai")) { url.protocol = "https:"; url.hostname = "onthebench.ai"; return Response.redirect(url.href, 308); }
   if (/%2f|%5c|%2e/i.test(path) || path.includes("\\") || path.startsWith("/_publication")) return error(404, "Not found");
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (!["GET", "HEAD"].includes(request.method)) return new Response(null, { status: 405, headers: { Allow: "GET, HEAD, OPTIONS" } });
@@ -141,13 +155,25 @@ async function route(request, env) {
     const fields=await input('/_publication/history/fields.json');
     const collection=fields.some(f=>f.field_id===fieldRanks[1]) ? await input(`/_publication/history/fields/${fieldRanks[1]}.json`) : JSON.parse(await env.PUBLICATIONS?.get(`field-evidence/${fieldRanks[1]}`) || 'null');
     if(!collection) throw new URIError('Unknown field');
+    if (!fields.some(f=>f.field_id===fieldRanks[1]) && namesWithdrawn(JSON.stringify(collection), await withdrawnShas(env))) return WITHDRAWN();
     return json({schema_version:'1.0',field_id:fieldRanks[1],...fieldRankings(collection,q)});
   }
   if (path === '/api/v1/releases' && env.PUBLICATIONS) {
     const q=parameters(url,['limit','cursor']);
     const limit=integer(q.limit,20,1,100);
     const list=await env.PUBLICATIONS.list({prefix:'releases/',limit,...(q.cursor?{cursor:q.cursor}:{})});
-    const releases=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+    const shas=await withdrawnShas(env);
+    const raw=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean);
+    const kept=[];
+    for (const text of raw) {
+      if (namesWithdrawn(text, shas)) continue;
+      const ids=[...new Set(text.match(/field-[a-f0-9]{64}/g)||[])], datasets=[...new Set(text.match(/dataset-[a-f0-9]{64}/g)||[])];
+      let hidden=false;
+      for (const id of ids) if (await storedFieldWithdrawn(env,id,shas)) { hidden=true; break; }
+      for (const d of datasets) if (!hidden && namesWithdrawn(await env.PUBLICATIONS.get(`datasets/${d}`), shas)) hidden=true;
+      if (!hidden) kept.push(JSON.parse(text));
+    }
+    const releases=kept;
     const next=new URL(url);if(list.cursor)next.searchParams.set('cursor',list.cursor);
     return json({schema_version:'1.0',limit,next:list.list_complete?null:next.href,releases});
   }
@@ -157,7 +183,10 @@ async function route(request, env) {
       if(q.offset) throw new RangeError('Follow cursor pagination for retained fields');
       const limit=integer(q.limit,20,1,100);
       const list=await env.PUBLICATIONS.list({prefix:'field-index/',limit,...(q.cursor?{cursor:q.cursor}:{})});
-      const fields=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+      const shas=await withdrawnShas(env);
+      const all=(await Promise.all(list.keys.map(k=>env.PUBLICATIONS.get(k.name)))).filter(Boolean).map(JSON.parse);
+      const fields=[];
+      for (const f of all) if (!(await storedFieldWithdrawn(env,f.field_id,shas))) fields.push(f);
       const next=new URL(url);if(list.cursor)next.searchParams.set('cursor',list.cursor);
       return json({schema_version:'1.0',total:null,limit,offset:0,next:list.list_complete?null:next.href,fields});
     }
@@ -209,7 +238,8 @@ async function route(request, env) {
     const comparison = compareMeasurements(publication.measurements, q);
     if (!pair) return json(comparison);
     const canonical = path.replace(/\.md$/, "");
-    const html = renderArticle(await input("/_publication/template.html", false), { path: canonical, title: `${q.a} vs ${q.b}`, body: comparisonArticle(comparison), markdown: canonical + ".md" + new URL(request.url).search });
+    const names = Object.fromEntries((publication.gateways || []).map(g => [g.id, g.name]));
+    const html = renderArticle(await input("/_publication/template.html", false), { path: canonical, title: `${names[q.a] || q.a} vs ${names[q.b] || q.b}`, body: comparisonArticle(comparison, names), markdown: canonical + ".md" + new URL(request.url).search });
     return text(pair[3] ? htmlToMarkdown(html) : html, pair[3] ? "text/markdown" : "text/html");
   }
   const dashboardPath = path === "/index.md" ? "/" : path === "/gateways/index.md" ? "/gateways" : path.replace(/\.md$/, "");
@@ -245,11 +275,13 @@ async function route(request, env) {
     const field=path.match(/^\/api\/v1\/fields\/(field-[a-f0-9]{64})(?:\.json)?$/);
     if(field && env.PUBLICATIONS) {
       const stored=await env.PUBLICATIONS.get(`fields/${field[1]}`);
+      if(stored && namesWithdrawn(stored, await withdrawnShas(env))) return WITHDRAWN();
       if(stored) return new Response(stored,{headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=31536000, immutable'}});
     }
     const dataset = path.match(/^\/api\/v1\/benchmarks\/(dataset-[a-f0-9]{64})(?:\.json)?$/);
     if (dataset && env.PUBLICATIONS) {
       const stored = await env.PUBLICATIONS.get(`datasets/${dataset[1]}`);
+      if (stored != null && namesWithdrawn(stored, await withdrawnShas(env))) return WITHDRAWN();
       if (stored != null) return new Response(stored, { headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=31536000, immutable" } });
     }
     return error(404, "Not found");
@@ -269,12 +301,20 @@ export default {
       else if (e instanceof URIError) response = error(404, e.message);
       else { console.error(e); response = error(500, "Publication could not be read"); }
     }
+    // A person who mistypes a page gets the site's 404 page; API clients keep the JSON error.
+    const reqPath = new URL(request.url).pathname;
+    if (response.status === 404 && !reqPath.startsWith("/api/") && (request.headers.get("Accept") || "").includes("text/html")) {
+      const page = await env.ASSETS.fetch(new Request(`${ORIGIN}/404.html`));
+      if (page.ok) response = new Response(page.body, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
     const headers = new Headers(response.headers);
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, If-None-Match, If-Modified-Since");
     headers.set("Access-Control-Expose-Headers", "ETag, Last-Modified, Link");
     headers.set("X-Content-Type-Options", "nosniff");
+    if (new URL(request.url).hostname === "onthebench.ai") headers.set("Strict-Transport-Security", "max-age=31536000");
+    if (headers.get("Content-Type") === "text/html") headers.set("Content-Type", "text/html; charset=utf-8");
     headers.set("Link", `<${ORIGIN}/api/v1/summary>; rel="alternate"; type="application/json", <${ORIGIN}/llms.txt>; rel="describedby"; type="text/plain", <${ORIGIN}/api/v1>; rel="service-desc"; type="application/json"`);
     if (!headers.has("Cache-Control")) headers.set("Cache-Control", response.ok ? "public, max-age=0, must-revalidate" : "no-store");
     // Static assets already have ETags. Small generated responses receive one as

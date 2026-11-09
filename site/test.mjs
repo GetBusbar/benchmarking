@@ -1255,8 +1255,8 @@ test("a throughput hole is an ABSENCE with the engine's reason, never a zero", (
   assert.equal(slow1.text, "n/a");
   // AND IT SAYS SO ON THE CELL. On the field data plano is this state at five of six bounds; a bare cell
   // there would read as five missing measurements instead of the one damning finding it is.
-  assert.equal(slow1.why, "no rung held this tail");
-  assert.match(app.metricTd(slow1), /no rung held this tail/, "the reason renders in the td, not only on hover");
+  assert.equal(slow1.why, "no tested concurrency met this bound");
+  assert.match(app.metricTd(slow1), /no tested concurrency met this bound/, "the reason renders in the td, not only on hover");
   assert.match(slow1.note, /tail latency at or above/, "and the engine's own prose is the tooltip");
   const hole = tooSlow;
   // (b) A REAL READING still reads as one, at the bound it was taken at, with its concurrency inline.
@@ -2811,10 +2811,10 @@ test("matrix cell states map served to the three visible states", () => {
 test("machine-readable served states map to distinct honest cell states", () => {
   // not_verified is a harness gap, never a red
   assert.equal(app.cellState({ served: "not_verified", reason: "harness_boot_failure" })[0], "unverified");
-  // untestable is a rig limit (real cloud host pinned), its own state, never a red
+  // untestable = the gateway pins the real cloud host (fixed endpoint), its own state, never a red
   assert.equal(app.cellState({ served: "untestable", reason: "no_base_url_override" })[0], "untestable");
   assert.equal(app.cellState({ served: "untestable" })[1], "untestable");
-  assert.ok(app.matrixCellTip({ served: "untestable" }).includes("untestable: the recorded harness"));
+  assert.ok(app.matrixCellTip({ served: "untestable", verdict_note: "pins api.example" }) === "untestable: pins api.example");
   // served:false with an explicit reason (wrong_answer) is the ONLY red: not a harness gap
   assert.equal(app.cellState({ served: false, reason: "wrong_answer", status: "200" })[0], "failed");
   // An UNRECOGNISED value is not a recorded refusal: the engine's own `not_probed` default, a newer token,
@@ -4026,10 +4026,10 @@ test("memory Min/Max select on memory and report memory, and disclose the size o
   // The candidate count rides next to the cell: min-of-3 and min-of-1 are different-sized searches.
   const ofText = (html) => (html.match(/<span class="tested-of[^>]*>([^<]*)<\/span>/) || [])[1] || "";
   const pill = memCol("tested").render(g, min);
-  assert.equal(ofText(pill), "of 3 steady", "a Min/Max row must state how many cells the extremum was chosen from");
-  assert.match(pill, /OpenAI→Gemini/, "and which cell it landed on");
+  assert.equal(ofText(pill), "of 3 cells", "a Min/Max row must state how many cells the extremum was chosen from");
+  assert.match(pill, /OpenAI→(<wbr>)?Gemini/, "and which cell it landed on");
   const narrow = memGw("narrow", { "anthropic>anthropic": { steady_state_rss_mib: 70 } });
-  assert.equal(ofText(memCol("tested").render(narrow, memState([narrow], { mode: "min" }))), "of 1 steady");
+  assert.equal(ofText(memCol("tested").render(narrow, memState([narrow], { mode: "min" }))), "of 1 cell");
   // Same/Custom are like-for-like: one named cell on every row, so there is no candidate set to disclose.
   assert.equal(ofText(memCol("tested").render(g, memState([g], { mode: "same", sameDialect: "openai" }))), "",
     "Same names one cell for every row; there is no search size to state");
@@ -4243,7 +4243,7 @@ test("memory: a WAVE is not a leak, and the board must stop calling it one", () 
   assert.match(tipC, /51\.0 MiB\/min under load/);
   assert.match(tipS, /did not grow/);
   assert.match(tipS, /the swing, not a leak/, "the same rate means something different under a swing");
-  assert.match(tipF, /RELEASING/, "a window still handing memory back is the OPPOSITE of a leak");
+  assert.match(tipF, /releasing/i, "a window still handing memory back is the OPPOSITE of a leak");
   assert.ok(!/still growing/.test(tipF), "and it must never be described as growing");
 });
 
@@ -4437,7 +4437,7 @@ test("memory: the RSS sparkline obeys all-or-nothing too (the get() guard does n
   const html = curve.render(g, st);
   assert.ok(!/<svg/.test(html),
     `an all-n/a row must not keep a live sparkline as its one occupied cell; got: ${html.slice(0, 120)}`);
-  assert.match(html, /n\/a/, "the cell reads n/a like every other cell on the row");
+  assert.match(html, /n\/a|not measured/, "the cell reads the same absence label as every other cell on the row");
   assert.equal(curve.get(g, st).na, true, "and the column agrees about it");
 
   // (2) the same curve on a row that DID measure something still draws, so this is not a blanket kill.
@@ -5753,7 +5753,7 @@ test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguish
     { bound_ms: null, rps: sealMetric(22000), concurrency: 1024, p99_us: 40000, first_disqualified_conc: null, lower_bound: true },
   ];
   const svg = app.frontierSpark(three, { min: 19, max: 44363, boundMs: 10 });
-  assert.match(svg, /no rung held this tail/, "a bound nothing held is drawn ON THE FLOOR, and titled");
+  assert.match(svg, /no tested concurrency met this bound/, "a bound nothing held is drawn ON THE FLOOR, and titled");
   assert.match(svg, /r="1\.9" fill="currentColor"/, "an established ceiling is a filled dot");
   assert.match(svg, /r="2\.4" fill="none"/, "a floor is an OPEN dot - it is not a proven peak");
   assert.match(svg, /stroke-dasharray="2 2"/, "and the selected bound is ruled, so the ranked number is locatable");
@@ -5779,10 +5779,10 @@ test("FRONTIER: the curve is drawn on a SHARED log scale, with three distinguish
   assert.ok(!/\b0\s*%/.test(cell.text), "and never as 0%, which would claim a measured share it does not have");
   assert.equal(cell.zero, true, "carrying the measured-zero styling, not an absence styling");
   assert.ok(cell.v != null, "a curve that holds nothing at any bound is the most extreme shape on the board, not a null that sinks to the bottom");
-  assert.match(cell.note, /no measurable throughput under ANY published bound/);
+  assert.match(cell.note, /no measurable throughput under any published bound/i);
   const td = app.COLUMN_SETS.performance.find((c) => c.id === "shape").render(g, { ...app.newState(), mode: "peak", data: { gateways: [g] } });
   assert.match(td, /frontier-spark/, "the sparkline still renders for the slowest row on the board");
-  assert.equal((td.match(/<title>[^<]*no rung held this tail<\/title>/g) || []).length, 5,
+  assert.equal((td.match(/<title>[^<]*no tested concurrency met this bound<\/title>/g) || []).length, 5,
     "five ticks on the floor - one per bound the gateway could not hold - and one real point");
 });
 
@@ -6138,7 +6138,7 @@ test("#1 PROSE: one or two sentences above the table, everything else below it a
   // THE FRONTIER'S RELOCATED CLAIMS ARE ALL STILL THERE, below the table.
   const fc = app.frontierCaption(st, board);
   const notes = fc.notes.join(" ");
-  assert.match(notes, /no rung held this tail/, "the measured-zero distinction survives the move");
+  assert.match(notes, /no tested concurrency met this bound/, "the measured-zero distinction survives the move");
   assert.match(notes, /It is not missing data/, "including the sentence that makes it a finding rather than a gap");
   assert.match(notes, /"≥" marks a reading whose sweep ran out of ladder/, "and the floor marker's meaning");
   assert.match(notes, /never the bound/, "and the observed-tail-is-not-the-bound rule");

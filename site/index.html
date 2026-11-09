@@ -101,7 +101,7 @@
     <p class="fineprint">Every gateway on the board, in alphabetical order. Language, the exact version measured (hover for the build stamp the run recorded: an immutable image digest or a pinned source commit), when it was last benchmarked, project age, stars (snapshot), and each project's own self-description. The other tabs measure how they perform.</p>
     <div class="table-scroll">
       <table id="gateways-table">
-        <thead><tr><th data-sort="name">Gateway</th><th data-sort="lang">Language</th><th class="build" data-sort="version">Version</th><th class="lastrun" data-sort="lastrun">Last benchmarked</th><th class="age" data-sort="age">Project Age</th><th class="stars" data-sort="stars">Stars</th><th class="contrib" data-sort="contrib">Contributors</th></tr></thead>
+        <thead><tr><th data-sort="name">Gateway</th><th data-sort="lang">Language</th><th class="build" data-sort="version">Version</th><th class="lastrun" data-sort="lastrun">Last benchmarked</th><th class="age" data-sort="age">Project age</th><th class="stars" data-sort="stars">Stars</th><th class="contrib" data-sort="contrib">Contributors</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -202,10 +202,10 @@
     <h2>Protocol support matrix (6x6)</h2>
     <ul class="matrix-legend" aria-label="cell legend">
       <li><span class="lg lg-pass"></span>served (probe passed)</li>
-      <li><span class="lg lg-notconf"></span>not declared (historical capability research; not a probe)</li>
+      <li><span class="lg lg-notdecl"></span>not declared (historical capability research; not a probe)</li>
       <li><span class="lg lg-notconf"></span>not configured (probe failed; evidence on hover)</li>
       <li><span class="lg lg-unverified"></span>not verified (harness could not get it serving)</li>
-      <li><span class="lg lg-untestable"></span>untestable (recorded harness limitation)</li>
+      <li><span class="lg lg-untestable"></span>untestable (the engine's recorded reason is shown on hover)</li>
       <li><span class="lg lg-unprobed"></span>unprobed auth (authentication was not tested in this run)</li>
       <li><span class="lg lg-failed"></span>not served (the gateway declined a pairing it is set up for; evidence on hover)</li>
       <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
@@ -220,7 +220,7 @@
     <article class="essay">
       <h2 class="essay-title">How we measure, and why we think this is the fair way to do it</h2>
 
-      <p class="essay-standfirst"><strong>Who runs this.</strong> Built and operated by the Busbar team; busbar is one of the entrants. Same shared harness for every gateway, no per-gateway special-casing, every number from committed JSON, fully open source. <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">Read the code and re-run it yourself</a>. Gateway creators are welcome to PR and maintain their gateway manifest and configuration.</p>
+      <p class="essay-standfirst"><strong>Who runs this.</strong> Built and operated by the Busbar team; Busbar is one of the entrants. Same shared harness for every gateway, no per-gateway special-casing, every number from committed JSON, fully open source. <a href="https://github.com/GetBusbar/benchmarking" target="_blank" rel="noopener">Read the code and re-run it yourself</a>. Gateway creators are welcome to PR and maintain their gateway manifest and configuration.</p>
 
       <p class="essay-lede">A benchmark is only worth reading if you can see what it did. Every gateway here gets its own machine, its own dedicated cores, the same local upstream, the same measuring tools, and the kind of configuration a real operator would actually deploy. Nothing is tuned to make anyone look good, including us. What follows is how it works, why we chose it, and where it can still be wrong.</p>
       <p>The short version: one gateway per machine so nobody inherits anyone else's mess. Fixed cores so the load generator can never steal from the thing being measured. A local fake provider so we are timing the gateway and not the internet. Default configuration, because a benchmark of how well we tuned every product on the board is not a benchmark of the products. And when we are not sure a number is real, we do not print it.</p>
@@ -290,9 +290,9 @@
   </section>
 
   <section id="view-charts" class="view hidden">
-    <p class="lede">Every chart here is drawn from the same numbers the tables rank, at the bound and
-    cell you have selected — change either and the chart follows. Bars are coloured by implementation
-    language, a neutral property, never by rank or brand.</p>
+    <p class="lede">Every chart here is drawn from the same numbers the tables rank, on the cell and
+    tail-latency bound last chosen on the table tabs; the line under each chart names them. Bars are
+    coloured by implementation language (key above the chart), a neutral property, never by rank or brand.</p>
     <div id="chart-controls" class="chart-controls"></div>
     <div id="chart-panel"></div>
     <p id="chart-note" class="muted"></p>
