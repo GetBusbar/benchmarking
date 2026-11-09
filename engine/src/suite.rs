@@ -1526,6 +1526,16 @@ fn rendered_config(cfg: &SuiteConfig) -> crate::record::ConfigFiles {
     crate::record::ConfigFiles { files }
 }
 
+/// A kernel tunable read from /proc/sys, or None when the file is missing (non-Linux), unreadable,
+/// or not a number. Never a 0 standing in for "could not read".
+fn proc_sys_u64(path: &str) -> Option<u64> {
+    parse_proc_sys_u64(&std::fs::read_to_string(path).ok()?)
+}
+
+fn parse_proc_sys_u64(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
 fn flush(
     cfg: &SuiteConfig,
     upstreams: &HashMap<String, Upstream>,
@@ -1544,6 +1554,8 @@ fn flush(
             // The load generator is this engine's own `loadgen` subcommand, so rig.engine names it.
             ugen: None,
             box_qualify,
+            somaxconn: proc_sys_u64("/proc/sys/net/core/somaxconn"),
+            tcp_max_syn_backlog: proc_sys_u64("/proc/sys/net/ipv4/tcp_max_syn_backlog"),
         },
     );
     // Resolved once and used at BOTH levels. `gateway_build` re-resolves the manifest's launch spec,
@@ -1604,6 +1616,16 @@ fn flush(
 
 #[cfg(test)]
 mod tests {
+    // /proc/sys values end in a newline; anything that is not a number reads as unknown, and a
+    // missing file (macOS) is unknown too, never 0.
+    #[test]
+    fn a_proc_sys_tunable_parses_trimmed_and_is_none_when_unreadable() {
+        assert_eq!(super::parse_proc_sys_u64("65535\n"), Some(65535));
+        assert_eq!(super::parse_proc_sys_u64(""), None);
+        assert_eq!(super::parse_proc_sys_u64("abc\n"), None);
+        assert_eq!(super::proc_sys_u64("/nonexistent/otb/somaxconn"), None);
+    }
+
     // A DEFINITION THAT DRIFTS FROM THE CODE IS WORSE THAN NO DEFINITION.
     //
     // The retired throughput gate is the case: every surface said "p99 < 1 s" while the engine enforced

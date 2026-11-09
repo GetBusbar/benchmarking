@@ -141,6 +141,15 @@ pub struct RigProvenance {
     /// through as opaque JSON rather than typed against a shape nothing has confirmed.
     #[serde(default)]
     pub box_qualify: Option<serde_json::Value>,
+    /// The box's effective `net.core.somaxconn`, which caps the mock's listen backlog. Read from
+    /// /proc when the snapshot is written; ABSENT (not null, never 0) where it cannot be read, so a
+    /// snapshot from before this field and one from a non-Linux host have the same shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub somaxconn: Option<u64>,
+    /// The box's effective `net.ipv4.tcp_max_syn_backlog`, the half-open queue in front of that
+    /// backlog. Same read and absence rule as `somaxconn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_max_syn_backlog: Option<u64>,
 }
 
 /// Which commit produced this run's harness, and whether the tree was dirty. `null` (not an absent
@@ -949,6 +958,29 @@ pub struct StreamingProjection {
 
 #[cfg(test)]
 mod tests {
+    // The backlog tunables are additive: a rig block written before them still reads, and an
+    // unreadable value is an ABSENT key, never a null or a 0.
+    #[test]
+    fn rig_backlog_fields_are_absent_when_unknown_and_round_trip_when_known() {
+        let old: RigProvenance =
+            serde_json::from_str(r#"{"arch":"arm64","release_url":null,"box_qualify":null}"#)
+                .unwrap();
+        assert_eq!(old.somaxconn, None);
+        assert_eq!(old.tcp_max_syn_backlog, None);
+        let v = serde_json::to_value(&old).unwrap();
+        assert!(v.get("somaxconn").is_none() && v.get("tcp_max_syn_backlog").is_none());
+
+        let known = RigProvenance {
+            somaxconn: Some(65535),
+            tcp_max_syn_backlog: Some(65535),
+            ..RigProvenance::default()
+        };
+        let v = serde_json::to_value(&known).unwrap();
+        assert_eq!(v["somaxconn"], 65535);
+        assert_eq!(v["tcp_max_syn_backlog"], 65535);
+        assert_eq!(serde_json::from_value::<RigProvenance>(v).unwrap(), known);
+    }
+
     /// EVERY SCALAR MEASUREMENT ON `CellPerf` MUST BE REACHABLE BY `absences()`.
     ///
     /// This is a STRUCTURAL guard, not a list to maintain: it serialises a perf record whose scalars
