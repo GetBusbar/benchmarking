@@ -42,6 +42,17 @@ fn require_f64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<f
     }
 }
 
+/// A count an older generator may not print. ABSENT is 0 ("none reported", see `UgenStats`); PRESENT
+/// must be a count like every required field. A malformed value used to read as 0 too, so a garbled
+/// `rigrefused=` stopped the window being discarded as rig-limited and charged the rig's refused
+/// connects to the gateway.
+fn optional_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
+    match fields.get(key) {
+        None => Ok(0),
+        Some(_) => require_i64(fields, key, line),
+    }
+}
+
 fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
     match fields.get(key) {
         None => Err(format!("missing field '{key}' in stats line: '{line}'")),
@@ -86,9 +97,11 @@ pub struct UgenStats {
     /// Requests that exhausted the generator's response budget. Optional on the wire for the same
     /// reason as `rig_refused`.
     pub budget_exceeded: i64,
-    /// Whether the CHILD could not spawn the threads for this window - the OS refusing, not the gateway.
-    /// Optional on the wire for the same reason as the two above: an older generator's line simply has
-    /// no such field, and `false` means "none reported".
+    /// Whether the CHILD could not pose this window at the concurrency it reports - its async runtime
+    /// would not build, its request could not be built, or a connection task was lost - the rig
+    /// failing, not the gateway. Optional on the wire for the same reason as the two above: an older
+    /// generator's line simply has no such field, and `false` means "none reported". Present, it must
+    /// be `0` or `1`.
     pub spawn_failed: bool,
 }
 
@@ -100,18 +113,17 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
         p50_us: require_i64(&fields, "p50us", line)?,
         p99_us: require_i64(&fields, "p99us", line)?,
         ok: require_i64(&fields, "ok", line)?,
-        rig_refused: fields
-            .get("rigrefused")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
-        budget_exceeded: fields
-            .get("budgetexceeded")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
-        spawn_failed: fields
-            .get("spawnfailed")
-            .map(|v| v.trim() != "0" && !v.trim().is_empty())
-            .unwrap_or(false),
+        rig_refused: optional_i64(&fields, "rigrefused", line)?,
+        budget_exceeded: optional_i64(&fields, "budgetexceeded", line)?,
+        spawn_failed: match fields.get("spawnfailed").copied() {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(v) => {
+                return Err(format!(
+                    "non-flag field 'spawnfailed={v}' in stats line: '{line}'"
+                ))
+            }
+        },
     })
 }
 
@@ -205,6 +217,33 @@ mod tests {
             .into_value()
             .expect("a line without the field still parses");
         assert!(!got.spawn_failed);
+    }
+
+    // THE RIG'S OWN COUNTS ARE READ, NOT DEFAULTED. A non-zero `rigrefused`/`budgetexceeded` must
+    // reach the parent as itself - it is what discards a rig-limited window - and a PRESENT value
+    // that is not a count is a corrupt line, refused like any required field rather than read as 0.
+    #[test]
+    fn rig_counts_are_read_and_a_malformed_one_is_refused() {
+        let base = "rps=1000 fail=4 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1000";
+        let got = parse_ugen_line(&format!("{base} rigrefused=3 budgetexceeded=1"))
+            .into_value()
+            .expect("a complete line parses");
+        assert_eq!((got.rig_refused, got.budget_exceeded), (3, 1));
+
+        for bad in [
+            "rigrefused=1x",
+            "rigrefused=1.5",
+            "budgetexceeded=-",
+            "spawnfailed=yes",
+            "spawnfailed=",
+        ] {
+            let m = parse_ugen_line(&format!("{base} {bad}"));
+            assert_eq!(
+                m.reason(),
+                Some(&Absent::HarnessError),
+                "{bad} must be refused, not defaulted"
+            );
+        }
     }
 
     use super::*;
