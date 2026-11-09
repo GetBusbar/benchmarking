@@ -38,7 +38,8 @@ export function metadata(document, path, title, description, structured, markdow
     `<link data-publication rel="alternate" type="text/markdown" href="${esc(ORIGIN + markdown)}">` +
     `<link data-publication rel="alternate" type="application/json" href="${ORIGIN}/api/v1/summary">` +
     `<link data-publication rel="service-desc" type="application/json" href="${ORIGIN}/openapi.json"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/llms.txt"><link data-publication rel="sitemap" type="application/xml" href="${ORIGIN}/sitemap.xml"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/robots.txt"><link data-publication rel="help" href="${ORIGIN}/gateways/data"><meta data-publication property="og:image" content="${ORIGIN}/social-card.png">` +
-    `<script data-publication type="application/ld+json">${jsonScript(structured)}</script>` +
+    // A bare WebPage record is already inside the site-identity graph; emitting it twice declares two pages.
+    (structured?.["@type"] === "WebPage" ? "" : `<script data-publication type="application/ld+json">${jsonScript(structured)}</script>`) +
     `<script data-publication type="application/ld+json">${jsonScript(siteIdentity(path, title))}</script>`);
 }
 

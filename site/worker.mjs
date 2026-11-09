@@ -49,7 +49,8 @@ function integer(value, fallback, min, max) {
 }
 async function route(request, env) {
   const url = new URL(request.url), path = decodeURIComponent(url.pathname);
-  if (url.hostname === "www.onthebench.ai") { url.hostname = "onthebench.ai"; return Response.redirect(url.href, 308); }
+  // Plain http and www both land on the one canonical https origin.
+  if (url.hostname.endsWith("onthebench.ai") && (url.protocol === "http:" || url.hostname === "www.onthebench.ai")) { url.protocol = "https:"; url.hostname = "onthebench.ai"; return Response.redirect(url.href, 308); }
   if (/%2f|%5c|%2e/i.test(path) || path.includes("\\") || path.startsWith("/_publication")) return error(404, "Not found");
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (!["GET", "HEAD"].includes(request.method)) return new Response(null, { status: 405, headers: { Allow: "GET, HEAD, OPTIONS" } });
@@ -269,12 +270,20 @@ export default {
       else if (e instanceof URIError) response = error(404, e.message);
       else { console.error(e); response = error(500, "Publication could not be read"); }
     }
+    // A person who mistypes a page gets the site's 404 page; API clients keep the JSON error.
+    const reqPath = new URL(request.url).pathname;
+    if (response.status === 404 && !reqPath.startsWith("/api/") && (request.headers.get("Accept") || "").includes("text/html")) {
+      const page = await env.ASSETS.fetch(new Request(`${ORIGIN}/404.html`));
+      if (page.ok) response = new Response(page.body, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
     const headers = new Headers(response.headers);
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Accept, If-None-Match, If-Modified-Since");
     headers.set("Access-Control-Expose-Headers", "ETag, Last-Modified, Link");
     headers.set("X-Content-Type-Options", "nosniff");
+    if (new URL(request.url).hostname === "onthebench.ai") headers.set("Strict-Transport-Security", "max-age=31536000");
+    if (headers.get("Content-Type") === "text/html") headers.set("Content-Type", "text/html; charset=utf-8");
     headers.set("Link", `<${ORIGIN}/api/v1/summary>; rel="alternate"; type="application/json", <${ORIGIN}/llms.txt>; rel="describedby"; type="text/plain", <${ORIGIN}/api/v1>; rel="service-desc"; type="application/json"`);
     if (!headers.has("Cache-Control")) headers.set("Cache-Control", response.ok ? "public, max-age=0, must-revalidate" : "no-store");
     // Static assets already have ETags. Small generated responses receive one as

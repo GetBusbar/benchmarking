@@ -80,6 +80,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const reviewPath = join(root, 'results/run-reviews.json');
   const runReviews = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, 'utf8')) : {};
   json('/api/v1/run-reviews.json', runReviews);
+  const reviewNames = [];
   for (const review of Object.values(runReviews)) {
     const name = basename(new URL(review.evidence).pathname);
     const diagnosticRoot = resolve(root, 'results/diagnostics');
@@ -87,6 +88,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     if (!proof.startsWith(diagnosticRoot + sep) || !existsSync(proof))
       throw new Error(`Missing or invalid review evidence: ${name}`);
     json(`/api/v1/reviews/${name}`, JSON.parse(readFileSync(proof, 'utf8')));
+    reviewNames.push(name);
   }
   const withdrawnPath = join(root, 'results/withdrawn-runs.json');
   const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
@@ -112,7 +114,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       json(`/api/v1/benchmarks/${id}.json`, summary);
       page(`/gateways/runs/${id}`, renderArticle(template, {
         path: `/gateways/runs/${id}`, title: `${snapshot.gateway} — ${snapshot.measured_at || "undated run"}`,
-        structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${snapshot.gateway} benchmark run`, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
+        structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${snapshot.gateway} benchmark run`, description: `Immutable raw evidence for one ${snapshot.gateway} benchmark run measured ${snapshot.measured_at || "at an unrecorded time"} against a local mock upstream.`, creator: { "@type": "Organization", name: DISCLOSURE.operator, "@id": `${ORIGIN}/#organization` }, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
         body: `<h1>${esc(snapshot.gateway)} benchmark run</h1>${disclosureHtml}<p>Measured ${esc(snapshot.measured_at)}. Recorded build: ${esc(snapshot.build)}.</p><p>Hardware: ${esc(snapshot.hardware)}. Architecture: ${esc(snapshot.arch)}.</p><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p>${item.review ? `<h2>Publication correction</h2><p>${esc(item.review.reason)}</p><p><a href="${esc(item.review.evidence)}">Validation evidence</a></p>` : ""}<h2>Recorded metric definitions</h2><dl>${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2><pre>${esc(JSON.stringify(snapshot.rig ?? null, null, 2))}</pre>`,
       }));
       item.gateway_family = familyOf(snapshot.gateway);
@@ -279,7 +281,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json("/api/v1/index.json", { schema_version: "1.0", retrieval: retrievalGuide(Buffer.byteLength(JSON.stringify(publication) + "\n")), links: { history: `${ORIGIN}/api/v1/history`, fields: `${ORIGIN}/api/v1/fields`, releases: `${ORIGIN}/api/v1/releases`, runs: `${ORIGIN}/api/v1/runs`, definitions: `${ORIGIN}/api/v1/definitions`, summary: `${ORIGIN}/api/v1/summary`, gateways: `${ORIGIN}/api/v1/gateways`, latest: publication.source_url.replace("/gateways", "/api/v1/benchmarks/latest"), measurements: `${ORIGIN}/api/v1/measurements`, comparisons: `${ORIGIN}/api/v1/compare`, methodology: `${ORIGIN}/api/v1/methodology`, schema: `${ORIGIN}/api/v1/schema`, openapi: `${ORIGIN}/openapi.json` }, comparison_policy: POLICY, disclosure: DISCLOSURE });
   json("/api/v1/schema/index.json", schemaIndex());
   json("/api/v1/schema/measurement.json", measurementSchema());
-  json("/openapi.json", openapi());
+  json("/openapi.json", openapi({ field: fields[0]?.field_id, run: archives.find(r => r.gateway_id === "busbar")?.id || archives[0]?.id, dataset: datasetId, review: reviewNames[0]?.replace(/\.json$/, "") }));
   json("/data.json", data);
   for (const path of ["/", "/gateways", ...["memory", "performance", "frontier", "streaming", "matrix", "charts", "method"].map(v => `/gateways/${v}`)]) page(path, renderDashboard(template, data, path, publication));
   json("/api/v1/methodology.json", { schema_version: "1.0", url: `${ORIGIN}/gateways/method`, markdown: readFileSync(join(out, "gateways/method.md"), "utf8"), definitions: data.definitions ?? {}, comparison_policy: POLICY, disclosure: DISCLOSURE });
@@ -288,7 +290,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     const histories = archives.filter(r => gatewayFamily(r.gateway_id) === gatewayFamily(g.key));
     page(`/gateways/${g.key}/evidence`, renderArticle(template, { path: `/gateways/${g.key}/evidence`, title: `${g.display} complete benchmark evidence`, body: gatewayArticle(g, records, histories, data.gateways, { full: true }) }));
     json(`/api/v1/gateways/${g.key}.json`, { schema_version: "1.0", gateway: g, current_metadata: publication.gateways.find(item => item.id === g.key).current_metadata, metadata_scope: "gateway.stars and stars_as_of are legacy aliases of current_metadata, a dated repository snapshot, not stars at measurement time. Run statistics were not recorded.", measurements: records, history: histories, generated_at: data.generated_at, disclosure: DISCLOSURE });
-    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${g.display} gateway measurements`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways) }));
+    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${g.display} gateway measurements`, description: `${g.display} AI gateway overhead measured against a local mock upstream: added latency, throughput, streaming and memory across client and upstream protocol pairs.`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator, "@id": `${ORIGIN}/#organization` }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways) }));
   }
   // Common comparison URLs cost only a static read, and are discoverable in the
   // sitemap. Both orders are useful: the ratio explicitly names its denominator.
@@ -321,8 +323,8 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   page("/gateways/license", renderArticle(template, { path: "/gateways/license", title: "Dataset reuse and attribution", body: `<h1>Dataset reuse and attribution</h1>${licenseText.split(/\n\n/).filter(block => !block.startsWith("# ")).map(block => `<p>${esc(block).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`).join("")}<p><a href="${DATA_LICENSE}">CC BY 4.0</a> · <a href="${DATA_LICENSE}legalcode">Legal terms</a></p>` }));
   write("/DATA-LICENSE.md", licenseText);
   write("/robots.txt", `User-agent: *\nAllow: /\nDisallow: /_publication/\nSitemap: ${ORIGIN}/sitemap.xml\n`);
-  // RFC 9116. Expires is tied to the publication time so a stale build cannot advertise a live contact forever.
-  const securityExpires = new Date(Date.parse(data.generated_at) + 365 * 864e5).toISOString().replace(/\.\d{3}Z$/, "Z");
+  // RFC 9116 (Expires under a year). Expires is tied to the publication time so a stale build cannot advertise a live contact forever.
+  const securityExpires = new Date(Date.parse(data.generated_at) + 360 * 864e5).toISOString().replace(/\.\d{3}Z$/, "Z");
   write("/.well-known/security.txt", `Contact: https://github.com/GetBusbar/benchmarking/security/advisories/new\nExpires: ${securityExpires}\nPreferred-Languages: en\nCanonical: ${ORIGIN}/.well-known/security.txt\nPolicy: https://github.com/GetBusbar/benchmarking/security/policy\n`);
   write("/humans.txt", `/* TEAM */\nOperator: Busbar team (also a benchmark entrant)\nSite: https://getbusbar.com\nGitHub: https://github.com/GetBusbar\n\n/* SITE */\nSource: https://github.com/GetBusbar/benchmarking\nData license: CC BY 4.0 (${ORIGIN}/gateways/license)\nMethodology: ${ORIGIN}/gateways/method\nAgent guide: ${ORIGIN}/llms.txt\nPublished: ${data.generated_at}\n`);
   // No lastmod is preferable to an invented timestamp on every metadata refresh.
