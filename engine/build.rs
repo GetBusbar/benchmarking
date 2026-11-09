@@ -25,69 +25,19 @@ pub fn main() {
         .ok()
         .filter(|s| !s.trim().is_empty());
     let commit = commit.unwrap_or_else(|| {
-        let head = git(&["rev-parse", "HEAD"]).unwrap_or_default();
-        if head.is_empty() {
-            return head;
-        }
-        // A LOCAL BUILD OF UNCOMMITTED EDITS IS NOT THAT COMMIT. HEAD's sha alone stamped a binary
-        // built from a modified engine/ or mock/ as the clean commit, and the `otb engine-commit`
-        // check this file exists for then passed for an engine that is not it. The suffix makes the
-        // check fail instead; a tree whose state cannot be read is not claimed clean either.
-        match git(&[
-            "status",
-            "--porcelain",
-            "--untracked-files=no",
-            "--",
-            "engine",
-            "mock",
-            "Cargo.toml",
-            "Cargo.lock",
-            ".cargo",
-            "rust-toolchain.toml",
-        ]) {
-            Some(s) if s.is_empty() => head,
-            Some(_) => format!("{head}-dirty"),
-            None => format!("{head}-unverified"),
-        }
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     });
     println!("cargo:rustc-env=OTB_ENGINE_COMMIT={commit}");
-    println!(
-        "cargo:rustc-env=OTB_SOURCE_COMMIT={}",
-        git(&["rev-parse", "HEAD"]).unwrap_or_default()
-    );
     // Re-bake when HEAD moves, so a rebuild after a commit does not keep the old sha. Both paths are
     // named because a detached HEAD (a worktree, a CI checkout) writes the sha into .git/HEAD itself.
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs/heads");
-    // And when the tree's own state moves, so the dirty suffix appears on an edit and clears on the
-    // commit (which rewrites the index).
-    println!("cargo:rerun-if-changed=../.git/index");
-    println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=Cargo.toml");
-    println!("cargo:rerun-if-changed=../engine/src");
-    println!("cargo:rerun-if-changed=../mock/src");
-    for path in [
-        "../Cargo.toml",
-        "../Cargo.lock",
-        "../.cargo",
-        "../rust-toolchain.toml",
-        "../engine/build.rs",
-        "../mock/build.rs",
-    ] {
-        println!("cargo:rerun-if-changed={path}");
-    }
     println!("cargo:rerun-if-env-changed=OTB_BUILD_COMMIT");
-}
-
-/// A git command's trimmed stdout, or `None` when git is absent or the command fails.
-fn git(args: &[&str]) -> Option<String> {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").ok()?).parent()?)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
 }
