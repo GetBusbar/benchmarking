@@ -569,6 +569,24 @@ fn refuse_knob(name: &str, value: &str, why: &str) -> ! {
     std::process::exit(2)
 }
 
+/// The listen(2) backlog the mock asks for. `TcpListener::bind` asks for 1024, and a gateway that
+/// does not pool upstream connections opens about one mock connection per in-flight request, so at
+/// high concurrency a 1024 queue overflows and the dropped SYNs are charged to the gateway. The
+/// kernel caps this at net.core.somaxconn, which the rig raises to the same value and records.
+const LISTEN_BACKLOG: u32 = 65_535;
+
+/// Bind with SO_REUSEADDR (as `TcpListener::bind` does on unix) and an explicit LISTEN_BACKLOG.
+fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
 #[tokio::main]
 async fn main() {
     let mut port: u16 = 8000;
@@ -624,7 +642,7 @@ async fn main() {
     let listener = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            match TcpListener::bind(addr).await {
+            match bind_listener(addr) {
                 Ok(l) => break l,
                 Err(e) if std::time::Instant::now() < deadline => {
                     eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port - retrying");
@@ -1280,6 +1298,20 @@ mod tests {
         assert_eq!(dialect_for("/v1beta/models"), "other");
         assert_eq!(dialect_for("/v1/models"), "other");
         assert_eq!(dialect_for("/v1/models?limit=100"), "other");
+    }
+
+    // The explicit-backlog bind must still give a listener that accepts (the kernel clamps the
+    // backlog to somaxconn rather than refusing it).
+    #[tokio::test]
+    async fn the_explicit_backlog_listener_binds_and_accepts() {
+        let listener = match super::bind_listener("127.0.0.1:0".parse().unwrap()) {
+            Ok(l) => l,
+            Err(e) => panic!("loopback bind with LISTEN_BACKLOG must succeed: {e}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr);
+        let (accepted, connected) = tokio::join!(listener.accept(), client);
+        assert!(accepted.is_ok() && connected.is_ok());
     }
 
     // Unset and blank take the default; a set value is trimmed like the engine trims it. (A value
