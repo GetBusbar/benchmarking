@@ -29,5 +29,3 @@ The final provider configuration passes 30 exact upstream and response checks in
 
 The two allowed_requests maps describe distinct mock upstream operations. The shipped shouldFallbackResponsesToChat path activates only when a custom Chat backend lacks Responses; without that declaration a Responses request goes to /v1/responses and cannot measure the Chat column. Request limits, caching, retries and pool sizing retain their defaults. Source: https://github.com/maximhq/bifrost/blob/69f4d56d18b9ba00ac5f9cf969b4501a882b9967/core/providers/openai/openai.go
 
-client.compat.convert_chat_to_responses upstream # Required to expose the released Chat/Cohere-to-Responses converter for the Responses-only upstream. plugins/compat/main.go::markForConversion requires the model catalog to declare Responses supported and Chat unsupported.
-bench-responses/o3-pro upstream # Declares that Responses-only operation; gpt-4o-mini also supports Chat and therefore cannot select this conversion. The mock and common request/token limit are unchanged. No model catalog override, parameter-dropping option or performance setting is added.

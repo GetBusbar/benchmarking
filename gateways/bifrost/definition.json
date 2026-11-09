@@ -6,9 +6,9 @@
     "gemini>openai": "/genai/v1beta/models/bench-chat/gpt-4o-mini:generateContent",
     "cohere>openai": "/cohere/v2/chat",
     "bedrock>openai": "/bedrock/model/bench-chat%2Fgpt-4o-mini/converse",
-    "gemini>openai-responses": "/genai/v1beta/models/bench-responses/o3-pro:generateContent",
+    "gemini>openai-responses": "/genai/v1beta/models/bench-responses/gpt-4o-mini:generateContent",
     "cohere>openai-responses": "/cohere/v2/chat",
-    "bedrock>openai-responses": "/bedrock/model/bench-responses%2Fo3-pro/converse",
+    "bedrock>openai-responses": "/bedrock/model/bench-responses%2Fgpt-4o-mini/converse",
     "anthropic>anthropic": "/anthropic/v1/messages",
     "gemini>anthropic": "/genai/v1beta/models/claude-3-5-sonnet-20241022:generateContent",
     "cohere>anthropic": "/cohere/v2/chat",
@@ -47,7 +47,7 @@
     "cohere": "command-r-plus",
     "gemini": "gemini-1.5-pro",
     "openai": "bench-chat/gpt-4o-mini",
-    "openai-responses": "bench-responses/o3-pro"
+    "openai-responses": "bench-responses/gpt-4o-mini"
   },
   "lang": "Go",
   "launch": {
@@ -84,12 +84,12 @@
     "x-bf-vk: sk-bf-benchmark-dummy"
   ],
   "matrix": [
+    "101110",
     "111110",
     "111110",
     "111110",
-    "111110",
-    "111110",
+    "101110",
     "111110"
   ],
-  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967 supports all six ingress protocols to the five locally reachable upstream wires. The Responses-only model o3-pro and documented convert_chat_to_responses option expose Chat/Cohere-to-Responses; the earlier gpt-4o-mini declaration incorrectly left those cells grey because the catalog treats it as Chat-capable. plugins/compat/main.go::markForConversion selects by the declared model operation. No parameters are dropped or performance settings changed. Thirty supported pairs remain enabled; six Bedrock upstream cells are separate rig limitations. Evidence: results/diagnostics/refresh-configuration/bifrost-final-config-correctness-preflight.json"
+  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967. Every upstream uses the field's common model gpt-4o-mini. OpenAI Chat and Cohere ingress into the Responses-only upstream are not enabled: Bifrost only converts them when the model catalog marks the model Responses-only (plugins/compat/main.go::markForConversion), and selecting a different model (o3-pro) to trigger that path also triggers the compat plugin's default parameter dropping (it removed max_completion_tokens in the preflight), which the out-of-the-box mandate excludes. Six Bedrock upstream cells are separate rig limitations."
 }
