@@ -54,9 +54,13 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
     // know is still an ERROR, not a silent fallback"); it was only true when every name was bad.
     let mut parsed: Vec<Dialect> = Vec::new();
     let mut unknown: Vec<&str> = Vec::new();
+    // A NAME TWICE walked that dialect's rows and columns twice, the second result overwriting the
+    // first, so a repeat is refused like a typo rather than doubling the grid.
+    let mut repeated: Vec<&str> = Vec::new();
     for name in list.split(',') {
         let name = name.trim();
         match name.parse::<Dialect>() {
+            Ok(d) if parsed.contains(&d) => repeated.push(name),
             Ok(d) => parsed.push(d),
             // An empty element is a stray comma rather than a misspelled dialect, and reporting it as
             // an unknown name would send a reader hunting for a typo that is not there.
@@ -70,6 +74,17 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
              dialect measures something other than what was asked for",
             if unknown.len() == 1 { "a dialect" } else { "dialects" },
             unknown.join(", ")
+        ));
+    }
+    if !repeated.is_empty() {
+        return Err(format!(
+            "OTB_DIALECTS={list:?} names {} more than once: {}",
+            if repeated.len() == 1 {
+                "a dialect"
+            } else {
+                "dialects"
+            },
+            repeated.join(", ")
         ));
     }
     if parsed.is_empty() {
@@ -520,6 +535,15 @@ mod tests {
             super::dialects_from(None).expect("unset"),
             Dialect::ALL.to_vec()
         );
+    }
+
+    // A NAME TWICE walked that dialect's rows and columns twice, the second result overwriting the
+    // first.
+    #[test]
+    fn a_repeated_dialect_is_an_error_not_a_doubled_grid() {
+        let e = super::dialects_from(Some("openai,anthropic,openai"))
+            .expect_err("a repeated dialect must not double the grid");
+        assert!(e.contains("more than once") && e.contains("openai"), "{e}");
     }
 
     use super::*;
