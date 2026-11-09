@@ -1097,6 +1097,10 @@ enum StreamStop {
         proven: u32,
         restart_cleared: bool,
     },
+    /// The restart that would have separated "the rig is dirty" from "the gateway is wedged" itself
+    /// FAILED. Ours: the harness could not put the process back, so nothing about the gateway was
+    /// learned here - and, unlike `RigContaminated`, the cause is not a host that had not drained.
+    RestartFailed { at: u32, proven: u32 },
 }
 
 impl StreamStop {
@@ -1107,7 +1111,8 @@ impl StreamStop {
     /// budget's. `RigRanShort`, `WindowUnavailable` and `RigContaminated` all say the instrument is
     /// the variable, and a number taken on a host we have just accused would be exactly the
     /// attribution error the rest of this enum exists to prevent - with the flattering sign, because
-    /// it would publish a figure where honesty published none.
+    /// it would publish a figure where honesty published none. `RestartFailed` is excluded for the
+    /// same reason: the harness could not even put the process back.
     ///
     /// `GatewayDidNotRecover` is excluded for the opposite reason: the process serving the fallback
     /// window is not the process the sweep measured, so whatever it carries is not this cell's
@@ -1127,11 +1132,17 @@ impl StreamStop {
         match self {
             StreamStop::RigRanShort { .. }
             | StreamStop::WindowUnavailable { .. }
-            | StreamStop::RigContaminated { .. } => Absent::HarnessError,
+            | StreamStop::RigContaminated { .. }
+            | StreamStop::RestartFailed { .. } => Absent::HarnessError,
             // A gateway that does not recover from overload is the GATEWAY's result, so it must not
             // be filed under our own faults - that would be the attribution error in reverse.
-            StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
-            _ => Absent::NotMeasured,
+            //
+            // Listed rather than caught by a wildcard: a new ending must be classified on purpose,
+            // or a rig fault added later compiles silently into the gateway's results.
+            StreamStop::GatewayDidNotRecover { .. }
+            | StreamStop::FloorReached { .. }
+            | StreamStop::SteppedRungFailed { .. }
+            | StreamStop::BudgetExhausted => Absent::NotMeasured,
         }
     }
 
@@ -1171,6 +1182,12 @@ impl StreamStop {
                 } else {
                     ", and a restart did not bring it back either"
                 }
+            ),
+            StreamStop::RestartFailed { at, proven } => format!(
+                "the bisection proved c={proved}, but re-measurement failed at c={at} although this \
+                 cell had already carried c={proven}, and the restart that would have told the rig \
+                 apart from the gateway failed - a harness fault, so nothing is published about the \
+                 gateway here"
             ),
             StreamStop::BudgetExhausted => format!(
                 "the bisection proved c={proved}, but that concurrency did not hold the stream gate \
@@ -2423,6 +2440,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                    two different processes as one measurement. What gets published
                                    instead is the finding: it did not recover. */
                                 if !recovered && contaminated {
+                                    let mut restart_failed = false;
                                     let restart_cleared = match cfg.relaunch.as_ref() {
                                         Some(spec) => {
                                             eprintln!(
@@ -2438,8 +2456,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                                         passed3
                                                     })
                                                     .unwrap_or(false),
+                                                // A FAILED RESTART IS OURS, and it is named as one
+                                                // rather than folded into the undrained-host story.
                                                 Err(e) => {
                                                     eprintln!("streams: the gateway could not be restarted: {e}");
+                                                    restart_failed = true;
                                                     false
                                                 }
                                             }
@@ -2462,7 +2483,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                        the variable - so this stays OURS. Calling it a gateway
                                        failure here would be the flattering direction of the same
                                        error, and the one nobody would catch. */
-                                    stop = if restart_cleared {
+                                    stop = if restart_failed {
+                                        StreamStop::RestartFailed { at: ceiling, proven: proven_clean }
+                                    } else if restart_cleared {
                                         StreamStop::GatewayDidNotRecover {
                                             at: ceiling,
                                             proven: proven_clean,
@@ -3272,6 +3295,11 @@ mod tests {
         .floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
         assert!(!StreamStop::RigContaminated {
+            at: 4096,
+            proven: 4096
+        }
+        .floor_fallback_ok());
+        assert!(!StreamStop::RestartFailed {
             at: 4096,
             proven: 4096
         }
@@ -6231,6 +6259,24 @@ mod gateway_recovery_tests {
             assert!(d.contains("c=8192"), "must name what it had carried: {d}");
             assert!(d.contains("c=4096"), "must name the rung that failed: {d}");
         }
+    }
+
+    // A RESTART THAT FAILS INSIDE THE STREAM SEARCH IS OURS, and it is named as a restart failure,
+    // not as an undrained host.
+    #[test]
+    fn a_failed_stream_restart_is_a_harness_error_named_as_a_restart_failure() {
+        let stop = StreamStop::RestartFailed {
+            at: 3088,
+            proven: 4096,
+        };
+        assert_eq!(stop.absent_kind(), Absent::HarnessError);
+        assert!(!stop.floor_fallback_ok());
+        let d = stop.describe(6176, MAX_CEILING_STEPDOWNS);
+        assert!(
+            d.contains("restart") && d.contains("c=3088") && d.contains("c=4096"),
+            "{d}"
+        );
+        assert!(!d.contains("drained"), "not the rig-drain story: {d}");
     }
 }
 
