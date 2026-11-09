@@ -112,7 +112,7 @@ async function geometryAudit(page, view) {
     const scroll = table.closest(".table-scroll");
     // Overflow is read BEFORE the mutation: the stuffed strings would report a table width no board ever has.
     const overflow = Math.round(table.scrollWidth - scroll.clientWidth);
-    const wide = "OpenAI→Bedrock Converse 2,083,807 no rung held this tail";
+    const wide = "OpenAI→Bedrock Converse 2,083,807 no tested concurrency met this bound";
     for (const td of table.querySelectorAll("tbody td")) td.textContent = wide;
     for (const th of table.querySelectorAll("thead th")) th.textContent = wide;
     const after = widths();

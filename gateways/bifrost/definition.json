@@ -91,5 +91,5 @@
     "101110",
     "111110"
   ],
-  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967. Every upstream uses the field's common model gpt-4o-mini. OpenAI Chat and Cohere ingress into the Responses-only upstream are not enabled: Bifrost only converts them when the model catalog marks the model Responses-only (plugins/compat/main.go::markForConversion), and selecting a different model (o3-pro) to trigger that path also triggers the compat plugin's default parameter dropping (it removed max_completion_tokens in the preflight), which the out-of-the-box mandate excludes. Six Bedrock upstream cells are separate rig limitations."
+  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967. Every upstream uses the field's common model gpt-4o-mini. OpenAI Chat and Cohere ingress into the Responses-only upstream are not enabled: Bifrost only converts them when the model catalog marks the model Responses-only (plugins/compat/main.go::markForConversion), and selecting a different model (o3-pro) to trigger that path also triggers the compat plugin's default parameter dropping (it removed max_completion_tokens in the preflight), which the benchmark's out-of-the-box rule excludes. Six Bedrock upstream cells are separate rig limitations."
 }
