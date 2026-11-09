@@ -1,0 +1,1139 @@
+{
+  "gateway": "plano",
+  "raw_path": "results/snapshots/result_plano_2026-11-09T02-02-01Z.json",
+  "raw_sha256": "2a0c9a08422b9fc28fd23dd6115f9b40903c907e48d3269425e717acb0f44235",
+  "reviewed_at": "2026-11-09T03:22:25.598157+00:00",
+  "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
+  "mock_sha256": "7150734b700340a9031720299d3bfa50b0a0ac746c87360c623831db48187d54",
+  "bundle_verification": "Both engine and mock checksums passed in worker fanout log",
+  "qualification": {
+    "band_pct": 20.0,
+    "baseline_rps": 94065.0,
+    "baseline_samples": 1,
+    "concurrency": 32,
+    "drift_pct": 14.02753415191623,
+    "observed_absent_detail": null,
+    "observed_absent_reason": null,
+    "observed_rps": 107260.0,
+    "outcome": "pass"
+  },
+  "build": "katanemo/plano:0.4.39@sha256:35a84cb873ee5f16cded33eeda72736f90798962b7489d58650c0db7b546e9ac",
+  "cells": [
+    {
+      "pair": "cohere>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai-responses",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "openai-responses>openai-responses is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "bedrock>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>anthropic",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21162us) came in under the mock's (21686us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "anthropic>anthropic is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "bedrock>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21146us) came in under the mock's (21147us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "openai>openai is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "gemini>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.100ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.100ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.50ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.concurrency": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.p99_us": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "perf.frontier.unbounded.rps": {
+          "reason": "not_measured",
+          "detail": "the rig interrupted the concurrency sweep; partial rungs are retained but establish no completed throughput boundary"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21073us) came in under the mock's (21074us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21168us) came in under the mock's (21727us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "verdict_note": "Pinned 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: hermesllm/src/clients/endpoints.rs accepts Chat, Responses and Messages ingress, with no Gemini, Cohere or Bedrock client API. providers/id.rs::compatible_api_for_client selects native Responses only for Responses ingress to OpenAI, Chat for Messages-to-OpenAI, native Messages for Messages-to-Anthropic, and Converse for all three ingress APIs to amazon_bedrock. Anthropic Chat/Responses ingress and Gemini provider use OpenAI-compatible upstream wire; they are not native Anthropic/Gemini translations. The normal provider mapping is retained rather than substituting a different provider for the OpenAI column. Seven supported pairs are enabled, including the documented Bedrock upstream.",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    }
+  ],
+  "publication_status": "publish_valid_metrics_with_scoped_absence_notes",
+  "invariants": "7 findings in frontier re-derivation check; checker does not account for sweep_max_proxy_interrupted",
+  "attribution": {
+    "gateway_failed_cells": 0,
+    "unsupported_cells": 29,
+    "served_cells": 7,
+    "rig_interrupted_sweeps": 7,
+    "source_policy": "engine/src/metric.rs:310,354-357 intentionally withholds every frontier on interrupted sweeps; engine/src/search.rs:445-449 marks None probes as interrupted; engine/src/run.rs:566-603 defines None probe cases.",
+    "observed": "All seven raw cells have sweep_max_proxy_interrupted=true. Final retained clean rungs are at concurrency 128 or 256, with multi-second tails. Full run log contains no explicit spawn, rig-refused or stats parse diagnostic.",
+    "inference": "An empty measured window is the remaining silent None branch (ok=0 and fail=0). Treat missing throughput boundaries as a rig-window limitation; no gateway ceiling is established. The interrupted window raw stats and responses are not retained, so this is a source-based inference, not a directly observed cause.",
+    "unresolved": "Need explicit publication decision after source-based interruption review; do not recompute a frontier from partial rungs or rerun."
+  },
+  "publication_resolution": "Owner requested metric-scoped explanations instead of withholding the whole run. Raw observations, values, failures and original absence classifications are unchanged; only public absence details clarify evidence limits."
+}

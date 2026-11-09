@@ -1,0 +1,39 @@
+{
+  "kind": "local streaming correctness preflight; not performance measurements",
+  "image": "kong:3.9.4@sha256:2d572848be6fc58b73ba75edc84f028837bb7be998b3a8b8117fdb44a6892220",
+  "streams": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "content_frames": 64,
+      "done_marker": true,
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"max_tokens\":16,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\"}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "content_frames": 64,
+      "done_marker": true,
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"max_tokens\":16,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\"}"
+        }
+      }
+    }
+  ],
+  "checked_at": "2026-11-08T23:42:46.599318+00:00",
+  "definition_sha256": "eab3db1e2bf342000b45f4b49351a0636bc04aabaa7a94a6d39bd542560ad650",
+  "mock_binary_sha256": "9d390ee6612a2fbb66208f074fc6b6cd10d2ac2dc547fd1230164579c8eeb7e1"
+}

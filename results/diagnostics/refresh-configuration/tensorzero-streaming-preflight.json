@@ -1,0 +1,39 @@
+{
+  "kind": "local streaming correctness preflight; not performance measurements",
+  "image": "tensorzero/gateway:2026.6.0@sha256:9133135ccdaa23c0fffc2965f20b2a89b077ea3ad9a86a6f15b2a641bff67c89",
+  "streams": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "content_frames": 64,
+      "done_marker": true,
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\",\"max_completion_tokens\":16,\"stream\":true,\"stream_options\":{\"include_usage\":true}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "content_frames": 64,
+      "done_marker": true,
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"max_tokens\":16,\"stream\":true}"
+        }
+      }
+    }
+  ],
+  "checked_at": "2026-11-08T23:42:27.961402+00:00",
+  "definition_sha256": "235b6506aa3b789d4b952c3a4c716de0d8b5eff0e4f61517163a3c188f1ca0a3",
+  "mock_binary_sha256": "9d390ee6612a2fbb66208f074fc6b6cd10d2ac2dc547fd1230164579c8eeb7e1"
+}

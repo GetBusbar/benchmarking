@@ -20,9 +20,8 @@
 # upstream cells can only be recorded untestable. Plano's model_providers take base_url, so the mock
 # stands in for every provider and the measured number is Plano's own cost.
 #
-# What the prefix does NOT do is translate. Plano routes to the right upstream cluster and forwards
-# the request in the dialect it arrived in - see matrix_note in definition.json for the recorded
-# probe. Only the pass-through diagonal is claimed.
+# Provider prefixes select the released adapters. Capability declarations are source-backed in
+# definition.json; correct ingress and upstream wire shapes are checked separately.
 version: v0.3.0
 
 listeners:
@@ -44,5 +43,6 @@ model_providers:
     base_url: 'http://127.0.0.1:{MOCK_PORT}'
     access_key: {GW_AUTH}
 
-tracing:
-  random_sampling: 0
+  - model: amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0
+    base_url: 'http://127.0.0.1:{MOCK_PORT}'
+    access_key: {GW_AUTH}

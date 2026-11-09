@@ -1,0 +1,265 @@
+{
+  "image": "maximhq/bifrost:v2.5.0@sha256:445bc49544bc64971b63581a93c6ca5716a03ccf27a58ced4c285cbafc133e78",
+  "checked_at": "2026-11-09T01:26:44.087378+00:00",
+  "purpose": "Diagnostic of declared conversion capability; no performance measurement or production configuration change",
+  "configuration": {
+    "governance": {
+      "virtual_keys": [
+        {
+          "id": "bench",
+          "name": "benchmark",
+          "value": "sk-bf-benchmark-dummy",
+          "is_active": true,
+          "allow_all_providers": true
+        }
+      ]
+    },
+    "providers": {
+      "anthropic": {
+        "keys": [
+          {
+            "value": "sk-dummy",
+            "models": [
+              "claude-3-5-sonnet-20241022"
+            ],
+            "weight": 1
+          }
+        ],
+        "network_config": {
+          "allow_private_network": true,
+          "base_url": "http://host.docker.internal:19821"
+        }
+      },
+      "gemini": {
+        "keys": [
+          {
+            "value": "sk-dummy",
+            "models": [
+              "gemini-1.5-pro"
+            ],
+            "weight": 1
+          }
+        ],
+        "network_config": {
+          "allow_private_network": true,
+          "base_url": "http://host.docker.internal:19821"
+        }
+      },
+      "cohere": {
+        "keys": [
+          {
+            "value": "sk-dummy",
+            "models": [
+              "command-r-plus"
+            ],
+            "weight": 1
+          }
+        ],
+        "network_config": {
+          "allow_private_network": true,
+          "base_url": "http://host.docker.internal:19821"
+        }
+      },
+      "bench-chat": {
+        "keys": [
+          {
+            "value": "sk-dummy",
+            "models": [
+              "gpt-4o-mini"
+            ],
+            "weight": 1
+          }
+        ],
+        "network_config": {
+          "allow_private_network": true,
+          "base_url": "http://host.docker.internal:19821"
+        },
+        "custom_provider_config": {
+          "base_provider_type": "openai",
+          "allowed_requests": {
+            "list_models": true,
+            "chat_completion": true,
+            "chat_completion_stream": true
+          }
+        }
+      },
+      "bench-responses": {
+        "keys": [
+          {
+            "value": "sk-dummy",
+            "models": [
+              "gpt-4o-mini",
+              "o3-pro"
+            ],
+            "weight": 1
+          }
+        ],
+        "network_config": {
+          "allow_private_network": true,
+          "base_url": "http://host.docker.internal:19821"
+        },
+        "custom_provider_config": {
+          "base_provider_type": "openai",
+          "allowed_requests": {
+            "list_models": true,
+            "responses": true,
+            "responses_stream": true
+          }
+        }
+      },
+      "openai": {
+        "keys": [
+          {
+            "value": "dummy",
+            "models": [
+              "o3-pro"
+            ],
+            "weight": 1
+          }
+        ],
+        "network_config": {
+          "allow_private_network": true,
+          "base_url": "http://host.docker.internal:19821"
+        }
+      }
+    },
+    "client": {
+      "compat": {
+        "convert_chat_to_responses": true
+      }
+    }
+  },
+  "responses": [
+    {
+      "ingress": "openai",
+      "model": "bench-responses/gpt-4o-mini",
+      "request_body": {
+        "model": "bench-responses/gpt-4o-mini",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 64
+      },
+      "status": 400,
+      "body": "{\"is_bifrost_error\":false,\"error\":{\"code\":\"unsupported_operation\",\"message\":\"chat_completion is not supported by bench-responses provider\"},\"extra_fields\":{\"routing_info\":{\"provider\":\"bench-responses\",\"model\":\"gpt-4o-mini\",\"requested_provider\":\"bench-responses\",\"requested_model\":\"gpt-4o-mini\"},\"provider\":\"bench-responses\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"request_type\":\"chat_completion\"}}\n",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "cohere",
+      "model": "bench-responses/gpt-4o-mini",
+      "request_body": {
+        "model": "bench-responses/gpt-4o-mini",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 64
+      },
+      "status": 400,
+      "body": "{\"message\":\"chat_completion is not supported by bench-responses provider\"}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai",
+      "model": "bench-responses/o3-pro",
+      "request_body": {
+        "model": "bench-responses/o3-pro",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 64
+      },
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"logprobs\":null,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1,\"model\":\"mock\",\"object\":\"chat.completion\",\"system_fingerprint\":\"\",\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0},\"completion_tokens\":2,\"completion_tokens_details\":{},\"total_tokens\":12},\"extra_fields\":{\"request_type\":\"chat_completion\",\"routing_info\":{\"provider\":\"bench-responses\",\"model\":\"o3-pro\",\"requested_provider\":\"bench-responses\",\"requested_model\":\"o3-pro\"},\"provider\":\"bench-responses\",\"original_model_requested\":\"o3-pro\",\"resolved_model_used\":\"o3-pro\",\"latency\":0,\"upstream_latency\":0,\"chunk_index\":0,\"converted_request_type\":\"responses\",\"dropped_compat_plugin_params\":[\"max_completion_tokens\"]}}\n",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"o3-pro\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "model": "bench-responses/o3-pro",
+      "request_body": {
+        "model": "bench-responses/o3-pro",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 64
+      },
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2},\"cached_tokens\":0}}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"o3-pro\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "model": "openai/o3-pro",
+      "request_body": {
+        "model": "openai/o3-pro",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 64
+      },
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"logprobs\":null,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"created\":1,\"model\":\"mock\",\"object\":\"chat.completion\",\"system_fingerprint\":\"\",\"usage\":{\"prompt_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0},\"completion_tokens\":2,\"completion_tokens_details\":{},\"total_tokens\":12},\"extra_fields\":{\"request_type\":\"chat_completion\",\"routing_info\":{\"provider\":\"openai\",\"model\":\"o3-pro\",\"requested_provider\":\"openai\",\"requested_model\":\"o3-pro\"},\"provider\":\"openai\",\"original_model_requested\":\"o3-pro\",\"resolved_model_used\":\"o3-pro\",\"latency\":0,\"upstream_latency\":0,\"chunk_index\":0,\"converted_request_type\":\"responses\",\"dropped_compat_plugin_params\":[\"max_completion_tokens\"]}}\n",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"o3-pro\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    },
+    {
+      "ingress": "cohere",
+      "model": "openai/o3-pro",
+      "request_body": {
+        "model": "openai/o3-pro",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "max_tokens": 64
+      },
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"finish_reason\":\"COMPLETE\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]},\"usage\":{\"tokens\":{\"input_tokens\":10,\"output_tokens\":2},\"cached_tokens\":0}}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\":\"o3-pro\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello\"}]}"
+        }
+      }
+    }
+  ],
+  "conclusion": "Two previous grey cells were false absences: the converter is present and works when the Responses upstream is declared with a Responses-only model and its documented conversion switch. Requests retain max_tokens=64. Final config retains only that model/wire declaration; no parameter-dropping or model-catalog overrides."
+}

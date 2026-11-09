@@ -34,6 +34,7 @@
 import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -355,12 +356,46 @@ export function newestSnapshotOnDisk(gwKey, dir = SNAP_DIR) {
    and made C8 read the scoped run's engine while the base run's cells were the ones shown. The SELECTION
    rule is re-derived here independently; the layering itself is the pure, directly-tested snapshots.mjs.
    `runs` lists every snapshot that contributed cells (base first), so C8 can check each one's engine. */
+// Independently apply only hash-scoped publication exclusions to the oracle input.
+// All unaffected cells still use the original raw measurements.
+export function reviewedOracleSnapshot(snapshot, review) {
+  if (!review) return snapshot;
+  if (review.gateway !== snapshot.gateway || !review.reason || !Array.isArray(review.excluded_ingress))
+    throw new Error('Invalid oracle run review');
+  const copy = structuredClone(snapshot);
+  const rows = [copy.matrix?.cells, ...Object.values(copy.matrix?.upstreams || {}).map(u=>u.cells)];
+  for (const row of rows) for (const ingress of review.excluded_ingress) {
+    const cell = row?.[ingress];
+    if (!cell) continue;
+    cell.served = 'untestable'; cell.reason = 'harness_error';
+    cell.probe_note = review.reason; cell.verdict_note = review.reason;
+    cell.perf = null; cell.stream = null; cell.memory = null;
+  }
+  for (const annotation of review.absence_notes || []) {
+    const cell = copy.matrix?.upstreams?.[annotation.egress]?.cells?.[annotation.ingress]
+      || copy.matrix?.cells?.[annotation.ingress];
+    if (!cell || !annotation.detail || !Array.isArray(annotation.paths) || !annotation.paths.length)
+      throw new Error('Invalid oracle absence review');
+    for (const field of annotation.paths) {
+      if (!cell.absences?.[field]) throw new Error(`Oracle review targets no recorded absence: ${field}`);
+      cell.absences[field].detail = annotation.detail;
+    }
+  }
+  return copy;
+}
 export function resolvedSnapshotOnDisk(gwKey, dir = SNAP_DIR) {
   if (!existsSync(dir)) return null;
   const snaps = [];
   for (const f of readdirSync(dir)) {
     if (!f.startsWith(`result_${gwKey}_`) || !f.endsWith(".json")) continue;
-    const snap = readJsonOrNull(join(dir, f));
+    let snap = readJsonOrNull(join(dir, f));
+    if (snap) {
+      const reviews = readJsonOrNull(join(ROOT, "results/run-reviews.json")) || {};
+      const digest = createHash("sha256").update(readFileSync(join(dir, f))).digest("hex");
+      const withdrawn = readJsonOrNull(join(ROOT, "results/withdrawn-runs.json"))?.runs || {};
+      if (withdrawn[digest]) continue;
+      snap = reviewedOracleSnapshot(snap, reviews[digest]);
+    }
     if (!snap) continue;
     const ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
     snaps.push({ snap, file: f, ms: Number.isFinite(ms) ? ms : 0, coords: snapshotCellCoords(snap.matrix) });

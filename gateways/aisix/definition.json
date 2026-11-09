@@ -20,12 +20,16 @@
   "egress": [
     "openai",
     "openai-responses",
-    "anthropic"
+    "anthropic",
+    "gemini",
+    "bedrock"
   ],
   "egress_models": {
     "anthropic": "claude-3-5-sonnet-20241022",
     "openai": "gpt-4o-mini",
-    "openai-responses": "gpt-4o-mini"
+    "openai-responses": "mock-responses",
+    "gemini": "gemini-1.5-pro",
+    "bedrock": "amazon.nova-micro-v1:0"
   },
   "lang": "Rust",
   "launch": {
@@ -56,5 +60,14 @@
   "runtime": {
     "kind": "docker",
     "container": "aisix-bench"
-  }
+  },
+  "matrix": [
+    "101101",
+    "111101",
+    "101101",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned AISIX v1.9.0 source 7e070f0bde3f653c3b197ed18c5b9205b866a4c5: README native adapter families, aisix-proxy/src/lib.rs routes and dispatch.rs::serves_natively_with, provider-vertex/bedrock bridge configuration. OpenAI, Responses and Anthropic ingress translate to Chat Completions, Anthropic, Gemini and Bedrock; only Responses ingress selects the Responses upstream. Separate provider keys use explicit apis:{} for Chat-only routing and the native Responses declaration default for the Responses alias. Thirteen exact pairs passed local recorder checks. Evidence: results/diagnostics/refresh-configuration/aisix-protocol-preflight.json"
 }

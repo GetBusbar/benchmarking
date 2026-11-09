@@ -1,0 +1,72 @@
+{
+  "upstream_chat_response": {
+    "id": "chatcmpl-x",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "mock",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "ok"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 2,
+      "total_tokens": 12
+    }
+  },
+  "intermediate_output_type": "litellm.types.responses.main.GenericResponseOutputItem",
+  "intermediate_output": {
+    "type": "message",
+    "id": "msg_1fce707d-4cf1-4157-8e91-9fe425167019",
+    "status": "completed",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "output_text",
+        "text": "ok",
+        "annotations": []
+      }
+    ],
+    "phase": null
+  },
+  "recognized_as_openai_response_message": false,
+  "recognized_as_dict": false,
+  "actual_anthropic_response": {
+    "id": "chatcmpl-x",
+    "type": "message",
+    "role": "assistant",
+    "model": "mock",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 2
+    },
+    "content": [],
+    "stop_reason": "end_turn",
+    "stop_details": null
+  },
+  "diagnostic_control_only_sdk_type_content": [
+    {
+      "type": "text",
+      "text": "ok"
+    }
+  ],
+  "gateway": "litellm-python",
+  "release": "1.108.3",
+  "image": "ghcr.io/berriai/litellm:v1.108.3@sha256:e2bce769eb29b100d53ce90cbf2d6bba00dce82cb894c79d092ef6377523d7e5",
+  "source_commit": "b7d579fab2818968322ef96e5b8e98dc8178fafc",
+  "checked_at": "2026-11-09T01:27:42.229726+00:00",
+  "reproduction_python": "import json\nfrom litellm.responses.litellm_completion_transformation.transformation import LiteLLMCompletionResponsesConfig\nfrom litellm.llms.anthropic.pass_through.responses_adapters.transformation import LiteLLMAnthropicToResponsesAPIAdapter\nfrom openai.types.responses import ResponseOutputMessage\nchat = {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"mock\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\nr = LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response(request_input=\"hello\",responses_api_request={\"max_output_tokens\":64},chat_completion_response=chat)\na = LiteLLMAnthropicToResponsesAPIAdapter()\nbroken = a.translate_response(r)\nitem = r.output[0]\nevidence = {\"upstream_chat_response\":chat,\"intermediate_output_type\":type(item).__module__+\".\"+type(item).__name__,\"intermediate_output\":item.model_dump(),\"recognized_as_openai_response_message\":isinstance(item,ResponseOutputMessage),\"recognized_as_dict\":isinstance(item,dict),\"actual_anthropic_response\":broken}\n# Diagnostic control only: same content represented as the SDK type accepted by the adapter.\nr.output = [ResponseOutputMessage(**item.model_dump())]\nevidence[\"diagnostic_control_only_sdk_type_content\"] = a.translate_response(r)[\"content\"]\nprint(json.dumps(evidence,indent=2))\n",
+  "execution": "Official pinned image, --network none; no gateway server or benchmark mock process involved.",
+  "conclusion": "Released type mismatch: Chat-to-Responses builds GenericResponseOutputItem; Responses-to-Anthropic translator handles SDK ResponseOutputMessage or dict and silently skips GenericResponseOutputItem. Nonempty content is lost. Diagnostic type normalization is proof only, not a gateway patch or benchmark workaround.",
+  "source_urls": [
+    "https://github.com/BerriAI/litellm/blob/b7d579fab2818968322ef96e5b8e98dc8178fafc/litellm/responses/litellm_completion_transformation/transformation.py#L3233-L3262",
+    "https://github.com/BerriAI/litellm/blob/b7d579fab2818968322ef96e5b8e98dc8178fafc/litellm/llms/anthropic/pass_through/responses_adapters/transformation.py#L717-L814"
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "checked_at": "2026-11-09T00:04:38.093432+00:00",
+  "image": "higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:2.2.5@sha256:9846006cb3cf2dafa942deab0e1d004ed30e219fbc9580438f9e3c58e7096422",
+  "kind": "local correctness preflight; not performance measurements",
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\",\"logprobs\":null}],\"created\":1794182678,\"model\":\"claude-3-5-sonnet-20241022\",\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"model\":\"mock\",\"output\":[{\"type\":\"message\",\"id\":\"msg_x\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12}}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"model\": \"claude-3-5-sonnet-20241022\", \"input\": \"hello\"}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\": \"claude-3-5-sonnet-20241022\", \"messages\": [{\"role\": \"user\", \"content\": \"hello\"}], \"max_tokens\": 16}"
+        }
+      }
+    },
+    {
+      "ingress": "gemini",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 200,
+      "body": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": false,
+          "last_path": "/v1beta/models/gpt-4o-mini-gemini:generateContent",
+          "last_snippet": "{\"model\": \"claude-3-5-sonnet-20241022\", \"messages\": [{\"role\": \"user\", \"content\": \"hello\"}], \"max_tokens\": 16}"
+        }
+      }
+    }
+  ],
+  "source_commit": "4deae1dd3b4cb2707273748985e55bef28e747d1",
+  "plugin": "Bundled ai-proxy/2.0.3/plugin.wasm",
+  "scope": "Exploratory Claude adapter check, not final configuration or readiness.",
+  "findings": [
+    "Original benchmark configuration contains no AI Proxy plugin and measures passthrough only.",
+    "File-based API server names ingress from mounted filename bench.yaml; matchRules must refer to bench, not metadata bench-diagonal.",
+    "After enabling bundled plugin with matching ingress, OpenAI Chat translates to Anthropic; Responses and Gemini requests still pass through in their original dialect and must not be counted as Anthropic egress."
+  ],
+  "configuration": {
+    "plugin.yaml": "apiVersion: extensions.higress.io/v1alpha1\nkind: WasmPlugin\nmetadata:\n  name: bench-ai-proxy\n  namespace: higress-system\n  creationTimestamp: \"2000-01-01T00:00:00Z\"\n  resourceVersion: \"1\"\nspec:\n  defaultConfigDisable: true\n  matchRules:\n  - ingress: [bench]\n    config:\n      provider:\n        type: claude\n        apiTokens: [dummy]\n        modelMapping:\n          '*': claude-3-5-sonnet-20241022\n  url: file:///usr/share/nginx/html/plugins/ai-proxy/2.0.3/plugin.wasm\n",
+    "ingress.yaml": "# One Ingress, six prefix paths, one destination: each path is a wire dialect's own canonical\n# route (the same paths engine ingress.rs probes), so each diagonal cell is verbatim passthrough -\n# the request leaves in the dialect it arrived in, and the mock's shape recording can tell. The\n# gemini and bedrock paths embed their cell's model, which the manifest declares as constants and\n# mirrors into cell_paths so the probe and this route agree by construction, not by copy-paste.\n# Shape mirrors the image's own all-in-one/config/ingresses/*.yaml (labels, timestamps and the\n# resource-definer marker included - the file-based apiserver serves these as k8s objects).\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: bench-diagonal\n  namespace: higress-system\n  creationTimestamp: \"2000-01-01T00:00:00Z\"\n  resourceVersion: \"1\"\n  labels:\n    higress.io/resource-definer: higress\n  annotations:\n    higress.io/destination: mock.static\nspec:\n  rules:\n    - http:\n        paths:\n        - backend:\n            resource:\n              apiGroup: networking.higress.io\n              kind: McpBridge\n              name: default\n          path: /v1/chat/completions\n          pathType: Prefix\n        - backend:\n            resource:\n              apiGroup: networking.higress.io\n              kind: McpBridge\n              name: default\n          path: /v1/responses\n          pathType: Prefix\n        - backend:\n            resource:\n              apiGroup: networking.higress.io\n              kind: McpBridge\n              name: default\n          path: /v1/messages\n          pathType: Prefix\n        - backend:\n            resource:\n              apiGroup: networking.higress.io\n              kind: McpBridge\n              name: default\n          path: /v2/chat\n          pathType: Prefix\n        - backend:\n            resource:\n              apiGroup: networking.higress.io\n              kind: McpBridge\n              name: default\n          path: \"/v1beta/models/gpt-4o-mini-gemini:generateContent\"\n          pathType: Prefix\n        - backend:\n            resource:\n              apiGroup: networking.higress.io\n              kind: McpBridge\n              name: default\n          path: \"/model/anthropic.claude-3-sonnet-20240229-v1:0/converse\"\n          pathType: Prefix\n",
+    "bridge.yaml": "# The upstream registry this run drives: the harness's mock, on the host loopback. This file\n# replaces the image's own default McpBridge (whose only registry is the console at 8001); the\n# all-in-one bootstrap copies its defaults into /data with cp -n, so a file that already exists at\n# this path is left alone and this one wins. 127.0.0.1 reaches the mock because the harness\n# launches every container with host networking - the same fact apisix's override.endpoint and\n# kong's upstream_url rely on. Shape mirrors the image's own all-in-one/config/mcpbridges/default.yaml.\napiVersion: networking.higress.io/v1\nkind: McpBridge\nmetadata:\n  name: default\n  namespace: higress-system\n  creationTimestamp: \"2000-01-01T00:00:00Z\"\n  resourceVersion: \"1\"\nspec:\n  registries:\n  - domain: \"192.168.5.2:18000\"\n    name: mock\n    port: 18000\n    type: static\n"
+  }
+}

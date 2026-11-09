@@ -19,3 +19,27 @@ llm:
       model: anthropic.claude-3-sonnet-20240229-v1:0
       awsRegion: us-east-1
       baseUrl: "http://127.0.0.1:{MOCK_PORT}/bedrock"
+  - name: gemini-1.5-pro
+    provider: gemini
+    params:
+      model: gemini-1.5-pro
+      apiKey: dummy
+      baseUrl: http://127.0.0.1:{MOCK_PORT}
+  - name: bench-chat
+    provider:
+      custom:
+        formats:
+        - type: completions
+    params:
+      model: gpt-4o-mini
+      apiKey: dummy
+      baseUrl: http://127.0.0.1:{MOCK_PORT}/v1
+  - name: bench-responses
+    provider:
+      custom:
+        formats:
+        - type: responses
+    params:
+      model: gpt-4o-mini
+      apiKey: dummy
+      baseUrl: http://127.0.0.1:{MOCK_PORT}/v1

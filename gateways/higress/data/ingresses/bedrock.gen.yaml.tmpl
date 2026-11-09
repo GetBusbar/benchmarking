@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bedrock
+  namespace: higress-system
+  annotations:
+    higress.io/destination: mock.static
+spec:
+  rules:
+  - host: bedrock.bench
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          resource:
+            apiGroup: networking.higress.io
+            kind: McpBridge
+            name: default

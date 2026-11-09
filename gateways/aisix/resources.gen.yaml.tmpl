@@ -3,6 +3,7 @@ provider_keys:
   - display_name: mock-openai
     provider: openai
     adapter: openai
+    apis: {{}}
     api_base: "http://127.0.0.1:{MOCK_PORT}/v1"
     api_key: "sk-mock"
   - display_name: mock-anthropic
@@ -10,15 +11,42 @@ provider_keys:
     adapter: anthropic
     api_base: "http://127.0.0.1:{MOCK_PORT}"
     api_key: "sk-mock"
+  - display_name: mock-vertex
+    provider: google
+    adapter: vertex
+    api_base: "http://127.0.0.1:{MOCK_PORT}"
+    api_key: '{{"access_token":"dummy","project":"mock","region":"us-central1"}}'
+  - display_name: mock-bedrock
+    provider: bedrock
+    adapter: bedrock
+    api_base: "http://127.0.0.1:{MOCK_PORT}"
+    api_key: '{{"access_key_id":"AKIAMOCKACCESSKEY","secret_access_key":"mock-secret","region":"us-east-1"}}'
+  - display_name: mock-responses
+    provider: openai
+    adapter: openai
+    api_base: "http://127.0.0.1:{MOCK_PORT}/v1"
+    api_key: "sk-mock"
 models:
   - display_name: {GW_MODEL_OPENAI}
     provider: openai
-    model_name: gpt-4o-mini
+    model_name: {GW_MODEL_OPENAI}
     provider_key: mock-openai
   - display_name: {GW_MODEL_ANTHROPIC}
     provider: anthropic
-    model_name: claude-3-5-sonnet-20241022
+    model_name: {GW_MODEL_ANTHROPIC}
     provider_key: mock-anthropic
+  - display_name: gemini-1.5-pro
+    provider: google
+    model_name: gemini-1.5-pro
+    provider_key: mock-vertex
+  - display_name: amazon.nova-micro-v1:0
+    provider: bedrock
+    model_name: amazon.nova-micro-v1:0
+    provider_key: mock-bedrock
+  - display_name: mock-responses
+    provider: openai
+    model_name: {GW_MODEL_OPENAI}
+    provider_key: mock-responses
 api_keys:
   - display_name: bench
     key_env: BENCH_AISIX_KEY

@@ -1,0 +1,250 @@
+{
+  "fe194b1716c365f8f2a85363caa026398c368fd35dc78c3c74e03e75d601302b": {
+    "gateway": "one-api",
+    "excluded_ingress": [],
+    "reason": "Publish valid measurements and clarify only affected recorded absences; causes not established by retained evidence remain unresolved.",
+    "reviewed_at": "2026-11-09T03:56:22.951948+00:00",
+    "evidence": "https://onthebench.ai/api/v1/reviews/fe194b1716c365f8-one-api-review.json",
+    "evidence_file": "field-2026-11-08/one-api-result-review.json",
+    "absence_notes": [
+      {
+        "ingress": "openai",
+        "egress": "openai",
+        "paths": [
+          "perf.cost_core_utilisation",
+          "perf.cost_majflt",
+          "perf.cost_nonvol_ctxt_per_request",
+          "perf.cost_threads",
+          "perf.cost_window_conc",
+          "perf.cost_window_ok",
+          "perf.cost_window_rps",
+          "perf.cpu_us_per_request",
+          "perf.rps_per_cpu_second"
+        ],
+        "detail": "the c=8 cost window had 2 failure(s) alongside 198 success(es); CPU divided by only the successes would describe the failures, not the work. The individual failed responses were not retained, so their gateway-versus-rig cause is unresolved. This omission affects this cost window only; other measured values remain published."
+      },
+      {
+        "ingress": "openai",
+        "egress": "anthropic",
+        "paths": [
+          "perf.cost_core_utilisation",
+          "perf.cost_majflt",
+          "perf.cost_nonvol_ctxt_per_request",
+          "perf.cost_threads",
+          "perf.cost_window_conc",
+          "perf.cost_window_ok",
+          "perf.cost_window_rps",
+          "perf.cpu_us_per_request",
+          "perf.rps_per_cpu_second"
+        ],
+        "detail": "the c=8 cost window had 1 failure(s) alongside 205 success(es); CPU divided by only the successes would describe the failures, not the work. The individual failed responses were not retained, so their gateway-versus-rig cause is unresolved. This omission affects this cost window only; other measured values remain published."
+      }
+    ]
+  },
+  "2a0c9a08422b9fc28fd23dd6115f9b40903c907e48d3269425e717acb0f44235": {
+    "gateway": "plano",
+    "excluded_ingress": [],
+    "reason": "Publish valid measurements and clarify only affected recorded absences; causes not established by retained evidence remain unresolved.",
+    "reviewed_at": "2026-11-09T03:56:22.961320+00:00",
+    "evidence": "https://onthebench.ai/api/v1/reviews/2a0c9a08422b9fc2-plano-review.json",
+    "evidence_file": "field-2026-11-08/plano-result-review.json",
+    "absence_notes": [
+      {
+        "ingress": "openai-responses",
+        "egress": "openai-responses",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      },
+      {
+        "ingress": "openai",
+        "egress": "bedrock",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      },
+      {
+        "ingress": "openai-responses",
+        "egress": "bedrock",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      },
+      {
+        "ingress": "anthropic",
+        "egress": "bedrock",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      },
+      {
+        "ingress": "anthropic",
+        "egress": "anthropic",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      },
+      {
+        "ingress": "openai",
+        "egress": "openai",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      },
+      {
+        "ingress": "anthropic",
+        "egress": "openai",
+        "paths": [
+          "perf.frontier.100ms.concurrency",
+          "perf.frontier.100ms.p99_us",
+          "perf.frontier.100ms.rps",
+          "perf.frontier.10ms.concurrency",
+          "perf.frontier.10ms.p99_us",
+          "perf.frontier.10ms.rps",
+          "perf.frontier.1ms.concurrency",
+          "perf.frontier.1ms.p99_us",
+          "perf.frontier.1ms.rps",
+          "perf.frontier.50ms.concurrency",
+          "perf.frontier.50ms.p99_us",
+          "perf.frontier.50ms.rps",
+          "perf.frontier.5ms.concurrency",
+          "perf.frontier.5ms.p99_us",
+          "perf.frontier.5ms.rps",
+          "perf.frontier.unbounded.concurrency",
+          "perf.frontier.unbounded.p99_us",
+          "perf.frontier.unbounded.rps"
+        ],
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published."
+      }
+    ]
+  },
+  "225883992e291ef0d0f55bff6e17bae73d884df0df917299f70062ac8de34bd9": {
+    "gateway": "helicone",
+    "excluded_ingress": [],
+    "reason": "Publish valid measurements and clarify only affected recorded absences; causes not established by retained evidence remain unresolved.",
+    "reviewed_at": "2026-11-09T03:56:22.967518+00:00",
+    "evidence": "https://onthebench.ai/api/v1/reviews/225883992e291ef0-helicone-review.json",
+    "evidence_file": "field-2026-11-08/helicone-result-review.json",
+    "absence_notes": [
+      {
+        "ingress": "openai",
+        "egress": "openai",
+        "paths": [
+          "stream.streams_sustained",
+          "stream.streams_sustained_fps",
+          "stream.streams_sustained_headroom",
+          "stream.streams_sustained_mock_ceiling"
+        ],
+        "detail": "Sustained-stream reconfirmation failed below an earlier clean rung. The instrument labeled this harness_error; retained rungs contain HTTP-status failures but not their individual status codes or response bodies, so a rig-versus-gateway cause is unresolved. No sustained-stream ceiling is published. Other valid measurements remain available."
+      }
+    ]
+  }
+}

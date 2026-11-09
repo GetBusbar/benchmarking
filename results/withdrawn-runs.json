@@ -1,0 +1,41 @@
+{
+  "withdrawn_at": "2026-11-09T03:25:47.166172+00:00",
+  "runs": {
+    "009d8f059eec771b295e9a09029c3d299282c0eafe88315849db78425ba0ebd4": {
+      "gateway": "bifrost",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "29150e5095a0c34ff9c2592b9afd53334a5cd6da1f6d7eb7016e36dd59cff601": {
+      "gateway": "litellm-rust",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "e0e0fc88b37bd223122344fc79d16eb8ece9fe0d86859867df9385b6e81e767a": {
+      "gateway": "helicone",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "32723db35418cccd1e7f1e17305cd673fefeb613cd3e009470a24a224fddbadf": {
+      "gateway": "litellm-rust",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "d2cb4d8b02d078e4149b495e878a3db789ab75be0172cfce761d998dece42d3d": {
+      "gateway": "bifrost",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "09b09d505d98ed5739651c094e505e7c62cfc5e171a156bbc2e85061a1f3ace4": {
+      "gateway": "portkey",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "f763065c91d7f976869b2a4aca8a20c1f8f0770fabf299a0991250db8869101d": {
+      "gateway": "one-api",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "d2a79d4d80511ad60a1010c92dbeb1652c76d2202ab8a6972584b9c02d37e837": {
+      "gateway": "tensorzero",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    },
+    "ca81771742261dc1af26cb5a3dba33e76f8769e3ddacbd7f107be190fc3751a0": {
+      "gateway": "kong",
+      "reason": "Discarded refresh: configuration and protocol-validation defects; withdrawn at operator request."
+    }
+  }
+}

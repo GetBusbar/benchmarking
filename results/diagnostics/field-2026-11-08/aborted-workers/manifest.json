@@ -1,0 +1,70 @@
+{
+  "captured_at": "2026-11-09T04:06:48.793350+00:00",
+  "reason": "Owner requested engine corrections and immediate decision on rerun validity; preserve diagnostic evidence before stopping the current instrument.",
+  "workers": [
+    {
+      "gateway": "agentgateway",
+      "ip": "65.2.141.88",
+      "archive_rc": 0,
+      "bytes": 121867,
+      "sha256": "39aa4af327dcff28cdced384a75aeb34b56a79c395327187ede0a62e66349a0a",
+      "health_rc": 0
+    },
+    {
+      "gateway": "aisix",
+      "ip": "13.206.124.182",
+      "archive_rc": 0,
+      "bytes": 134486,
+      "sha256": "20f8701c81328bd8db459434944a6fd73ffff3b1f3d2fd6ad6ebc66d272c3d09",
+      "health_rc": 0
+    },
+    {
+      "gateway": "bifrost",
+      "ip": "65.2.148.56",
+      "archive_rc": 0,
+      "bytes": 207817,
+      "sha256": "9ab13ab41e8230876e4ae86e1524ce62402bf098879aad4b1ac82f4fddb84896",
+      "health_rc": 0
+    },
+    {
+      "gateway": "busbar",
+      "ip": "13.127.144.166",
+      "archive_rc": 0,
+      "bytes": 125371,
+      "sha256": "f74042db0325181cabea8711123d68423b73fe5b7ade137a77cf4c6b7257e5fe",
+      "health_rc": 0
+    },
+    {
+      "gateway": "gomodel",
+      "ip": "13.233.141.44",
+      "archive_rc": 0,
+      "bytes": 192658,
+      "sha256": "a7c9eeff43dd8e40953470f724069625e16b6e8ffc910861a4c699491721e89f",
+      "health_rc": 0
+    },
+    {
+      "gateway": "higress",
+      "ip": "3.111.157.214",
+      "archive_rc": 0,
+      "bytes": 102949,
+      "sha256": "3aeb9c29639523ad013f00e2940b70a48b43e2d1dbb1dbeab01375c714341578",
+      "health_rc": 0
+    },
+    {
+      "gateway": "litellm-python",
+      "ip": "52.66.136.157",
+      "archive_rc": 0,
+      "bytes": 113564,
+      "sha256": "43e0d9b8ed046905ccee01bba7c55b97ccba7e0e19aabe92aac929dc9306d419",
+      "health_rc": 0
+    },
+    {
+      "gateway": "portkey",
+      "ip": "52.66.201.6",
+      "archive_rc": 0,
+      "bytes": 240934,
+      "sha256": "c717d5b59f5e2986091616d7d3db3a47eff2a802afe8232b5f3650e6016014f7",
+      "health_rc": 0
+    }
+  ]
+}

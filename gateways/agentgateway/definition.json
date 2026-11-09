@@ -13,13 +13,15 @@
     "openai",
     "openai-responses",
     "anthropic",
+    "gemini",
     "bedrock"
   ],
   "egress_models": {
     "anthropic": "claude-3-5-sonnet-20241022",
     "bedrock": "anthropic.claude-3-sonnet-20240229-v1:0",
-    "openai": "gpt-4o-mini",
-    "openai-responses": "gpt-4o-mini"
+    "openai": "bench-chat",
+    "openai-responses": "bench-responses",
+    "gemini": "gemini-1.5-pro"
   },
   "lang": "Rust",
   "launch": {
@@ -45,5 +47,14 @@
   "runtime": {
     "container": "agentgateway-bench",
     "kind": "docker"
-  }
+  },
+  "matrix": [
+    "101101",
+    "110001",
+    "111001",
+    "000100",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned v1.7.0 image and source 26f5aebe99a36a037fe54f8080a608aca5547e15: CHAT_TRANSLATIONS in crates/agentgateway/src/llm/mod.rs defines supported conversions. Separate custom providers constrain Chat versus Responses wire. Gemini native and Chat-to-Gemini are supported; Messages/Responses use Google OpenAI compatibility instead of native Gemini and are not counted as Gemini wire. Cohere preset similarly uses OpenAI compatibility, not Cohere native chat. No native Cohere or Bedrock ingress conversion is registered. Local recorder and response checks establish 12 pairs. Responses mock token-details correction is required for Messages-to-Responses. Evidence: results/diagnostics/refresh-configuration/agentgateway-protocol-preflight.json"
 }

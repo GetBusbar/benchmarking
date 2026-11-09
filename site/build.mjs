@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // One checked input bundle, one deployable directory. Never upload source/tests.
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, copyFileSync, existsSync, rmSync } from "node:fs";
-import { resolve, join, dirname, basename } from "node:path";
+import { resolve, join, dirname, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -62,7 +62,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   // denies public /_publication requests.
   write("/_publication/template.html", template);
   json("/ui-shell.json", shellViews(template));
-  const projector = `${PROJECTOR}-${hash(['history.mjs','seal-matrix.mjs','seal.mjs','public-data.mjs','states.mjs'].map(file=>readFileSync(join(root,'site',file),'utf8')).join('\n'))}`;
+  const projector = `${PROJECTOR}-${hash(['history.mjs','seal-matrix.mjs','seal.mjs','public-data.mjs','states.mjs','run-reviews.mjs'].map(file=>readFileSync(join(root,'site',file),'utf8')).join('\n') + (existsSync(join(root,'results/run-reviews.json')) ? readFileSync(join(root,'results/run-reviews.json'),'utf8') : ''))}`;
   const deferredHistoryPages = [], placements = new Map();
   // Stream the upload manifest: serializing all retained evidence at once doubles
   // its memory cost and can kill the CI runner before publication.
@@ -77,15 +77,30 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     ...Object.values(g.matrix?.upstreams || {}).flatMap(u => Object.values(u.cells || {}).map(c => c.__run?.file))]).filter(Boolean));
   const families = JSON.parse(readFileSync(join(root, "site/gateway-families.json"), "utf8"));
   const familyOf = id => Object.entries(families).find(([, aliases]) => aliases.includes(id))?.[0] || id;
+  const reviewPath = join(root, 'results/run-reviews.json');
+  const runReviews = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, 'utf8')) : {};
+  json('/api/v1/run-reviews.json', runReviews);
+  for (const review of Object.values(runReviews)) {
+    const name = basename(new URL(review.evidence).pathname);
+    const diagnosticRoot = resolve(root, 'results/diagnostics');
+    const proof = resolve(diagnosticRoot, review.evidence_file || join('refresh-configuration', name));
+    if (!proof.startsWith(diagnosticRoot + sep) || !existsSync(proof))
+      throw new Error(`Missing or invalid review evidence: ${name}`);
+    json(`/api/v1/reviews/${name}`, JSON.parse(readFileSync(proof, 'utf8')));
+  }
+  const withdrawnPath = join(root, 'results/withdrawn-runs.json');
+  const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
+  json('/_publication/withdrawn-runs.json', withdrawn);
   const archives = [], byFile = new Map(), byHash = new Map();
   function archive(file, bytes, current = false) {
     const snapshot = JSON.parse(bytes.toString("utf8"));
     if (!snapshot.gateway || !snapshot.matrix) return;
     if (!/^[a-z0-9][a-z0-9-]*$/.test(snapshot.gateway)) throw new Error(`Unsafe gateway ID in ${file}`);
     const sha256 = hash(bytes), id = `run-${snapshot.gateway}-${sha256}`;
+    if (withdrawn[sha256]) return;
     let item = byHash.get(sha256);
     if (!item) {
-      item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null };
+      item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null, ...(runReviews[sha256] ? { review: runReviews[sha256] } : {}) };
       const compressed = gzipSync(bytes, { level: 9 });
       write(`/api/v1/runs/${id}/raw.json.gz`, compressed);
       retain(`raw/${id}`, compressed.toString("base64"), true);
@@ -94,7 +109,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       page(`/gateways/runs/${id}`, renderArticle(template, {
         path: `/gateways/runs/${id}`, title: `${snapshot.gateway} — ${snapshot.measured_at || "undated run"}`,
         structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${snapshot.gateway} benchmark run`, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
-        body: `<h1>${esc(snapshot.gateway)} benchmark run</h1>${disclosureHtml}<p>Measured ${esc(snapshot.measured_at)}. Recorded build: ${esc(snapshot.build)}.</p><p>Hardware: ${esc(snapshot.hardware)}. Architecture: ${esc(snapshot.arch)}.</p><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p><h2>Recorded metric definitions</h2><dl>${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2><pre>${esc(JSON.stringify(snapshot.rig ?? null, null, 2))}</pre>`,
+        body: `<h1>${esc(snapshot.gateway)} benchmark run</h1>${disclosureHtml}<p>Measured ${esc(snapshot.measured_at)}. Recorded build: ${esc(snapshot.build)}.</p><p>Hardware: ${esc(snapshot.hardware)}. Architecture: ${esc(snapshot.arch)}.</p><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p>${item.review ? `<h2>Publication correction</h2><p>${esc(item.review.reason)}</p><p><a href="${esc(item.review.evidence)}">Validation evidence</a></p>` : ""}<h2>Recorded metric definitions</h2><dl>${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2><pre>${esc(JSON.stringify(snapshot.rig ?? null, null, 2))}</pre>`,
       }));
       item.gateway_family = familyOf(snapshot.gateway);
       item.engine = snapshot.rig?.engine?.commit ?? null;

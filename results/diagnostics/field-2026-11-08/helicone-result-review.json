@@ -1,0 +1,549 @@
+{
+  "gateway": "helicone",
+  "raw_path": "results/snapshots/result_helicone_2026-11-09T02-01-40Z.json",
+  "raw_sha256": "225883992e291ef0d0f55bff6e17bae73d884df0df917299f70062ac8de34bd9",
+  "reviewed_at": "2026-11-09T03:25:47.165665+00:00",
+  "publication_status": "publish_valid_metrics_with_scoped_absence_notes",
+  "qualification": {
+    "band_pct": 20.0,
+    "baseline_rps": 94065.0,
+    "baseline_samples": 1,
+    "concurrency": 32,
+    "drift_pct": 10.846754903524157,
+    "observed_absent_detail": null,
+    "observed_absent_reason": null,
+    "observed_rps": 104268.0,
+    "outcome": "pass"
+  },
+  "invariants": "PASS; invariant result does not resolve the missing stream metric cause",
+  "supported_cells": 5,
+  "unsupported_cells": 31,
+  "attribution": {
+    "affected_metric": "openai>openai sustained streams",
+    "raw_classification": "harness_error",
+    "observed": "Bisection proved c=1036; reconfirmation at c=1024 failed, with retained HTTP-status error counts (3,1,87 in last three c=1024 windows) and host TIME_WAIT around 2048. Instrument withholds the sustained stream metrics.",
+    "source_policy": "engine/src/run.rs:1244-1248 classifies a failed reconfirmation below an earlier clean rung as rig residue.",
+    "unresolved": "The monotonicity-based engine classification does not independently prove a rig cause. Raw status codes/bodies for these failed performance requests are not retained, so gateway-vs-rig source attribution remains unresolved. No gateway failure or successful ceiling is inferred.",
+    "other_omissions": "Bedrock streams lack native mock support; Anthropic memory load oscillated without a plateau; below-resolution and settled-window shape omissions are detailed per metric."
+  },
+  "cells": [
+    {
+      "pair": "cohere>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": null,
+      "reverify_note": "bedrock>bedrock is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "anthropic>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21064us) came in under the mock's (21073us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.streams_sustained": {
+          "reason": "harness_error",
+          "detail": "the bisection proved c=1036, but re-measurement failed at c=1024 - a concurrency THIS CELL had already carried cleanly up to c=1024. A rung cannot fail below one it has already passed because of the gateway, so this is our rig not having drained between windows, and nothing is published about the gateway here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "harness_error",
+          "detail": "the bisection proved c=1036, but re-measurement failed at c=1024 - a concurrency THIS CELL had already carried cleanly up to c=1024. A rung cannot fail below one it has already passed because of the gateway, so this is our rig not having drained between windows, and nothing is published about the gateway here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "harness_error",
+          "detail": "the bisection proved c=1036, but re-measurement failed at c=1024 - a concurrency THIS CELL had already carried cleanly up to c=1024. A rung cannot fail below one it has already passed because of the gateway, so this is our rig not having drained between windows, and nothing is published about the gateway here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "harness_error",
+          "detail": "the bisection proved c=1036, but re-measurement failed at c=1024 - a concurrency THIS CELL had already carried cleanly up to c=1024. A rung cannot fail below one it has already passed because of the gateway, so this is our rig not having drained between windows, and nothing is published about the gateway here"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "openai>openai is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "bedrock>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>anthropic",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21139us) came in under the mock's (21143us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>anthropic",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.time_to_plateau_s": {
+          "reason": "not_measured",
+          "detail": "memory was still oscillating with no net trend - it returns to where it was, which is not a leak when the 300s load window closed, so it has no time-to-plateau; its rate is published beside this"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21067us) came in under the mock's (21069us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21127us) came in under the mock's (21139us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "anthropic>anthropic is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "openai>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "verdict_note": "Pinned v0.2.0-beta.30 source 081f310be779f27122e6038e81e2359c44db4ecb: ai-gateway/src/endpoints defines OpenAI Chat, Anthropic Messages and Bedrock Converse. Google uses v1beta/openai/chat/completions, not native Gemini. router/router_details.rs exposes OpenAI router ingress plus provider-prefixed direct proxy paths. No Responses, native Gemini or Cohere interface is registered; direct proxy does not imply cross-protocol conversion. Five supported exact-wire pairs pass the 36-cell correctness check. Evidence: results/diagnostics/refresh-configuration/helicone-final-config-correctness-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    }
+  ],
+  "publication_resolution": "Owner requested metric-scoped explanations instead of withholding the whole run. Raw observations, values, failures and original absence classifications are unchanged; only public absence details clarify evidence limits."
+}

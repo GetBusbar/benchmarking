@@ -1,0 +1,20 @@
+{
+  "openai": [
+    "Host: openai.bench"
+  ],
+  "openai-responses": [
+    "Host: openai-responses.bench"
+  ],
+  "anthropic": [
+    "Host: anthropic.bench"
+  ],
+  "gemini": [
+    "Host: gemini.bench"
+  ],
+  "cohere": [
+    "Host: cohere.bench"
+  ],
+  "bedrock": [
+    "Host: bedrock.bench"
+  ]
+}

@@ -54,7 +54,7 @@ export function projectMeasurements(gateway, archivesByFile) {
         gateway_id: gateway.key,
         gateway_build: cell.__run?.build ?? matrix.build ?? null,
         run_id: archive?.id ?? null, measured_at: measuredAt,
-        status: { state: cellStatus(cell), raw_state: cell.served ?? null, reason: cell.reason ?? null, detail: cell.probe_note || cell.verdict_note || null, evidence_scope: cell.served === "not_configurable" ? "Historical capability research, not a fresh probe of the tested build. Referenced versions may differ from gateway_build; do not infer current capability." : "Recorded run evidence", probe_http_status: cell.status || null, response_excerpt: cell.body_snippet || null },
+        status: { state: cellStatus(cell), raw_state: cell.publication_review?.original_state ?? cell.served ?? null, reason: cell.reason ?? null, detail: cell.probe_note || cell.verdict_note || null, evidence_scope: cell.publication_review ? "Publication correction; original observation is retained in raw_state and the immutable raw result." : cell.served === "not_configurable" ? "Historical capability research, not a fresh probe of the tested build. Referenced versions may differ from gateway_build; do not infer current capability." : "Recorded run evidence", probe_http_status: cell.status || null, response_excerpt: cell.body_snippet || null },
         test: {
           ingress_protocol: ingress, upstream_protocol: egress,
           hardware: raw?.hardware ?? matrix.hardware ?? null,

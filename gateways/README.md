@@ -49,7 +49,10 @@ commit**. The first two are the project's own artifact; the third makes our buil
 number, so it is the fallback and only three entrants need it.
 
 `egress` lists the upstream dialects this gateway is configured for. It is **not** a capability
-claim: every cell in the grid is probed regardless, and the board publishes what was observed.
+claim. The researched `matrix` declares supported pairings: `1` cells are probed and `0` cells are
+reported unsupported without probing. A supported cell that fails stays a failure, including a
+404 or 501 response. `untestable` identifies rig limitations separately. Without a declared matrix,
+every cell is probed; the response status alone does not establish product support.
 
 ## env
 

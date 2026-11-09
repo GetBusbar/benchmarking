@@ -1,0 +1,39 @@
+{
+  "kind": "local streaming correctness preflight; not performance measurements",
+  "image": "justsong/one-api:v0.6.10@sha256:af6b361630bdf408b86fce7aa8fc131b37ea5177ae866d121ba7c002e773e477",
+  "streams": [
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "status": 200,
+      "content_frames": 64,
+      "done_marker": true,
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"model\": \"gpt-4o-mini\", \"messages\": [{\"role\": \"user\", \"content\": \"hello\"}], \"max_tokens\": 16, \"stream\": true}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "status": 200,
+      "content_frames": 64,
+      "done_marker": true,
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"model\":\"claude-3-5-sonnet-20240620\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"max_tokens\":16,\"stream\":true}"
+        }
+      }
+    }
+  ],
+  "checked_at": "2026-11-08T23:43:04.860359+00:00",
+  "definition_sha256": "b3e32159e692bd2f2f8659c289f52b986d586ace0cf6cdd29a1426584da7bca0",
+  "mock_binary_sha256": "9d390ee6612a2fbb66208f074fc6b6cd10d2ac2dc547fd1230164579c8eeb7e1"
+}
