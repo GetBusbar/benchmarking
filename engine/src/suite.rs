@@ -1652,6 +1652,25 @@ fn parse_proc_sys_u64(text: &str) -> Option<u64> {
     text.trim().parse().ok()
 }
 
+/// The build receipt a source-built gateway's build script left in its directory, verbatim.
+///
+/// `None` when there is none (image gateways, older build scripts). A receipt that exists but
+/// cannot be read or is not JSON is recorded as an explicit `{"error": ...}` object: the finished
+/// measurement must not be discarded over its own provenance, and the gap must not be silent.
+fn built_gateway_provenance(dir: &Path) -> Option<serde_json::Value> {
+    let path = dir.join(".build-provenance.json");
+    let why = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => return Some(v),
+            Err(e) => format!("{} is not valid JSON: {e}", path.display()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => format!("{} could not be read: {e}", path.display()),
+    };
+    eprintln!("suite: gateway build provenance unusable: {why}");
+    Some(serde_json::json!({ "error": why }))
+}
+
 fn flush(
     cfg: &SuiteConfig,
     upstreams: &HashMap<String, Upstream>,
@@ -1681,6 +1700,7 @@ fn flush(
         gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
         schema_version: 1,
+        gateway_provenance: built_gateway_provenance(&cfg.gw_dir),
         definitions: metric_definitions(),
         config: rendered_config(cfg),
         gateway: cfg.manifest.name.clone(),
@@ -3093,5 +3113,45 @@ mod tests {
             mem.absences().contains_key("plateaued"),
             "and the absence must be reachable from the published absences map"
         );
+    }
+
+    // A SOURCE-BUILT GATEWAY'S RECEIPT REACHES THE ARTIFACT VERBATIM; no receipt is no field; a
+    // broken receipt is an explicit error object, never a silently dropped one or a lost run.
+    #[test]
+    fn built_gateway_identity_is_read_from_the_successful_build_receipt() {
+        let dir = tmpdir("build-proof");
+        let path = dir.join(".build-provenance.json");
+        let proof = serde_json::json!({
+            "source_commit": "a".repeat(40),
+            "source_dirty": false,
+            "binary_sha256": "b".repeat(64)
+        });
+        std::fs::write(&path, serde_json::to_vec(&proof).unwrap()).unwrap();
+        assert_eq!(built_gateway_provenance(&dir), Some(proof.clone()));
+        let mut cfg = cfg_for(&dir.join("results"), "127.0.0.1:1".parse().unwrap());
+        cfg.gw_dir = dir.clone();
+        std::fs::create_dir_all(&cfg.results_dir).unwrap();
+        let paths = flush(&cfg, &HashMap::new(), false, None).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.current).unwrap()).unwrap();
+        assert_eq!(snapshot["gateway_provenance"], proof);
+
+        std::fs::write(&path, b"broken json").unwrap();
+        let broken = built_gateway_provenance(&dir).expect("a broken receipt is recorded");
+        assert!(broken["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not valid JSON"));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(built_gateway_provenance(&dir), None);
+        let paths = flush(&cfg, &HashMap::new(), false, None).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.current).unwrap()).unwrap();
+        assert!(
+            snapshot.get("gateway_provenance").is_none(),
+            "no receipt must mean no field, so older readers see the shape they always did"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

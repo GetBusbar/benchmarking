@@ -52,6 +52,13 @@ where
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultSnapshot {
     pub schema_version: u32,
+    /// IDENTITY OF A SOURCE-BUILT GATEWAY BINARY, copied verbatim from the receipt its successful
+    /// build wrote (`<gateway dir>/.build-provenance.json`, e.g. source commit, dirty flag, binary
+    /// sha256). Absent for image gateways and for every older snapshot: nothing is inferred or
+    /// fabricated. A receipt that exists but cannot be read or parsed is recorded as
+    /// `{"error": "..."}` rather than dropped, so the gap is visible in the artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_provenance: Option<serde_json::Value>,
     /// WHAT EACH PUBLISHED METRIC MEANS, keyed by metric, built from the engine's own constants.
     ///
     /// A number a reader cannot check is a number they have to trust, and this project's whole claim is
@@ -1516,6 +1523,7 @@ mod tests {
     fn sample_record() -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
+            gateway_provenance: None,
             definitions: Default::default(),
             gateway: "gw".to_string(),
             build: "gw:1.0.0".to_string(),

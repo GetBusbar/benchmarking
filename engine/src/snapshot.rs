@@ -477,6 +477,7 @@ mod tests {
     ) -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
+            gateway_provenance: None,
             definitions: Default::default(),
             gateway: gateway.to_string(),
             build: String::new(),
