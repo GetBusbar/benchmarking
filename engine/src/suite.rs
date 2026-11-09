@@ -1204,27 +1204,40 @@ pub fn run_suite_with(
 
         // Read before `entry` takes ownership of the key.
         let configurable = cfg.manifest.egress.iter().any(|e| e == &eg);
-        upstreams
-            .entry(eg)
-            // `configurable` is whether this gateway can be POINTED at this upstream at all, which
-            // is exactly what the manifest's `egress` list declares, so it is read from there rather
-            // than hardcoded. It was `true` unconditionally, which made the field a constant: every
-            // egress column claimed to be configured, including ones the manifest never wired, and a
-            // constant that is published as an observation is the shape of a false claim even when
-            // it happens to be right. `served` stays true here because this entry is only created
-            // when a cell for this egress produced a row at all.
-            .or_insert_with(|| Upstream {
-                configurable,
-                served: true,
-                ..Default::default()
-            })
-            .cells
-            .insert(ing, cell);
+        let cell_served = matches!(cell.served, RecServed::Bool(true));
+        record_upstream_cell(&mut upstreams, eg, ing, configurable, cell_served, cell);
     });
 
     // The final write always happens, so a grid with a single egress column is not lost.
     let _ = written;
     flush(cfg, &upstreams, any_served, Some(box_qualify))
+}
+
+/// File one cell under its egress column, creating the column on its first cell.
+///
+/// `configurable` is whether this gateway can be POINTED at this upstream at all, which is exactly
+/// what the manifest's `egress` list declares, so it is read from there rather than hardcoded.
+///
+/// `served` is OBSERVED, not assumed: the column came up if at least one cell was served through
+/// it. It used to be a constant `true` for every column with a row, including columns whose every
+/// cell was untestable, refused or failed - and `lib/promote_guard.py` reads
+/// `upstreams.<egress>.served` as "this matrix served something", so the constant made a column
+/// that served nothing look served.
+fn record_upstream_cell(
+    upstreams: &mut HashMap<String, Upstream>,
+    egress: String,
+    ingress: String,
+    configurable: bool,
+    cell_served: bool,
+    cell: Cell,
+) {
+    let upstream = upstreams.entry(egress).or_insert_with(|| Upstream {
+        configurable,
+        served: false,
+        ..Default::default()
+    });
+    upstream.served |= cell_served;
+    upstream.cells.insert(ingress, cell);
 }
 
 /// A REFUTED RE-VERIFICATION WITHHOLDS THE NUMBERS, IT DOES NOT MERELY ANNOTATE THEM.
@@ -2114,7 +2127,53 @@ mod tests {
         let cell = up.cells.get("openai").expect("the cell row exists");
         assert!(!matches!(cell.served, RecServed::Bool(true)));
         assert!(cell.perf.is_none(), "an unserved cell carries no perf");
+        assert!(
+            !up.served,
+            "a column none of whose cells was served must not publish served: true"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `served` on an egress column is observed from its cells: any served cell makes it served, and
+    // a later unserved cell does not take that back.
+    #[test]
+    fn an_upstream_is_served_exactly_when_one_of_its_cells_was() {
+        let mut up: HashMap<String, Upstream> = HashMap::new();
+        let unserved = || Cell {
+            served: RecServed::Bool(false),
+            ..Default::default()
+        };
+        record_upstream_cell(
+            &mut up,
+            "openai".into(),
+            "openai".into(),
+            true,
+            false,
+            unserved(),
+        );
+        assert!(!up["openai"].served, "only unserved cells so far");
+        record_upstream_cell(
+            &mut up,
+            "openai".into(),
+            "anthropic".into(),
+            true,
+            true,
+            Cell::default(),
+        );
+        assert!(up["openai"].served, "one served cell serves the column");
+        record_upstream_cell(
+            &mut up,
+            "openai".into(),
+            "gemini".into(),
+            true,
+            false,
+            unserved(),
+        );
+        assert!(
+            up["openai"].served,
+            "a later unserved cell does not unserve it"
+        );
+        assert_eq!(up["openai"].cells.len(), 3);
     }
 
     // ── apply_sustained_verdict: the same rig-bound machinery as the peak, applied to the gate ──────
