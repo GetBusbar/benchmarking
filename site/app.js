@@ -164,9 +164,9 @@ function memoryMode(st = state) { return MEM_CHOOSER_MODES.has(st.mode) ? st.mod
    are extrema of the quantity their column reports; this one is not an extremum of anything. */
 const MODE_LABELS = { peak: "Own cell", min: "Min", max: "Max", same: "Same", custom: "Custom" };
 const MODE_TIPS = {
-  peak: "Each gateway on its own representative same-dialect diagonal: its OpenAI passthrough where it serves one, otherwise its lowest-added-latency diagonal. Not the highest-throughput cell - switching the tail-latency bound cannot change which cell this picks.",
-  min: "Each gateway's LOWEST steady-state cell (selected on memory, reported as memory)",
-  max: "Each gateway's HIGHEST steady-state cell (selected on memory, reported as memory)",
+  peak: "Each gateway on its own representative same-dialect diagonal: its OpenAI passthrough where it serves one, otherwise its lowest-added-latency diagonal. Not the highest-throughput cell — switching the tail-latency bound cannot change which cell this picks.",
+  min: "Each gateway's cell with its lowest steady-state RSS (selected on memory, reported as memory)",
+  max: "Each gateway's cell with its highest steady-state RSS (selected on memory, reported as memory)",
   same: "One chosen dialect's identity cell for every gateway",
   custom: "Any ingress→egress cell for every gateway",
 };
@@ -732,7 +732,7 @@ function frontierCell(rec, boundMs) {
   const c = metric(rd.rps, fmtRate);
   if (c.na) return c;   // the engine's absence reason, rendered by the one accessor
   /* An uncertified bound is unavailable, never numeric zero. Preserve its recorded reason. */
-  if (mcode(rd.rps) == null) return { ...c, v: null, na: true, text: "n/a", why: "no rung held this tail", reading: rd };
+  if (mcode(rd.rps) == null) return { ...c, v: null, na: true, text: "n/a", why: "no tested concurrency met this bound", reading: rd };
   const floor = rd.lower_bound === true;
   return { ...c, text: floor ? `≥ ${c.text}` : c.text, note: readingSentence(rd, c.v), reading: rd, floor };
 }
@@ -796,7 +796,7 @@ const HELD_NOTHING_INDEX = FRONTIER_BOUNDS_MS.length;
 /* The reference paragraph for the column, rendered BELOW the table (see captionText). It states the two
    things six words on a cell cannot: which reading is the denominator, and why the named bound is part of the
    number rather than a footnote. */
-const HELD_REFERENCE = `"N% of its full rate at B" in the last column is what the cell still carried at B, the TIGHTEST tail-latency bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape: the gateway gives up almost nothing even when you demand a 1 ms tail. A low percentage means it needs a loose tail to go fast. The bound matters as much as the percentage - 99% at 50 ms is not a flat gateway, it is a gateway that holds no rate at all under 50 ms - so the column sorts by that bound first and the percentage second, and a cell that held nothing under any published bound says so in words instead of showing 0%.`;
+const HELD_REFERENCE = `"N% of its full rate at B" in the last column is what the cell still carried at B, the tightest tail-latency bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape: the gateway gives up almost nothing even when you demand a 1 ms tail. A low percentage means it needs a loose tail to go fast. The bound matters as much as the percentage — 99% at 50 ms is not a flat gateway, it is a gateway that holds no rate at all under 50 ms — so the column sorts by that bound first and the percentage second, and a cell that held nothing under any published bound says so in words instead of showing 0%.`;
 /* frontierSpark(frontier, opts): the curve, drawn.
    WHY A SPARKLINE AND NOT SIX NUMBERS. The finding is a SLOPE - "flat" vs "nearly doubles by 5 ms" - and a
    slope is something the eye reads in one pass and a row of digits is not. Six numbers per row across
@@ -864,14 +864,14 @@ function frontierSpark(frontier, opts = {}) {
        floor tick  - served, but nothing held this tail (a measured nothing, not a missing measurement) */
   const dots = pts.map((p) => {
     const cx = x(p.i).toFixed(1), cy = y(p.v).toFixed(1);
-    const title = `<title>${esc(`${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtRate(p.v)} req/s${p.floor ? " or more" : ""}`}`)}</title>`;
+    const title = `<title>${esc(`${boundLabel(p.b)}: ${p.onFloor ? "no tested concurrency met this bound" : `${fmtRate(p.v)} req/s${p.floor ? " or more" : ""}`}`)}</title>`;
     if (p.onFloor)
       return `<line x1="${cx}" y1="${(H - PAD - 3).toFixed(1)}" x2="${cx}" y2="${H - PAD}" stroke="currentColor" stroke-width="1.2" stroke-opacity="0.55">${title}</line>`;
     return p.floor
       ? `<circle cx="${cx}" cy="${cy}" r="2.4" fill="none" stroke="currentColor" stroke-width="1.2">${title}</circle>`
       : `<circle cx="${cx}" cy="${cy}" r="1.9" fill="currentColor">${title}</circle>`;
   }).join("");
-  const aria = pts.map((p) => `${boundLabel(p.b)}: ${p.onFloor ? "no rung held this tail" : `${fmtRate(p.v)}${p.floor ? " or more" : ""}`}`).join("; ");
+  const aria = pts.map((p) => `${boundLabel(p.b)}: ${p.onFloor ? "no tested concurrency met this bound" : `${fmtRate(p.v)}${p.floor ? " or more" : ""}`}`).join("; ");
   return `<svg class="frontier-spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" ` +
     `aria-label="throughput across the published tail-latency bounds, log scale - ${esc(aria)}">` +
     `<line x1="${PAD}" y1="${H - PAD}" x2="${W - PAD}" y2="${H - PAD}" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"/>` +
@@ -970,8 +970,8 @@ const SWEEP_CAPTION = {
   "6x6-memory-window":   ()  => `post-6×6 memory window (identical fixed load on the peak cell, fresh cold-restarted process)`,
   // The PER-CELL memory windows: one cold-started process per cell, the same fixed-length load on every
   // cell, steadiness judged over the trailing window at the end. The cell is the workload, so the caption names it exactly like every other lane's does.
-  "6x6-memory-diagonal": (p) => `${laneDialect(p && p.dialect)} passthrough - 6×6 memory window (cold start, fixed-length load)`,
-  "6x6-memory-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out - 6×6 memory window (cold start, fixed-length load)`,
+  "6x6-memory-diagonal": (p) => `${laneDialect(p && p.dialect)} passthrough — 6×6 memory window (cold start, fixed-length load)`,
+  "6x6-memory-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out — 6×6 memory window (cold start, fixed-length load)`,
   "6x6-stream-diagonal": (p) => `${laneDialect(p && p.dialect)} SSE stream — 6×6 diagonal cell`,
   "6x6-stream-translation": (p) => `${laneDialect(p && p.ingress)} in → ${laneDialect(p && p.egress)} out SSE stream — 6×6 translation cell`,
   "perf-suite":          (p) => `${laneDialect(p && p.dialect)} passthrough — perf suite (no 6×6 cell for this gateway yet)`,
@@ -1371,7 +1371,8 @@ function chosenMemory(g, st = state) {
   // The candidate count travels ON the record: min-of-26 and min-of-1 are different-sized searches and the
   // row has to be able to say so (the bias Min/Max carry is disclosed, not designed away).
   return { served: true, ...stampChosen(pick.mem, g, pick.ingress, pick.egress, "memory-"),
-    mem_candidates: cells.filter((c) => memSteady(c.mem) != null).length, mem_cells: cells.length };
+    mem_candidates: cells.filter((c) => memSteady(c.mem) != null).length, mem_cells: cells.length,
+    mem_plateaued: cells.filter((c) => c.mem.plateaued === true).length };
 }
 /* memoryFor(g, st): THE memory record every memory column reads. Per-cell bundle → the chosen cell;
    legacy bundle → the single post-6x6 window, unchanged (that is what keeps the published board working
@@ -1482,21 +1483,29 @@ function memCellTip(rec) {
     // NO VERDICT WORDING. The rate, its sign and its units ARE the finding; "NEVER SETTLED" in caps on
     // top of them was the board passing judgement on a gateway instead of publishing a measurement.
     // Nothing is dropped - every reading these branches carried still prints.
+    // THE ENGINE'S OWN WORDS FOR THE VERDICT. `plateaued` is the end-of-load test over the trailing
+    // window; `steady_state_rss_mib` is a separate reading (the median of the load window's second half)
+    // that the engine records whether or not the test passed. Calling a failed test "no steady state"
+    // beside a published steady-state figure - and beside "36 of 36 reached a steady state" - made the
+    // tooltip contradict itself, so the verdict is named as what it is: did not plateau.
     const what = sh === "swinging"
-      ? "no steady state, and did not grow: RSS swung around a level it kept returning to"
+      ? "did not plateau by the end of the fixed load, and did not grow: RSS swung around a level it kept returning to"
       : sh === "releasing"
-      ? "no steady state: still RELEASING memory when the fixed load ended, not growing"
-      : "no steady state: RSS was still rising when the fixed load ended";
+      ? "did not plateau by the end of the fixed load: still releasing memory, not growing"
+      : "did not plateau by the end of the fixed load: RSS was still rising";
     bits.push(gr != null && sh !== "swinging" && sh !== "releasing"
-      ? `no steady state: ${fmt1(gr)} MiB/min under load when the fixed load ended`
+      ? `did not plateau by the end of the fixed load: moving ${fmt1(gr)} MiB/min under load when it ended`
       : gr != null && sh === "swinging"
       ? `${what} (moving ${fmt1(gr)} MiB/min at the close, which is the swing, not a leak)`
       : what);
   }
   // Stated mode-neutrally: in Min/Max it is the size of the search, and in Same/Custom it is still the
-  // context a reader needs for the row above it.
-  if (rec && rec.mem_candidates != null)
-    bits.push(`${fmtInt(rec.mem_candidates)} of this gateway's ${fmtInt(rec.mem_cells)} measured cells reached a steady state`);
+  // context a reader needs for the row above it. TWO COUNTS, because they are two engine fields: how many
+  // windows carry a steady-state RSS reading (what Min/Max rank) and how many passed the plateau test.
+  if (rec && rec.mem_candidates != null) {
+    const plat = rec.mem_plateaued != null ? `; ${fmtInt(rec.mem_plateaued)} of ${fmtInt(rec.mem_cells)} passed the plateau test` : "";
+    bits.push(`${fmtInt(rec.mem_candidates)} of this gateway's ${fmtInt(rec.mem_cells)} measured cells have a steady-state RSS reading${plat}`);
+  }
   return `${bits.join("; ")}${memDisclosure(rec)}`;
 }
 
@@ -1514,14 +1523,15 @@ function passCell(g, key, fmt) {
    a sealed envelope; metric() reads it. A gateway that did not stream (no g.streaming) reads n/a. */
 function streamCell(g, key, fmt) {
   const s = canonicalStreaming(g);
-  return s ? withHistoryTrend(metric(s[key], fmt), g, s, key) : { v: null, text: "n/a", na: true };
+  return s ? withHistoryTrend(metric(s[key], fmt), g, s, key) : absentCell(g, "stream", key, { ...state, mode: "peak" });
 }
 /* memCell: the memory columns read the record memoryFor() chose: the per-cell window for the chosen mode,
    or (legacy bundle) the single post-6x6 window. Each metric is a sealed envelope; metric() reads it. A
    gateway with no record for the chosen cell reads n/a; nothing is ever substituted from another cell. */
 function memCell(g, key, fmt, st = state) {
   const m = memoryFor(g, st);
-  return m ? withHistoryTrend(metric(m[key], fmt), g, m, key) : { v: null, text: "n/a", na: true };
+  return m ? withHistoryTrend(metric(m[key], fmt), g, m, key)
+    : hasPerCellMemory(stateData(st)) ? absentCell(g, "memory", key, st) : { v: null, text: "n/a", na: true };
 }
 
 /* DELETED: `ZERO_RPS_NOTE` / `withZeroNote(cell)`, which annotated a throughput 0 with "served, but no
@@ -1614,7 +1624,7 @@ function chooserDialects(g, st = state) {
 // value reads n/a. No gate here — the envelope carries the honesty decision (Design E §2.3).
 function chooserPerfCell(g, key, fmt, st = state) {
   const p = chooserCellPerf(g, st);
-  return p ? withHistoryTrend(metric(p[key], fmt), g, p, key) : { v: null, text: "n/a", na: true };
+  return p ? withHistoryTrend(metric(p[key], fmt), g, p, key) : absentCell(g, "perf", key, st);
 }
 // The chosen cell's STREAMING record (metrics as sealed envelopes). Per-cell streaming is only measured on
 // the diagonal today (gen-data projects it to g.streaming), so:
@@ -1655,7 +1665,50 @@ function chooserCellStream(g, st = state) {
 function chooserStreamCell(g, key, fmt, st = state) {
   if (st.mode === "peak") return streamCell(g, key, fmt);
   const s = chooserCellStream(g, st);
-  return s ? withHistoryTrend(metric(s[key], fmt), g, s, key) : { v: null, text: "n/a", na: true };
+  return s ? withHistoryTrend(metric(s[key], fmt), g, s, key) : absentCell(g, "stream", key, st);
+}
+/* absentCell(g, lane, key, st): THE ENGINE'S OWN RECORDED STATE for a chosen cell that put no number on
+   the row, so an n/a never stands bare. The footer promises that every muted cell's label and tooltip say
+   why; the chooser readers used to return a reasonless `n/a` whenever the chosen record was missing, which
+   hid that the engine had in fact recorded a reason (a not-configured probe, an untestable stream, a
+   withheld window). Nothing is selected or computed here: it reads the cell the row already names and
+   repeats the state token and the detail the run wrote, verbatim. */
+function absentCell(g, lane, key, st = state) {
+  const na = (text, note) => ({ v: null, text, na: true, note: note || "" });
+  let ingress, egress;
+  if (lane === "memory") {
+    const mode = memoryMode(st);
+    if (mode === "min" || mode === "max")
+      return na("n/a", memoryCells(g).length
+        ? "none of this gateway's memory windows recorded a steady-state RSS reading to rank"
+        : "this run recorded no per-cell memory window for this gateway");
+    [ingress, egress] = mode === "same" ? [st.sameDialect, st.sameDialect] : [st.xlateIn, st.xlateOut];
+  } else {
+    [ingress, egress] = chooserDialects(g, st);
+  }
+  if (ingress == null) return na("n/a", "this gateway has no measured cell to show in this mode");
+  const cell = matrixCell(g, egress, ingress);
+  if (!cell) return na("n/a", "this run recorded no matrix cell for this pairing");
+  if (cell.served !== true || (cell.perf && cell.perf.egress_reverified === false)) {
+    const [, label] = cellState(cell);
+    return na(label, matrixCellTip(cell));
+  }
+  const rec = lane === "stream" ? cell.stream : lane === "memory" ? cell.memory : cell.perf;
+  if (!rec) return na("not measured", stripRigPaths(cell.perf_dropped || "")
+    || `served, but this run recorded no ${lane === "perf" ? "performance" : lane} block for this cell`);
+  if (lane === "stream" && rec.stream_served !== true) {
+    const t = naText(rec, "stream_served", "stream_error");
+    const env = key ? rec[key] : null;
+    // A value the engine DID record on this not-served record is named, never dropped.
+    const recorded = mval(env);
+    const extra = recorded != null
+      ? ` · the record also carries ${key} = ${recorded}${env.note ? ` (${env.note})` : ""}` : "";
+    return na(t.text, `${typeof rec.stream_served === "string" ? rec.stream_served : "not served"}: ${t.note}${extra}`);
+  }
+  if (lane === "memory" && rec.served === false) return na("not served", stripRigPaths(rec.serve_error || ""));
+  const env = key ? rec[key] : null;
+  if (isEnvelope(env)) { const m = metric(env); if (m.na) return m; }
+  return na("n/a", key ? `this cell's record carries no ${key}` : "");
 }
 // Does gateway g have a chosen cell to show at all (a served, measured cell)? Drives whether a row
 // appears / how the pill renders. Peak: any best_cell. Same/Custom: the exact cell is served.
@@ -1780,7 +1833,7 @@ const LANE_RECORD = {
 // The header tooltip per lane (what the column means on THIS tab).
 const LANE_TESTED_TITLE = {
   memory: () => (hasPerCellMemory()
-    ? "The cell this row's memory numbers were measured on. Min/Max: this gateway's own lowest/highest steady-state cell, with the size of the search beside it. Same/Custom: the chosen cell, identical on every row."
+    ? "The cell this row's memory numbers were measured on. Min/Max: the cell with this gateway's own lowest/highest steady-state RSS, with the number of cells it was chosen from beside it. Same/Custom: the chosen cell, identical on every row."
     : "The peak cell this gateway's memory window actually ran on (its highest-throughput served cell). The fixed load recipe is identical for every gateway; only the cell differs."),
 };
 // A lane may append its OWN extra disclosure after the record's caption on the pill tooltip. Memory
@@ -1797,7 +1850,7 @@ const LANE_TESTED_SUFFIX = {
     if ((mode !== "min" && mode !== "max") || !rec || rec.mem_candidates == null) return "";
     // mem_candidates counts the cells that REACHED A STEADY STATE (the Min/Max candidate set), not the
     // cells served; "of 5 served" over a gateway serving 26 understated the search it states.
-    return `of ${fmtInt(rec.mem_candidates)} steady`;
+    return `of ${fmtInt(rec.mem_candidates)} cell${rec.mem_candidates === 1 ? "" : "s"}`;
   },
 };
 // Lanes that take no part in sorting (memory's cell is an attribution, not a ranking, as before).
@@ -1847,7 +1900,7 @@ function colTested(lane) {
       const rec = pick(g, st);
       // NO record → NO pill, and a record with NO displayable value is the same emptiness wearing a
       // costume. A row whose every column reads n/a must not advertise a measurement.
-      if (!rec || !recordShowsValues(rec)) return `<td class="tested"><span class="muted">n/a</span></td>`;
+      if (!rec || !recordShowsValues(rec)) return `<td class="tested"><span class="muted" title="No measured record for the chosen cell on this tab; each muted cell in the row carries the engine's recorded reason.">n/a</span></td>`;
       const p = cellPath(rec);
       const ing = p.ingress ?? p.dialect, eg = p.egress ?? p.dialect;
       if (ing == null) return `<td class="tested"><span class="muted">n/a</span></td>`;
@@ -1859,7 +1912,7 @@ function colTested(lane) {
       const base = rec.source ? caption(rec) : `measured on the ${ing}-in / ${eg}-out cell`;
       const title = note ? `${base} — ${note(rec)}` : base;
       const suf = suffix ? suffix(rec, st) : "";
-      return `<td class="tested"><span class="tested-pill" title="${esc(title)}">${esc(label)}${fb ? " *" : ""}</span>${
+      return `<td class="tested"><span class="tested-pill" title="${esc(title)}">${esc(label).replace(/→/g, "→<wbr>")}${fb ? " *" : ""}</span>${
         suf ? `<span class="tested-of muted" title="The size of the set this extremum was selected from. A minimum over 26 cells and a minimum over 1 are not the same search.">${esc(suf)}</span>` : ""}</td>`;
     },
   };
@@ -1884,7 +1937,7 @@ function concAt(env) {
 // boundary proof, or the floor disclosure - rides on the tooltip.
 function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
   const p = chooserCellPerf(g, st);
-  if (!p) return { v: null, text: "n/a", na: true };
+  if (!p) return absentCell(g, "perf", null, st);
   /* PINNED TO ONE RUNG, when the reader asks for it. Every row then reports what it carried at the
      SAME concurrency, which is the only way the table can answer "you gave busbar 4x the concurrency"
      - the rung is identical, so whatever is left is the gateway. No "@ N conc" suffix here: the
@@ -1925,7 +1978,7 @@ function frontierChooserCell(g, st = state, boundMs = selectedBound(st)) {
 // what a reader compares across the row, and the tooltip carries the rest of the evidence.
 function frontierBoundCell(g, boundMs, st = state) {
   const p = chooserCellPerf(g, st);
-  if (!p) return { v: null, text: "n/a", na: true };
+  if (!p) return absentCell(g, "perf", null, st);
   return withHistoryTrend(frontierCell(p, boundMs), g, p, "throughput_rps", boundMs);
 }
 /* frontierFullRate(frontier): the UNBOUNDED reading's rate, i.e. the denominator that "full rate" means.
@@ -1944,7 +1997,7 @@ function frontierFullRate(frontier) {
 function frontierShapeCell(g, st = state) {
   const p = chooserCellPerf(g, st);
   const f = frontierOf(p);
-  if (!f.length) return { v: null, text: "n/a", na: true, note: p ? NO_FRONTIER_NOTE : "" };
+  if (!f.length) return p ? { v: null, text: "n/a", na: true, note: NO_FRONTIER_NOTE } : absentCell(g, "perf", null, st);
   const h = frontierHeld(f);
   if (!h) {
     const full = frontierFullRate(f);
@@ -1970,10 +2023,10 @@ function frontierShapeCell(g, st = state) {
     const loosest = FRONTIER_BOUNDS_MS[FRONTIER_BOUNDS_MS.length - 1];
     return { v: heldSortKey(HELD_NOTHING_INDEX, 0), text: `served nothing under ${boundLabel(loosest)}`,
       zero: true, na: false, frontier: f,
-      note: `No share of full rate can be stated: this cell carried no measurable throughput under ANY ` +
-        `published bound, so the only reading it has is the unbounded one. That is a measurement, not a gap - ` +
+      note: `No share of full rate can be stated: this cell carried no measurable throughput under any ` +
+        `published bound, so the only reading it has is the unbounded one. That is a measurement, not a gap — ` +
         `the gateway served cleanly and no concurrency it was offered kept 99% of requests under even ` +
-        `${boundLabel(loosest)}, the loosest bound on the board. The curve beside this is the whole finding - ` +
+        `${boundLabel(loosest)}, the loosest bound on the board. The curve beside this is the whole finding — ` +
         `a tick on the floor at every bound it could not hold.` };
   }
   const floorNote = h.lowerBound
@@ -2005,7 +2058,10 @@ function frontierShapeCell(g, st = state) {
 function frontierShapeTd(g, st = state) {
   const c = frontierShapeCell(g, st);
   if (c.na) return `<td class="shape na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
-  const label = c.zero ? `<span class="reading-none">${esc(c.text)}</span>` : esc(c.text);
+  // A number and its unit never split across lines ("…at 1 / ms"): the last space before a unit is
+  // non-breaking. Presentation only - the text itself is unchanged.
+  const glued = esc(c.text).replace(/ (ms|s|µs)\b/g, "&nbsp;$1");
+  const label = c.zero ? `<span class="reading-none">${glued}</span>` : glued;
   return `<td class="shape${c.zero ? " reading-zero" : ""}" title="${esc(c.note)}">` +
     `${frontierSpark(c.frontier, { ...boardFrontierScale(stateData(st)), boundMs: selectedBound(st) })}` +
     `<span class="shape-gain">${label}</span></td>`;
@@ -2043,7 +2099,7 @@ const COLUMN_SETS = {
     { id: "cpu", label: () => { const c = costWindowConc();
         return c == null ? "CPU per request (\u00b5s)" : `CPU per request (\u00b5s @ c=${c})`; },
       desc: false, costOnly: true,
-      title: () => `Microseconds of gateway CPU - user plus system, summed across its whole process tree - spent per completed request, ` +
+      title: () => `Microseconds of gateway CPU — user plus system, summed across its whole process tree — spent per completed request, ` +
         `measured at a fixed concurrency held identical for every gateway (published beside it as the cost window). ` +
         `Unlike peak throughput this does not stop separating gateways once they saturate their cores. ` +
         `A window with any failure publishes no cost: CPU divided by only the successes would describe the failures, not the work.`,
@@ -2061,7 +2117,7 @@ const COLUMN_SETS = {
         ? `The requests/sec the chosen cell carried at c=${fmtInt(selectedConc())}: the median of that rung's windows that failed no request, whatever its tail. ` +
           `The bound selector does not apply while a rung is pinned. A gateway that never drove this rung reads n/a, never an interpolated value.`
         : `The most requests/sec the chosen cell carried ${boundClause(selectedBound())} and it failed no request it accepted, with the concurrency it was observed at. ` +
-        `One of ${BOUND_CHOICES.length} readings of the SAME concurrency sweep published on every cell - switch the bound above to re-rank the board. ` +
+        `One of ${BOUND_CHOICES.length} readings of the same concurrency sweep published on every cell — switch the bound above to re-rank the board. ` +
         `A "≥" is a floor: the sweep ran out of ladder while that concurrency was still qualifying. Hover a cell for the tail it actually produced and the concurrency that stopped qualifying above it.`,
       get: (g, st = state) => frontierChooserCell(g, st) },
     /* THE SHAPE, beside the number. A row of six figures does not communicate a slope; this does, and the
@@ -2073,9 +2129,9 @@ const COLUMN_SETS = {
     { id: "shape", label: "Rate held at its tightest bound", desc: true,
       title: () => `The whole frontier as one line: throughput at ${BOUND_CHOICES.map(boundLabel).join(", ")}, left to right, on a scale shared by every row. ` +
         `Flat means the gateway holds its rate even under a tight tail; a line climbing from the floor means it needs a loose tail to go fast. ` +
-        `Log scale, so equal slopes are equal RATIOS - which is what the shape means - and the slowest gateway on the board is still visible. ` +
-        `The dotted rule marks the bound the ranked column is reading; an open dot marks a reading that is a floor rather than a ceiling; a tick on the baseline means the gateway served but NO concurrency held that tail (a measured nothing, not a missing measurement). ` +
-        `"N% OF ITS FULL RATE AT B" is what the cell still carried at B, the tightest published bound it holds any rate at, as a share of its rate with no latency bound at all. Sorting groups the column by that bound first, because 99% at 1 ms and 99% at 50 ms are opposite findings.`,
+        `Log scale, so equal slopes are equal ratios — which is what the shape means — and the slowest gateway on the board is still visible. ` +
+        `The dotted rule marks the bound the ranked column is reading; an open dot marks a reading that is a floor rather than a ceiling; a tick on the baseline means the gateway served but no concurrency held that tail (a measured nothing, not a missing measurement). ` +
+        `"N% of its full rate at B" is what the cell still carried at B, the tightest published bound it holds any rate at, as a share of its rate with no latency bound at all. Sorting groups the column by that bound first, because 99% at 1 ms and 99% at 50 ms are opposite findings.`,
       get: (g, st = state) => frontierShapeCell(g, st),
       render: (g, st = state) => frontierShapeTd(g, st) },
   ],
@@ -2101,12 +2157,13 @@ const COLUMN_SETS = {
       // The observed tail rides UNDER the number (frontierBoundCell) because "4 ms under a 100 ms bound" and
       // "99 ms under it" are different findings and a column of rates alone cannot tell them apart.
       title: `The most requests/sec the chosen cell carried ${boundClause(b)} and it failed no request it accepted. ` +
-        `Under each number is the tail it ACTUALLY produced there, which is never the bound. "≥" marks a floor.`,
+        `Under each number is the tail it actually produced there, which is never the bound. "≥" marks a floor.`,
       get: (g, st = state) => frontierBoundCell(g, b, st),
       render: (g, st = state) => {
         const c = frontierBoundCell(g, b, st);
         const sel = selectedBound(st) === b || (b == null && selectedBound(st) == null) ? " bound-col" : "";
-        if (c.na) return `<td class="na${sel}" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
+        if (c.na) return `<td class="na${sel}" title="${esc(c.note || "")}">${esc(c.text)}${
+          c.why ? `<span class="zero-why">${esc(c.why)}</span>` : ""}</td>`;
         const rd = c.reading;
         /* THE SUB-LINE UNDER THE NUMBER carries whichever of the two things this cell has to say. For a real
            reading it is the tail the gateway ACTUALLY produced (4 ms under a 100 ms bound is not the same
@@ -2120,7 +2177,7 @@ const COLUMN_SETS = {
       },
     })),
     { id: "shape", label: "Rate held at its tightest bound", desc: true,
-      title: "The six readings as one line, on a scale shared by every row, and beside it what the cell still carried at the TIGHTEST bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape (it gives up almost nothing at the tightest tail we publish); 99% at 50 ms is a gateway that holds no rate at all under 50 ms. Sorting groups by that bound first for exactly that reason.",
+      title: "The six readings as one line, on a scale shared by every row, and beside it what the cell still carried at the tightest bound it holds any rate at, as a share of its full rate with no latency bound at all. 99% at 1 ms is the good shape (it gives up almost nothing at the tightest tail we publish); 99% at 50 ms is a gateway that holds no rate at all under 50 ms. Sorting groups by that bound first for exactly that reason.",
       get: (g, st = state) => frontierShapeCell(g, st),
       render: (g, st = state) => frontierShapeTd(g, st) },
   ],
@@ -2133,11 +2190,11 @@ const COLUMN_SETS = {
       get: (g) => chooserStreamCell(g, "added_ttft_p50_us", fmtUsMs) },
     { id: "sttft", label: "Added TTFT p99 (µs)", desc: false, title: "Added time-to-first-token p99 on the chosen cell. Lower is better.",
       get: (g) => chooserStreamCell(g, "added_ttft_p99_us", fmtUsMs) },
-    { id: "sgap50", label: "Added gap p50 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p50, on the chosen cell. Lower is better.",
+    { id: "sgap50", label: "Added gap p50 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p50, on the chosen cell: the gateway leg's gap p50 minus the direct-to-mock leg's gap p50. Lower is better.",
       get: (g) => chooserStreamCell(g, "added_gap_p50_us", fmtUsMs) },
-    { id: "sgap", label: "Added gap p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p99, on the chosen cell. Lower is better.",
+    { id: "sgap", label: "Added gap p99 (µs)", desc: false, title: "The extra pause the gateway adds between streamed tokens, p99, on the chosen cell. As the engine defines it, each added figure is the gateway leg's own percentile minus the direct-to-mock leg's same percentile, taken separately, so an added p99 can come out lower than the added p50 when the direct leg's own tail is wider. Lower is better.",
       get: (g) => chooserStreamCell(g, "added_gap_p99_us", fmtUsMs) },
-    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with EVERY expected frame delivered, no stalls, <0.1% errors, on the chosen cell",
+    { id: "streams", label: "Streams sustained", desc: true, title: "Max concurrent SSE streams sustained (bisected true concurrency) with every expected frame delivered, no stalls, <0.1% errors, on the chosen cell",
       get: (g) => chooserStreamCell(g, "streams_sustained", fmtInt) },
     // THE `cpufps` COLUMN IS GONE with the `cpu_fps` metric the producer retired: it counted frames/sec
     // under an unpaced firehose WITHOUT the delivery gate, so a gateway dropping frames could post a higher
@@ -2179,7 +2236,7 @@ const COLUMN_SETS = {
         // its sampling, must not survive as one lone number on an otherwise-empty row advertising a
         // measurement the cell does not have. Pick a mode that serves the cell (Min/Max always do)
         // and idle appears with the rest.
-        if (!recordShowsValues(memoryFor(g, st))) return { v: null, text: "n/a", na: true };
+        if (!recordShowsValues(memoryFor(g, st))) return absentCell(g, "memory", "idle_rss_mib", st);
         const i = idleAcrossCells(g);
         if (!i) return { v: null, text: "n/a", na: true };
         return { v: i.median, text: fmt1(i.median), na: false,
@@ -2187,7 +2244,7 @@ const COLUMN_SETS = {
       } },
     { id: "mempeak", label: () => (hasPerCellMemory() ? "Steady-state RSS (MiB)" : "Peak RSS (MiB)"), desc: false,
       title: () => (hasPerCellMemory()
-        ? "Resident memory once it stopped climbing, under a fixed load on the chosen cell that runs for the same fixed duration on every gateway and cell, with steadiness judged over the trailing window at its end. A gateway that never went steady has no steady state and reads n/a: its growth rate is the reading. Lower is better."
+        ? "The engine's steady_state_rss_mib for the chosen cell: the median RSS over the second half of a fixed-length load that runs for the same duration on every gateway and cell. The engine records it whether or not the window passed its separate end-of-load plateau test; the Growth column and the curve show whether RSS was still moving. n/a where the engine recorded no reading. Lower is better."
         : "Max process RSS observed while the identical fixed load runs on this gateway's peak cell. Same load recipe for every gateway. Lower is better."),
       get: (g, st = state) => (hasPerCellMemory(stateData(st))
         ? memCell(g, "steady_state_rss_mib", fmt1, st) : memCell(g, "peak_rss_mib", fmt1, st)) },
@@ -2195,7 +2252,7 @@ const COLUMN_SETS = {
     // informative thing the metric produces - it turns "did not plateau" from a missing value into the
     // headline finding - so it is a column of its own rather than a footnote on the steady-state n/a.
     { id: "memgrowth", label: "Growth (MiB/min)", desc: false, perCellOnly: true,
-      title: "How fast RSS was still rising over the final window on the chosen cell. Around zero once the gateway has settled. If no steady state was reached, this rate under this load IS the reading, and no steady-state number exists to report instead. Lower is better.",
+      title: "How fast RSS was still moving over the final window of the load on the chosen cell. Around zero once the gateway has settled; when the engine's end-of-load plateau test did not pass, this rate is what RSS was doing when the load ended. Lower is better.",
       get: (g, st = state) => {
         const m = memoryFor(g, st);
         const c = memCell(g, "growth_rate_mib_per_min", fmt1, st);
@@ -2205,10 +2262,10 @@ const COLUMN_SETS = {
           // not a verdict stamped on the cell.
           const gr0 = mval(m.growth_rate_mib_per_min);
           return { ...c, note: gr0 != null && gr0 > 0
-            ? "This cell never went steady: the fixed-length load ended with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number."
+            ? "This cell never went steady by the engine's end-of-load plateau test: RSS was still climbing at this rate when the fixed-length load ended."
             : gr0 != null && gr0 < 0
-            ? "This cell never went steady, but the rate is negative - it was releasing memory when the fixed load ended."
-            : "This cell never went steady; neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
+            ? "This cell never went steady by the engine's end-of-load plateau test, and the rate is negative: it was releasing memory when the fixed load ended."
+            : "This cell never went steady by the engine's end-of-load plateau test; neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
         }
         if (m.plateaued === false) {
           /* THE SUFFIX FOLLOWS THE SHAPE, NOT MERELY "DID NOT SETTLE".
@@ -2216,26 +2273,26 @@ const COLUMN_SETS = {
              published "-0.4 (leak)" - a NEGATIVE rate, memory being RELEASED, labelled as the one
              thing it is the opposite of - under a note that said "with RSS still climbing at this
              rate". The drawer three hundred lines up already got this right from the same field
-             ("still RELEASING memory when the fixed load ended, not growing"); the column did not, so
+             ("still releasing memory when the fixed load ended, not growing"); the column did not, so
              one board rendered one fact two ways and the wrong one was the one on the table.
              `memShape` reads the engine's own verdict. A record with no shape (an older board, a
              withheld verdict) gets the neutral wording rather than a guess. */
           const sh = memShape(m);
           if (sh === "releasing")
-            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but it was RELEASING memory when the fixed load ended - the rate is negative. That is the opposite of a leak: a longer load would not have produced a larger number." };
+            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but it was releasing memory when the fixed load ended - the rate is negative. That is the opposite of a leak: a longer load would not have produced a larger number." };
           if (sh === "swinging")
             return { ...c, text: `${c.text} (swing)`, note: "This cell never went steady, but it did not grow either: RSS swung around a level it kept returning to. This rate is how fast the window happened to be moving when it closed - a fact about the sampling instant, not a leak." };
           if (sh === "climbing")
-            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the fixed-length load ended with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady by the engine's end-of-load plateau test: RSS was still climbing at this rate when the fixed-length load ended." };
           /* NO SHAPE PUBLISHED (an older board, a withheld verdict): fall back to the SIGN of the
              rate, which is a reading rather than a guess. A positive rate is a climb whether or not a
              verdict came with it, and a negative one is not a leak under any verdict. Only a rate
              that is absent or exactly zero leaves the direction genuinely unestablished. */
           const gr = mval(m.growth_rate_mib_per_min);
           if (gr != null && gr > 0)
-            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady: the fixed-length load ended with RSS still climbing at this rate, so there is no steady state to report and a longer load would have produced a larger number." };
+            return { ...c, text: `${c.text} (leak)`, note: "This cell never went steady by the engine's end-of-load plateau test: RSS was still climbing at this rate when the fixed-length load ended." };
           if (gr != null && gr < 0)
-            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but the rate is negative - it was RELEASING memory when the fixed load ended, which is the opposite of a leak." };
+            return { ...c, text: `${c.text} (releasing)`, note: "This cell never went steady, but the rate is negative - it was releasing memory when the fixed load ended, which is the opposite of a leak." };
           return { ...c, text: `${c.text} (no steady state)`, note: "This cell never went steady, and neither a shape verdict nor a non-zero rate establishes which way RSS was moving." };
         }
         return { ...c, note: c.note || "Settled: RSS had stopped climbing when the load was terminated." };
@@ -2244,7 +2301,7 @@ const COLUMN_SETS = {
        MEMORY_RECOVERY_S (60 s) and publishes recovered_rss_mib as the median over the trailing
        MEMORY_RECOVERY_MEDIAN_S (30 s), which is what recovery_window_s carries (metric.rs, suite.rs).
        "Recovered @30 s ... end of the 30 s recovery window" described a window that does not exist. */
-    { id: "memrecov", label: () => `Recovered, final ${memWindowLabel(boardMemWindows().recovery)} (MiB)`, desc: false,
+    { id: "memrecov", label: () => `Recovered, final ${memWindowLabel(boardMemWindows().recovery).replace(" ", "\u00a0")} (MiB)`, desc: false,
       title: () => `Median process RSS over the final ${memWindowLabel(boardMemWindows().recovery)} of the recovery watch after the fixed load stops — does the gateway release memory? Lower is better.`,
       get: (g, st = state) => memCell(g, "recovered_rss_mib", fmt1, st) },
     { id: "memcurve", label: "RSS curve", desc: false, sortable: false,
@@ -2270,7 +2327,11 @@ const COLUMN_SETS = {
       render: (g, st = state) => {
         const m = memoryFor(g, st);
         const spark = m && recordShowsValues(m) ? rssCurves(m, { compact: true }) : "";
-        if (!spark) return `<td class="memcurve na">n/a</td>`;
+        if (!spark) {
+          const why = hasPerCellMemory(stateData(st)) ? absentCell(g, "memory", "steady_state_rss_mib", st)
+            : { text: "n/a", note: "" };
+          return `<td class="memcurve na" title="${esc(why.note || "")}">${esc(why.text)}</td>`;
+        }
         const summary = memCurveSummary(m);
         return `<td class="memcurve"><button type="button" class="rss-life-btn" title="${esc(summary)}" ` +
           `aria-label="${esc(summary)}">${spark}</button></td>`;
@@ -2543,10 +2604,12 @@ function laneAgeNote(j, now = Date.now()) {
 function lanePathNote(l, j, st = state) {
   const base = l.pathNote ? l.pathNote(j) : "";
   if (!base) return "";
-  const MODE_HINT = { same: "Same-dialect", custom: "chosen", min: "lowest steady-state", max: "highest steady-state" };
+  const MODE_HINT = { same: "the Same-dialect cell the table shows", custom: "the chosen cell the table shows",
+    min: "the cell with this gateway's lowest steady-state RSS, as the table shows",
+    max: "the cell with this gateway's highest steady-state RSS, as the table shows" };
   const mode = l.key === "memory" ? memoryMode(st) : st.mode;
   const hint = (l.key === "perf" || l.key === "stream" || l.key === "memory") && MODE_HINT[mode]
-    ? ` (the ${MODE_HINT[mode]} cell the table shows)` : "";
+    ? ` (${MODE_HINT[mode]})` : "";
   return `${base}${hint}${laneAgeNote(j)}`;
 }
 
@@ -3156,7 +3219,9 @@ function chooserCaption(view, st, data) {
   const lead = chooserLead(view, data);
   // HELD_REFERENCE belongs to whichever tab actually renders the shape column. Performance does; Streaming
   // has no frontier column at all, and explaining a number that is not on the page is noise.
-  const extra = view === "performance" ? [HELD_REFERENCE] : [];
+  const extra = view === "performance" ? [HELD_REFERENCE]
+    : view === "streaming" ? ["Each added figure is the gateway leg's percentile minus the direct-to-mock leg's same percentile, taken separately (the engine's definition), so an added p99 can be lower than the added p50 when the direct leg's own tail is the wider one."]
+    : [];
   if (st.mode === "peak")
     return { lead: [lead,
       // NOT "best" and NOT "peak": bestCell prefers the openai diagonal and otherwise ranks on added
@@ -3194,8 +3259,8 @@ function memoryCaption(data = state.data, st = state) {
   const d = MATRIX_LABELS[st.sameDialect] || st.sameDialect;
   const inL = MATRIX_LABELS[st.xlateIn] || st.xlateIn, outL = MATRIX_LABELS[st.xlateOut] || st.xlateOut;
   const pick = {
-    min: "Each gateway on its OWN lowest steady-state cell. Selected on memory and reported as memory, so it is a real minimum - but of a set whose size differs per gateway, which the row states next to the cell.",
-    max: "Each gateway on its OWN highest steady-state cell. A real maximum, over a candidate set whose size differs per gateway (stated next to the cell). Min flatters a broad gateway, Max penalises it; both are offered so neither reads as the answer.",
+    min: "Each gateway on its own cell with the lowest steady-state RSS. Selected on memory and reported as memory, so it is a real minimum, but of a set whose size differs per gateway, which the row states next to the cell.",
+    max: "Each gateway on its own cell with the highest steady-state RSS. A real maximum, over a candidate set whose size differs per gateway (stated next to the cell). Min flatters a broad gateway, Max penalises it; both are offered so neither reads as the answer.",
     same: `Every gateway on the ${d}→${d} identity cell: the same work on every row, so this is the like-for-like comparison.`,
     custom: st.xlateIn === st.xlateOut
       ? `Every gateway on the ${inL}→${outL} cell: same dialect, so this is passthrough.`
@@ -3204,17 +3269,18 @@ function memoryCaption(data = state.data, st = state) {
   const flagged = ((data && data.gateways) || []).filter(neverPlateaued);
   // States the count and where to read the rate. It used to say "never settled ... (flagged by name)":
   // a verdict, and a pointer to a name-column pill that no longer exists.
+  // In the engine's own terms: `plateaued` is a verdict, `steady_state_rss_mib` a separate reading the
+  // engine records either way. Only a gateway with no reading at all has nothing for Min/Max to rank.
+  const noReading = flagged.filter((g) => !memoryCells(g).some((c) => memSteady(c.mem) != null));
   const never = flagged.length
-    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} reached no steady state on any cell, so no steady-state number is published for ${flagged.length === 1 ? "it" : "them"}${
-        // Min/Max rank steady states, so a gateway with none has no cell to pick there and its whole row is
-        // n/a (chosenMemory never substitutes one). Only Same/Custom put the climbing rate in Growth.
-        mode === "min" || mode === "max"
-          ? `; Min and Max rank steady states, so ${flagged.length === 1 ? "its row reads" : "their rows read"} n/a here - switch to Same or Custom to see the rate in the Growth column`
-          : " and the Growth column carries the rate instead"}: their memory under load is bounded by how long the load ran, not by the gateway.`
+    ? ` ${fmtInt(flagged.length)} gateway${flagged.length === 1 ? "" : "s"} did not pass the engine's end-of-load plateau test on any cell; the Growth column carries how fast RSS was moving when the load ended.${
+        noReading.length && (mode === "min" || mode === "max")
+          ? ` ${fmtInt(noReading.length)} of them recorded no steady-state RSS reading on any cell, so Min and Max have nothing to rank and ${noReading.length === 1 ? "its row reads" : "their rows read"} n/a here; Same or Custom show the rate.`
+          : ""}`
     : "";
   return {
     lead: [
-      "Every cell gets its own cold-started process and its own load, run until RSS stops climbing rather than for a fixed time.",
+      "Every cell gets its own cold-started process and the same fixed-length load; whether RSS had plateaued is judged at the end of that load and does not shorten it.",
       pick,
     ],
     notes: [
@@ -3244,8 +3310,8 @@ function frontierCaption(st = state, data = state.data) {
     ],
     notes: [
       `Each reading is the most requests/sec that cell carried while 99% of requests finished under that bound and it failed no request it accepted. Published as a single number, a flat row and a climbing row look comparable, and they are not the same machine.`,
-      `The ${boundLabel(sel)} column is the one the Performance tab ranks and is marked here; every other column is published on every cell too, so nothing is chosen for you. "≥" marks a reading whose sweep ran out of ladder while still qualifying: a floor, not a maximum. "tail" under a number is the tail that reading ACTUALLY produced, never the bound.`,
-      `A "0 · no rung held this tail" is a MEASUREMENT: the gateway served cleanly and no concurrency it was offered kept 99% of requests under that bound. It is not missing data - a cell with no measurement at all reads "no frontier" instead - and the difference matters most on the slowest rows, where five of the six columns can be that finding.`,
+      `The ${boundLabel(sel)} column is the one the Performance tab ranks and is marked here; every other column is published on every cell too, so nothing is chosen for you. "≥" marks a reading whose sweep ran out of ladder while still qualifying: a floor, not a maximum. "tail" under a number is the tail that reading actually produced, never the bound.`,
+      `A "0 · no tested concurrency met this bound" is a MEASUREMENT: the gateway served cleanly and no concurrency it was offered kept 99% of requests under that bound. It is not missing data - a cell with no measurement at all reads "no frontier" instead - and the difference matters most on the slowest rows, where five of the six columns can be that finding.`,
       HELD_REFERENCE,
       chooserLead("frontier", data),
     ] };
@@ -3422,6 +3488,22 @@ function theadHtml(cols, st = state) {
   }
   return `<tr>${top}</tr><tr class="subhead">${sub}</tr>`;
 }
+/* revealSortedColumn(table): on a narrow screen the column the board is ranked by (Req/s, Steady-state RSS)
+   started off-screen to the right, so the ranking a reader landed on was invisible. When the sorted header is
+   outside the visible part of the scroll box, scroll it to sit just right of the sticky identity columns.
+   Presentation only: nothing about the rows or their order changes. */
+function revealSortedColumn(table) {
+  const wrap = table && table.closest && table.closest(".table-scroll");
+  if (!wrap || wrap.scrollWidth <= wrap.clientWidth + 1) return;
+  const th = table.querySelector("thead th.sorted");
+  if (!th) return;
+  const sticky = [...table.querySelectorAll("thead tr:first-child th")].slice(0, 2)
+    .reduce((w, t) => w + t.getBoundingClientRect().width, 0);
+  const box = wrap.getBoundingClientRect(), r = th.getBoundingClientRect();
+  const left = r.left - box.left + wrap.scrollLeft, right = left + r.width;
+  const viewL = wrap.scrollLeft + sticky, viewR = wrap.scrollLeft + wrap.clientWidth;
+  if (left < viewL - 1 || right > viewR + 1) wrap.scrollLeft = Math.max(0, left - sticky);
+}
 function renderTable() {
   const { data } = state;
   const table = document.querySelector("#results-table");
@@ -3476,7 +3558,7 @@ function renderTable() {
      being shown a ranking of. */
   const tiedWithPrev = tiedRuns(rows, col, state, rigResolutionPct(state.data));
   tbody.innerHTML = rows.map((g) =>
-    `<tr data-gw="${esc(g.key)}" tabindex="0"${tiedWithPrev.has(g.key) ? ' class="tied-above" title="Within the rig\u2019s own measurement resolution of the row above - this ordering is not a finding"' : ""}>` + cols.map((c) => {
+    `<tr data-gw="${esc(g.key)}" tabindex="0"${tiedWithPrev.has(g.key) ? ' class="tied-above" title="Within the rig\u2019s own measurement resolution of the row above — this ordering is not a finding"' : ""}>` + cols.map((c) => {
       const sc = c.id === state.sortCol ? " sorted-col" : "";
       if (c.render) {
         // render columns emit their own <td>; tint the sorted one by injecting the class.
@@ -3495,6 +3577,7 @@ function renderTable() {
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="${cols.length}" class="na">No gateways match the current filters.</td></tr>`;
   }
+  revealSortedColumn(table);
 
   thead.querySelectorAll("th").forEach((th) => {
     const sortBy = () => {
@@ -4263,7 +4346,7 @@ function drawerHtml(g, st = state) {
       const cell = diag[c];
       if (!cell) return `<li><span class="cell na"></span> ${esc(MATRIX_LABELS[c])}: <span class="muted">n/a</span></li>`;
       const [cls, label] = cellState(cell);
-      return `<li><span class="cell ${cls}"></span> <b>${esc(MATRIX_LABELS[c])}</b>: ${label}` +
+      return `<li><span class="cell ${cls}${label === "not declared" ? " notdecl" : ""}"></span> <b>${esc(MATRIX_LABELS[c])}</b>: ${label}` +
         ` <span class="muted">(HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")})</span>` +
         (cell.verdict_note ? `<div class="muted evidence">${esc(cell.verdict_note)}</div>` : "") +
         (cell.served !== true && cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "") +
@@ -4449,6 +4532,16 @@ function bestIndex(vals, best) {
    The DOM half stays in renderCompare (find the panel, set innerHTML, draw the canvases); everything
    that DECIDES anything - which record each lane reads, which cell wins, how a failure or a suppressed
    metric renders - lives here, as a pure function of (gateways, state). */
+/* cmpAbsence: why a compare cell has no number. A chooser-driven lane with NO record reads the engine's own
+   state for the cell the row names (absentCell), so the compare panel never shows a reasonless "not
+   measured"; a record that exists but did not serve keeps naText's wording and evidence. */
+function cmpAbsence(l, g, j, key, st = state) {
+  if (!j && (l.key === "perf" || l.key === "stream" || (l.key === "memory" && hasPerCellMemory(stateData(st))))) {
+    const a = absentCell(g, l.key, key, st);
+    return { text: a.text, note: a.note || "" };
+  }
+  return naText(j, l.flag, l.err);
+}
 function compareBodyHtml(gws, st = state) {
   let h = `<div class="table-scroll"><table class="cmp-table"><thead><tr><th></th>` + gws.map((g, i) =>
     `<th><span class="dot" style="background:${CMP_COLORS[i]}"></span>${esc(g.display)}</th>`).join("") + `</tr></thead><tbody>`;
@@ -4460,7 +4553,7 @@ function compareBodyHtml(gws, st = state) {
     /* image digests and long refs stay in the tooltip; the cell stays compact */
     let short = full.replace(/\s*\(@sha256:[0-9a-f]+\)/, "");
     if (short.length > 40) short = short.slice(0, 37) + "...";
-    return `<td title="${esc(full)}">${esc(short)}</td>`;
+    return `<td class="cmp-build" title="${esc(full)}">${esc(short)}</td>`;
   }).join("")}</tr>`;
 
   for (const l of LANES) {
@@ -4473,10 +4566,11 @@ function compareBodyHtml(gws, st = state) {
     h += `<tr class="lane-row"><td colspan="${gws.length + 1}">${esc(l.label)}</td></tr>`;
     if (l.pathNote) {
       /* one disclosure row per canonical lane: WHICH path each gateway's numbers measured */
-      h += `<tr><td class="metric">Measured path</td>` + recs.map((j) =>
-        laneServed(j, l.flag)
-          ? `<td class="muted lane-note">${esc(lanePathNote(l, j, st))}</td>`
-          : `<td class="na"></td>`).join("") + `</tr>`;
+      h += `<tr><td class="metric">Measured path</td>` + recs.map((j, i) => {
+        if (laneServed(j, l.flag)) return `<td class="muted lane-note">${esc(lanePathNote(l, j, st))}</td>`;
+        const why = cmpAbsence(l, gws[i], j, null, st);
+        return `<td class="na" title="${esc(why.note)}">${esc(why.text)}</td>`;
+      }).join("") + `</tr>`;
     }
     for (const m of l.metrics) {
       // Each metric is a sealed envelope, read through the SAME metric() accessor the table uses -
@@ -4492,7 +4586,7 @@ function compareBodyHtml(gws, st = state) {
         if (!c || c.na) {
           if (c && c.failed) return `<td class="na failcell" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
           if (c) return `<td class="na" title="${esc(c.note || "")}">${esc(c.text)}</td>`;
-          const na = naText(recs[i], l.flag, l.err);
+          const na = cmpAbsence(l, gws[i], recs[i], m.k, st);
           return `<td class="na" title="${esc(na.note)}">${esc(na.text)}</td>`;
         }
         const zeroWhy = c.v === 0 && c.env && ZERO_WHY[c.env.note];
@@ -4509,11 +4603,15 @@ function compareBodyHtml(gws, st = state) {
       const blocks = recs.map((j) => (laneServed(j, l.flag) ? l.cmpExtra(j, st) : ""));
       if (blocks.some(Boolean))
         h += `<tr><td class="metric">Curve across bounds</td>` +
-          blocks.map((b) => (b ? `<td class="shape">${b}</td>` : `<td class="na"></td>`)).join("") + `</tr>`;
+          blocks.map((b, i) => {
+            if (b) return `<td class="shape">${b}</td>`;
+            const why = cmpAbsence(l, gws[i], recs[i], null, st);
+            return `<td class="na" title="${esc(why.note)}">${esc(why.text)}</td>`;
+          }).join("") + `</tr>`;
     }
   }
   h += `</tbody></table></div>`;
-  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). The sweep below each gateway is the ONE concurrency sweep its cell was measured on - every published throughput reading is a maximum over some subset of these same rungs - and the marked dot is the reading at the bound the board is currently showing, at the concurrency it was observed at.</p>`;
+  h += `<p class="fineprint">Best value per row is highlighted, decided by the measurement (lower latency and memory, higher throughput). The sweep below each gateway is the one concurrency sweep its cell was measured on - every published throughput reading is a maximum over some subset of these same rungs - and the marked dot is the reading at the bound the board is currently showing, at the concurrency it was observed at.</p>`;
   h += `<div id="cmp-sweeps" class="sweeps"></div>`;
   return h;
 }
@@ -4675,7 +4773,7 @@ function cellPopFull(g, ingress, egress) {
   const deltaBlock = delta
     ? `<div class="pop-delta">vs its own cell (${esc(MATRIX_LABELS[bp.ingress] || bp.ingress)}→${esc(MATRIX_LABELS[bp.egress] || bp.egress)}): ${esc(delta)}</div>`
     : (cellPerf && bp && bp.ingress === ingress && bp.egress === egress
-      ? `<div class="pop-delta muted">this IS the cell that ranks the Performance tab</div>` : "");
+      ? `<div class="pop-delta muted">this is the cell that ranks the Performance tab</div>` : "");
   const verdict = cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "";
   // The egress fairness guard, surfaced where the translation claim is actually inspected. The mock answers
   // all six dialects by path, so a gateway that forwarded the ingress request VERBATIM would still get a
@@ -4776,7 +4874,10 @@ function renderMatrix() {
             // colour-only: it rides as the accessible name, and the cell is focusable so the popup opens
             // from the keyboard too (focus/blur below mirror mouseenter/mouseleave).
             const aria = `${MATRIX_LABELS[c] || c} in, ${MATRIX_LABELS[e] || e} upstream: ${label}`;
-            return `<td><span class="cell ${cls}${diag}" tabindex="0" role="img" aria-label="${esc(aria)}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}"></span></td>`;
+            // "not declared" shares the grey notconf class with "not configured" (cellState); the extra
+            // class only lets the two engine states look different, as the legend promises.
+            const decl = label === "not declared" ? " notdecl" : "";
+            return `<td><span class="cell ${cls}${decl}${diag}" tabindex="0" role="img" aria-label="${esc(aria)}" data-gw="${esc(g.key)}" data-egress="${esc(e)}" data-cell="${esc(c)}"></span></td>`;
           }).join("")
         }</tr>`).join("")
       }</tbody></table></div>
@@ -4844,6 +4945,25 @@ function renderMatrix() {
    draw reports a smaller, tidier field than the one that was measured - and on this board an absent
    number usually means a refusal (the cell was not served, the window had failures) that a reader
    needs to see. They are named under the chart with their reason. */
+/* chartBasis(metric, st): which cell (and, for the throughput chart, which bound) the chart read, in words.
+   The Charts tab has no chooser of its own; it reads the cell and bound last chosen on the table tabs (and
+   carried in the URL), so the chart has to say which ones those are rather than promise controls it lacks. */
+function chartBasis(metric, st = state) {
+  let cell;
+  if (metric.id === "rss") {
+    const mm = memoryMode(st);
+    cell = mm === "min" ? "each gateway's cell with its lowest steady-state RSS"
+      : mm === "max" ? "each gateway's cell with its highest steady-state RSS"
+      : mm === "same" ? `the ${MATRIX_LABELS[st.sameDialect] || st.sameDialect}→${MATRIX_LABELS[st.sameDialect] || st.sameDialect} cell on every gateway`
+      : `the ${MATRIX_LABELS[st.xlateIn] || st.xlateIn}→${MATRIX_LABELS[st.xlateOut] || st.xlateOut} cell on every gateway`;
+  } else {
+    cell = st.mode === "same" ? `the ${MATRIX_LABELS[st.sameDialect] || st.sameDialect}→${MATRIX_LABELS[st.sameDialect] || st.sameDialect} cell on every gateway`
+      : st.mode === "custom" ? `the ${MATRIX_LABELS[st.xlateIn] || st.xlateIn}→${MATRIX_LABELS[st.xlateOut] || st.xlateOut} cell on every gateway`
+      : "each gateway's own representative same-dialect cell";
+  }
+  const bound = metric.id === "rps" ? ` at the ${boundLabel(selectedBound(st))} tail-latency bound` : "";
+  return `Read on ${cell}${bound}, as last chosen on the table tabs.`;
+}
 function renderCharts() {
   const panel = document.getElementById("chart-panel");
   const controls = document.getElementById("chart-controls");
@@ -4870,12 +4990,17 @@ function renderCharts() {
     return;
   }
   const alt = rankedBarsAlt(rows, metric);
-  panel.innerHTML = `<canvas id="chart-canvas" width="900" height="${Math.max(160, rows.length * 30 + 60)}" ` +
+  // THE COLOUR KEY. The lede says bars are coloured by implementation language; without a key the colours
+  // were unreadable. Only the languages actually on the chart are listed.
+  const langs = [...new Set(rows.map((r) => (LANG_COLORS[r.g.lang] ? r.g.lang : "Other")))];
+  const key = `<ul class="chart-legend" aria-label="Bar colour: implementation language">${langs.map((l) =>
+    `<li><span class="sw" style="background:${LANG_COLORS[l]}"></span>${esc(l)}</li>`).join("")}</ul>`;
+  panel.innerHTML = key + `<canvas id="chart-canvas" width="900" height="${Math.max(160, rows.length * 30 + 60)}" ` +
     `role="img" aria-label="${esc(alt.label)}" aria-describedby="chart-canvas-data"></canvas>` + alt.table;
   drawRankedBars(document.getElementById("chart-canvas"), rows, metric, chartTheme());
 
-  note.innerHTML = esc(metric.note) +
-    (metric.log ? " Drawn on a LOG scale: this metric spans orders of magnitude, and a linear axis would collapse most of the field into the width of a line." : "") +
+  note.innerHTML = esc(metric.note) + ` ${esc(chartBasis(metric, state))}` +
+    (metric.log ? " Drawn on a log scale: this metric spans orders of magnitude, and a linear axis would collapse most of the field into the width of a line." : "") +
     (missing.length
       ? `<br>Not shown (no value on the chosen cell): ${missing.map((g) => esc(g.display || g.key)).join(", ")}.`
       : "");
@@ -5220,7 +5345,7 @@ function versionBasis(g) {
   // NOT "what the harness built": for a source build the run records no commit (build is a binary path),
   // and this version is read from the gateway's CURRENT build.sh when the board is generated, so the
   // artifact cannot prove it matches the run. Say exactly that.
-  if (build) return `Launched as: ${build} - that stamp names no version (it is a source build), so this is the ref pinned in the gateway's build.sh when this board was generated. The run itself recorded no commit, so the artifact does not prove this is the build that was measured.`;
+  if (build) return `Launched as: ${build} — that stamp names no version (it is a source build), so this is the ref pinned in the gateway's build.sh when this board was generated. The run itself recorded no commit, so the artifact does not prove this is the build that was measured.`;
   if (versionToken(g)) return "The version pinned in the gateway's manifest, which is what the harness builds. This gateway has not been measured on the current benchmark yet, so there is no launch stamp to read instead.";
   return "Nothing published for this gateway names a version: neither a build stamp of what ran nor a pin in its manifest.";
 }
