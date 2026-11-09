@@ -62,8 +62,9 @@ refresh-gateway-stars:
     # Full history retains original raw bytes when a snapshot is corrected.
     - git clone --quiet --single-branch --branch main "$CI_REPOSITORY_URL" "$publish_dir"
     - cd "$publish_dir"
-    # Fail the refresh on API errors; stale data must not look like a fresh run.
-    - node gateways/fetch-stars.mjs
+    # Only the nightly schedule refreshes GitHub stars (and fails on API errors, so stale data never
+    # looks fresh). Release deploys publish the committed counts and never hit GitHub's rate limit.
+    - if [ "$CI_PIPELINE_SOURCE" = "schedule" ]; then node gateways/fetch-stars.mjs; fi
     - node site/gen-data.mjs
     - node site/check-consistency.mjs site/data.json
     - node site/test-coverage.mjs
