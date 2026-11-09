@@ -4,7 +4,7 @@
 set -euo pipefail
 GW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$GW_DIR/src"
-COMMIT=b7d579fab2818968322ef96e5b8e98dc8178fafc
+COMMIT=b7d579fab2818968322ef96e5b8e98dc8178fafc # tag v1.108.3
 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -q git build-essential pkg-config libssl-dev cmake
 [ -d "$SRC/.git" ] || git clone --filter=blob:none --no-checkout https://github.com/BerriAI/litellm.git "$SRC"
 git -C "$SRC" fetch --depth=1 origin tag v1.108.3

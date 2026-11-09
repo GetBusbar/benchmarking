@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
-import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, shellViews } from "./render.mjs";
+import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, shellViews, timeHtml, formatTimestamp, proseHtml, mdSpan } from "./render.mjs";
 import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords, PROTOCOLS } from "./public-data.mjs";
-import { measurementTable, gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml } from "./evidence.mjs";
+import { measurementTable, gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml, buildHtml, factsHtml } from "./evidence.mjs";
 
 import { expandHistorical, historicalMeasurements, historyPoints, currentTrends, historyArticle, fieldRankings, rankChanges, metricDirection, PROJECTOR } from "./history.mjs";
 import { semanticGuide, retrievalGuide, compactCsv, DATA_LICENSE, gatewayFamily } from "./retrieval.mjs";
@@ -75,6 +75,8 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   };
   const selectedFiles = new Set(data.gateways.flatMap(g => [g.snapshot_file,
     ...Object.values(g.matrix?.upstreams || {}).flatMap(u => Object.values(u.cells || {}).map(c => c.__run?.file))]).filter(Boolean));
+  // A gateway whose definition launches a build step runs a binary compiled from source; its snapshot records that binary path as the build.
+  const builtFromSource = key => { try { return Boolean(JSON.parse(readFileSync(join(root, "gateways", key, "definition.json"), "utf8")).launch?.build); } catch { return false; } };
   const families = JSON.parse(readFileSync(join(root, "site/gateway-families.json"), "utf8"));
   const familyOf = id => Object.entries(families).find(([, aliases]) => aliases.includes(id))?.[0] || id;
   const reviewPath = join(root, 'results/run-reviews.json');
@@ -115,7 +117,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
       page(`/gateways/runs/${id}`, renderArticle(template, {
         path: `/gateways/runs/${id}`, title: `${snapshot.gateway} — ${snapshot.measured_at || "undated run"}`,
         structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${snapshot.gateway} benchmark run`, description: `Immutable raw evidence for one ${snapshot.gateway} benchmark run measured ${snapshot.measured_at || "at an unrecorded time"} against a local mock upstream.`, creator: { "@type": "Organization", name: DISCLOSURE.operator, "@id": `${ORIGIN}/#organization` }, url: summary.source_url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: summary.raw_result_url } },
-        body: `<h1>${esc(snapshot.gateway)} benchmark run</h1>${disclosureHtml}<p>Measured ${esc(snapshot.measured_at)}. Recorded build: ${esc(snapshot.build)}.</p><p>Hardware: ${esc(snapshot.hardware)}. Architecture: ${esc(snapshot.arch)}.</p><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p>${item.review ? `<h2>Publication correction</h2><p>${esc(item.review.reason)}</p><p><a href="${esc(item.review.evidence)}">Validation evidence</a></p>` : ""}<h2>Recorded metric definitions</h2><dl>${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2><pre>${esc(JSON.stringify(snapshot.rig ?? null, null, 2))}</pre>`,
+        body: `<h1>${mdSpan(esc(data.gateways.find(g => g.key === snapshot.gateway)?.display || snapshot.gateway), snapshot.gateway)} benchmark run</h1>${disclosureHtml}<dl class="record-facts"><dt>Measured</dt><dd>${timeHtml(snapshot.measured_at)}</dd><dt>Recorded build</dt><dd>${buildHtml(snapshot.build, { fromSource: builtFromSource(snapshot.gateway) })}</dd><dt>Hardware</dt><dd>${esc(snapshot.hardware ?? "Not recorded")}</dd><dt>Architecture</dt><dd>${esc(snapshot.arch ?? "Not recorded")}</dd></dl><p>SHA-256 of exact raw JSON bytes: <code>${sha256}</code>.</p><p><a href="${summary.raw_result_url}">Full immutable raw result, all protocol cells and samples</a> · <a href="/api/v1/benchmarks/${id}">Run metadata JSON</a> · <a href="/gateways/${snapshot.gateway}">Current gateway evidence</a></p>${item.review ? `<h2>Publication correction</h2><p>${esc(item.review.reason)}</p><p><a href="${esc(item.review.evidence)}">Validation evidence</a></p>` : ""}<h2>Recorded metric definitions</h2><dl class="recorded-definitions">${Object.entries(snapshot.definitions || {}).map(([k,v]) => `<dt><code>${esc(k)}</code></dt><dd>${proseHtml(v)}</dd>`).join("")}</dl><h2>Instrument provenance</h2>${factsHtml(snapshot.rig ?? null)}<p>The exact recorded JSON is in the <a href="${summary.raw_result_url}">full immutable raw result</a>.</p>`,
       }));
       item.gateway_family = familyOf(snapshot.gateway);
       item.engine = snapshot.rig?.engine?.commit ?? null;
@@ -288,9 +290,9 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   for (const g of data.gateways) {
     const records = measurements.filter(m => m.gateway_id === g.key);
     const histories = archives.filter(r => gatewayFamily(r.gateway_id) === gatewayFamily(g.key));
-    page(`/gateways/${g.key}/evidence`, renderArticle(template, { path: `/gateways/${g.key}/evidence`, title: `${g.display} complete benchmark evidence`, body: gatewayArticle(g, records, histories, data.gateways, { full: true }) }));
+    page(`/gateways/${g.key}/evidence`, renderArticle(template, { path: `/gateways/${g.key}/evidence`, title: `${g.display} complete benchmark evidence`, body: gatewayArticle(g, records, histories, data.gateways, { full: true, fromSource: builtFromSource(g.key) }) }));
     json(`/api/v1/gateways/${g.key}.json`, { schema_version: "1.0", gateway: g, current_metadata: publication.gateways.find(item => item.id === g.key).current_metadata, metadata_scope: "gateway.stars and stars_as_of are legacy aliases of current_metadata, a dated repository snapshot, not stars at measurement time. Run statistics were not recorded.", measurements: records, history: histories, generated_at: data.generated_at, disclosure: DISCLOSURE });
-    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${g.display} gateway measurements`, description: `${g.display} AI gateway overhead measured against a local mock upstream: added latency, throughput, streaming and memory across client and upstream protocol pairs.`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator, "@id": `${ORIGIN}/#organization` }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways) }));
+    page(`/gateways/${g.key}`, renderArticle(template, { path: `/gateways/${g.key}`, title: `${g.display} benchmark measurements`, structured: { "@context": "https://schema.org", "@type": "Dataset", license: DATA_LICENSE, name: `${g.display} gateway measurements`, description: `${g.display} AI gateway overhead measured against a local mock upstream: added latency, throughput, streaming and memory across client and upstream protocol pairs.`, url: `${ORIGIN}/gateways/${g.key}`, creator: { "@type": "Organization", name: DISCLOSURE.operator, "@id": `${ORIGIN}/#organization` }, about: { "@type": "SoftwareApplication", name: g.display, url: g.repo }, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: `${ORIGIN}/api/v1/gateways/${g.key}` } }, body: gatewayArticle(g, records, histories, data.gateways, { fromSource: builtFromSource(g.key) }) }));
   }
   // Common comparison URLs cost only a static read, and are discoverable in the
   // sitemap. Both orders are useful: the ratio explicitly names its denominator.
@@ -298,12 +300,12 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     const comparison = compareMeasurements(measurements, { a: a.key, b: b.key });
     const pair = `${a.key}-vs-${b.key}`;
     json(`/api/v1/comparisons/${pair}.json`, comparison);
-    page(`/gateways/compare/${pair}`, renderArticle(template, { path: `/gateways/compare/${pair}`, title: `${a.display} vs ${b.display}`, body: comparisonArticle(comparison) }));
+    page(`/gateways/compare/${pair}`, renderArticle(template, { path: `/gateways/compare/${pair}`, title: `${a.display} vs ${b.display}`, body: comparisonArticle(comparison, Object.fromEntries(data.gateways.map(g => [g.key, g.display]))) }));
   }
   // Retired entrants retain independently addressable history and evidence.
   for (const key of new Set(archives.map(r => r.gateway_id))) if (!data.gateways.some(g => g.key === key)) {
     const histories = archives.filter(r => r.gateway_id === key);
-    page(`/gateways/${key}`, renderArticle(template, { path: `/gateways/${key}`, title: `${key} historical benchmarks`, body: `<h1>${esc(key)} historical benchmarks</h1>${disclosureHtml}<p>This gateway is not on the current board.</p><ul>${histories.map(r => `<li><a href="${esc(r.source_url || `/gateways/runs/${r.id}`)}">${esc(r.measured_at)} — ${esc(r.build)}</a></li>`).join("")}</ul>` }));
+    page(`/gateways/${key}`, renderArticle(template, { path: `/gateways/${key}`, title: `${key} historical benchmarks`, body: `<h1>${esc(key)} historical benchmarks</h1>${disclosureHtml}<p>This gateway is not on the current board.</p><ul>${histories.map(r => `<li><a href="${esc(r.source_url || `/gateways/runs/${r.id}`)}">${timeHtml(r.measured_at, "Date not recorded")} — ${buildHtml(r.build)}</a></li>`).join("")}</ul>` }));
     json(`/api/v1/gateways/${key}.json`, { schema_version: "1.0", gateway: { key, current: false }, measurements: [], history: histories, disclosure: DISCLOSURE });
   }
   page("/gateways/data", renderArticle(template, { path: "/gateways/data", title: "Benchmark data and API", structured: { "@context": "https://schema.org", "@type": "DataCatalog", license: DATA_LICENSE, name: "On the Bench published gateway evidence", url: `${ORIGIN}/gateways/data`, creator: { "@type": "Organization", name: DISCLOSURE.operator }, dataset: publication.gateways.map(g => ({ "@type": "Dataset", license: DATA_LICENSE, name: g.name + " measurements", url: g.url, distribution: { "@type": "DataDownload", encodingFormat: "application/json", contentUrl: g.json_url } })) }, body: dataArticle(publication) }));
@@ -312,7 +314,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     const runs = archives.filter(r => r.gateway_family === family);
     const dates = runs.map(r => r.measured_at).filter(Boolean).sort();
     const name = data.gateways.find(g => familyOf(g.key) === family)?.display || family;
-    return `<tr><td><a href="/gateways/${encodeURIComponent(family)}/history">${esc(name)}</a></td><td>${runs.length}</td><td>${esc(dates.at(-1)?.slice(0, 10) || "Not recorded")}</td><td><a href="/gateways/${encodeURIComponent(family)}/history">View history →</a></td></tr>`;
+    return `<tr><td><a href="/gateways/${encodeURIComponent(family)}/history">${esc(name)}</a></td><td>${runs.length}</td><td>${timeHtml(dates.at(-1)?.slice(0, 10))}</td><td><a href="/gateways/${encodeURIComponent(family)}/history">View history →</a></td></tr>`;
   }).join("");
   page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Gateway history", body: `<h1>Gateway history</h1><p>Choose a gateway to see its previous results, changes and original evidence. All tested versions are grouped together.</p><div class="table-scroll"><table><thead><tr><th>Gateway</th><th>Retained runs</th><th>Latest measurement</th><th>History</th></tr></thead><tbody>${historyDirectory}</tbody></table></div><p><a href="/api/v1/runs">Machine-readable run catalog</a></p>` }));
   write("/gateways/data.csv", compactCsv(measurements, measurements, datasetId));
