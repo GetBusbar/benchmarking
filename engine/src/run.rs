@@ -880,31 +880,43 @@ pub fn load_window_at(
                 detail.map(|d| format!(": {d}")).unwrap_or_default()
             );
         }
-        parsed.into_value().map(|u| GenStats {
-            ok: u.ok.max(0) as u64,
-            fail: u.fail.max(0) as u64,
-            // `u.rps` is f64 now (fractional below 1/s), so the comparison and the division are
-            // both float. A sub-1/s window previously could not even reach here: it failed the i64
-            // parse and the whole window was classified as a HarnessError.
-            elapsed_s: if u.rps > 0.0 {
-                u.ok as f64 / u.rps
-            } else {
-                0.0
-            },
-            latencies_us: Vec::new(),
-            // FROM THE CHILD, not assumed. This was hardcoded `false`, so `if stats.spawn_failed` in
-            // `SweepProbe::probe` - the check that stops the search when the OS refused a thread -
-            // could never fire on the subprocess path, and a window that never ran at its stated
-            // concurrency was read as an ordinary result of the gateway.
-            spawn_failed: u.spawn_failed,
-            rig_refused: u.rig_refused.max(0) as u64,
-            budget_exceeded: u.budget_exceeded.max(0) as u64,
-            // The subprocess never sends its raw samples back, only the percentiles it already
-            // computed over them, so these are filled straight from the stats line rather than left
-            // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
-            p50_us: Some(u.p50_us.max(0) as u64),
-            p99_us: Some(u.p99_us.max(0) as u64),
-        })
+        parsed.into_value().map(gen_stats_from_child)
+    }
+}
+
+/// The child's stats line, as the `GenStats` every caller reads.
+///
+/// Separate from `load_window_at` so the conversion - the only place the subprocess path decides
+/// what a percentile is - can be tested without spawning a child.
+fn gen_stats_from_child(u: crate::loadgen::UgenStats) -> GenStats {
+    // A WINDOW THAT COMPLETED NOTHING HAS NO PERCENTILE. The child computes p50/p99 over its
+    // successes only and prints 0 for an empty set, so passing that through published a collapsed
+    // rung (every request failed) as `p99_us: 0` - an absence dressed as the best tail on the board.
+    let percentile = |v: i64| (u.ok > 0).then_some(v.max(0) as u64);
+    GenStats {
+        ok: u.ok.max(0) as u64,
+        fail: u.fail.max(0) as u64,
+        // `u.rps` is f64 now (fractional below 1/s), so the comparison and the division are
+        // both float. A sub-1/s window previously could not even reach here: it failed the i64
+        // parse and the whole window was classified as a HarnessError.
+        elapsed_s: if u.rps > 0.0 {
+            u.ok as f64 / u.rps
+        } else {
+            0.0
+        },
+        latencies_us: Vec::new(),
+        // FROM THE CHILD, not assumed. This was hardcoded `false`, so `if stats.spawn_failed` in
+        // `SweepProbe::probe` - the check that stops the search when the OS refused a thread -
+        // could never fire on the subprocess path, and a window that never ran at its stated
+        // concurrency was read as an ordinary result of the gateway.
+        spawn_failed: u.spawn_failed,
+        rig_refused: u.rig_refused.max(0) as u64,
+        budget_exceeded: u.budget_exceeded.max(0) as u64,
+        // The subprocess never sends its raw samples back, only the percentiles it already
+        // computed over them, so these are filled straight from the stats line rather than left
+        // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
+        p50_us: percentile(u.p50_us),
+        p99_us: percentile(u.p99_us),
     }
 }
 
@@ -4115,6 +4127,37 @@ while True:
             matches!(s, Served::No(ref v, ref ev) if *v == crate::probe::Verdict::Failed && ev.status == 401),
             "401 must be Failed with the real status carried as evidence, got {s:?}"
         );
+    }
+
+    // A WINDOW THAT COMPLETED NOTHING HAS NO TAIL LATENCY.
+    //
+    // The child computes its percentiles over successes only and prints 0 for an empty set, so a
+    // rung where every request failed reached the sweep as `p99_us: 0` - the best tail on the
+    // board, published for a collapse.
+    #[test]
+    fn a_child_window_with_no_successes_reports_no_percentile_rather_than_zero() {
+        let line = |ok: i64, p50: i64, p99: i64| crate::loadgen::UgenStats {
+            rps: 0.0,
+            fail: 500,
+            p50_us: p50,
+            p99_us: p99,
+            ok,
+            rig_refused: 0,
+            budget_exceeded: 0,
+            spawn_failed: false,
+        };
+        let collapsed = gen_stats_from_child(line(0, 0, 0));
+        assert_eq!(collapsed.p50_us, None, "{collapsed:?}");
+        assert_eq!(collapsed.p99_us, None, "{collapsed:?}");
+        assert_eq!((collapsed.ok, collapsed.fail), (0, 500));
+
+        // A window that served carries the child's percentiles through unchanged.
+        let served = gen_stats_from_child(crate::loadgen::UgenStats {
+            rps: 100.0,
+            ..line(400, 1_200, 9_000)
+        });
+        assert_eq!(served.p50_us, Some(1_200));
+        assert_eq!(served.p99_us, Some(9_000));
     }
 
     // A pairing the manifest DECLARES supported cannot turn grey by answering 404/501: that is a
