@@ -1679,7 +1679,6 @@ mod tests {
     }
 
     use super::*;
-    use std::io::Write;
     use std::net::TcpListener;
 
     // A RUN MUST NOT DECLARE ITSELF DEGRADED WHILE CARRYING THE DATA IT SAYS IT SKIPPED. The
