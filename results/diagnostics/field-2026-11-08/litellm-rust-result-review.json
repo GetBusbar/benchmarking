@@ -674,5 +674,12 @@
       "egress_reverified": null,
       "reverify_note": null
     }
-  ]
+  ],
+  "publication_consistency_warnings": [
+    "check-consistency: WARNING: litellm-rust.anthropic->anthropic.memory: sampled peak_rss 20.1484375 MiB > kernel peak_rss_hwm 19.8828125 MiB (a 1.34% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)",
+    "check-consistency: WARNING: litellm-rust.openai->anthropic.memory: sampled peak_rss 18.609375 MiB > kernel peak_rss_hwm 18.3359375 MiB (a 1.49% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)",
+    "check-consistency: WARNING: litellm-rust.openai-responses->openai-responses.memory: sampled peak_rss 19.0859375 MiB > kernel peak_rss_hwm 18.828125 MiB (a 1.37% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)",
+    "check-consistency: WARNING: litellm-rust.openai->openai.memory: sampled peak_rss 19.18359375 MiB > kernel peak_rss_hwm 18.83203125 MiB (a 1.87% overshoot - VmHWM cannot be below an observed RSS for a FIXED process tree, so a child process counted in the sampled peak had exited before the VmHWM sum was taken; a transient-worker artefact of summing the tree at two different instants, not a fabricated value)"
+  ],
+  "memory_warning_policy": "Existing checker accepts small process-tree sampling-time differences; raw sampled RSS and later VmHWM sum retained unchanged. No stronger cause inferred from this discrepancy."
 }
