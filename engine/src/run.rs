@@ -1025,7 +1025,9 @@ thread_local! {
 
 /// Record what "quiet" means for the cell about to be measured. Called once, before its ladder.
 pub fn arm_stream_settle_baseline() {
-    let tw = HostState::sample().tw.map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
+    let tw = HostState::sample()
+        .tw
+        .map(|t| t * STREAM_SETTLE_TW_TOLERANCE + 64);
     STREAM_SETTLE_TW_BASELINE.with(|b| *b.borrow_mut() = tw);
 }
 const MAX_CEILING_STEPDOWNS: usize = 4;
@@ -1735,7 +1737,9 @@ fn settle_after_streams(concurrency: u32) {
         // proportional sleep: an unobservable host still needs SOME pause, and the old behaviour is
         // the honest default when the condition cannot be evaluated.
         let ms = u64::from(concurrency) * STREAM_SETTLE_MS_PER_1K / 1000;
-        std::thread::sleep(std::time::Duration::from_millis(ms.min(STREAM_SETTLE_MAX_MS)));
+        std::thread::sleep(std::time::Duration::from_millis(
+            ms.min(STREAM_SETTLE_MAX_MS),
+        ));
         return;
     };
     let started = std::time::Instant::now();
@@ -3057,32 +3061,47 @@ pub(crate) fn test_fixture(gw: SocketAddr, mock: SocketAddr) -> RunConfig {
 #[cfg(test)]
 mod tests {
     /* THE DRAIN WAITS ON A CONDITION, AND THE CONDITION HAS TO BE REACHABLE.
-    
-       A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
-       above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
-       is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
+
+    A settle that can never be satisfied turns the 60s backstop into the schedule: 1,647 windows
+    above the free-below threshold would become 27 HOURS of waiting in a field run. The tolerance
+    is what keeps it reachable on a box that is never perfectly idle, so it is asserted directly. */
     #[test]
+    #[allow(clippy::erasing_op)] // clippy 1.98: the idle-box arithmetic is spelled out on purpose
     fn the_drain_target_is_reachable_on_a_box_that_is_never_perfectly_idle() {
         // The baseline is the cell's own starting count, scaled - not a number chosen here. A box
         // that starts with 200 sockets in TIME_WAIT must not be asked to return to 0.
         let quiet = 200u64;
         let target = quiet * STREAM_SETTLE_TW_TOLERANCE + 64;
-        assert!(target > quiet, "the target must sit ABOVE the level the cell started at");
+        assert!(
+            target > quiet,
+            "the target must sit ABOVE the level the cell started at"
+        );
         // The mock and the load generator hold their own sockets throughout, so a window that closes
         // cleanly still leaves the box above where it began. That has to read as drained.
-        assert!(quiet + 100 <= target, "ordinary residue still counts as drained");
+        assert!(
+            quiet + 100 <= target,
+            "ordinary residue still counts as drained"
+        );
         // And a box still holding thousands of dying sockets from a c=8,192 window does NOT.
-        assert!(quiet + 8_000 > target, "a real backlog is not mistaken for quiet");
+        assert!(
+            quiet + 8_000 > target,
+            "a real backlog is not mistaken for quiet"
+        );
 
         // An idle box reads 0 and must still get a usable target rather than an impossible one.
-        assert_eq!(0 * STREAM_SETTLE_TW_TOLERANCE + 64, 64, "an idle box still has headroom");
+        assert_eq!(
+            0 * STREAM_SETTLE_TW_TOLERANCE + 64,
+            64,
+            "an idle box still has headroom"
+        );
     }
 
     /* AND THE BACKSTOP IS ONE TIME_WAIT GENERATION, which is the point of the number. It was 10s,
-       deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
-       after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
-       broken rather than busy. */
+    deliberately UNDER TIME_WAIT, and the board showed cells failing rungs they had already carried
+    after 4-5s of it. A closed socket cannot need longer than a generation; past that the host is
+    broken rather than busy. */
     #[test]
+    #[allow(clippy::assertions_on_constants)] // clippy 1.98: deliberate constant checks
     fn the_settle_backstop_covers_a_full_time_wait_generation() {
         assert!(
             STREAM_SETTLE_MAX_MS >= 60_000,
@@ -3097,9 +3116,9 @@ mod tests {
     }
 
     /* THE FLOOR FALLBACK'S GATE, which decides whether a cell publishes a conservative number or an
-       absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
-       only meaningful when the host was not the suspect - and the flattering direction of this error
-       (publishing a figure where honesty published none) is the one nobody would catch. */
+    absence. The fallback re-measures on the SAME host that just failed several rungs, so it is
+    only meaningful when the host was not the suspect - and the flattering direction of this error
+    (publishing a figure where honesty published none) is the one nobody would catch. */
     #[test]
     fn floor_fallback_only_where_the_host_is_not_the_suspect() {
         // The search ran out of room or budget: the gateway and the rig are both innocent so far, and
@@ -3110,29 +3129,54 @@ mod tests {
 
         // OUR instrument is the variable. A number taken on a host we have just accused would be
         // exactly the attribution error the enum exists to prevent.
-        assert!(!StreamStop::RigRanShort { measured: 1, wanted: 3 }.floor_fallback_ok());
+        assert!(!StreamStop::RigRanShort {
+            measured: 1,
+            wanted: 3
+        }
+        .floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
-        assert!(!StreamStop::RigContaminated { at: 4096, proven: 4096 }.floor_fallback_ok());
+        assert!(!StreamStop::RigContaminated {
+            at: 4096,
+            proven: 4096
+        }
+        .floor_fallback_ok());
 
         // And a gateway that had to be restarted is no longer the process the sweep measured, so
         // whatever a fresh one carries is not this cell's ceiling. "It does not recover" is the
         // finding and must not be overwritten by a number.
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: true }
-            .floor_fallback_ok());
-        assert!(!StreamStop::GatewayDidNotRecover { at: 8192, proven: 4096, restart_cleared: false }
-            .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover {
+            at: 8192,
+            proven: 4096,
+            restart_cleared: true
+        }
+        .floor_fallback_ok());
+        assert!(!StreamStop::GatewayDidNotRecover {
+            at: 8192,
+            proven: 4096,
+            restart_cleared: false
+        }
+        .floor_fallback_ok());
     }
 
     /* AND THE FLOOR STILL HAS TO EARN IT. The fallback publishes only what the same majority rule
-       every other repeated measurement uses would publish, so a floor that wins one window of three -
-       the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
+    every other repeated measurement uses would publish, so a floor that wins one window of three -
+    the shape that made the bisected rung unpublishable in the first place - stays unpublished. */
     #[test]
     fn the_floor_is_published_only_on_the_same_majority_every_other_rate_needs() {
         assert!(stream_ceiling_confirmed(3, 3), "three of three holds");
         assert!(stream_ceiling_confirmed(3, 2), "two of three is a majority");
-        assert!(!stream_ceiling_confirmed(3, 1), "one of three is the busbar c=5,652 shape");
-        assert!(!stream_ceiling_confirmed(3, 0), "none of three publishes nothing");
-        assert!(!stream_ceiling_confirmed(2, 2), "a short window set is not a confirmation");
+        assert!(
+            !stream_ceiling_confirmed(3, 1),
+            "one of three is the busbar c=5,652 shape"
+        );
+        assert!(
+            !stream_ceiling_confirmed(3, 0),
+            "none of three publishes nothing"
+        );
+        assert!(
+            !stream_ceiling_confirmed(2, 2),
+            "a short window set is not a confirmation"
+        );
     }
 
     #[test]

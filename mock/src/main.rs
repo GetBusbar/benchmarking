@@ -10,7 +10,7 @@
 //   /messages              -> Anthropic Messages
 //   …:generateContent      -> Google Gemini
 //   /converse | /model/…   -> AWS Bedrock (Converse)
-//   /v2/chat | /v1/chat    -> Cohere
+//   /v2/chat -> Cohere v2, /v1/chat -> Cohere v1
 //   (anything else)        -> OpenAI chat.completion (safe default)
 //
 // It is deliberately dumb and deliberately fast: hyper on a multi-threaded tokio runtime, static
@@ -77,12 +77,16 @@ use hyper_util::server::conn::auto;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 
-const OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
-const RESPONSES: &[u8] = br#"{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}"#;
-const ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
+// Streaming dispatch compares these two response allocations by identity. Static storage keeps
+// that identity stable across codegen units; const values may be instantiated separately.
+static OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#;
+const RESPONSES: &[u8] = br#"{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12},"error":null,"incomplete_details":null,"instructions":null,"parallel_tool_calls":true,"tools":[],"tool_choice":"auto","temperature":1.0,"top_p":1.0,"metadata":{},"previous_response_id":null,"truncation":"disabled","max_output_tokens":null,"store":false}"#;
+static ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
 const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
 const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
 const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
+// Cohere v1 adapters read top-level text and meta.tokens, not the v2 message envelope.
+const COHERE_V1: &[u8] = br#"{"response_id":"x","generation_id":"x","text":"ok","finish_reason":"COMPLETE","meta":{"api_version":{"version":"1"},"tokens":{"input_tokens":10,"output_tokens":2},"billed_units":{"input_tokens":10,"output_tokens":2}}}"#;
 // GET .../models - a model list, discovered at boot by gateways that register routable models by
 // calling the upstream's /models. PROVIDER-SPECIFIC (keyed off the request path, see models_for): a
 // catalog shared across providers would let a gateway that routes by bare model name register the
@@ -122,8 +126,10 @@ fn body_for(path: &str) -> &'static [u8] {
         GEMINI
     } else if path.contains("/converse") || path.contains("/model/") || path.contains("/invoke") {
         BEDROCK
-    } else if path.contains("/v2/chat") || path.contains("/v1/chat") {
+    } else if path.contains("/v2/chat") {
         COHERE
+    } else if path.contains("/v1/chat") {
+        COHERE_V1
     } else {
         OPENAI
     }
@@ -770,13 +776,29 @@ mod tests {
             ("/v1/messages", "\"stop_reason\":\"end_turn\""),
             ("/v1beta/models/m:generateContent", "candidates"),
             ("/model/m/converse", "stopReason"),
-            ("/v2/chat", "\"finish_reason\":\"COMPLETE\""),
+            ("/v2/chat", "\"message\":{"),
+            ("/v1/chat", "\"meta\":{\"api_version\":{\"version\":\"1\"}"),
         ] {
             let body = String::from_utf8_lossy(body_for(path)).into_owned();
             assert!(
                 body.contains(marker),
                 "{path} must answer its own dialect, got {body}"
             );
+        }
+    }
+
+    // Responses adapters deserialize usage detail objects and the full response envelope; a body
+    // without them is a mock defect that would be published as a gateway conversion failure.
+    #[test]
+    fn the_responses_body_carries_usage_details_and_the_full_envelope() {
+        let body = String::from_utf8_lossy(body_for("/v1/responses")).into_owned();
+        for field in [
+            "\"input_tokens_details\"",
+            "\"output_tokens_details\"",
+            "\"tool_choice\"",
+            "\"truncation\"",
+        ] {
+            assert!(body.contains(field), "responses body lacks {field}: {body}");
         }
     }
 
