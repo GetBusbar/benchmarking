@@ -1728,7 +1728,11 @@ mod tests {
                     tokio::spawn(async move {
                         let mut b = [0u8; 4096];
                         while c.read(&mut b).await.unwrap_or(0) > 0 {
-                            let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                            let body = crate::run::TEST_PROTOCOL_OK;
+                            let r = format!(
+                                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
                             if c.write_all(r.as_bytes()).await.is_err() {
                                 return;
                             }

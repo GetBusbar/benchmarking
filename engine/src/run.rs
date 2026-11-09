@@ -424,7 +424,28 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
         &headers_for(cfg, ing, &id.egress),
         cfg.probe_timeout,
     ) {
-        Outcome::Response(r) if (200..300).contains(&r.status) => (Served::Yes, None),
+        // A 2xx IS NOT AN ANSWER UNTIL IT IS ONE. The body must be a well-formed response of the
+        // INGRESS dialect carrying assistant text; an empty message, an error object or another
+        // dialect's body is a failed probe with the body kept as evidence. Not retryable: it is a
+        // real answer the gateway keeps giving.
+        Outcome::Response(r) if (200..300).contains(&r.status) => {
+            match ing.nonstream_response_problem(r.body()) {
+                None => (Served::Yes, None),
+                Some(why) => (
+                    Served::No(
+                        Verdict::Failed,
+                        crate::cell::Evidence {
+                            status: r.status,
+                            body_snippet: crate::cell::Evidence::snippet_within(
+                                &format!("{why}: {}", String::from_utf8_lossy(r.body())),
+                                600,
+                            ),
+                        },
+                    ),
+                    None,
+                ),
+            }
+        }
         Outcome::Response(r) => {
             // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
             // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
@@ -2783,6 +2804,57 @@ pub struct CellResult {
     pub reverify: crate::reverify::Reverified,
 }
 
+/// How long to wait before asking a refuted re-verification once more. One recorder read can be
+/// caught mid-flight (a gateway still settling after the previous cell's relaunch); a second read a
+/// few seconds later separates that moment from a gateway that really emits the wrong dialect.
+pub const REVERIFY_RETRY_PAUSE: Duration = Duration::from_secs(5);
+
+/// Re-verify, and when the first answer is a REFUTATION, pause and ask exactly once more. The
+/// second answer is the verdict. `None` (unchecked) and `Some(true)` are never retried: only a
+/// refutation withholds a cell, so only a refutation is worth a second look.
+pub fn reverify_with_retry(
+    mut check: impl FnMut() -> crate::reverify::Reverified,
+    pause: Duration,
+    id: &CellId,
+) -> crate::reverify::Reverified {
+    let first = check();
+    if first.verified != Some(false) {
+        return first;
+    }
+    eprintln!(
+        "[reverify] {id}: refuted ({}) - asking once more after {}s",
+        first.note.as_deref().unwrap_or("no note"),
+        pause.as_secs()
+    );
+    std::thread::sleep(pause);
+    check()
+}
+
+/// A served cell whose egress re-verification was refuted (after its retry) is NOT served: it is a
+/// failed probe whose evidence is the mock's own record of what arrived upstream. Anything else
+/// passes through unchanged.
+pub fn served_after_reverify(served: Served, reverify: &crate::reverify::Reverified) -> Served {
+    match (served, reverify.verified) {
+        (Served::Yes, Some(false)) => Served::No(
+            Verdict::Failed,
+            crate::cell::Evidence {
+                status: 200,
+                body_snippet: crate::cell::Evidence::snippet_within(
+                    &format!(
+                        "egress not re-verified: {}",
+                        reverify
+                            .note
+                            .as_deref()
+                            .unwrap_or("no evidence was recorded with the refutation")
+                    ),
+                    600,
+                ),
+            },
+        ),
+        (s, _) => s,
+    }
+}
+
 /// Walk the grid: probe every pairing, sweep the ones that are served.
 pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
     run_grid_with(cfg, lo, hi, metric::METRICS)
@@ -2985,10 +3057,18 @@ pub fn run_grid_cells(
             // minute memory window, and the recorder's `body_ok` only ever describes the LAST body it
             // saw. One request, on a cleared recorder, with nothing else in flight.
             let reverify = if served.is_measurable() {
-                crate::reverify::reverify_cell(cfg, &id, *ing)
+                reverify_with_retry(
+                    || crate::reverify::reverify_cell(cfg, &id, *ing),
+                    REVERIFY_RETRY_PAUSE,
+                    &id,
+                )
             } else {
                 Default::default()
             };
+            // A cell whose egress was REFUTED twice is not served: it answered over a wire that is
+            // not this pairing, so it is recorded failed with the refutation as its evidence and is
+            // never measured.
+            served = served_after_reverify(served, &reverify);
             let (metrics, series, timings) = if served.is_measurable() {
                 let ctx = metric::CellCtx {
                     cfg,
@@ -3023,7 +3103,23 @@ pub fn run_grid_cells(
             let outcome = match served {
                 Served::Yes => CellOutcome::served(id),
                 Served::No(v, ev) => {
-                    let n = format!("probed and answered {} (HTTP {})", v.token(), ev.status);
+                    let n = match &reverify {
+                        crate::reverify::Reverified {
+                            verified: Some(false),
+                            note,
+                        } => format!(
+                            "probed and answered HTTP {}, but egress re-verification failed on both \
+                             attempts: {}",
+                            ev.status,
+                            note.as_deref().unwrap_or("no evidence was recorded")
+                        ),
+                        _ if (200..300).contains(&ev.status) => format!(
+                            "probed and answered HTTP {}, but the body is not a usable {} response \
+                             (see body_snippet)",
+                            ev.status, id.ingress
+                        ),
+                        _ => format!("probed and answered {} (HTTP {})", v.token(), ev.status),
+                    };
                     CellOutcome::not_served(id, v, ev, n)
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
@@ -3048,6 +3144,12 @@ pub fn run_grid_cells(
         }
     }
 }
+
+/// A 2xx body every test fixture can serve that is a valid response for the openai, anthropic,
+/// gemini and cohere ingress dialects at once (each validator reads only its own fields), so a fixture
+/// that stands in for "a gateway that serves" passes `Dialect::nonstream_response_problem`.
+#[cfg(test)]
+pub(crate) const TEST_PROTOCOL_OK: &str = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}],"content":[{"type":"text","text":"ok"}],"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"message":{"content":[{"type":"text","text":"ok"}]}}"#;
 
 /// A minimal `RunConfig` for tests across this crate, mirroring `manifest::test_fixture` (one place
 /// to add a field, not one per call site). `matrix`/`untestable_cells` empty: undeclared, so every
@@ -3716,7 +3818,11 @@ while True:
                 std::thread::spawn(move || {
                     let mut b = [0u8; 4096];
                     while c.read(&mut b).unwrap_or(0) > 0 {
-                        let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                        let body = super::TEST_PROTOCOL_OK;
+                        let r = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
                         if c.write_all(r.as_bytes()).is_err() {
                             return;
                         }
@@ -3735,6 +3841,152 @@ while True:
             probe_cell(&cfg, &CellId::new("openai", "openai"), true),
             Served::Yes
         );
+    }
+
+    /// One 200 with a fixed body, on a fresh listener.
+    fn serve_once(body: &'static str) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let mut b = [0u8; 8192];
+                let _ = c.read(&mut b);
+                let r = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = c.write_all(r.as_bytes());
+            }
+        });
+        addr
+    }
+
+    // A 2xx whose body is not a usable response of the INGRESS dialect is a failed probe, the body
+    // kept as evidence, and it is not retried (a real answer the gateway keeps giving).
+    #[test]
+    fn a_2xx_without_a_usable_ingress_response_is_a_failed_probe_with_evidence() {
+        for (ingress, body) in [
+            // litellm-python anthropic>openai, 2026-11-09: `content: []`.
+            (
+                "anthropic",
+                r#"{"id":"resp_x","type":"message","role":"assistant","model":"gpt-4o-mini","usage":{"input_tokens":10,"output_tokens":2},"content":[],"stop_reason":"end_turn"}"#,
+            ),
+            // higress openai>cohere: the raw cohere v1 body.
+            (
+                "openai",
+                r#"{"response_id":"x","generation_id":"x","text":"ok","finish_reason":"COMPLETE"}"#,
+            ),
+            ("openai", "<!doctype html><html>dashboard</html>"),
+        ] {
+            let gw = serve_once(body);
+            let cfg = cfg_for(gw, gw);
+            let (served, retry) = probe_cell_once(&cfg, &CellId::new(ingress, "openai"), true);
+            assert_eq!(retry, None, "{body}");
+            match served {
+                Served::No(Verdict::Failed, ev) => {
+                    assert_eq!(ev.status, 200);
+                    assert!(
+                        ev.body_snippet
+                            .contains(&format!("not a response of the {ingress} dialect")),
+                        "{}",
+                        ev.body_snippet
+                    );
+                    assert!(ev.body_snippet.contains(&body[..20]), "{}", ev.body_snippet);
+                }
+                other => panic!("{ingress}: {body} -> {other:?}"),
+            }
+        }
+        let gw = serve_once(r#"{"content":[{"type":"text","text":"ok"}]}"#);
+        let cfg = cfg_for(gw, gw);
+        assert_eq!(
+            probe_cell_once(&cfg, &CellId::new("anthropic", "openai"), true).0,
+            Served::Yes
+        );
+    }
+
+    fn refuted() -> crate::reverify::Reverified {
+        crate::reverify::Reverified {
+            verified: Some(false),
+            note: Some("the request landed on openai".into()),
+        }
+    }
+
+    #[test]
+    fn a_refuted_reverify_that_passes_on_retry_stays_served() {
+        let id = CellId::new("openai", "gemini");
+        let mut answers = vec![
+            crate::reverify::Reverified {
+                verified: Some(true),
+                note: None,
+            },
+            refuted(),
+        ];
+        let mut asked = 0;
+        let r = reverify_with_retry(
+            || {
+                asked += 1;
+                answers.pop().unwrap()
+            },
+            Duration::ZERO,
+            &id,
+        );
+        assert_eq!(asked, 2);
+        assert_eq!(r.verified, Some(true));
+        assert_eq!(served_after_reverify(Served::Yes, &r), Served::Yes);
+    }
+
+    #[test]
+    fn a_reverify_refuted_twice_is_not_served_and_says_why() {
+        let id = CellId::new("openai", "gemini");
+        let mut asked = 0;
+        let r = reverify_with_retry(
+            || {
+                asked += 1;
+                refuted()
+            },
+            Duration::ZERO,
+            &id,
+        );
+        assert_eq!(asked, 2, "retried exactly once");
+        match served_after_reverify(Served::Yes, &r) {
+            Served::No(Verdict::Failed, ev) => {
+                assert!(ev
+                    .body_snippet
+                    .contains("egress not re-verified: the request landed on openai"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_proven_or_unchecked_reverify_is_asked_once_and_changes_nothing() {
+        let id = CellId::new("openai", "gemini");
+        for answer in [
+            crate::reverify::Reverified {
+                verified: Some(true),
+                note: None,
+            },
+            crate::reverify::Reverified {
+                verified: None,
+                note: Some("diagonal".into()),
+            },
+        ] {
+            let mut asked = 0;
+            let r = reverify_with_retry(
+                || {
+                    asked += 1;
+                    answer.clone()
+                },
+                Duration::ZERO,
+                &id,
+            );
+            assert_eq!(asked, 1);
+            assert_eq!(served_after_reverify(Served::Yes, &r), Served::Yes);
+        }
+        // A cell that was never served is never promoted by a passing check.
+        let no = Served::Untestable("x".into());
+        assert_eq!(served_after_reverify(no.clone(), &refuted()), no);
     }
 
     // A real error status with a healthy rig is the GATEWAY's own answer about this pairing.
@@ -4509,7 +4761,7 @@ while True:
                         let (status, body) = if n < busy_times {
                             (503, "{\"error\":{\"message\":\"The service is temporarily overloaded.\"}}")
                         } else {
-                            (200, "{\"ok\":true}")
+                            (200, super::TEST_PROTOCOL_OK)
                         };
                         let r = format!(
                             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
@@ -4587,7 +4839,7 @@ while True:
                             std::thread::sleep(std::time::Duration::from_secs(30));
                             return;
                         }
-                        let body = "{\"ok\":true}";
+                        let body = super::TEST_PROTOCOL_OK;
                         let r = format!(
                             "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
                             body.len()
