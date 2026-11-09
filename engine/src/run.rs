@@ -1666,7 +1666,8 @@ impl HostState {
 /// collapse and reads exactly the same when the peer reset every one of them for a reason of ours.
 ///
 /// These are attribution classes, not error codes. `Refused`/`Reset` is the peer declining a
-/// connection it was asked for; `Status` is the peer answering and saying no; `NoFrames` is a 2xx
+/// connection it was asked for; `Status` is the peer answering and saying no; `NoResponse` is the
+/// peer taking the connection and never producing a response head; `NoFrames` is a 2xx
 /// that never produced an event; `Malformed`/`NotEventStream` is the peer speaking something that is
 /// not SSE. Rig-side ends (`RigExhausted`, `RigRefused`) never reach here - `stream_window` discards
 /// the whole window for those, so they cannot be laundered into a gateway's error rate.
@@ -1676,6 +1677,10 @@ pub struct StreamErrorKinds {
     pub connect_failed: u64,
     /// The peer answered with a non-2xx status.
     pub status: u64,
+    /// The connection was made but no response head ever arrived (or none that parsed): the lane
+    /// timed out or was closed before the peer said anything. Not `status` - that bucket says the
+    /// peer ANSWERED with an error, and a gateway that never answered must not read as one that did.
+    pub no_response: u64,
     /// A 2xx that delivered no event at all.
     pub no_frames: u64,
     /// The peer answered 2xx but did not speak a well-formed event stream.
@@ -1684,7 +1689,11 @@ pub struct StreamErrorKinds {
 
 impl StreamErrorKinds {
     pub fn total(&self) -> u64 {
-        self.connect_failed + self.status + self.no_frames + self.not_event_stream
+        self.connect_failed
+            + self.status
+            + self.no_response
+            + self.no_frames
+            + self.not_event_stream
     }
     fn add(&mut self, o: &crate::http::SseOutcome) {
         use crate::http::SseEnd;
@@ -1693,6 +1702,8 @@ impl StreamErrorKinds {
         // erase the distinction this type exists for.
         if matches!(o.end, SseEnd::ConnectionFailed(_)) {
             self.connect_failed += 1;
+        } else if o.status.is_none() {
+            self.no_response += 1;
         } else if !o.status.is_some_and(|s| (200..300).contains(&s)) {
             self.status += 1;
         } else if matches!(o.end, SseEnd::Malformed(_) | SseEnd::NotAnEventStream(_)) {
@@ -2124,6 +2135,7 @@ impl StreamPoint {
             // are distinguishable in the snapshot.
             "stream_errors_connect_failed": self.error_kinds.connect_failed,
             "stream_errors_status": self.error_kinds.status,
+            "stream_errors_no_response": self.error_kinds.no_response,
             "stream_errors_no_frames": self.error_kinds.no_frames,
             "stream_errors_not_event_stream": self.error_kinds.not_event_stream,
             "host_before": self.host_before.to_json(),
@@ -6156,6 +6168,18 @@ mod stream_error_kind_tests {
             "a non-2xx is a status error, not a frame famine"
         );
 
+        // Connected, but no response head ever came back: the peer never ANSWERED, so this must
+        // not read as a gateway that answered with an error status.
+        for end in [SseEnd::Timeout, SseEnd::StreamClosed] {
+            let mut k = StreamErrorKinds::default();
+            k.add(&outcome(None, 0, end));
+            assert_eq!(
+                (k.no_response, k.status, k.connect_failed),
+                (1, 0, 0),
+                "no response head is its own class, not a status error"
+            );
+        }
+
         let mut k = StreamErrorKinds::default();
         k.add(&outcome(Some(200), 0, SseEnd::StreamClosed));
         assert_eq!(
@@ -6193,6 +6217,7 @@ mod stream_error_kind_tests {
         let outcomes = [
             outcome(None, 0, SseEnd::ConnectionFailed("reset".into())),
             outcome(Some(502), 0, SseEnd::StreamClosed),
+            outcome(None, 0, SseEnd::Timeout),
             outcome(Some(200), 0, SseEnd::Timeout),
             outcome(Some(200), 2, SseEnd::Malformed("x".into())),
         ];
@@ -6210,7 +6235,7 @@ mod stream_error_kind_tests {
             "every counted error must land in exactly one class"
         );
         assert_eq!(
-            errored, 4,
+            errored, 5,
             "this fixture must actually produce errors to be testing anything"
         );
     }
