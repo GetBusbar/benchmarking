@@ -649,5 +649,10 @@
       "egress_reverified": null,
       "reverify_note": null
     }
+  ],
+  "publication_consistency_warnings": [
+    "openai>openai sampled peak RSS 69.875 MiB vs later summed process-tree VmHWM 69.66796875 MiB (0.30%).",
+    "openai>bedrock sampled peak RSS 69.8125 MiB vs later summed process-tree VmHWM 69.75 MiB (0.09%).",
+    "Existing consistency checker accepts these small process-tree sampling-time differences and explains that a transient child can exit between samples. No values normalized, dropped or changed."
   ]
 }

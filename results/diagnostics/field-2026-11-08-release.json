@@ -18,7 +18,7 @@
   "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
   "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
   "results_harvested": 5,
-  "results_published": 1,
+  "results_published": 0,
   "harvested_results": {
     "one-api": {
       "raw": "results/snapshots/result_one-api_2026-11-09T02-01-58Z.json",
@@ -30,7 +30,7 @@
     "apisix": {
       "raw": "results/snapshots/result_apisix_2026-11-09T02-01-33Z.json",
       "review": "results/diagnostics/field-2026-11-08/apisix-result-review.json",
-      "publication": "published_checked",
+      "publication": "checked_ready",
       "instance_id": "i-054a0b7bf43b7eb6c",
       "instance_state": "terminated"
     },
@@ -57,5 +57,6 @@
     }
   },
   "all_15_engine_mock_hash_verifications": true,
-  "latest_production_version": "966e21c7-145b-4ff2-b2fb-9222b0f6ef40"
+  "latest_production_version": "966e21c7-145b-4ff2-b2fb-9222b0f6ef40",
+  "publication_correction": "Deployment 966e21c7-145b-4ff2-b2fb-9222b0f6ef40 remained blank because active-field.json still selected f713. Correct selector to the launched field and verify actual current gateway snapshots before release."
 }
