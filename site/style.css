@@ -908,3 +908,20 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
 .rank-change { color: var(--muted); }
 
 .build > span { display: inline-block; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+
+/* ARTICLE TABLES ARE PROSE TABLES. The global `tbody td` rule (right-aligned, nowrap) is for the
+   results grid, where a wrapped number reads as two numbers. Article pages - history, runs, data,
+   methodology - carry builds, reasons and links, and inheriting nowrap pushed them off the right edge
+   (litellm-rust history: the comparison reasons ran out of the table). Here cells read left to right,
+   start at the top and wrap at spaces; identifiers that must not split stay on one line. */
+.publication-article thead th, .publication-article tbody td { text-align: left; white-space: normal; vertical-align: top; overflow-wrap: anywhere; }
+.publication-article tbody td:first-child, .publication-article td code { white-space: nowrap; }
+.publication-article .history-comparison-reasons { max-width: 24rem; }
+
+/* PHONE: the 6x6 matrix has ~40px per upstream column, so horizontal labels were cut to "OpenA" and
+   "Anthr". Turned upright they keep their full names at any width. The frontier sparkline also scales
+   to its cell instead of overflowing it by a few pixels. */
+@media (max-width: 640px) {
+  .matrix-table thead th:not(.axis) { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; vertical-align: bottom; text-align: left; height: 9.5rem; padding: .4rem .2rem; }
+}
+#results-table td.shape .frontier-spark { max-width: 100%; height: auto; }
