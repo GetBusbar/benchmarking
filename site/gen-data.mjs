@@ -162,7 +162,8 @@ function builtFromSourceVersion(key) {
   try { text = readFileSync(path, "utf8"); } catch { return null; }
   const line = text.split("\n").find((l) => /^\s*COMMIT=/.test(l));
   if (!line) return null;
-  const tag = line.match(/#\s*tag\s+(\S+)/);
+  // Both comment forms occur: `# tag v1.2.3` and a bare `# v0.2.0-beta.30`.
+  const tag = line.match(/#\s*tag\s+(\S+)/) || line.match(/#\s*(v\d[\w.+-]*)/);
   if (tag) return tag[1];
   const sha = line.match(/:-([0-9a-f]{7,40})\}/i) || line.match(/COMMIT=["']?([0-9a-f]{7,40})/i);
   return sha ? sha[1].slice(0, 7) : null;

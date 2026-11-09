@@ -62,5 +62,5 @@
     "111111",
     "111111"
   ],
-  "matrix_note": "All 36 protocol pairs are supported by the unchanged Busbar 1.5.5 deployment accepted in the August full field. A supported-cell rejection must remain failed, including 404/501; the declaration is not a promise that a future run passes. No per-gateway performance settings were added."
+  "matrix_note": "All 36 protocol pairs are configured on the unchanged Busbar 1.5.5 deployment accepted in the August full field. A configured pair that rejects the request, including with HTTP 404 or 501, is recorded as a failure; this configuration does not guarantee that a future run passes. No per-gateway performance settings were added."
 }
