@@ -1,5 +1,5 @@
 {
-  "withdrawn_at": "2026-11-09T03:22:48.581094+00:00",
+  "withdrawn_at": "2026-11-09T03:25:47.166172+00:00",
   "runs": {
     "009d8f059eec771b295e9a09029c3d299282c0eafe88315849db78425ba0ebd4": {
       "gateway": "bifrost",
@@ -44,6 +44,10 @@
     "2a0c9a08422b9fc28fd23dd6115f9b40903c907e48d3269425e717acb0f44235": {
       "gateway": "plano",
       "reason": "Publication withheld pending rig-interruption attribution: all seven throughput sweeps are marked interrupted and retain partial rungs but no completed frontier. Existing frontier invariant checker ignores the interruption marker. Raw result remains in Git; review: results/diagnostics/field-2026-11-08/plano-result-review.json. No replacement measurement launched."
+    },
+    "225883992e291ef0d0f55bff6e17bae73d884df0df917299f70062ac8de34bd9": {
+      "gateway": "helicone",
+      "reason": "Publication withheld pending attribution of missing native Chat sustained-stream metrics: the instrument labels failed floor reconfirmation harness_error, while retained HTTP-status error counts lack the raw responses needed to distinguish gateway and rig causes. Review: results/diagnostics/field-2026-11-08/helicone-result-review.json. Raw evidence retained; no replacement measurement launched."
     }
   }
 }
