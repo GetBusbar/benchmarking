@@ -80,6 +80,44 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
     Ok(parsed)
 }
 
+/// Which cells a run should walk, from the value of `OTB_CELLS` (`ingress>egress`, comma-separated).
+///
+/// Unset or empty means the whole grid - the field run. A named cell narrows the walk to exactly
+/// those pairings, for checking one cell of a rebuilt gateway or giving one cell its own box; the
+/// cells it walks are measured exactly as they are in a full run. Every name must be a pairing of
+/// dialects this run walks: a cell that silently fell out of the walk would be a scope the operator
+/// did not ask for, the same rule `dialects_from` applies to a misspelled dialect.
+pub fn cells_from(
+    value: Option<&str>,
+    dialects: &[Dialect],
+) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+    let Some(list) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let mut cells = std::collections::BTreeSet::new();
+    let mut bad: Vec<String> = Vec::new();
+    for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let walked = |d: &str| d.parse::<Dialect>().ok().filter(|d| dialects.contains(d));
+        match name.split_once('>') {
+            Some((i, e)) if walked(i.trim()).is_some() && walked(e.trim()).is_some() => {
+                cells.insert(format!("{}>{}", i.trim(), e.trim()));
+            }
+            _ => bad.push(name.to_string()),
+        }
+    }
+    if !bad.is_empty() {
+        return Err(format!(
+            "OTB_CELLS={list:?} names {} that is not an ingress>egress pairing of this run's dialects: {}",
+            if bad.len() == 1 { "a cell" } else { "cells" },
+            bad.join(", ")
+        ));
+    }
+    if cells.is_empty() {
+        return Err(format!("OTB_CELLS={list:?} named no cell"));
+    }
+    Ok(Some(cells))
+}
+
 impl Dialect {
     /// Every dialect, in the canonical order used across the harness (lib/ingress.sh, matrix/run.sh).
     pub const ALL: [Dialect; 6] = [
@@ -647,6 +685,30 @@ mod tests {
             assert_eq!(parsed, d);
             assert_eq!(parsed.as_str(), d.as_str());
         }
+    }
+
+    #[test]
+    fn a_cell_scope_is_the_whole_grid_unless_named_and_every_name_must_be_walked() {
+        let all = Dialect::ALL.to_vec();
+        assert_eq!(cells_from(None, &all), Ok(None));
+        assert_eq!(cells_from(Some("  "), &all), Ok(None));
+        let one = cells_from(Some(" openai > anthropic ,"), &all).expect("valid");
+        assert_eq!(
+            one,
+            Some(["openai>anthropic".to_string()].into_iter().collect())
+        );
+        // A typo, a missing arrow and a dialect this run does not walk are all refused, by name.
+        let err = cells_from(
+            Some("openai>anthorpic,openai,openai>cohere"),
+            &[Dialect::Openai, Dialect::Anthropic],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("openai>anthorpic")
+                && err.contains("openai>cohere")
+                && err.contains(", openai,")
+        );
+        assert!(cells_from(Some(","), &all).is_err());
     }
 
     #[test]

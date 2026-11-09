@@ -2819,7 +2819,30 @@ pub fn run_grid_streaming(
     metrics: &[&dyn metric::Metric],
     on_cell: &mut dyn FnMut(CellResult),
 ) {
-    let total_cells = cfg.dialects.len() * cfg.dialects.len();
+    // `otb run` validates OTB_CELLS before the gateway launches. If an invalid scope still arrives,
+    // nothing is walked: running the whole grid instead would measure a scope nobody asked for.
+    match crate::ingress::cells_from(std::env::var("OTB_CELLS").ok().as_deref(), &cfg.dialects) {
+        Ok(cells) => run_grid_cells(cfg, lo, hi, metrics, cells.as_ref(), on_cell),
+        Err(e) => eprintln!("[scope] {e} - walking no cells"),
+    }
+}
+
+/// The walk over an explicit cell scope: `None` is the whole grid, `Some` only the named
+/// `ingress>egress` cells. Cells outside the scope are not probed and not emitted at all - an absent
+/// cell is how a snapshot records a scoped run (see site/snapshots.mjs), never a verdict.
+pub fn run_grid_cells(
+    cfg: &RunConfig,
+    lo: u32,
+    hi: u32,
+    metrics: &[&dyn metric::Metric],
+    cells: Option<&std::collections::BTreeSet<String>>,
+    on_cell: &mut dyn FnMut(CellResult),
+) {
+    let in_scope = |id: &CellId| cells.is_none_or(|s| s.contains(&id.to_string()));
+    let total_cells = match cells {
+        None => cfg.dialects.len() * cfg.dialects.len(),
+        Some(s) => s.len(),
+    };
     let total = total_cells;
     let mut done = 0usize;
     // Set when a mid-grid restart FAILED: from that point the harness cannot vouch for the
@@ -2829,6 +2852,9 @@ pub fn run_grid_streaming(
     for eg in &cfg.dialects {
         for ing in &cfg.dialects {
             let id = CellId::new(ing.as_str(), eg.as_str());
+            if !in_scope(&id) {
+                continue;
+            }
             done += 1;
             if let Some(why) = &restart_poisoned {
                 eprintln!("[cell {done}/{total}] {id}: untestable (harness: restart failed earlier in the grid)");
@@ -3818,6 +3844,31 @@ while True:
         // pay for every real measurement to assert that every pairing appears.
         let rows = run_grid_with(&cfg, 1, 2, &[]);
         assert_eq!(rows.len(), 4);
+    }
+
+    // A scoped walk emits exactly the named cells, in grid order, and the same cell it would have
+    // produced in the full walk - the scope narrows what runs, never how a cell is measured.
+    #[test]
+    fn a_cell_scope_walks_only_the_named_cells() {
+        let gw = serve(200);
+        let mut cfg = cfg_for(gw, gw);
+        cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
+        let scope = crate::ingress::cells_from(Some("anthropic>openai"), &cfg.dialects)
+            .expect("valid scope")
+            .expect("a scope");
+        let mut rows = Vec::new();
+        run_grid_cells(&cfg, 1, 2, &[], Some(&scope), &mut |c| rows.push(c));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome.id.to_string(), "anthropic>openai");
+        let full = run_grid_with(&cfg, 1, 2, &[]);
+        let same = full
+            .iter()
+            .find(|c| c.outcome.id.to_string() == "anthropic>openai")
+            .expect("the full walk has the cell");
+        assert_eq!(
+            format!("{:?}", same.outcome.served),
+            format!("{:?}", rows[0].outcome.served)
+        );
     }
 
     /// A relaunch spec that cannot come back up: its stop path matches no process (so stopping

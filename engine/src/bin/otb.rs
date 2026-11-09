@@ -389,6 +389,23 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // A cell scope is refused here, before the gateway launches, rather than discovered by
+            // the grid walk after the box-hours are spent.
+            match otb_engine::ingress::cells_from(
+                std::env::var("OTB_CELLS").ok().as_deref(),
+                &dialects,
+            ) {
+                Ok(None) => {}
+                Ok(Some(cells)) => eprintln!(
+                    "[scope] OTB_CELLS: walking {} cell(s) only: {}",
+                    cells.len(),
+                    cells.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
+                }
+            }
             let env_u32 = |k: &str, d: u32| {
                 std::env::var(k)
                     .ok()
