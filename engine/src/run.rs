@@ -1079,10 +1079,10 @@ enum StreamStop {
     WindowUnavailable { at: u32 },
     /// The step-down budget was genuinely spent without finding a rung that holds.
     BudgetExhausted,
-    /// A rung failed at a concurrency this same cell had ALREADY proved clean. Never the gateway's
-    /// result: a gate that fails at 3,088 after passing 6,144 is measuring how far the rig has
-    /// drained, not what the gateway can carry.
-    RigContaminated { at: u32, proven: u32 },
+    /// A previously clean rung still failed after settling and (where the harness owns the
+    /// process) restarting the gateway. This does not identify the cause: gateway state, upstream
+    /// behaviour and host residue all remain possible, so it is not filed as either side's fault.
+    ReconfirmationUnresolved { at: u32, proven: u32 },
     /// The gateway stopped serving after an overload and did not come back on its own. THIS ONE IS
     /// ABOUT THE GATEWAY, and it is a finding rather than a gap: aisix passed every rung to c=8,192,
     /// was pushed to c=16,384, and then failed seventeen consecutive windows including c=4,096 which
@@ -1099,7 +1099,7 @@ enum StreamStop {
     },
     /// The restart that would have separated "the rig is dirty" from "the gateway is wedged" itself
     /// FAILED. Ours: the harness could not put the process back, so nothing about the gateway was
-    /// learned here - and, unlike `RigContaminated`, the cause is not a host that had not drained.
+    /// learned here. A failed reconfirmation alone does not establish which component caused it.
     RestartFailed { at: u32, proven: u32 },
 }
 
@@ -1108,8 +1108,8 @@ impl StreamStop {
     ///
     /// ONLY WHERE THE HOST IS NOT THE SUSPECT. The floor fallback re-measures a rung on the same box
     /// that just failed several, so it is only meaningful when the failures were the gateway's or the
-    /// budget's. `RigRanShort`, `WindowUnavailable` and `RigContaminated` all say the instrument is
-    /// the variable, and a number taken on a host we have just accused would be exactly the
+    /// budget's. `RigRanShort` and `WindowUnavailable` say the instrument is the variable, and
+    /// `ReconfirmationUnresolved` leaves the host a live suspect, and a number taken on a host we have just accused would be exactly the
     /// attribution error the rest of this enum exists to prevent - with the flattering sign, because
     /// it would publish a figure where honesty published none. `RestartFailed` is excluded for the
     /// same reason: the harness could not even put the process back.
@@ -1132,7 +1132,6 @@ impl StreamStop {
         match self {
             StreamStop::RigRanShort { .. }
             | StreamStop::WindowUnavailable { .. }
-            | StreamStop::RigContaminated { .. }
             | StreamStop::RestartFailed { .. } => Absent::HarnessError,
             // A gateway that does not recover from overload is the GATEWAY's result, so it must not
             // be filed under our own faults - that would be the attribution error in reverse.
@@ -1140,6 +1139,9 @@ impl StreamStop {
             // Listed rather than caught by a wildcard: a new ending must be classified on purpose,
             // or a rig fault added later compiles silently into the gateway's results.
             StreamStop::GatewayDidNotRecover { .. }
+            // Cause unresolved: neither proven ours nor proven the gateway's, so it is a measurement
+            // that did not resolve rather than a harness fault.
+            | StreamStop::ReconfirmationUnresolved { .. }
             | StreamStop::FloorReached { .. }
             | StreamStop::SteppedRungFailed { .. }
             | StreamStop::BudgetExhausted => Absent::NotMeasured,
@@ -1166,11 +1168,12 @@ impl StreamStop {
                 "the bisection proved c={proved}, but re-measurement could not take a window at all \
                  at c={at} - a rig failure, so nothing is published about the gateway here"
             ),
-            StreamStop::RigContaminated { at, proven } => format!(
+            StreamStop::ReconfirmationUnresolved { at, proven } => format!(
                 "the bisection proved c={proved}, but re-measurement failed at c={at} - a concurrency \
-                 THIS CELL had already carried cleanly up to c={proven}. A rung cannot fail below one \
-                 it has already passed because of the gateway, so this is our rig not having drained \
-                 between windows, and nothing is published about the gateway here"
+                 this cell had already carried cleanly up to c={proven}. Settling (and a gateway \
+                 restart, where the harness owns the process) did not restore the earlier result. \
+                 The gateway-versus-rig cause is unresolved; no sustained ceiling is established by \
+                 these inconsistent windows"
             ),
             StreamStop::GatewayDidNotRecover { at, proven, restart_cleared } => format!(
                 "the gateway stopped serving after being pushed past c={proven} and did not recover: \
@@ -2493,19 +2496,17 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                         // the rig-side one it already had.
                                         None => false,
                                     };
-                                    /* THE RESTART IS THE ATTRIBUTION TEST, and its two outcomes
-                                       point at opposite culprits.
+                                    /* THE RESTART IS THE ATTRIBUTION TEST.
 
                                        Cleared by a restart: the process that had been serving was
                                        wedged, a fresh one is not, and the host was the same
                                        throughout - so it is the GATEWAY that did not recover.
 
-                                       NOT cleared: a brand-new gateway process still cannot carry a
-                                       rung this cell already carried. The gateway is the thing that
-                                       just changed and the failure did not, which leaves the host as
-                                       the variable - so this stays OURS. Calling it a gateway
-                                       failure here would be the flattering direction of the same
-                                       error, and the one nobody would catch. */
+                                       NOT cleared (or no restart was possible): a rung this cell
+                                       already carried still fails. That is an inconsistency, not
+                                       proof of either side: gateway state, upstream behaviour and
+                                       host residue all remain possible, so the cause is recorded as
+                                       unresolved rather than charged to the gateway or to us. */
                                     stop = if restart_failed {
                                         StreamStop::RestartFailed { at: ceiling, proven: proven_clean }
                                     } else if restart_cleared {
@@ -2515,7 +2516,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                             restart_cleared,
                                         }
                                     } else {
-                                        StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
+                                        StreamStop::ReconfirmationUnresolved { at: ceiling, proven: proven_clean }
                                     };
                                     break;
                                 }
@@ -3323,7 +3324,7 @@ mod tests {
         }
         .floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
-        assert!(!StreamStop::RigContaminated {
+        assert!(!StreamStop::ReconfirmationUnresolved {
             at: 4096,
             proven: 4096
         }
@@ -5979,21 +5980,25 @@ mod contamination_tests {
         );
     }
 
-    /* A RUNG FAILING BELOW ONE THE SAME CELL ALREADY PASSED IS OURS, AND MUST BE FILED AS OURS.
-    This is the whole point of the variant: `Absent::NotMeasured` puts a finding among the
-    GATEWAY's results, which is what happened to 6 cells on the 2026-07-31 board. */
+    // Reconfirmation failure is an observed inconsistency, not proof of a rig fault.
     #[test]
-    fn a_contaminated_rung_is_a_harness_error_and_never_the_gateways_result() {
+    fn inconsistent_reconfirmation_keeps_the_cause_unresolved() {
+        let stop = StreamStop::ReconfirmationUnresolved {
+            at: 3088,
+            proven: 4096,
+        };
         assert_eq!(
-            StreamStop::RigContaminated {
-                at: 3088,
-                proven: 4096
-            }
-            .absent_kind(),
-            Absent::HarnessError,
-            "a rung failing below a proven-clean one is the rig; filing it as NotMeasured charges \
-             the gateway for our own undrained host"
+            stop.absent_kind(),
+            Absent::NotMeasured,
+            "a previously clean rung does not identify the cause of a later failure"
         );
+        assert!(
+            !stop.floor_fallback_ok(),
+            "the host is still a suspect, so no floor is published from it"
+        );
+        let detail = stop.describe(6176, 6);
+        assert!(detail.contains("unresolved"), "{detail}");
+        assert!(!detail.contains("our rig not having drained"), "{detail}");
         // The endings that ARE about the gateway must stay that way, or this variant has just
         // laundered every real failure into a rig excuse.
         assert_eq!(
@@ -6014,7 +6019,7 @@ mod contamination_tests {
     /// between them - either number alone reads like an ordinary failure.
     #[test]
     fn the_contaminated_reason_names_the_rung_and_what_the_cell_had_already_carried() {
-        let d = StreamStop::RigContaminated {
+        let d = StreamStop::ReconfirmationUnresolved {
             at: 3088,
             proven: 4096,
         }
@@ -6280,14 +6285,15 @@ mod gateway_recovery_tests {
             Absent::NotMeasured,
             "a gateway that will not serve again is not a rig fault"
         );
-        // And the rig-side ones must stay rig-side, or this variant has laundered them.
+        // A restart that did not help does not prove whether the gateway, upstream or rig caused
+        // the regression, so it is not filed as ours either.
         assert_eq!(
-            StreamStop::RigContaminated {
+            StreamStop::ReconfirmationUnresolved {
                 at: 3088,
                 proven: 4096
             }
             .absent_kind(),
-            Absent::HarnessError
+            Absent::NotMeasured
         );
     }
 
@@ -6355,21 +6361,24 @@ mod restart_attribution_tests {
                 restart_cleared,
             }
         } else {
-            StreamStop::RigContaminated { at, proven }
+            StreamStop::ReconfirmationUnresolved { at, proven }
         }
     }
 
     #[test]
-    fn a_restart_that_helps_blames_the_gateway_and_one_that_does_not_blames_us() {
+    fn a_restart_that_helps_blames_the_gateway_and_one_that_does_not_stays_unresolved() {
         assert_eq!(
             stop_for(true, 4096, 8192).absent_kind(),
             Absent::NotMeasured,
             "a restart clearing it proves the old process was wedged - that is the gateway's"
         );
         assert_eq!(
-            stop_for(false, 4096, 8192).absent_kind(),
-            Absent::HarnessError,
-            "a FRESH gateway still failing a rung it carried leaves the host as the variable - ours"
+            stop_for(false, 4096, 8192),
+            StreamStop::ReconfirmationUnresolved {
+                at: 4096,
+                proven: 8192
+            },
+            "a FRESH gateway still failing a rung it carried leaves the cause unresolved"
         );
     }
 
