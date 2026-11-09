@@ -1679,7 +1679,7 @@ mod tests {
     }
 
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
 
     // A RUN MUST NOT DECLARE ITSELF DEGRADED WHILE CARRYING THE DATA IT SAYS IT SKIPPED. The
@@ -1713,19 +1713,30 @@ mod tests {
     fn serve(status: u16) -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = l.local_addr().expect("addr");
+        // One fixture thread, regardless of the measured concurrency: a thread per socket exhausts
+        // the CI runner's task limit during box qualification.
+        l.set_nonblocking(true)
+            .expect("nonblocking fixture listener");
         std::thread::spawn(move || {
-            for c in l.incoming() {
-                let Ok(mut c) = c else { continue };
-                std::thread::spawn(move || {
-                    let mut b = [0u8; 4096];
-                    while c.read(&mut b).unwrap_or(0) > 0 {
-                        let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
-                        if c.write_all(r.as_bytes()).is_err() {
-                            return;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("fixture runtime");
+            runtime.block_on(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let listener = tokio::net::TcpListener::from_std(l).expect("async listener");
+                while let Ok((mut c, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut b = [0u8; 4096];
+                        while c.read(&mut b).await.unwrap_or(0) > 0 {
+                            let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                            if c.write_all(r.as_bytes()).await.is_err() {
+                                return;
+                            }
                         }
-                    }
-                });
-            }
+                    });
+                }
+            });
         });
         addr
     }
