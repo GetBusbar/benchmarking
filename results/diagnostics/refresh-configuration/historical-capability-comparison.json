@@ -1,5 +1,5 @@
 {
-  "scope": "Nine revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
+  "scope": "Eleven revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
   "gateways": [
     {
       "gateway": "one-api",
@@ -340,6 +340,80 @@
         "gemini>gemini",
         "openai-responses>openai",
         "openai>gemini"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 6
+    },
+    {
+      "gateway": "higress",
+      "latest_prior_snapshot": "results/snapshots/result_higress_2026-08-26T19-01-18Z.json",
+      "latest_prior_sha256": "af1ce2bee0833f93ed558ceb54c4e30f0164de90a7a837817aa387b275cc353b",
+      "latest_prior_measured_at": "2026-08-26T19:01:18Z",
+      "definition_sha256": "c6f8de4a67d6aef2c51c24cfca30c80d5b75176f415311ca605890312ef26ae4",
+      "prior_served_pairs": [
+        "anthropic>anthropic",
+        "bedrock>bedrock",
+        "cohere>cohere",
+        "gemini>gemini",
+        "openai-responses>openai-responses",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>cohere",
+        "anthropic>gemini",
+        "anthropic>openai",
+        "bedrock>bedrock",
+        "cohere>cohere",
+        "gemini>gemini",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "anthropic>cohere",
+        "anthropic>gemini",
+        "anthropic>openai",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>cohere",
+        "openai>gemini"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 1
+    },
+    {
+      "gateway": "plano",
+      "latest_prior_snapshot": "results/snapshots/result_plano_2026-08-26T19-08-45Z.json",
+      "latest_prior_sha256": "5f9e8f61383353dae54dc52a3eece8e1db6e6b024d94a55a3687a3d96386130e",
+      "latest_prior_measured_at": "2026-08-26T19:08:45Z",
+      "definition_sha256": "ca22e6bfab213794d9ac4e7cb50f5c5f5501cbf9e9d55f9d8382729f50845748",
+      "prior_served_pairs": [
+        "anthropic>anthropic",
+        "openai-responses>openai-responses",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>bedrock",
+        "anthropic>openai",
+        "openai-responses>bedrock",
+        "openai-responses>openai",
+        "openai-responses>openai-responses",
+        "openai>bedrock",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "anthropic>bedrock",
+        "anthropic>openai",
+        "openai-responses>bedrock",
+        "openai-responses>openai",
+        "openai>bedrock"
       ],
       "earlier_served_not_in_current_configuration": [],
       "historical_snapshots_checked": 6

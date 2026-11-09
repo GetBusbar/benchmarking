@@ -14,13 +14,13 @@
     "openai",
     "openai-responses",
     "anthropic",
-    "gemini"
+    "bedrock"
   ],
   "egress_models": {
+    "openai": "gemini/gemini-1.5-pro",
+    "openai-responses": "openai/gpt-4o-mini",
     "anthropic": "anthropic/claude-3-5-sonnet",
-    "gemini": "gemini/gemini-1.5-pro",
-    "openai": "openai/gpt-4o-mini",
-    "openai-responses": "openai/gpt-4o-mini"
+    "bedrock": "amazon_bedrock/anthropic.claude-3-sonnet-20240229-v1:0"
   },
   "lang": "Rust",
   "launch": {
@@ -43,5 +43,14 @@
   "runtime": {
     "container": "plano-bench",
     "kind": "docker"
-  }
+  },
+  "matrix": [
+    "100001",
+    "110001",
+    "101001",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Plano 0.4.39 source b13ddd632bde1fea7678386c345665ea5fa671af: SupportedAPIsFromClient accepts Chat, Responses and Messages only. Gemini provider uses OpenAI compatibility, not native Gemini wire; it explicitly selects the Chat upstream for all three ingress protocols, while the OpenAI provider selects Responses for Responses ingress. Bedrock model enables three Converse translations. Recorder and response-content checks prove eight pairs. No Cohere adapter or native Gemini/Bedrock ingress exists in the supported API enums. Corrected standard Responses mock fields are required. Evidence: results/diagnostics/refresh-configuration/plano-protocol-preflight.json"
 }

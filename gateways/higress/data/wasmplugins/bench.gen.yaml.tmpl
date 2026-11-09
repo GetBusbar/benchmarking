@@ -1,0 +1,52 @@
+apiVersion: extensions.higress.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: bench
+  namespace: higress-system
+spec:
+  defaultConfigDisable: true
+  matchRules:
+  - ingress: [openai]
+    config:
+      provider:
+        type: openai
+        apiTokens: [dummy]
+        modelMapping:
+          "*": gpt-4o-mini
+  - ingress: [openai-responses]
+    config:
+      provider:
+        type: openai
+        apiTokens: [dummy]
+        modelMapping:
+          "*": gpt-4o-mini
+  - ingress: [anthropic]
+    config:
+      provider:
+        type: claude
+        apiTokens: [dummy]
+        modelMapping:
+          "*": claude-3-5-sonnet-20241022
+  - ingress: [gemini]
+    config:
+      provider:
+        type: gemini
+        apiTokens: [dummy]
+        modelMapping:
+          "*": gemini-1.5-pro
+  - ingress: [cohere]
+    config:
+      provider:
+        type: cohere
+        apiTokens: [dummy]
+        modelMapping:
+          "*": command-r-plus
+  - ingress: [bedrock]
+    config:
+      provider:
+        type: bedrock
+        apiTokens: [dummy]
+        modelMapping:
+          "*": anthropic.claude-3-sonnet-20240229-v1:0
+        awsRegion: us-east-1
+  url: file:///usr/share/nginx/html/plugins/ai-proxy/2.0.3/plugin.wasm

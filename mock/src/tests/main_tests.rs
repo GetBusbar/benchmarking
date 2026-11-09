@@ -800,3 +800,15 @@ fn responses_usage_includes_required_token_details() {
     );
     assert_eq!(body["usage"]["total_tokens"], 12);
 }
+
+#[test]
+fn responses_includes_standard_response_settings() {
+    let body: serde_json::Value = serde_json::from_slice(body_for("/v1/responses")).unwrap();
+    assert!(body["parallel_tool_calls"].is_boolean());
+    assert!(body["tools"].is_array());
+    assert!(body["tool_choice"].is_string());
+    assert!(body["temperature"].is_number());
+    assert!(body["top_p"].is_number());
+    assert!(body["metadata"].is_object());
+    assert!(body["error"].is_null());
+}
