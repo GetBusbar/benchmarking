@@ -1,5 +1,6 @@
 {
-  "dataset_id": "dataset-e5fe84c3d27c0f848b734ec3549114e29c2c6130d551868582f0acc9008d5fb2",
+  "dataset_id": "dataset-03a8eac58ed7be5b0dad84192f3df6d2a9d4dd570db29c1c50fb3e024fad05b0",
+  "deployment_version": "4badcfc7-f42e-4b1e-9e43-91a9528a486f",
   "active_field": {
     "id": "otb-20261109T015651Z",
     "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
@@ -22,10 +23,14 @@
       "tensorzero"
     ]
   },
-  "proof": [
+  "raw_hashes": [
     {
       "gateway": "apisix",
       "sha256": "d51bb4cf969f13b635245fa757bd0c2714c73362193bfc76b5b2de11699146a9"
+    },
+    {
+      "gateway": "helicone",
+      "sha256": "225883992e291ef0d0f55bff6e17bae73d884df0df917299f70062ac8de34bd9"
     },
     {
       "gateway": "kong",
@@ -36,9 +41,58 @@
       "sha256": "953b9d142836b5f083cda599ba66a977cfaf9f3e885c493d03aa140626939c18"
     },
     {
+      "gateway": "one-api",
+      "sha256": "fe194b1716c365f8f2a85363caa026398c368fd35dc78c3c74e03e75d601302b"
+    },
+    {
+      "gateway": "plano",
+      "sha256": "2a0c9a08422b9fc28fd23dd6115f9b40903c907e48d3269425e717acb0f44235"
+    },
+    {
       "gateway": "tensorzero",
       "sha256": "d2d1e5023702ce6a5f88e6705a0bf5afdbc1e1d8c1e43cbeefd43c5ac77fa932"
     }
   ],
-  "deployment_version": "fa28f318-cf8b-4653-aa51-f722689809d7"
+  "scoped_notes_verified": [
+    {
+      "gateway": "one-api",
+      "absence": {
+        "value": null,
+        "certified": false,
+        "suppressed": false,
+        "reason": "not_measured",
+        "detail": "the c=8 cost window had 2 failure(s) alongside 198 success(es); CPU divided by only the successes would describe the failures, not the work. The individual failed responses were not retained, so their gateway-versus-rig cause is unresolved. This omission affects this cost window only; other measured values remain published.",
+        "state": "not_measured",
+        "section": "perf",
+        "definition_id": "definition-3"
+      },
+      "latency": 1363784
+    },
+    {
+      "gateway": "plano",
+      "absence": {
+        "value": null,
+        "certified": false,
+        "suppressed": false,
+        "reason": "not_measured",
+        "detail": "The recorded sweep is marked interrupted. Its partial clean rungs do not establish a completed throughput boundary, so frontier values remain unavailable. The exact interruption cause was not retained; no gateway ceiling or implementation failure is inferred. Latency, cost, memory and applicable stream measurements remain published.",
+        "state": "not_measured"
+      },
+      "latency": 203971
+    },
+    {
+      "gateway": "helicone",
+      "absence": {
+        "value": null,
+        "certified": false,
+        "suppressed": false,
+        "reason": "harness_error",
+        "detail": "Sustained-stream reconfirmation failed below an earlier clean rung. The instrument labeled this harness_error; retained rungs contain HTTP-status failures but not their individual status codes or response bodies, so a rig-versus-gateway cause is unresolved. No sustained-stream ceiling is published. Other valid measurements remain available.",
+        "state": "harness_error",
+        "section": "stream",
+        "definition_id": "definition-6"
+      },
+      "latency": 290
+    }
+  ]
 }

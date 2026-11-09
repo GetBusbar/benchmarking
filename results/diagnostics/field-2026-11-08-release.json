@@ -18,12 +18,12 @@
   "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
   "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
   "results_harvested": 7,
-  "results_published": 4,
+  "results_published": 7,
   "harvested_results": {
     "one-api": {
       "raw": "results/snapshots/result_one-api_2026-11-09T02-01-58Z.json",
       "review": "results/diagnostics/field-2026-11-08/one-api-result-review.json",
-      "publication": "valid_metrics_ready_with_scoped_absence_notes",
+      "publication": "published_valid_metrics_with_scoped_notes",
       "instance_id": "i-0fc939cbd74bda7b7",
       "instance_state": "terminated"
     },
@@ -37,14 +37,14 @@
     "plano": {
       "raw": "results/snapshots/result_plano_2026-11-09T02-02-01Z.json",
       "review": "results/diagnostics/field-2026-11-08/plano-result-review.json",
-      "publication": "valid_metrics_ready_with_scoped_absence_notes",
+      "publication": "published_valid_metrics_with_scoped_notes",
       "instance_id": "i-03f003891cd4d8d4d",
       "instance_state": "terminated"
     },
     "helicone": {
       "raw": "results/snapshots/result_helicone_2026-11-09T02-01-40Z.json",
       "review": "results/diagnostics/field-2026-11-08/helicone-result-review.json",
-      "publication": "valid_metrics_ready_with_scoped_absence_notes",
+      "publication": "published_valid_metrics_with_scoped_notes",
       "instance_id": "i-01f8b7caf56fa3c15",
       "instance_state": "terminated"
     },
@@ -71,6 +71,6 @@
     }
   },
   "all_15_engine_mock_hash_verifications": true,
-  "latest_production_version": "fa28f318-cf8b-4653-aa51-f722689809d7",
+  "latest_production_version": "4badcfc7-f42e-4b1e-9e43-91a9528a486f",
   "publication_correction": "Resolved by b7eabc6d: active-field selects corrected run; live summary exposes exactly APISIX/TensorZero and both downloaded raw hashes/engine/mock stamps match."
 }
