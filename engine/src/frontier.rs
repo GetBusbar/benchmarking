@@ -277,7 +277,7 @@ pub fn absence_for(rungs: &[Rung], bound: Option<u64>) -> Measurement<i64> {
             /* "NO RUNG WAS UNDER THE BOUND" AND "NO RUNG HAD A TAIL AT ALL" ARE OPPOSITE FINDINGS.
             `qualifies` is false for a clean rung whose `p99_us` is `None` (`is_some_and` on
             `None`), so a sweep whose windows reported no percentile lands here and used to
-            publish `BelowResolution` - the sentence "every cleanly-served rung had a tail latency
+            publish a bound-not-met absence - the sentence "every cleanly-served rung had a tail latency
             at or above 1ms" about a cell where NO tail latency was ever observed. That is a
             latency claim manufactured from missing data, on a board whose entire premise is that
             a number must re-derive from its evidence.
@@ -299,8 +299,11 @@ pub fn absence_for(rungs: &[Rung], bound: Option<u64>) -> Measurement<i64> {
                     ),
                 );
             }
+            // `BoundNotMet`, not `BelowResolution`: the rig resolved these tails fine - they were
+            // simply all over the bound. That is a finding about the gateway at this bound, and it
+            // must not share a token with "a difference too small for this rig to weigh".
             Measurement::absent_because(
-                Absent::BelowResolution,
+                Absent::BoundNotMet,
                 format!(
                     "every cleanly-served rung that reported a tail had it at or above {}ms, so \
                      this gateway carried no measurable throughput under that bound",
@@ -589,7 +592,7 @@ mod tests {
 
         let slow = vec![rung(8, 900.0, 60, 0)];
         let b = absence_for(&slow, Some(1_000));
-        assert_eq!(b.reason(), Some(&Absent::BelowResolution));
+        assert_eq!(b.reason(), Some(&Absent::BoundNotMet));
         assert!(b.detail().unwrap().contains("1ms"), "{:?}", b.detail());
     }
 
@@ -638,7 +641,7 @@ mod absence_attribution_tests {
         assert_eq!(
             a.reason(),
             Some(&Absent::NotMeasured),
-            "no rung reported a tail, so this is not-measured, never below-resolution"
+            "no rung reported a tail, so this is not-measured, never bound-not-met"
         );
         let d = a.detail().unwrap_or_default();
         assert!(
@@ -647,22 +650,22 @@ mod absence_attribution_tests {
         );
     }
 
-    /// And the real below-resolution case must still read as one, or the fix has simply moved the
+    /// And the real bound-not-met case must still read as one, or the fix has simply moved the
     /// lie to the other side.
     #[test]
-    fn a_sweep_whose_tails_are_all_over_the_bound_is_still_below_resolution() {
+    fn a_sweep_whose_tails_are_all_over_the_bound_reads_as_bound_not_met() {
         let rungs = vec![with_tail(32, 5_000.0, 40), with_tail(64, 9_000.0, 80)];
         let a = absence_for(&rungs, Some(1_000));
-        assert_eq!(a.reason(), Some(&Absent::BelowResolution));
+        assert_eq!(a.reason(), Some(&Absent::BoundNotMet));
     }
 
-    /// A mix must read as below-resolution too - some tails WERE observed and all were over - but
+    /// A mix must read as bound-not-met too - some tails WERE observed and all were over - but
     /// the sentence must not claim every clean rung had a tail, because one did not.
     #[test]
     fn a_mixed_sweep_speaks_only_for_the_rungs_that_reported_a_tail() {
         let rungs = vec![tailless(32, 5_000.0), with_tail(64, 9_000.0, 40)];
         let a = absence_for(&rungs, Some(1_000));
-        assert_eq!(a.reason(), Some(&Absent::BelowResolution));
+        assert_eq!(a.reason(), Some(&Absent::BoundNotMet));
         let d = a.detail().unwrap_or_default();
         assert!(
             d.contains("that reported a tail"),

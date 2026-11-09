@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 /// Every reason there is. A variant added to `Absent` without being added here fails the
 /// completeness check below, so this list cannot silently go stale.
-const ALL_REASONS: [Absent; 7] = [
+const ALL_REASONS: [Absent; 8] = [
     Absent::NotServed,
     Absent::NotMeasured,
     Absent::BelowResolution,
@@ -35,6 +35,7 @@ const ALL_REASONS: [Absent; 7] = [
     Absent::SearchExhausted,
     Absent::Untestable,
     Absent::HarnessError,
+    Absent::BoundNotMet,
 ];
 
 #[test]
@@ -54,6 +55,7 @@ fn the_all_reasons_list_is_complete() {
         "search_exhausted",
         "untestable",
         "harness_error",
+        "bound_not_met",
     ] {
         let parsed: Result<Absent, _> = serde_json::from_str(&format!("\"{token}\""));
         assert!(parsed.is_ok(), "{token} must parse as a reason");

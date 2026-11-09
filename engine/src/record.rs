@@ -1196,12 +1196,12 @@ mod tests {
             FrontierReading {
                 p99_bound_us: Some(1_000),
                 rps: Measurement::absent_because(
-                    Absent::BelowResolution,
+                    Absent::BoundNotMet,
                     "every cleanly-served rung had a tail at or above 1ms",
                 ),
-                concurrency: Measurement::absent(Absent::BelowResolution),
-                p99_us: Measurement::absent(Absent::BelowResolution),
-                first_disqualified_conc: Measurement::absent(Absent::BelowResolution),
+                concurrency: Measurement::absent(Absent::BoundNotMet),
+                p99_us: Measurement::absent(Absent::BoundNotMet),
+                first_disqualified_conc: Measurement::absent(Absent::BoundNotMet),
                 lower_bound: false,
             },
             FrontierReading {
@@ -1217,7 +1217,7 @@ mod tests {
         let e = abs
             .get("frontier.1ms.rps")
             .expect("keyed by its BOUND, so a reader need not count columns to find it");
-        assert_eq!(e.reason, Absent::BelowResolution);
+        assert_eq!(e.reason, Absent::BoundNotMet);
         assert!(e.detail.as_deref().unwrap_or_default().contains("1ms"));
         assert!(abs.contains_key("frontier.1ms.concurrency"));
         assert!(abs.contains_key("frontier.1ms.p99_us"));
@@ -1545,6 +1545,7 @@ mod tests {
                 Absent::SearchExhausted,
                 Absent::Untestable,
                 Absent::HarnessError,
+                Absent::BoundNotMet,
             ]
             .iter()
             .any(|a| a.token() == reason),

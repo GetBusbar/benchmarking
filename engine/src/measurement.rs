@@ -49,6 +49,12 @@ pub enum Absent {
     /// The harness itself is misconfigured or broken. Never publishable as a gateway or rig property:
     /// a bug of ours wearing a rig failure's clothes is the worst shape a defect can take here.
     HarnessError,
+    /// A frontier tail-latency bound that NO rung of the sweep met: every cleanly-served rung that
+    /// reported a tail had it at or above the bound. A measured finding about the gateway at this
+    /// bound - not a rig-resolution limit, which is what `BelowResolution` means, and not a hole.
+    /// It used to share `below_resolution`, so "this rig cannot weigh a difference that small" and
+    /// "this gateway never held a tail this tight" published as one token.
+    BoundNotMet,
 }
 
 impl Absent {
@@ -62,6 +68,7 @@ impl Absent {
             Absent::SearchExhausted => "search_exhausted",
             Absent::Untestable => "untestable",
             Absent::HarnessError => "harness_error",
+            Absent::BoundNotMet => "bound_not_met",
         }
     }
 
@@ -339,13 +346,14 @@ mod tests {
             Absent::SearchExhausted,
             Absent::Untestable,
             Absent::HarnessError,
+            Absent::BoundNotMet,
         ] {
             assert!(!r.is_about_gateway(), "{r} is not a gateway property");
         }
     }
 
     /// Every reason, so a variant added later cannot quietly escape the invariants below.
-    const ALL: [Absent; 7] = [
+    const ALL: [Absent; 8] = [
         Absent::NotServed,
         Absent::NotMeasured,
         Absent::BelowResolution,
@@ -353,6 +361,7 @@ mod tests {
         Absent::SearchExhausted,
         Absent::Untestable,
         Absent::HarnessError,
+        Absent::BoundNotMet,
     ];
 
     // THE TOKEN AND THE WIRE FORM ARE THE SAME STRING, OR THE BOARD LIES ABOUT ITSELF. `token()` is
@@ -457,6 +466,28 @@ mod tests {
             assert_eq!(m.reason(), Some(&reason));
             assert_eq!(m.detail(), None);
             assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));
+        }
+    }
+
+    // A snapshot written before `bound_not_met` existed carries its frontier absences as
+    // `below_resolution`; it must still read back, and the new token must read as itself.
+    #[test]
+    fn old_below_resolution_entries_and_new_bound_not_met_entries_both_parse() {
+        for (json, want) in [
+            (
+                r#"{"reason":"below_resolution","detail":"old frontier spelling"}"#,
+                Absent::BelowResolution,
+            ),
+            (
+                r#"{"reason":"bound_not_met","detail":"no rung held 1ms"}"#,
+                Absent::BoundNotMet,
+            ),
+        ] {
+            let e: AbsentEntry = match serde_json::from_str(json) {
+                Ok(e) => e,
+                Err(err) => panic!("{json} must parse: {err}"),
+            };
+            assert_eq!(e.reason, want);
         }
     }
 
