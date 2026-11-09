@@ -1,0 +1,288 @@
+{
+  "checked_at": "2026-11-08T23:58:50.280362+00:00",
+  "image": "ghcr.io/agentgateway/agentgateway:v1.7.0@sha256:4562330cd6e580bfac2de5b8905fee608dcf3fff6f1f4900744d27bdddb3b41b",
+  "kind": "local correctness preflight; not performance measurements",
+  "responses": [
+    {
+      "ingress": "openai",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 200,
+      "body": "{\"model\":\"mock\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"message\":{\"content\":\"ok\",\"role\":\"assistant\"},\"index\":0,\"finish_reason\":\"stop\"}],\"id\":\"msg_x\",\"created\":1794182330,\"object\":\"chat.completion\"}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"claude-3-5-sonnet-20241022\",\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "bedrock",
+      "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+      "status": 200,
+      "body": "{\"model\":\"anthropic.claude-3-sonnet-20240229-v1:0\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"message\":{\"content\":\"ok\",\"role\":\"assistant\"},\"index\":0,\"finish_reason\":\"stop\"}],\"id\":\"bedrock-1794182330216\",\"created\":1794182330,\"object\":\"chat.completion\"}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/bedrock/model/anthropic.claude-3-sonnet-20240229-v1:0/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"inferenceConfig\":{\"maxTokens\":16}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai",
+      "model": "bench-chat",
+      "status": 200,
+      "body": "{\"model\":\"mock\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"message\":{\"content\":\"ok\",\"role\":\"assistant\"},\"index\":0,\"finish_reason\":\"stop\"}],\"id\":\"chatcmpl-x\",\"object\":\"chat.completion\",\"created\":1}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"gpt-4o-mini\",\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "openai",
+      "egress": "openai-responses",
+      "model": "bench-responses",
+      "status": 400,
+      "body": "failed to process LLM request: unsupported conversion: from Completions to provider custom (supported: [OpenAIResponses])",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai",
+      "egress": "gemini",
+      "model": "gemini-1.5-pro",
+      "status": 200,
+      "body": "{\"model\":\"\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12},\"choices\":[{\"message\":{\"content\":\"ok\",\"role\":\"assistant\"},\"index\":0,\"finish_reason\":\"stop\"}],\"id\":\"vertex-gemini-1794182330227\",\"created\":1794182330,\"object\":\"chat.completion\"}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/gemini-1.5-pro:generateContent",
+          "last_snippet": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hello\"}]}],\"generationConfig\":{\"maxOutputTokens\":16}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 400,
+      "body": "failed to process LLM request: unsupported conversion: from Responses to provider anthropic (supported: [AnthropicMessages])",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "bedrock",
+      "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+      "status": 200,
+      "body": "{\"id\":\"resp_09ea55ae025f1891\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":null,\"text\":\"ok\"}],\"id\":\"msg_9f9c22a77f0e5bfa\",\"role\":\"assistant\",\"status\":\"completed\"}],\"model\":\"anthropic.claude-3-sonnet-20240229-v1:0\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12},\"created_at\":1794182330,\"object\":\"response\"}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/bedrock/model/anthropic.claude-3-sonnet-20240229-v1:0/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"inferenceConfig\":{\"maxTokens\":4096}}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai",
+      "model": "bench-chat",
+      "status": 200,
+      "body": "{\"id\":\"resp_26e73d5731d62ab5\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":null,\"text\":\"ok\"}],\"id\":\"msg_1046fd57693dec85\",\"role\":\"assistant\",\"status\":\"completed\"}],\"model\":\"gpt-4o-mini\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12},\"created_at\":1794182330,\"object\":\"response\"}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"gpt-4o-mini\",\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "openai-responses",
+      "model": "bench-responses",
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":null,\"text\":\"ok\"}],\"id\":\"msg_x\",\"role\":\"assistant\",\"status\":\"completed\"}],\"model\":\"mock\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12},\"object\":\"response\",\"created_at\":1}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"input\":\"hello\",\"model\":\"gpt-4o-mini\"}"
+        }
+      }
+    },
+    {
+      "ingress": "openai-responses",
+      "egress": "gemini",
+      "model": "gemini-1.5-pro",
+      "status": 200,
+      "body": "{\"id\":\"resp_9b354dd399eac4d9\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"annotations\":[],\"logprobs\":null,\"text\":\"ok\"}],\"id\":\"msg_64c7aa37ea5940d3\",\"role\":\"assistant\",\"status\":\"completed\"}],\"model\":\"gemini-1.5-pro\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12},\"created_at\":1794182330,\"object\":\"response\"}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/openai/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"gemini-1.5-pro\",\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 200,
+      "body": "{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"content\":[{\"text\":\"ok\",\"type\":\"text\"}]}",
+      "mock_observed": {
+        "anthropic": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/messages",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"model\":\"claude-3-5-sonnet-20241022\",\"max_tokens\":16}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "bedrock",
+      "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+      "status": 200,
+      "body": "{\"id\":\"msg_1a1bd99b7889d1bb751\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"anthropic.claude-3-sonnet-20240229-v1:0\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"content\":[{\"text\":\"ok\",\"type\":\"text\"}]}",
+      "mock_observed": {
+        "bedrock": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/bedrock/model/anthropic.claude-3-sonnet-20240229-v1:0/converse",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hello\"}]}],\"inferenceConfig\":{\"maxTokens\":16}}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai",
+      "model": "bench-chat",
+      "status": 200,
+      "body": "{\"id\":\"chatcmpl-x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"model\":\"mock\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"gpt-4o-mini\",\"max_completion_tokens\":16,\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "openai-responses",
+      "model": "bench-responses",
+      "status": 200,
+      "body": "{\"id\":\"resp_x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"model\":\"mock\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}],\"model\":\"gpt-4o-mini\",\"max_output_tokens\":16,\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "anthropic",
+      "egress": "gemini",
+      "model": "gemini-1.5-pro",
+      "status": 200,
+      "body": "{\"id\":\"chatcmpl-x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"model\":\"mock\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}",
+      "mock_observed": {
+        "openai": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/openai/chat/completions",
+          "last_snippet": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"gemini-1.5-pro\",\"max_completion_tokens\":16,\"stream\":false}"
+        }
+      }
+    },
+    {
+      "ingress": "gemini",
+      "egress": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "status": 400,
+      "body": "failed to process LLM request: unsupported conversion: from Gemini to provider anthropic (supported: [AnthropicMessages])",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress": "bedrock",
+      "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+      "status": 404,
+      "body": "{\"error\":{\"message\":\"Model not found\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\"}}",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai",
+      "model": "bench-chat",
+      "status": 400,
+      "body": "failed to process LLM request: unsupported conversion: from Gemini to provider custom (supported: [OpenAICompletions])",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress": "openai-responses",
+      "model": "bench-responses",
+      "status": 400,
+      "body": "failed to process LLM request: unsupported conversion: from Gemini to provider custom (supported: [OpenAIResponses])",
+      "mock_observed": {}
+    },
+    {
+      "ingress": "gemini",
+      "egress": "gemini",
+      "model": "gemini-1.5-pro",
+      "status": 200,
+      "body": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"totalTokenCount\":12}}",
+      "mock_observed": {
+        "gemini": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1beta/models/gemini-1.5-pro:generateContent",
+          "last_snippet": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hello\"}]}]}"
+        }
+      }
+    }
+  ],
+  "scope": "Exploratory protocol checks; configuration approval outstanding.",
+  "source_commit": "26f5aebe99a36a037fe54f8080a608aca5547e15",
+  "mock_binary_sha256": "3a3feb35f12c83156a05d0ffae7df6bea99b7efae673cd30a6f2aa277c55c276",
+  "mock_regression": {
+    "pair": "anthropic>openai-responses",
+    "before": {
+      "ingress": "anthropic",
+      "egress": "openai-responses",
+      "model": "bench-responses",
+      "status": 502,
+      "body": "failed to process LLM response",
+      "mock_observed": {
+        "openai-responses": {
+          "count": 1,
+          "body_ok": true,
+          "last_path": "/v1/responses",
+          "last_snippet": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}],\"model\":\"gpt-4o-mini\",\"max_output_tokens\":16,\"stream\":false}"
+        }
+      }
+    },
+    "cause": "Responses usage omitted input_tokens_details and output_tokens_details; pinned gateway rejected payload. Adding standard token details changes 502 to 200 without gateway changes.",
+    "schema_reference": "https://developers.openai.com/api/reference/resources/responses/methods/create"
+  }
+}

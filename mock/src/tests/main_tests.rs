@@ -785,3 +785,18 @@ fn bedrock_request_validation_ignores_json_whitespace() {
         br#"{"messages":[{"content":"hello"}],"inferenceConfig":{"maxTokens":16}}"#
     ));
 }
+
+#[test]
+fn responses_usage_includes_required_token_details() {
+    let body: serde_json::Value = serde_json::from_slice(body_for("/v1/responses")).unwrap();
+    assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 0);
+    assert_eq!(
+        body["usage"]["input_tokens_details"]["cache_write_tokens"],
+        0
+    );
+    assert_eq!(
+        body["usage"]["output_tokens_details"]["reasoning_tokens"],
+        0
+    );
+    assert_eq!(body["usage"]["total_tokens"], 12);
+}

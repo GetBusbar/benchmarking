@@ -1,5 +1,5 @@
 {
-  "scope": "Seven revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
+  "scope": "Nine revised configurations; excludes discarded November 8 batch. Capability evidence, not performance or full readiness.",
   "gateways": [
     {
       "gateway": "one-api",
@@ -255,6 +255,94 @@
       ],
       "earlier_served_not_in_current_configuration": [],
       "historical_snapshots_checked": 5
+    },
+    {
+      "gateway": "gomodel",
+      "latest_prior_snapshot": "results/snapshots/result_gomodel_2026-08-26T19-08-45Z.json",
+      "latest_prior_sha256": "d5a944f96686f17fd771628164aa2872bb733a541b28d2b40dbbfd3876e24b19",
+      "latest_prior_measured_at": "2026-08-26T19:08:45Z",
+      "definition_sha256": "7bf71b386d2fd271200607f7c1005e96a129d1a0539db38cbbca05c9b5166c53",
+      "prior_served_pairs": [
+        "anthropic>anthropic",
+        "anthropic>openai",
+        "openai-responses>anthropic",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>bedrock",
+        "anthropic>cohere",
+        "anthropic>gemini",
+        "anthropic>openai",
+        "cohere>cohere",
+        "openai-responses>anthropic",
+        "openai-responses>bedrock",
+        "openai-responses>cohere",
+        "openai-responses>gemini",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>cohere",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "anthropic>bedrock",
+        "anthropic>cohere",
+        "anthropic>gemini",
+        "cohere>cohere",
+        "openai-responses>bedrock",
+        "openai-responses>cohere",
+        "openai-responses>gemini",
+        "openai>cohere"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 5
+    },
+    {
+      "gateway": "agentgateway",
+      "latest_prior_snapshot": "results/snapshots/result_agentgateway_2026-08-26T19-08-42Z.json",
+      "latest_prior_sha256": "b908faf77122520df0d8055d83ae1c95022a63e5302463fa419aa5d7c3696894",
+      "latest_prior_measured_at": "2026-08-26T19:08:42Z",
+      "definition_sha256": "3b5ee09598aa90455671b9d82d6d405e6f0d27d51d22cccd0fe145b09839c020",
+      "prior_served_pairs": [
+        "anthropic>anthropic",
+        "anthropic>bedrock",
+        "anthropic>openai",
+        "openai-responses>bedrock",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>openai"
+      ],
+      "configured_pairs": [
+        "anthropic>anthropic",
+        "anthropic>bedrock",
+        "anthropic>openai",
+        "anthropic>openai-responses",
+        "gemini>gemini",
+        "openai-responses>bedrock",
+        "openai-responses>openai",
+        "openai-responses>openai-responses",
+        "openai>anthropic",
+        "openai>bedrock",
+        "openai>gemini",
+        "openai>openai"
+      ],
+      "removed_since_latest": [],
+      "added_since_latest": [
+        "anthropic>openai-responses",
+        "gemini>gemini",
+        "openai-responses>openai",
+        "openai>gemini"
+      ],
+      "earlier_served_not_in_current_configuration": [],
+      "historical_snapshots_checked": 6
     }
   ]
 }
