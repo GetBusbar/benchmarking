@@ -522,9 +522,9 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
     let mut hdr_end: Option<usize> = None;
     // Parsed ONCE when the headers complete, then reused. Re-decoding and re-lowercasing the head
     // on every read put an allocation per read inside the timed window, which is charged to the
-    // gateway. `scanned` is how far the terminator search has already looked: rescanning the whole
-    // body on each read is O(N^2) in the number of reads, and chunked is the normal framing for a
-    // gateway that streams, so this was the worst case rather than the rare one.
+    // gateway. `scanned` is where the chunked parse resumes (the next unparsed chunk-size line):
+    // rescanning the whole body on each read is O(N^2) in the number of reads, and chunked is the
+    // normal framing for a gateway that streams, so this was the worst case rather than the rare one.
     let mut framing_kind: Option<Framing> = None;
     let mut scanned: usize = 0;
     let mut closing = false;
@@ -556,13 +556,18 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
                     None => return Exchange::Failed,
                 },
                 Framing::Chunked => {
-                    // Only the newly-arrived bytes, overlapping by the terminator length so a
-                    // terminator split across two reads is still found.
-                    let from = scanned.saturating_sub(4).max(he);
-                    if acc[from..].windows(5).any(|w| w == b"0\r\n\r\n") {
-                        return complete(closing);
+                    // PARSED BY CHUNK SIZE, not by searching for `0\r\n\r\n`. A byte search ended
+                    // the response early on a chunk whose DATA held that sequence (leaving the rest on
+                    // a connection about to be reused, so the next exchange read body bytes as its
+                    // head), and never ended one whose last chunk carried trailers or an extension
+                    // (`0\r\nX: y\r\n\r\n`, `0;ext\r\n\r\n`), so a correct gateway waited out the
+                    // whole budget. `scanned` is where the next unparsed chunk-size line starts, so
+                    // each read resumes there instead of rescanning the body.
+                    match scan_chunks(acc, scanned.max(he)) {
+                        ChunkScan::Complete => return complete(closing),
+                        ChunkScan::NeedMore(at) => scanned = at,
+                        ChunkScan::Malformed => return Exchange::Failed,
                     }
-                    scanned = acc.len();
                 }
                 // An until-close body is only complete once the peer actually closes, which the
                 // n == 0 arm below handles. Returning here would call a body complete the moment the
@@ -636,6 +641,69 @@ enum Framing {
     Length(usize),
     Chunked,
     UntilClose,
+}
+
+/// Where a chunked body stands after the bytes received so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkScan {
+    /// The last chunk and its trailer section have arrived.
+    Complete,
+    /// More bytes are needed; the next chunk-size line starts at this offset.
+    NeedMore(usize),
+    /// Not chunked framing (a size that is not hex, a chunk not followed by CRLF): a broken response.
+    Malformed,
+}
+
+/// Walk a chunked body (RFC 9112 section 7.1) from the chunk-size line starting at `at`.
+///
+/// Each chunk is `<hex size>[;extensions]\r\n<size bytes>\r\n`; the last chunk has size 0 and is
+/// followed by optional trailer fields and an empty line. Only sizes are read - the data itself is
+/// skipped, never searched - so no byte sequence inside a chunk can end the body.
+fn scan_chunks(acc: &[u8], mut at: usize) -> ChunkScan {
+    loop {
+        let Some(line_len) = find_crlf(&acc[at..]) else {
+            return ChunkScan::NeedMore(at);
+        };
+        let line = &acc[at..at + line_len];
+        let size_field = line.split(|b| *b == b';').next().unwrap_or(line);
+        let Some(size) = std::str::from_utf8(size_field)
+            .ok()
+            .map(|t| t.trim_matches([' ', '\t']))
+            .filter(|t| !t.is_empty())
+            .and_then(|t| usize::from_str_radix(t, 16).ok())
+        else {
+            return ChunkScan::Malformed;
+        };
+        let data = at + line_len + 2;
+        if size == 0 {
+            // The trailer section: zero or more field lines, then an empty line.
+            let mut t = data;
+            loop {
+                let Some(n) = find_crlf(&acc[t..]) else {
+                    return ChunkScan::NeedMore(at);
+                };
+                if n == 0 {
+                    return ChunkScan::Complete;
+                }
+                t += n + 2;
+            }
+        }
+        let Some(end) = data.checked_add(size).and_then(|e| e.checked_add(2)) else {
+            return ChunkScan::Malformed;
+        };
+        if acc.len() < end {
+            return ChunkScan::NeedMore(at);
+        }
+        if acc[end - 2..end] != *b"\r\n" {
+            return ChunkScan::Malformed;
+        }
+        at = end;
+    }
+}
+
+/// Offset of the first CRLF in `b`, if any.
+fn find_crlf(b: &[u8]) -> Option<usize> {
+    b.windows(2).position(|w| w == b"\r\n")
 }
 
 /// How the body's end is signalled. Absent framing is its own case, never a zero-length body.
@@ -758,7 +826,14 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                 // stderr rather than folding a silent hole into a published rate: the release
                 // profile aborts on panic, so this is reachable only in a debug build, and a
                 // quietly smaller `ok` would read as the gateway being slower.
-                Err(e) => eprintln!("loadgen: a connection task did not finish cleanly: {e}"),
+                //
+                // AND MARK THE WINDOW. A lost lane means the window did not run at the concurrency
+                // it reports, which is exactly what `spawn_failed` tells the parent; a stderr line
+                // alone left a normal-looking stats line to be scored as the gateway's result.
+                Err(e) => {
+                    eprintln!("loadgen: a connection task did not finish cleanly: {e}");
+                    g.spawn_failed = true;
+                }
             }
         }
         g
@@ -1527,6 +1602,65 @@ mod tests {
         });
         assert!(g.spawn_failed, "the rig could not pose the question");
         assert_eq!((g.ok, g.fail), (0, 0), "and nothing is charged to anyone");
+    }
+
+    // ---- chunked framing is parsed by size, never searched for ----------------------------------
+
+    // A CHUNK WHOSE DATA CONTAINS THE TERMINATOR'S BYTES. A raw search for `0\r\n\r\n` ended this
+    // body at the first chunk, leaving the real last chunk on a connection about to be reused.
+    #[test]
+    fn a_terminator_shaped_sequence_inside_chunk_data_does_not_end_the_body() {
+        // One 7-byte chunk whose data is "ab0\r\n\r\n", then the real last chunk.
+        let body = b"7\r\nab0\r\n\r\n\r\n";
+        assert_eq!(scan_chunks(body, 0), ChunkScan::NeedMore(12));
+        let full = b"7\r\nab0\r\n\r\n\r\n0\r\n\r\n";
+        assert_eq!(scan_chunks(full, 0), ChunkScan::Complete);
+    }
+
+    // TRAILERS AND EXTENSIONS ARE LEGAL HTTP/1.1. A byte search never recognised a last chunk that
+    // carried either, so a correct gateway waited out the whole response budget on every request.
+    #[test]
+    fn a_last_chunk_with_trailers_or_an_extension_completes() {
+        assert_eq!(
+            scan_chunks(b"4\r\nabcd\r\n0\r\nx-trailer: y\r\n\r\n", 0),
+            ChunkScan::Complete
+        );
+        assert_eq!(
+            scan_chunks(b"4;name=v\r\nabcd\r\n0;ext\r\n\r\n", 0),
+            ChunkScan::Complete
+        );
+        assert_eq!(
+            scan_chunks(b"A\r\n0123456789\r\n0\r\n\r\n", 0),
+            ChunkScan::Complete
+        );
+        // The trailer section is not finished until its empty line arrives.
+        assert_eq!(
+            scan_chunks(b"4\r\nabcd\r\n0\r\nx-trailer: y\r\n", 0),
+            ChunkScan::NeedMore(9)
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_chunked_framing_is_malformed() {
+        assert_eq!(scan_chunks(b"zz\r\nabcd\r\n", 0), ChunkScan::Malformed);
+        assert_eq!(scan_chunks(b"\r\nabcd\r\n", 0), ChunkScan::Malformed);
+        // A chunk whose data is not followed by CRLF.
+        assert_eq!(scan_chunks(b"2\r\nabcd\r\n", 0), ChunkScan::Malformed);
+    }
+
+    // The parse resumes where it stopped: a body arriving a byte at a time completes exactly when
+    // its last byte lands, and never before.
+    #[test]
+    fn a_chunked_body_arriving_byte_by_byte_completes_only_on_its_last_byte() {
+        let whole = b"4\r\nabcd\r\n3\r\nefg\r\n0\r\n\r\n";
+        let mut at = 0;
+        for end in 1..whole.len() {
+            match scan_chunks(&whole[..end], at) {
+                ChunkScan::NeedMore(next) => at = next,
+                other => panic!("completed early at {end} of {}: {other:?}", whole.len()),
+            }
+        }
+        assert_eq!(scan_chunks(whole, at), ChunkScan::Complete);
     }
 }
 
