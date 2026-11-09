@@ -442,9 +442,9 @@ fn build_request(cfg: &GenConfig) -> Result<String, String> {
         h.push_str(&format!("{k}: {v}\r\n"));
     }
     Ok(format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{}\r\n{}",
+        "POST {} HTTP/1.1\r\n{}content-type: application/json\r\ncontent-length: {}\r\n{}\r\n{}",
         cfg.path,
-        cfg.addr,
+        crate::http::host_line(cfg.addr, &cfg.headers),
         cfg.body.len(),
         h,
         cfg.body
@@ -1498,6 +1498,16 @@ mod tests {
         ))
         .expect("a real credential must still send");
         assert!(ok.contains("authorization: Bearer sk-abc.DEF_123-+/=\r\n"));
+
+        // ONE Host header: a declared virtual host replaces the socket address, never follows it.
+        let routed = build_request(&with(
+            vec![("Host".into(), "cohere.bench".into())],
+            "/v1/chat/completions",
+        ))
+        .expect("a routing host must send");
+        assert_eq!(routed.to_ascii_lowercase().matches("\r\nhost:").count(), 1);
+        assert!(routed.contains("Host: cohere.bench\r\n"));
+        assert_eq!(ok.to_ascii_lowercase().matches("\r\nhost:").count(), 1);
     }
 
     // And the window built from such a manifest NEVER RUNS: a sanitised header would send a

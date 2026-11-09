@@ -512,6 +512,22 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
     }
 }
 
+/// The `Host` line for a request to `addr`, or nothing when the caller declares its own `Host`.
+///
+/// ONE HOST HEADER, NEVER TWO. A gateway that routes by virtual host (higress selects each upstream
+/// by `Host: <dialect>.bench`) is handed that name in the manifest's headers. Writing the socket
+/// address first and the manifest's name after it sent two `Host` headers; RFC 9112 makes that a
+/// malformed request, and envoy honoured the first, so every non-openai column was driven at the
+/// default (openai) route and re-verification correctly saw openai arrive upstream. A declared
+/// `Host` therefore REPLACES the default rather than following it.
+pub fn host_line(addr: impl std::fmt::Display, headers: &[(String, String)]) -> String {
+    if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("host")) {
+        String::new()
+    } else {
+        format!("Host: {addr}\r\n")
+    }
+}
+
 /// POSTs `body` as the request payload to `path` on `addr`, with `headers` sent verbatim
 /// (duplicates and all: this function does not deduplicate or reorder what the caller supplies).
 /// `timeout` bounds the whole call: connect, write, and read together, so a gateway that accepts a
@@ -618,7 +634,7 @@ fn send(
 
     let mut request = Vec::new();
     request.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
-    request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
+    request.extend_from_slice(host_line(addr, headers).as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
     // a gateway that requires content-type on a JSON body would otherwise answer 415 to the probe
@@ -1571,7 +1587,7 @@ fn build_sse_request(
     }
     let mut request = Vec::new();
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
-    request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
+    request.extend_from_slice(host_line(addr, headers).as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching gen.rs's build_request: a gateway
     // that requires content-type on a JSON body would otherwise answer 415 to the probe and be
@@ -1598,6 +1614,38 @@ mod tests {
     use std::io::BufRead;
     use std::net::{TcpListener, TcpStream as StdTcpStream};
     use std::thread;
+
+    #[test]
+    fn a_declared_host_replaces_the_default_rather_than_doubling_it() {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let routed = vec![("Host".to_string(), "cohere.bench".to_string())];
+        assert_eq!(host_line(addr, &routed), "");
+        assert_eq!(host_line(addr, &[]), "Host: 127.0.0.1:8080\r\n");
+        let sse = String::from_utf8(build_sse_request(addr, "/v1/chat", b"{}", &routed).unwrap())
+            .unwrap();
+        assert_eq!(
+            sse.to_ascii_lowercase().matches("\r\nhost:").count(),
+            1,
+            "{sse}"
+        );
+        assert!(sse.contains("Host: cohere.bench\r\n"));
+        // The probe lane: one Host on the wire, the declared one.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let gw = spawn_server(move |mut c| {
+            let mut buf = [0u8; 4096];
+            let n = c.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+        });
+        let _ = post_json(gw, "/v1/chat", b"{}", &routed, Duration::from_secs(5));
+        let seen = rx.recv().unwrap();
+        assert_eq!(
+            seen.to_ascii_lowercase().matches("\r\nhost:").count(),
+            1,
+            "{seen}"
+        );
+        assert!(seen.contains("Host: cohere.bench\r\n"), "{seen}");
+    }
 
     /// Binds an ephemeral port, hands the accepted connection to `serve` on a background thread,
     /// and returns the address to connect to. `serve` gets the raw request bytes read so far are
