@@ -686,9 +686,15 @@ fn metric_definitions() -> std::collections::BTreeMap<String, String> {
              stopped qualifying - that pair is the proof it is a boundary. When nothing above it \
              disqualified, the sweep ran out of range instead of finding a limit, and the reading sets \
              `lower_bound: true`: the rate is real, it is simply a floor rather than a ceiling. \
+             A window in which the gateway completed no request at all is a failed rung like any \
+             other. Only a RIG stop (a thread or connection this host could not make, or a load \
+             generator with no readable result) interrupts the sweep; its frontier is then read from \
+             the rungs below the stop, every reading sets `lower_bound: true`, and the absences name \
+             the rung and the cause. A bound no rung met publishes `bound_not_met`. \
              \
              The `p99_us` on a reading is the tail the winning rung ACTUALLY produced, never the bound - \
-             4ms under a 100ms bound is not the same finding as 99ms.",
+             4ms under a 100ms bound is not the same finding as 99ms - and `samples` is the number of \
+             completed requests it was taken over.",
             bounds.join(", ")
         ),
     );
