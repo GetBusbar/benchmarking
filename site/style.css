@@ -120,6 +120,10 @@ code { background: var(--bg-raise); border: 1px solid var(--border); border-radi
 .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
 
 main { padding: 1.6rem 0 3rem; }
+/* A short view (Charts) left the page background showing below the footer. The column fills the viewport
+   and main takes the slack, so the footer always sits on the bottom edge. */
+body { min-height: 100vh; display: flex; flex-direction: column; }
+body > main { flex: 1 0 auto; width: 100%; }
 
 /* ---- home landing page (site root) ------------------------------------------
    The header's category row, tab bar and category tagline belong to the category
@@ -224,6 +228,9 @@ thead th {
    they carry rowspan="2" - so first-child is the exact and only correct scope. */
 #results-table thead tr:first-child th:nth-child(1), #results-table thead tr:first-child th:nth-child(2) { white-space: nowrap; max-width: none; }
 thead th:first-child, tbody td:first-child { text-align: left; }
+/* The Gateway name is the row's label, so it reads left-aligned like the Gateways roster - not pushed
+   against the first metric column. */
+#results-table thead tr:first-child th:nth-child(2), #results-table tbody td:nth-child(2) { text-align: left; }
 /* Lock ONLY the identity of each row (checkbox + Gateway name) while the metric
    columns, Class and Lang included, scroll horizontally. Scoped to the results
    table only (not the matrix grid or the compare table, which share
@@ -339,6 +346,10 @@ tbody tr { cursor: pointer; }
 .drawer-lane dl > div { display: flex; justify-content: space-between; gap: 1rem; padding: .16rem 0; }
 .drawer-lane dt { color: var(--fg-dim); }
 .drawer-lane dd { margin: 0; font-weight: 600; }
+/* Long unbroken identifiers (image digests, build refs) wrap inside the drawer instead of running off its
+   right edge on a phone. */
+.drawer .stamp, .drawer .lane-note, .drawer-head, .drawer-lane p { overflow-wrap: anywhere; }
+.drawer-lane dl > div > * { min-width: 0; }
 .matrix-list { list-style: none; margin: 0; padding: 0; }
 .matrix-list li { margin-bottom: .4rem; }
 .matrix-list .cell { width: .9rem; height: .9rem; vertical-align: -2px; cursor: default; }
@@ -408,6 +419,19 @@ tbody tr { cursor: pointer; }
 }
 .compare-inner h2 { margin: 0 0 .8rem; font-size: 1.15rem; }
 .cmp-table td, .cmp-table th { text-align: right; }
+/* THE COMPARE TABLE FITS ITS PANEL. It inherited `tbody td { white-space: nowrap }`, so the long
+   "Measured path" sentence set every gateway column to its own length and the table rendered 6,000+px
+   wide with the numbers scrolled out of sight. Fixed layout shares the panel width between the metric
+   label and the gateways; cells wrap at spaces only, so a number is never split mid-digits. */
+.cmp-table { table-layout: fixed; }
+.cmp-table th:first-child, .cmp-table td.metric { width: 30%; }
+.cmp-table td, .cmp-table th { white-space: normal; overflow-wrap: normal; vertical-align: top; }
+.cmp-table td.lane-note { text-align: left; overflow-wrap: anywhere; line-height: 1.4; }
+.cmp-table td.shape .frontier-spark, .cmp-table td svg { max-width: 100%; height: auto; }
+.cmp-table thead th { white-space: normal; }
+.cmp-table td.cmp-build { overflow-wrap: anywhere; font-size: .78rem; }
+.cmp-table td.shape { white-space: normal; overflow: visible; }
+.cmp-table td.shape .stamp, .cmp-table td.shape p { white-space: normal; overflow-wrap: anywhere; }
 .cmp-table td.metric, .cmp-table th:first-child { text-align: left; color: var(--fg-dim); }
 .cmp-table .lane-row td { font-weight: 600; color: var(--fg); background: var(--bg-hover); text-align: left; }
 .cmp-table td.best { background: var(--best); font-weight: 700; }
@@ -431,13 +455,26 @@ tbody tr { cursor: pointer; }
 .cell.failed { background: var(--red); }
 .cell.unprobed { background: var(--grey); }
 /* not configurable: neutral, visibly distinct from both a red fail and the grey unprobed_auth */
-.cell.notconf { background: var(--bg-hover); border: 1px solid var(--border); }
+/* FOUR GREY STATES, FOUR SHAPES. They were near-identical pale squares; each now has its own pattern
+   (drawn in --fg-mute / --fg-dim so it holds in light and dark), and the legend uses the same classes.
+     not configured  - diagonal hatching (a probe ran and did not complete correctly)
+     not declared    - empty square, solid outline (research only, no probe)
+     not verified    - dashed outline with a centre dot (the harness could not get it serving)
+     untestable      - outline crossed by one diagonal (a recorded harness limitation) */
+.cell.notconf {
+  background: repeating-linear-gradient(45deg, var(--fg-mute) 0 2px, transparent 2px 5px);
+  border: 1px solid var(--fg-mute);
+}
+.cell.notconf.notdecl { background: transparent; border: 1.5px solid var(--fg-mute); }
 /* not verified: the harness could not get the gateway serving under this egress config; a dashed
    grey border reads as "we could not test this", visibly distinct from the solid "not declared". */
-.cell.unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
+.cell.unverified { background: radial-gradient(circle, var(--fg-dim) 0 2px, transparent 2.5px); border: 1.5px dashed var(--fg-dim); }
 /* untestable: the gateway supports the pair in production but pins the real cloud host (no
    base-URL override), so our mock cannot stand in - a rig limit, dotted border, never a red. */
-.cell.untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
+.cell.untestable {
+  background: linear-gradient(135deg, transparent calc(50% - 1px), var(--fg-dim) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px));
+  border: 1.5px solid var(--fg-dim);
+}
 /* diagonal cells (same dialect in and out, no translation required): subtle ring */
 .cell.diag { outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 /* compact cell legend: one line of colored squares + short labels, mirrors the cell classes */
@@ -448,12 +485,13 @@ tbody tr { cursor: pointer; }
 .matrix-legend li { display: flex; align-items: center; gap: .4rem; }
 .matrix-legend .lg { display: inline-block; width: .9rem; height: .9rem; border-radius: 3px; }
 .matrix-legend .lg-pass { background: var(--green); }
-.matrix-legend .lg-notconf { background: var(--bg-hover); border: 1px solid var(--border); }
-.matrix-legend .lg-unverified { background: var(--bg-hover); border: 1px dashed var(--fg-dim); }
-.matrix-legend .lg-untestable { background: var(--bg-hover); border: 1px dotted var(--grey); }
+.matrix-legend .lg-notconf { background: repeating-linear-gradient(45deg, var(--fg-mute) 0 2px, transparent 2px 5px); border: 1px solid var(--fg-mute); }
+.matrix-legend .lg-notdecl { background: transparent; border: 1.5px solid var(--fg-mute); }
+.matrix-legend .lg-unverified { background: radial-gradient(circle, var(--fg-dim) 0 2px, transparent 2.5px); border: 1.5px dashed var(--fg-dim); }
+.matrix-legend .lg-untestable { background: linear-gradient(135deg, transparent calc(50% - 1px), var(--fg-dim) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); border: 1.5px solid var(--fg-dim); }
 .matrix-legend .lg-unprobed { background: var(--grey); }
 .matrix-legend .lg-failed { background: var(--red); }
-.matrix-legend .lg-diag { background: var(--bg-hover); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
+.matrix-legend .lg-diag { background: var(--green); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
   margin-top: 1rem; border: 1px solid var(--border); border-radius: 8px;
@@ -536,6 +574,13 @@ td.failcell {
   border-radius: 6px; padding: .25rem .5rem; font-size: .85rem; font-family: inherit;
 }
 .cell-chooser .xlate-arrow { color: var(--fg-mute); }
+/* EVERY NATIVE SELECT ON THE SPA FOLLOWS THE THEME. #conc-select and the chart metric picker had no rule of
+   their own and rendered as bright white system controls on the dark page. */
+#conc-select, .chart-metric select {
+  background: var(--bg-raise); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: .25rem .5rem; font-size: .85rem; font-family: inherit; max-width: 100%;
+}
+#conc-select:focus-visible, .chart-metric select:focus-visible, .cell-chooser select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Segmented Peak | Same | Custom control. */
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .seg-btn {
@@ -690,8 +735,10 @@ td.memcurve.na { color: var(--fg-mute); }
 /* "Tested on" on the memory table: capped, because it was sized by its longest pill
    ("OpenAI→Bedrock Converse") for every row. The pill truncates with an ellipsis and its full value stays on
    the tooltip it already carries, so nothing is lost but the width. */
-#results-table td.tested { max-width: 8.5rem; }
-#results-table td.tested .tested-pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+/* THE PILL WRAPS INSTEAD OF TRUNCATING. "OpenA…" and "Bedrock C…" hid the very cell the row was measured
+   on; the column stays narrow (the pill breaks at its own spaces and at the arrow) and the full name shows. */
+#results-table td.tested { max-width: 8.5rem; white-space: normal; }
+#results-table td.tested .tested-pill { max-width: 100%; white-space: normal; overflow-wrap: break-word; line-height: 1.25; text-align: center; vertical-align: middle; }
 /* THE RELEASE MARK: how much of what it gained under load the gateway gave back, as a tick between two
    levels already plotted (peak → last sample). Thick and faint so it reads as a magnitude behind the curve
    rather than as another line on it; a gateway that released nothing draws none at all. */
@@ -793,6 +840,27 @@ td.memcurve.na { color: var(--fg-mute); }
   .count { margin-left: 0; flex: 1 1 100%; }
 
   thead th, tbody td { padding: .5rem .55rem; }
+  /* THE STICKY IDENTITY COLUMNS COST HALF A PHONE. 2.4rem + 11rem left ~170px for the data, so the column
+     the table is sorted by began off-screen. The name column narrows and wraps (names break at spaces). */
+  #results-table thead tr:first-child th:nth-child(1), #results-table tbody td:nth-child(1) { width: 2rem; min-width: 2rem; padding-left: .3rem; padding-right: .3rem; }
+  #results-table thead tr:first-child th:nth-child(2), #results-table tbody td:nth-child(2) { left: 2rem; width: 7.5rem; min-width: 7.5rem; max-width: 7.5rem; white-space: normal; overflow-wrap: anywhere; }
+  #results-table thead tr:first-child th:nth-child(2) { white-space: normal; }
+  /* The declared geometry lives on the <colgroup> (app.js COL_WIDTHS, inline widths); the two identity
+     columns are re-declared here to match the sticky offsets above. */
+  #results-table col:nth-child(1) { width: 2rem !important; }
+  #results-table col:nth-child(2) { width: 7.5rem !important; }
+  /* The filter block stacks: label above its controls, so a segmented control gets the full width and
+     wraps when it still does not fit, rather than clipping its last option ("Cus…"). */
+  .filters { grid-template-columns: minmax(0, 1fr); gap: .35rem; }
+  .filters .fnote { grid-column: 1; margin-bottom: .4rem; }
+  .seg { flex-wrap: wrap; max-width: 100%; }
+  .seg-btn { flex: 1 0 auto; border-bottom: 1px solid var(--border); margin-bottom: -1px; }
+  #bound-seg .seg-btn { min-width: 3.6rem; padding: .3rem .5rem; }
+  #mode-seg .seg-btn { min-width: 4rem; padding: .3rem .6rem; }
+  .cell-chooser label { flex-wrap: wrap; }
+  .cmp-table th:first-child, .cmp-table td.metric { width: 26%; }
+  .cmp-table { font-size: .78rem; }
+  .cmp-table td, .cmp-table th { padding: .45rem .35rem; }
 
   .drawer { width: 100vw; padding: 1rem 1.1rem 2rem; }
   .compare-bar { flex-wrap: wrap; gap: .5rem; padding: .6rem .8rem; }
@@ -859,7 +927,14 @@ tbody tr.tied-above > td {
 .chart-metric { font-size: .85rem; color: var(--fg-dim); }
 .chart-metric select { margin-left: .4rem; padding: .25rem .4rem; font: inherit; }
 #chart-panel canvas { width: 100%; height: auto; max-width: 900px; }
+/* The screen-reader data table behind each canvas is .sr-only, but a TABLE cannot be shorter than its rows,
+   so its 1px box still pushed the page ~190px past the footer (the empty band under the Charts footer).
+   Containing it here clips that overflow without hiding the table from assistive technology. */
+#chart-panel, .sweeps figure.sweep, #cmp-sweeps { position: relative; overflow: hidden; }
 #chart-note { margin-top: .6rem; font-size: .82rem; line-height: 1.5; }
+.chart-legend { list-style: none; display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin: 0 0 .6rem; padding: 0; font-size: .8rem; color: var(--fg-dim); }
+.chart-legend li { display: flex; align-items: center; gap: .4rem; }
+.chart-legend .sw { display: inline-block; width: .9rem; height: .9rem; border-radius: 3px; }
 
 /* Visually hidden, still read by screen readers: the data tables behind the canvas charts (app.js
    chartDataTable). Takes no space and draws nothing, so the page looks exactly as it did. */

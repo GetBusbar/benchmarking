@@ -101,7 +101,7 @@
     <p class="fineprint">Every gateway on the board, in alphabetical order. Language, the exact version measured (hover for the build stamp the run recorded: an immutable image digest or a pinned source commit), when it was last benchmarked, project age, stars (snapshot), and each project's own self-description. The other tabs measure how they perform.</p>
     <div class="table-scroll">
       <table id="gateways-table">
-        <thead><tr><th data-sort="name">Gateway</th><th data-sort="lang">Language</th><th class="build" data-sort="version">Version</th><th class="lastrun" data-sort="lastrun">Last benchmarked</th><th class="age" data-sort="age">Project Age</th><th class="stars" data-sort="stars">Stars</th><th class="contrib" data-sort="contrib">Contributors</th></tr></thead>
+        <thead><tr><th data-sort="name">Gateway</th><th data-sort="lang">Language</th><th class="build" data-sort="version">Version</th><th class="lastrun" data-sort="lastrun">Last benchmarked</th><th class="age" data-sort="age">Project age</th><th class="stars" data-sort="stars">Stars</th><th class="contrib" data-sort="contrib">Contributors</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -202,7 +202,7 @@
     <h2>Protocol support matrix (6x6)</h2>
     <ul class="matrix-legend" aria-label="cell legend">
       <li><span class="lg lg-pass"></span>served (probe passed)</li>
-      <li><span class="lg lg-notconf"></span>not declared (historical capability research; not a probe)</li>
+      <li><span class="lg lg-notdecl"></span>not declared (historical capability research; not a probe)</li>
       <li><span class="lg lg-notconf"></span>not configured (probe failed; evidence on hover)</li>
       <li><span class="lg lg-unverified"></span>not verified (harness could not get it serving)</li>
       <li><span class="lg lg-untestable"></span>untestable (the engine's recorded reason is shown on hover)</li>
@@ -290,9 +290,9 @@
   </section>
 
   <section id="view-charts" class="view hidden">
-    <p class="lede">Every chart here is drawn from the same numbers the tables rank, at the bound and
-    cell you have selected — change either and the chart follows. Bars are coloured by implementation
-    language, a neutral property, never by rank or brand.</p>
+    <p class="lede">Every chart here is drawn from the same numbers the tables rank, on the cell and
+    tail-latency bound last chosen on the table tabs; the line under each chart names them. Bars are
+    coloured by implementation language (key above the chart), a neutral property, never by rank or brand.</p>
     <div id="chart-controls" class="chart-controls"></div>
     <div id="chart-panel"></div>
     <p id="chart-note" class="muted"></p>
