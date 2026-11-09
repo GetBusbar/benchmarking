@@ -38,6 +38,16 @@
 // its prose detail instead of flattening every hole to one token. In particular "below_resolution" is a
 // difference that came out at or below what the rig can resolve - the best result the comparison can
 // express - and every surface renders it apart from a never-measured hole.
+//
+// "bound_not_met" (engine v1.1, frontier.rs `absence_for`) is the frontier's OWN token for "no tested
+// concurrency met this tail-latency bound": a measured finding that the gateway carried no throughput under
+// that bound. Snapshots from the older engine spell the same frontier state `below_resolution`; both are
+// carried exactly as recorded and never rewritten into each other. On a frontier RATE the two rank alike (a
+// measured zero, see BOUND_ZERO_REASONS); everywhere else `below_resolution` keeps its own meaning.
+export const BOUND_NOT_MET = "bound_not_met";
+// The absence reasons a frontier RATE ranks as a measured 0 ("no throughput under this bound"): the v1.1
+// token and the older engine's spelling of the same frontier state.
+export const BOUND_ZERO_REASONS = ["below_resolution", BOUND_NOT_MET];
 
 // ---- provenance stamp + caption vocabulary ---------------------------------
 // The `sweep` token names WHICH projection of the run the datum is; every caption renders FROM it via
@@ -301,7 +311,7 @@ export function sealFrontier(readings, absences = null) {
     const at = us == null ? "unbounded" : `${Math.round(us / 1000)}ms`;
     const key = `frontier.${at}.rps`;
     const abs = absences ? absences[`perf.${key}`] || absences[key] || null : null;
-    return {
+    const out = {
       bound_ms: us == null ? null : Math.round(us / 1000),
       rps: sealMetric(r.rps, { absent: abs }),
       concurrency: numOrNull(r.concurrency),
@@ -309,7 +319,22 @@ export function sealFrontier(readings, absences = null) {
       first_disqualified_conc: numOrNull(r.first_disqualified_conc),
       lower_bound: r.lower_bound === true,
     };
+    // THE SAMPLE COUNT BEHIND `p99_us` (engine v1.1 record.rs FrontierReading.samples: the successful
+    // requests the winning window completed). Carried only when the engine recorded a number, so a
+    // reading from an older engine keeps exactly its old shape rather than gaining a null.
+    if (Number.isFinite(r.samples)) out.samples = r.samples;
+    return out;
   });
+}
+// THE SAMPLE COUNTS BEHIND THE PERCENTILES, by the engine's own field names (record.rs CellPerf /
+// CellStream). Evidence about a percentile, not a metric: they ride as plain numbers, and only when the
+// engine recorded one (an absent count repeats its percentile's own reason, which is already sealed).
+export const PERF_SAMPLE_FIELDS = ["gateway_c1_samples", "direct_c1_samples"];
+export const STREAM_SAMPLE_FIELDS = ["ttft_gw_samples", "ttft_direct_samples", "gap_gw_samples", "gap_direct_samples"];
+export function sampleCounts(block, fields) {
+  const out = {};
+  if (block && typeof block === "object") for (const k of fields) if (Number.isFinite(block[k])) out[k] = block[k];
+  return out;
 }
 /* THE RATE EVERY GATEWAY CARRIED AT THE SAME CONCURRENCY, sealed, so the board can be read
    apples-to-apples on a rung instead of on each gateway's own peak.

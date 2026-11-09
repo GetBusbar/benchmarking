@@ -335,7 +335,7 @@ function stripRigPaths(s) {
 const STATUS_LABEL = {
   not_measured: "not measured", not_probed: "not measured", not_served: "not served",
   untestable: "not testable", rig_limited: "rig-limited", search_exhausted: "search exhausted",
-  harness_error: "harness error", below_resolution: "below resolution",
+  harness_error: "harness error", below_resolution: "below resolution", bound_not_met: "bound not met",
 };
 /* naText: compact honest label for a lane that was not served. The suites emit
    long diagnostic notes (passthrough evidence, launch errors); those must never
@@ -429,6 +429,9 @@ const METRIC_NOTES = {
   // The engine's own absence reasons (measurement.rs Absent), carried through the seal since the
   // reason-flattening fix. below_resolution is handled in metric() as a display state, not a hole.
   below_resolution: "below measurement resolution: the comparison ran and the gateway's overhead was too small for this rig to detect (the best result this test can express)",
+  // Engine v1.1's own token for a frontier bound no tested concurrency met. The engine's detail sentence
+  // is what the tooltip shows; this is only the fallback when a reading carries none.
+  bound_not_met: "bound not met: no tested concurrency held its tail latency under this bound (a measured finding, not a hole)",
   rig_limited: "not shown: rig-limited, the harness's own ceiling bounded this number, so it is not a gateway reading",
   untestable: "not testable: the rig cannot pose this question for this dialect (a rig limit, not a gateway fault)",
   // Still emitted, and now ONLY by the streaming ceiling: a stream-concurrency range whose top rung still
@@ -503,6 +506,11 @@ function metric(env, fmt = fmtInt) {
     // added-gap p99 with no p50 - impossible for one distribution, so the table looked broken.
     if (env && env.reason === "below_resolution")
       return { v: 0, text: "≈0", na: false, note: env.detail || noteText(env.reason), env };
+    // BOUND NOT MET (engine v1.1, frontier readings only) ranks exactly as the older engine's
+    // below_resolution frontier reading did - a measured 0, "no throughput under this bound" - but it is
+    // not a too-small difference, so it never reads "≈0". frontierCell renders it with the engine's detail.
+    if (env && env.reason === "bound_not_met")
+      return { v: 0, text: "n/a", na: false, note: env.detail || noteText(env.reason), env };
     // A MEASURED FAILURE READS AS ONE, in red, with its counts - never as the same n/a an untested
     // cell gets. The engine's detail carries the evidence ("0 ok, 14201 fail" - one-api's c=1 leg
     // after the restart bug; "no stream frame arrived"), and the cell shows the digits so a
@@ -571,14 +579,33 @@ function metric(env, fmt = fmtInt) {
    oscillating), so that coercion would turn an unmeasured field into a positive claim. Everything else
    about the read is identical, so this defers to mval rather than reaching into the envelope itself. */
 function mcode(env) {
-  if (isEnvelope(env) && env.reason === "below_resolution") return null;
+  if (isEnvelope(env) && (env.reason === "below_resolution" || env.reason === "bound_not_met")) return null;
   return mval(env);
 }
 
+/* samplesNote(rec, k): the recorded sample count(s) a percentile was taken over, as the engine documents
+   it (record.rs CellPerf/CellStream; mirrored in evidence.mjs SAMPLE_KEYS): a c=1 leg's p99 over that leg's
+   count, an added-latency / TTFT / gap difference over both legs. "" when the record carries no count, so
+   a record from an older engine renders exactly as before. */
+const SAMPLE_KEYS = {
+  gateway_c1_p99_us: [["gateway_c1_samples"]], direct_c1_p99_us: [["direct_c1_samples"]],
+  added_latency_p50_us: [["gateway_c1_samples", "gateway"], ["direct_c1_samples", "direct"]],
+  added_latency_p99_us: [["gateway_c1_samples", "gateway"], ["direct_c1_samples", "direct"]],
+  added_ttft_p50_us: [["ttft_gw_samples", "gateway"], ["ttft_direct_samples", "direct"]],
+  added_ttft_p99_us: [["ttft_gw_samples", "gateway"], ["ttft_direct_samples", "direct"]],
+  added_gap_p50_us: [["gap_gw_samples", "gateway"], ["gap_direct_samples", "direct"]],
+  added_gap_p99_us: [["gap_gw_samples", "gateway"], ["gap_direct_samples", "direct"]],
+};
+function samplesNote(rec, k) {
+  const parts = (SAMPLE_KEYS[k] || []).filter(([f]) => rec && Number.isFinite(rec[f]));
+  return parts.length ? `n=${parts.map(([f, leg]) => `${fmtInt(rec[f])}${leg ? ` ${leg}` : ""}`).join(" / ")}` : "";
+}
+// `bound_not_met` (engine v1.1) is only ever recorded on a frontier reading, and ranks there exactly as the
+// older engine's below_resolution spelling of the same state does: a measured 0.
 function mval(env) {
   if (!isEnvelope(env)) return null;
   if (env.value != null) return env.value;
-  return env.reason === "below_resolution" ? 0 : null;
+  return env.reason === "below_resolution" || env.reason === "bound_not_met" ? 0 : null;
 }
 
 /* ---- the latency-throughput frontier ----------------------------------------
@@ -706,7 +733,8 @@ function readingSentence(rd, v) {
      cell renderer were both changed to stop making. */
   const bits = [`${fmtRate(v)} req/s ${boundClause(rd.bound_ms)}.`];
   if (rd.concurrency != null) bits.push(`Observed with ${fmtInt(rd.concurrency)} concurrent requests in flight.`);
-  if (rd.p99_us != null) bits.push(`The tail it actually produced there was ${fmtTail(rd.p99_us)}.`);
+  if (rd.p99_us != null) bits.push(`The tail it actually produced there was ${fmtTail(rd.p99_us)}${
+    Number.isFinite(rd.samples) ? ` (p99 · n=${fmtInt(rd.samples)} completed requests)` : ""}.`);
   if (rd.lower_bound === true)
     // A FLOOR, NOT A CEILING. The sweep ran out of ladder while this rung was still qualifying, so the
     // rate is real and maximality is not established. The retired search published null for this state,
@@ -4323,8 +4351,11 @@ function drawerHtml(g, st = state) {
         const conc = c.env && c.env.concurrency;
         const cc = conc != null && c.v > 0 ? ` (@ c=${fmtInt(conc)})` : "";
         const zeroWhy = c.v === 0 && c.env && ZERO_WHY[c.env.note];
-        return `<div><dt>${esc(txt(m.label))}</dt><dd${c.note ? ` title="${esc(c.note)}"` : ""}>${esc(c.text + cc)}${
-          zeroWhy ? ` <span class="muted">(${esc(zeroWhy)})</span>` : ""}</dd></div>`;
+        // The recorded sample count behind a percentile (engine v1.1), when the record carries one.
+        const n = m.k ? samplesNote(j, m.k) : "";
+        const title = [c.note, n].filter(Boolean).join(" · ");
+        return `<div><dt>${esc(txt(m.label))}</dt><dd${title ? ` title="${esc(title)}"` : ""}>${esc(c.text + cc)}${
+          zeroWhy ? ` <span class="muted">(${esc(zeroWhy)})</span>` : ""}${n ? ` <span class="muted">· ${esc(n)}</span>` : ""}</dd></div>`;
       // The engine's definition of this lane's metrics, right under the numbers it defines: a reader who
       // asks "what does 'under 10 ms' actually mean" gets the answer without leaving the drawer.
       }).join("") + `</dl>` + (l.extra ? l.extra(j) : "") +
@@ -4666,7 +4697,11 @@ function matrixCellTip(cell) {
   if (cell.served === "failed")
     // The pairing is real (the status was not a 404/501-shaped absence); the gateway reached and
     // declined this specific attempt. Surface the actual evidence, not just the verdict label.
-    return `failed: the gateway answered HTTP ${cell.status || "?"}${cell.body_snippet ? " - " + cell.body_snippet : ""}`;
+    // The engine's verdict_note (v1.1: why a 2xx body failed validation, or why egress re-verification was
+    // refuted) travels verbatim beside the body it was decided from; shown once when the two are identical.
+    return `failed: the gateway answered HTTP ${cell.status || "?"}${
+      cell.verdict_note && cell.verdict_note !== cell.body_snippet ? " - " + cell.verdict_note : ""}${
+      cell.body_snippet ? " - " + cell.body_snippet : ""}`;
   if (cell.served !== true && cell.served !== "unprobed_auth" && isHarnessGap(cell))
     return `not verified: the harness could not get this gateway serving under this upstream config${cell.verdict_note ? " (" + cell.verdict_note + ")" : ""}`;
   return `${label}. ${cell.verdict_note || ""}`;
@@ -4774,7 +4809,12 @@ function cellPopFull(g, ingress, egress) {
     ? `<div class="pop-delta">vs its own cell (${esc(MATRIX_LABELS[bp.ingress] || bp.ingress)}→${esc(MATRIX_LABELS[bp.egress] || bp.egress)}): ${esc(delta)}</div>`
     : (cellPerf && bp && bp.ingress === ingress && bp.egress === egress
       ? `<div class="pop-delta muted">this is the cell that ranks the Performance tab</div>` : "");
-  const verdict = cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "";
+  // A FAILED probe's evidence is the body it was decided from (engine v1.1 keeps the validation reason
+  // and the body in body_snippet); shown verbatim beside the verdict, once when the two are identical.
+  const failedProbe = cell.served === "failed" || cell.served === "not_served" || cell.served === false;
+  const verdict = (cell.verdict_note ? `<div class="pop-note">${esc(cell.verdict_note)}</div>` : "") +
+    (failedProbe && cell.body_snippet && cell.body_snippet !== cell.verdict_note
+      ? `<pre class="pop-note evidence">${esc(cell.body_snippet)}</pre>` : "");
   // The egress fairness guard, surfaced where the translation claim is actually inspected. The mock answers
   // all six dialects by path, so a gateway that forwarded the ingress request VERBATIM would still get a
   // 200 and score as a translation it never performed. egress_reverified is the check that it really
@@ -5802,7 +5842,7 @@ if (NODE) {
     colTested, gatewayBuild, gatewayHardware, runMode, laneAgeSummary,
     chooserCaption, chooserLead, streamingProvenance,
     memoryCaption, memWindows, boardMemWindows, memLoadCellLabel, memLoadRecipeTip, memDisclosure,
-    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
+    canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, mcode, samplesNote, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
     metricTd,
