@@ -404,6 +404,9 @@ fn control_failed(outcome: Outcome) -> Option<String> {
         Outcome::Response(r) if (200..300).contains(&r.status) => None,
         Outcome::Response(r) => Some(format!("HTTP {}", r.status)),
         Outcome::ConnectionFailed(e) => Some(format!("no connection: {e}")),
+        Outcome::RigExhausted(e) => Some(format!(
+            "this host could not open a connection (ephemeral ports or descriptors exhausted): {e}"
+        )),
         Outcome::TimedOut => Some("timed out".to_string()),
         Outcome::Malformed { message, .. } => Some(format!("unparseable response: {message}")),
         // OUR OWN REFUSAL, and it lands here rather than anywhere near the cell's verdict for exactly

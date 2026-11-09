@@ -78,6 +78,12 @@ pub enum Outcome {
     /// The TCP connection itself could not be made or was severed before any response existed.
     /// The gateway may genuinely never have seen the request; this must never carry a status.
     ConnectionFailed(String),
+    /// THIS HOST could not open the connection: no ephemeral source port or no descriptor left
+    /// (see `connect_error_is_ours`). Like `RigRefused` it describes US - the gateway was never
+    /// asked - and the streaming lane already says so (`SseEnd::RigExhausted`); folding it into
+    /// `ConnectionFailed` worded our exhaustion as "no connection to the gateway", which the grid
+    /// reads as a gateway that died and restarts it for.
+    RigExhausted(String),
     /// The deadline passed with nothing usable read yet. Distinct from `ConnectionFailed`: the
     /// connection was live, the peer just never (yet) answered. A hung gateway must not hang the
     /// suite, so this is always reached within the caller's timeout, never later.
@@ -627,6 +633,9 @@ fn send(
 
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
+        // OUR OWN EXHAUSTION FIRST: no port or descriptor on this host is not the peer declining
+        // anything, and it must not be worded as the gateway being unreachable.
+        Err(e) if connect_error_is_ours(&e) => return Outcome::RigExhausted(e.to_string()),
         // A refused or unreachable connection is the one case that is unambiguously "never
         // reached": no bytes of ours ever left for the peer to act on.
         Err(e) => return Outcome::ConnectionFailed(e.to_string()),
@@ -1558,15 +1567,22 @@ pub async fn post_json_sse_async(
 /// descriptor left. Neither is the gateway declining anything - it was never asked. Everything else
 /// (refused, unreachable, reset) is the peer's, and stays a connection failure.
 fn connect_end(e: &std::io::Error) -> SseEnd {
-    let ours = matches!(
-        e.kind(),
-        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
-    ) || matches!(e.raw_os_error(), Some(23) | Some(24));
-    if ours {
+    if connect_error_is_ours(e) {
         SseEnd::RigExhausted(e.to_string())
     } else {
         SseEnd::ConnectionFailed(e.to_string())
     }
+}
+
+/// Whether a connect error is THIS HOST running out rather than the peer: EADDRNOTAVAIL/EADDRINUSE
+/// (no ephemeral source port left), EMFILE/ENFILE (no descriptor left). One rule for the streaming
+/// lane (`connect_end`) and the request lane (`send`), so the two cannot disagree about whose fault
+/// a failed connect was.
+fn connect_error_is_ours(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
+    ) || matches!(e.raw_os_error(), Some(23) | Some(24))
 }
 
 /// The request both SSE transports send. Written once so the blocking lane and the async lane cannot
@@ -1614,6 +1630,32 @@ mod tests {
     use std::io::BufRead;
     use std::net::{TcpListener, TcpStream as StdTcpStream};
     use std::thread;
+
+    // THIS HOST RUNNING OUT IS NOT THE PEER REFUSING. The request lane filed EADDRNOTAVAIL/EMFILE
+    // as `ConnectionFailed`, worded "no connection to the gateway" - the text the grid restarts a
+    // gateway on. One classifier now serves both lanes, so they cannot disagree about whose fault
+    // it was.
+    #[test]
+    fn a_connect_error_from_this_hosts_exhaustion_is_ours_and_a_refusal_is_not() {
+        use std::io::{Error, ErrorKind};
+        assert!(connect_error_is_ours(&Error::from(
+            ErrorKind::AddrNotAvailable
+        )));
+        assert!(connect_error_is_ours(&Error::from(ErrorKind::AddrInUse)));
+        assert!(connect_error_is_ours(&Error::from_raw_os_error(24)));
+        assert!(connect_error_is_ours(&Error::from_raw_os_error(23)));
+        assert!(!connect_error_is_ours(&Error::from(
+            ErrorKind::ConnectionRefused
+        )));
+        assert!(matches!(
+            connect_end(&Error::from(ErrorKind::AddrNotAvailable)),
+            SseEnd::RigExhausted(_)
+        ));
+        assert!(matches!(
+            connect_end(&Error::from(ErrorKind::ConnectionRefused)),
+            SseEnd::ConnectionFailed(_)
+        ));
+    }
 
     #[test]
     fn a_declared_host_replaces_the_default_rather_than_doubling_it() {

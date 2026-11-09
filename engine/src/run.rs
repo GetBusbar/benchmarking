@@ -331,6 +331,11 @@ fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
     ceiling.min(port_ceiling).min(STREAM_RUNAWAY_CAP)
 }
 
+/// The probe's wording for a gateway that refused or dropped the connection. The grid restarts the
+/// gateway when a probe ends with it (`run_grid_cells`), so a rig-side failure must never use it:
+/// restarting the gateway cannot give this host a free port.
+const NO_CONNECTION_PREFIX: &str = "no connection to the gateway";
+
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
@@ -498,8 +503,19 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
         // No HTTP answer at all: the gateway may never have been reached, so this says nothing
         // about it. Never a gateway fault.
         Outcome::ConnectionFailed(e) => (
-            Served::Untestable(format!("no connection to the gateway: {e}")),
+            Served::Untestable(format!("{NO_CONNECTION_PREFIX}: {e}")),
             Some("the connection was refused".to_string()),
+        ),
+        // THIS HOST ran out of ports or descriptors, so the gateway was never asked. Untestable like
+        // a refused connection, but NOT worded with `NO_CONNECTION_PREFIX`: that text is what makes
+        // the grid restart the gateway, and restarting it cannot give this host a free port. Worth
+        // another ask, because ports drain out of TIME_WAIT while the probe pauses.
+        Outcome::RigExhausted(e) => (
+            Served::Untestable(format!(
+                "this host could not open a connection (ephemeral ports or descriptors exhausted), \
+                 so the gateway was never asked: {e}"
+            )),
+            Some("this host had no free connection to make".to_string()),
         ),
         Outcome::TimedOut => (
             Served::Untestable("the gateway accepted the connection and never answered".into()),
@@ -3102,7 +3118,7 @@ pub fn run_grid_cells(
             // the budget, bring it back and ask once more. Cheap when it works, and when it does not
             // the cell records exactly what it recorded before.
             if let (Served::Untestable(ref why), Some(spec)) = (&served, cfg.relaunch.as_ref()) {
-                if why.contains("no connection") {
+                if why.contains(NO_CONNECTION_PREFIX) {
                     eprintln!("[cell {done}/{total}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
                     match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
                         Ok(()) => {
