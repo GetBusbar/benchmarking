@@ -558,6 +558,20 @@ impl CellPerf {
             // finding that the sweep ran out of range while this bound still held, which the reading's
             // own `lower_bound: true` states directly. Publishing it as an absence too would put one
             // fact in the artifact twice, in two vocabularies, which is what this map exists to avoid.
+            //
+            // EXCEPT when the boundary is missing for a reason OTHER than running out of range: a
+            // sweep the rig interrupted. Then `lower_bound` says only "floor", and the cause and rung
+            // live nowhere but here. Recorded only on a measured reading, because an absent reading's
+            // `first_disqualified_conc` repeats the `rps` reason already keyed above.
+            if r.rps.is_measured()
+                && !matches!(
+                    r.first_disqualified_conc.reason(),
+                    None | Some(Absent::SearchExhausted)
+                )
+            {
+                r.first_disqualified_conc
+                    .record_absence(&format!("frontier.{at}.first_disqualified_conc"), &mut out);
+            }
         }
         /* AND EVERY RUNG'S OWN ABSENCES, for exactly the reason the frontier's are here.
         `sweep_max_proxy` is a Vec of `SweepPoint`s whose `ok`/`rps`/`p99_us`/`fail` are

@@ -561,6 +561,117 @@ struct SweepProbe<'a> {
     /// than rebuilt inside `spawn_pinned`, so the window and the probe cannot end up speaking to the
     /// gateway as two different clients.
     headers: Vec<(String, String)>,
+    /// Why the most recent window could not be run, when it could not. Read by `sweep_cell` after
+    /// the climb so an interrupted sweep names its cause and rung instead of only stopping.
+    stop: Option<SweepInterruption>,
+}
+
+/// A throughput sweep the RIG stopped: the rung whose window could not run, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SweepInterruption {
+    pub conc: u32,
+    /// `RigLimited` when the rig itself refused (a thread, or its own connections);
+    /// `NotMeasured` when the loadgen child gave back no readable stats line, which does not say
+    /// whether the rig or the harness was at fault.
+    pub reason: Absent,
+    pub cause: String,
+}
+
+/// Classify one sweep window. `Err` is a window the RIG could not run (the climb stops and keeps
+/// what it has); `Ok` is a real observation of the gateway, failed or not.
+///
+/// A free function so the classification is testable without spawning a loadgen child.
+fn sweep_sample(
+    concurrency: u32,
+    stats: Option<GenStats>,
+    elapsed: Duration,
+) -> Result<Sample, SweepInterruption> {
+    let stop = |reason: Absent, cause: String| SweepInterruption {
+        conc: concurrency,
+        reason,
+        cause,
+    };
+    let Some(stats) = stats else {
+        return Err(stop(
+            Absent::NotMeasured,
+            "the load generator child returned no readable stats line (it could not be run, or its \
+             output could not be parsed)"
+                .to_string(),
+        ));
+    };
+    // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
+    // limit, not a gateway result, so the search must stop rather than read a turnover.
+    if stats.spawn_failed {
+        eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
+        return Err(stop(
+            Absent::RigLimited,
+            "the rig refused a load-generator thread, so the window never ran at this concurrency"
+                .to_string(),
+        ));
+    }
+    // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
+    // `spawn_failed` already models: the window never ran at the concurrency it claims, so
+    // nothing about the gateway was learned at any concurrency we could name.
+    //
+    // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
+    // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
+    // failed and the search recorded our own port range as the gateway's ceiling. Counting them
+    // separately was only half the fix: a window containing any of them still failed, and still
+    // failed for our reason. It is unmeasured instead.
+    if stats.rig_refused > 0 {
+        eprintln!(
+            "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
+             (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency",
+            stats.rig_refused
+        );
+        return Err(stop(
+            Absent::RigLimited,
+            format!(
+                "this host refused {} of its own connections (ephemeral ports or descriptors \
+                 exhausted)",
+                stats.rig_refused
+            ),
+        ));
+    }
+    // A WINDOW THE RIG RAN AND THE GATEWAY ANSWERED NOTHING IN IS A FAILED RUNG, not an interruption.
+    //
+    // The generator only counts exchanges that finish inside the window, so a gateway whose requests
+    // all take longer than the window (plano near c=512: p99 5.9 s at c=256 against a 6 s window)
+    // reports ok=0 fail=0. Nothing on the rig went wrong - the child ran, nothing refused - so this
+    // is the turnover the climb is looking for. It ends the climb normally, the frontier keeps every
+    // rung below it, and this rung becomes the boundary evidence. No percentile: nothing completed,
+    // and a 0 us tail would be the best on the board.
+    if stats.ok == 0 && stats.fail == 0 {
+        eprintln!(
+            "loadgen: the window at c={concurrency} completed no request in {:.3}s; recorded as a \
+             failed rung (the gateway finished nothing inside the window), not a rig interruption",
+            elapsed.as_secs_f64()
+        );
+        return Ok(
+            Sample::new(0.0, false).with_reading(crate::search::Reading {
+                p99_us: None,
+                ok: 0,
+                fail: 0,
+            }),
+        );
+    }
+    // THE LATENCY RIDES ALONG WITH THE RATE, because the generator already measured it.
+    //
+    // This used to return the rate and the verdict alone, and the p99 this window ran at died
+    // here. That single narrowing is why the engine ran a SECOND search to answer "and how much
+    // at 20ms?": the answer was not readable off the sweep it had just taken. The second search
+    // ran after the memory group had restarted the gateway, so the two published throughput
+    // numbers described two different states of it. Carrying the reading is what lets one sweep
+    // answer both, from one set of windows, on one state of the gateway.
+    Ok(
+        Sample::new(stats.rps(), stats.fail == 0 && stats.ok > 0).with_reading(
+            crate::search::Reading {
+                p99_us: stats.p99_us,
+                ok: stats.ok,
+                fail: stats.fail,
+            },
+        ),
+    )
 }
 
 impl Probe for SweepProbe<'_> {
@@ -573,51 +684,18 @@ impl Probe for SweepProbe<'_> {
         // generator measures a different machine than a pinned one, and the difference is invisible
         // in the artifact. Same binary, separate process, same pinning the load generator has always
         // had.
-        let stats = self.spawn_pinned(concurrency)?;
-        // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
-        // limit, not a gateway result, so the search must stop rather than read a turnover.
-        if stats.spawn_failed {
-            eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
-            return None;
+        let started = std::time::Instant::now();
+        let stats = self.spawn_pinned(concurrency);
+        match sweep_sample(concurrency, stats, started.elapsed()) {
+            Ok(sample) => {
+                self.stop = None;
+                Some(sample)
+            }
+            Err(why) => {
+                self.stop = Some(why);
+                None
+            }
         }
-        // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
-        // `spawn_failed` already models: the window never ran at the concurrency it claims, so
-        // nothing about the gateway was learned at any concurrency we could name.
-        //
-        // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
-        // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
-        // failed and the search recorded our own port range as the gateway's ceiling. Counting them
-        // separately was only half the fix: a window containing any of them still failed, and still
-        // failed for our reason. It is unmeasured instead.
-        if stats.rig_refused > 0 {
-            eprintln!(
-                "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
-                 (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency",
-                stats.rig_refused
-            );
-            return None;
-        }
-        // A window that produced nothing is UNMEASURED, not a zero.
-        if stats.ok == 0 && stats.fail == 0 {
-            return None;
-        }
-        // THE LATENCY RIDES ALONG WITH THE RATE, because the generator already measured it.
-        //
-        // This used to return the rate and the verdict alone, and the p99 this window ran at died
-        // here. That single narrowing is why the engine ran a SECOND search to answer "and how much
-        // at 20ms?": the answer was not readable off the sweep it had just taken. The second search
-        // ran after the memory group had restarted the gateway, so the two published throughput
-        // numbers described two different states of it. Carrying the reading is what lets one sweep
-        // answer both, from one set of windows, on one state of the gateway.
-        Some(
-            Sample::new(stats.rps(), stats.fail == 0 && stats.ok > 0).with_reading(
-                crate::search::Reading {
-                    p99_us: stats.p99_us,
-                    ok: stats.ok,
-                    fail: stats.fail,
-                },
-            ),
-        )
     }
 }
 
@@ -625,6 +703,241 @@ impl SweepProbe<'_> {
     /// Run one window in a pinned child and read its stats line back.
     fn spawn_pinned(&self, concurrency: u32) -> Option<GenStats> {
         load_window(self.cfg, &self.path, &self.body, &self.headers, concurrency)
+    }
+}
+
+#[cfg(test)]
+mod sweep_interruption_tests {
+    use super::*;
+    use crate::search::{climb_rungs_report, ProbedPoint};
+
+    /// Drives `sweep_sample` - the same classification `SweepProbe::probe` applies - over windows a
+    /// closure fabricates, so the climb and the frontier see exactly what a real sweep would.
+    struct StubSweep<F: FnMut(u32) -> Option<GenStats>> {
+        window: F,
+        stop: Option<SweepInterruption>,
+    }
+
+    impl<F: FnMut(u32) -> Option<GenStats>> Probe for StubSweep<F> {
+        fn probe(&mut self, concurrency: u32) -> Option<Sample> {
+            let stats = (self.window)(concurrency);
+            match sweep_sample(concurrency, stats, Duration::from_secs(6)) {
+                Ok(s) => Some(s),
+                Err(why) => {
+                    self.stop = Some(why);
+                    None
+                }
+            }
+        }
+    }
+
+    /// A clean window whose tail grows with concurrency and whose rate turns over past c=128.
+    fn clean(c: u32) -> GenStats {
+        let ok = u64::from(c.min(128)) * 600;
+        GenStats {
+            ok,
+            fail: 0,
+            elapsed_s: 6.0,
+            p50_us: Some(u64::from(c) * 100),
+            p99_us: Some(u64::from(c) * 400),
+            ..GenStats::default()
+        }
+    }
+
+    fn perf_of(points: Vec<ProbedPoint>, interrupted: Option<SweepInterruption>) -> CellPerf {
+        CellPerf {
+            points,
+            interrupted,
+        }
+    }
+
+    #[test]
+    fn an_empty_window_is_a_failed_rung_without_a_tail_not_an_interruption() {
+        // The child reports p99=0 on an empty window; that zero must not become a tail.
+        let empty = GenStats {
+            elapsed_s: 0.0,
+            p50_us: Some(0),
+            p99_us: Some(0),
+            ..GenStats::default()
+        };
+        let s = sweep_sample(512, Some(empty), Duration::from_secs(6))
+            .expect("an empty window the rig ran is an observation, not a rig stop");
+        assert!(!s.passed);
+        assert_eq!(s.value, 0.0);
+        assert_eq!(
+            s.reading,
+            Some(crate::search::Reading {
+                p99_us: None,
+                ok: 0,
+                fail: 0
+            })
+        );
+    }
+
+    // C2(a): plano near c=512 finishes nothing inside the window. The climb must end there as a
+    // turnover, and every published rate must be the one August published from the rungs below.
+    #[test]
+    fn a_gateway_answering_nothing_at_c512_ends_the_climb_with_a_disqualified_rung() {
+        let mut p = StubSweep {
+            window: |c: u32| {
+                Some(if c >= 512 {
+                    GenStats {
+                        elapsed_s: 0.0,
+                        p99_us: Some(0),
+                        ..GenStats::default()
+                    }
+                } else {
+                    clean(c)
+                })
+            },
+            stop: None,
+        };
+        let climb = climb_rungs_report(&mut p, 1, 65_536);
+        assert_eq!(climb.interrupted_at, None, "not a rig interruption");
+        assert!(p.stop.is_none());
+        let top: Vec<&ProbedPoint> = climb
+            .points
+            .iter()
+            .filter(|pt| pt.concurrency == 512)
+            .collect();
+        assert_eq!(top.len(), crate::search::WINDOWS_PER_RUNG);
+        assert!(top.iter().all(|pt| !pt.passed));
+        assert_eq!(
+            climb.points.iter().map(|pt| pt.concurrency).max(),
+            Some(512),
+            "the climb stops at the failed rung"
+        );
+
+        let frontier = metric::frontier_for_perf(&perf_of(climb.points.clone(), None));
+        // What August published: the same rungs without the c=512 windows, which it dropped.
+        let august_points: Vec<ProbedPoint> = climb
+            .points
+            .iter()
+            .filter(|pt| pt.concurrency < 512)
+            .cloned()
+            .collect();
+        let august = metric::frontier_for_perf(&perf_of(august_points, None));
+        assert_eq!(frontier.len(), august.len());
+        for (now, then) in frontier.iter().zip(&august) {
+            assert_eq!(now.p99_bound_us, then.p99_bound_us);
+            assert_eq!(now.rps.copied(), then.rps.copied());
+            assert_eq!(now.concurrency.copied(), then.concurrency.copied());
+            assert_eq!(now.p99_us.copied(), then.p99_us.copied());
+            assert!(!now.lower_bound, "a turnover is a ceiling, not a floor");
+        }
+        let unbounded = frontier
+            .iter()
+            .find(|r| r.p99_bound_us.is_none())
+            .expect("the unbounded reading is always published");
+        assert_eq!(unbounded.rps.copied(), Some(12_800.0));
+        assert_eq!(unbounded.concurrency.copied(), Some(128));
+        assert_eq!(
+            unbounded.first_disqualified_conc.copied(),
+            Some(512),
+            "the rung that answered nothing is the boundary evidence"
+        );
+    }
+
+    // C2(b)/(c): a REAL rig stop at rung k keeps rungs below k, marks every reading a lower bound and
+    // names the cause and the rung.
+    #[test]
+    fn a_spawn_failure_at_rung_k_keeps_the_rungs_below_it_as_a_named_lower_bound() {
+        let mut p = StubSweep {
+            window: |c: u32| {
+                Some(if c >= 64 {
+                    GenStats {
+                        spawn_failed: true,
+                        ..GenStats::default()
+                    }
+                } else {
+                    // A 2ms+ tail everywhere, so the 1ms bound is met by no rung.
+                    GenStats {
+                        p99_us: Some(2_000 + u64::from(c) * 400),
+                        ..clean(c)
+                    }
+                })
+            },
+            stop: None,
+        };
+        let climb = climb_rungs_report(&mut p, 1, 65_536);
+        assert_eq!(climb.interrupted_at, Some(64));
+        assert!(climb.points.iter().all(|pt| pt.concurrency < 64));
+        assert_eq!(
+            climb.points.len(),
+            6 * crate::search::WINDOWS_PER_RUNG,
+            "rungs 1..32 are kept"
+        );
+        let stop = p.stop.take().expect("the probe records why it stopped");
+        assert_eq!(stop.conc, 64);
+        assert_eq!(stop.reason, Absent::RigLimited);
+
+        let perf = perf_of(climb.points, Some(stop));
+        let frontier = metric::frontier_for_perf(&perf);
+        assert_eq!(frontier.len(), crate::frontier::P99_BOUNDS_US.len() + 1);
+        let unbounded = frontier
+            .iter()
+            .find(|r| r.p99_bound_us.is_none())
+            .expect("unbounded");
+        assert_eq!(
+            unbounded.rps.copied(),
+            Some(3_200.0),
+            "the frontier is kept"
+        );
+        assert_eq!(unbounded.concurrency.copied(), Some(32));
+        assert!(unbounded.lower_bound);
+        assert_eq!(unbounded.first_disqualified_conc.copied(), None);
+        assert_eq!(
+            unbounded.first_disqualified_conc.reason(),
+            Some(&Absent::RigLimited)
+        );
+        let d = unbounded
+            .first_disqualified_conc
+            .detail()
+            .unwrap_or_default();
+        assert!(d.contains("sweep interrupted by the rig at c=64"), "{d}");
+        assert!(d.contains("thread"), "the cause is named: {d}");
+        for r in frontier.iter().filter(|r| r.rps.is_measured()) {
+            assert!(
+                r.lower_bound,
+                "every reading of an interrupted sweep is a floor"
+            );
+        }
+        let tight = frontier
+            .iter()
+            .find(|r| r.p99_bound_us == Some(1_000))
+            .expect("1ms");
+        assert!(!tight.rps.is_measured());
+        let d = tight.rps.detail().unwrap_or_default();
+        assert!(d.contains("interrupted by the rig at c=64"), "{d}");
+
+        // And the cause reaches the published absences map, where nothing else carries it.
+        let rec = crate::record::CellPerf {
+            frontier,
+            ..Default::default()
+        };
+        let abs = rec.absences();
+        let e = abs
+            .get("frontier.unbounded.first_disqualified_conc")
+            .expect("an interrupted boundary is published with its reason");
+        assert_eq!(e.reason, Absent::RigLimited);
+    }
+
+    #[test]
+    fn an_uninterrupted_boundary_that_ran_out_of_range_stays_out_of_the_absences_map() {
+        let mut p = StubSweep {
+            window: |c: u32| Some(clean(c)),
+            stop: None,
+        };
+        let climb = climb_rungs_report(&mut p, 1, 256);
+        assert_eq!(climb.interrupted_at, None);
+        let rec = crate::record::CellPerf {
+            frontier: metric::frontier_for_perf(&perf_of(climb.points, None)),
+            ..Default::default()
+        };
+        assert!(!rec
+            .absences()
+            .keys()
+            .any(|k| k.ends_with("first_disqualified_conc")));
     }
 }
 
@@ -1025,6 +1338,10 @@ pub struct CellPerf {
     /// for a number the bisection produced; there is no bisection and no such number, and these rungs are
     /// the evidence for every reading taken from them.
     pub points: Vec<crate::search::ProbedPoint>,
+    /// Set when the RIG stopped the climb (a thread or connection it could not make, or a loadgen
+    /// child with no readable stats line). `points` then holds every rung below that one, and the
+    /// frontier read from them is a lower bound that names this cause and rung.
+    pub interrupted: Option<SweepInterruption>,
 }
 
 /// One load window at ONE concurrency. A point measurement, not a search.
@@ -1046,6 +1363,7 @@ pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement
         path: path_for(cfg, ing, &id.egress),
         body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
+        stop: None,
     };
     match p.probe(concurrency) {
         // The gate still applies: a window with failures is not a throughput reading, it is a window
@@ -1076,13 +1394,17 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
         // Nothing was probed, so there is no evidence to carry. The CELL's own `served` verdict says
         // why; a sweep with no rungs needs no separate reason of its own, and inventing one here would
         // be a second vocabulary for one fact.
-        return CellPerf { points: Vec::new() };
+        return CellPerf {
+            points: Vec::new(),
+            interrupted: None,
+        };
     };
     let mut p = SweepProbe {
         cfg,
         path: path_for(cfg, ing, &id.egress),
         body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
+        stop: None,
     };
     // No start argument: the climb always begins at the floor. A start derived from the range made the
     // ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is how a 1..65536
@@ -1092,8 +1414,28 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
     // it would keep going past the throughput plateau until the gate broke - a union of two stopping
     // rules for two summaries. There is one rule now (stop when requests start failing) and no summary:
     // every rung comes back and `frontier.rs` reads whichever bound a caller asks for.
+    let climb = search::climb_rungs_report(&mut p, lo, hi);
+    // ONLY A REAL RIG STOP IS AN INTERRUPTION. The probe records why the window it could not run
+    // failed; a gateway that answered nothing came back as a failed rung and never reaches here.
+    let interrupted = climb.interrupted_at.map(|conc| {
+        p.stop.take().unwrap_or_else(|| SweepInterruption {
+            conc,
+            reason: Absent::NotMeasured,
+            cause: "the window could not be run (no cause recorded)".to_string(),
+        })
+    });
+    if let Some(i) = &interrupted {
+        eprintln!(
+            "sweep: {id} interrupted by the rig at c={}: {}; keeping the {} window(s) below it as a \
+             lower-bound frontier",
+            i.conc,
+            i.cause,
+            climb.points.len()
+        );
+    }
     CellPerf {
-        points: search::climb_rungs(&mut p, lo, hi),
+        points: climb.points,
+        interrupted,
     }
 }
 

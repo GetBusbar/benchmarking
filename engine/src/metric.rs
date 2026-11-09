@@ -251,6 +251,130 @@ pub fn process_cell_with(
 /// happened at. One search, two numbers - which is the whole reason a group is the unit.
 pub struct Throughput;
 
+/// The published frontier, read off one sweep's rungs.
+///
+/// AN INTERRUPTED SWEEP KEEPS ITS FRONTIER. When the rig stopped the climb (`CellPerf::interrupted`),
+/// every rung below the stop is still a real observation, so every reading is computed from them as
+/// usual and marked `lower_bound` - the rig, not the gateway, ended the climb, so nothing above the
+/// stop is known. A reading with no boundary rung names the cause and the rung instead of claiming the
+/// sweep ran out of range, and a bound nothing met says the rungs above the stop were never tried.
+/// Erasing these readings (as an earlier revision did) threw away measured rates and filed slow
+/// gateways as rig faults.
+pub(crate) fn frontier_for_perf(
+    perf: &crate::run::CellPerf,
+) -> Vec<crate::record::FrontierReading> {
+    // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
+    // point is that one sweep answers the throughput question at every bound, and the two scalars
+    // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
+    //
+    // A rung with no window reading contributes nothing - not a zero. `ok`/`fail` of 0/0 fails
+    // `served_cleanly`, so such a rung is disqualified from every bound rather than counted as a
+    // clean one, which is the same rule the sweep points below follow when they publish an absent
+    // `fail` rather than a fabricated 0.
+    let rungs: Vec<crate::frontier::Rung> = perf
+        .points
+        .iter()
+        .map(|pt| crate::frontier::Rung {
+            concurrency: pt.concurrency,
+            rps: pt.value,
+            p99_us: pt.reading.and_then(|r| r.p99_us),
+            ok: pt.reading.map(|r| r.ok).unwrap_or(0),
+            fail: pt.reading.map(|r| r.fail).unwrap_or(0),
+        })
+        .collect();
+    let frontier: Vec<crate::record::FrontierReading> = crate::frontier::P99_BOUNDS_US
+        .iter()
+        .map(|b| Some(*b))
+        .chain(std::iter::once(None))
+        .map(|bound| match crate::frontier::read_at(&rungs, bound) {
+            Some(r) => crate::record::FrontierReading {
+                p99_bound_us: bound.map(|b| b as i64),
+                rps: Measurement::Measured(r.rps),
+                concurrency: Measurement::Measured(i64::from(r.concurrency)),
+                // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
+                // latency reading, which only the unbounded reading can select.
+                p99_us: match r.p99_us {
+                    Some(p) => Measurement::Measured(p as i64),
+                    None => Measurement::absent_because(
+                        Absent::NotMeasured,
+                        "no window behind this rung reported a tail latency".to_string(),
+                    ),
+                },
+                first_disqualified_conc: match (r.first_disqualified_conc, &perf.interrupted) {
+                    (Some(c), _) => Measurement::Measured(i64::from(c)),
+                    // The climb did not run out of range: the rig stopped it. Say where and why.
+                    (None, Some(i)) => Measurement::absent_because(
+                        i.reason.clone(),
+                        format!(
+                            "sweep interrupted by the rig at c={}: {}; nothing at or above c={} was \
+                             measured, so this rate is a lower bound",
+                            i.conc, i.cause, i.conc
+                        ),
+                    ),
+                    // Not a hole: the sweep ran out of range while this bound still held, which is
+                    // exactly what `lower_bound` beside it reports.
+                    (None, None) => Measurement::absent_because(
+                        Absent::SearchExhausted,
+                        "every rung above this one also held this bound, so the sweep ran out of \
+                         range rather than finding the boundary"
+                            .to_string(),
+                    ),
+                },
+                lower_bound: perf.interrupted.is_some() || r.is_lower_bound(),
+            },
+            // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
+            // entry would make the frontier's length vary per cell and a reader could not tell a
+            // bound that yielded nothing from a bound we forgot to report.
+            None => {
+                let absent = crate::frontier::absence_for(&rungs, bound);
+                // Interrupted: the finding only covers the rungs below the stop, and says so.
+                let absent = match (&perf.interrupted, absent) {
+                    (
+                        Some(i),
+                        Measurement::Absent {
+                            reason,
+                            detail: Some(d),
+                        },
+                    ) => Measurement::absent_because(
+                        reason,
+                        format!(
+                            "{d}; the sweep was interrupted by the rig at c={}: {}, so rungs at and \
+                             above c={} were not tested",
+                            i.conc, i.cause, i.conc
+                        ),
+                    ),
+                    (_, absent) => absent,
+                };
+                // Generic over the measurement's type: `rps` is f64 (fractional below 1/s) while
+                // its siblings are counts, and one absence has to be spellable for both.
+                let carry = |()| -> Measurement<f64> {
+                    match (absent.reason().cloned(), absent.detail()) {
+                        (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                        (Some(rr), None) => Measurement::absent(rr),
+                        (None, _) => Measurement::absent(Absent::NotMeasured),
+                    }
+                };
+                let carry_i = |()| -> Measurement<i64> {
+                    match (absent.reason().cloned(), absent.detail()) {
+                        (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                        (Some(rr), None) => Measurement::absent(rr),
+                        (None, _) => Measurement::absent(Absent::NotMeasured),
+                    }
+                };
+                crate::record::FrontierReading {
+                    p99_bound_us: bound.map(|b| b as i64),
+                    rps: carry(()),
+                    concurrency: carry_i(()),
+                    p99_us: carry_i(()),
+                    first_disqualified_conc: carry_i(()),
+                    lower_bound: false,
+                }
+            }
+        })
+        .collect();
+    frontier
+}
+
 impl Metric for Throughput {
     fn name(&self) -> &'static str {
         "throughput"
@@ -269,88 +393,7 @@ impl Metric for Throughput {
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         let perf = crate::run::sweep_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
-        // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
-        // point is that one sweep answers the throughput question at every bound, and the two scalars
-        // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
-        //
-        // A rung with no window reading contributes nothing - not a zero. `ok`/`fail` of 0/0 fails
-        // `served_cleanly`, so such a rung is disqualified from every bound rather than counted as a
-        // clean one, which is the same rule the sweep points below follow when they publish an absent
-        // `fail` rather than a fabricated 0.
-        let rungs: Vec<crate::frontier::Rung> = perf
-            .points
-            .iter()
-            .map(|pt| crate::frontier::Rung {
-                concurrency: pt.concurrency,
-                rps: pt.value,
-                p99_us: pt.reading.and_then(|r| r.p99_us),
-                ok: pt.reading.map(|r| r.ok).unwrap_or(0),
-                fail: pt.reading.map(|r| r.fail).unwrap_or(0),
-            })
-            .collect();
-        let frontier: Vec<crate::record::FrontierReading> = crate::frontier::P99_BOUNDS_US
-            .iter()
-            .map(|b| Some(*b))
-            .chain(std::iter::once(None))
-            .map(|bound| match crate::frontier::read_at(&rungs, bound) {
-                Some(r) => crate::record::FrontierReading {
-                    p99_bound_us: bound.map(|b| b as i64),
-                    rps: Measurement::Measured(r.rps),
-                    concurrency: Measurement::Measured(i64::from(r.concurrency)),
-                    // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
-                    // latency reading, which only the unbounded reading can select.
-                    p99_us: match r.p99_us {
-                        Some(p) => Measurement::Measured(p as i64),
-                        None => Measurement::absent_because(
-                            Absent::NotMeasured,
-                            "no window behind this rung reported a tail latency".to_string(),
-                        ),
-                    },
-                    first_disqualified_conc: match r.first_disqualified_conc {
-                        Some(c) => Measurement::Measured(i64::from(c)),
-                        // Not a hole: the sweep ran out of range while this bound still held, which is
-                        // exactly what `lower_bound` beside it reports.
-                        None => Measurement::absent_because(
-                            Absent::SearchExhausted,
-                            "every rung above this one also held this bound, so the sweep ran out of \
-                             range rather than finding the boundary"
-                                .to_string(),
-                        ),
-                    },
-                    lower_bound: r.is_lower_bound(),
-                },
-                // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
-                // entry would make the frontier's length vary per cell and a reader could not tell a
-                // bound that yielded nothing from a bound we forgot to report.
-                None => {
-                    let absent = crate::frontier::absence_for(&rungs, bound);
-                    // Generic over the measurement's type: `rps` is f64 (fractional below 1/s) while
-                    // its siblings are counts, and one absence has to be spellable for both.
-                    let carry = |()| -> Measurement<f64> {
-                        match (absent.reason().cloned(), absent.detail()) {
-                            (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
-                            (Some(rr), None) => Measurement::absent(rr),
-                            (None, _) => Measurement::absent(Absent::NotMeasured),
-                        }
-                    };
-                    let carry_i = |()| -> Measurement<i64> {
-                        match (absent.reason().cloned(), absent.detail()) {
-                            (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
-                            (Some(rr), None) => Measurement::absent(rr),
-                            (None, _) => Measurement::absent(Absent::NotMeasured),
-                        }
-                    };
-                    crate::record::FrontierReading {
-                        p99_bound_us: bound.map(|b| b as i64),
-                        rps: carry(()),
-                        concurrency: carry_i(()),
-                        p99_us: carry_i(()),
-                        first_disqualified_conc: carry_i(()),
-                        lower_bound: false,
-                    }
-                }
-            })
-            .collect();
+        let frontier = frontier_for_perf(&perf);
         // THE SWEEP TRAVELS WITH THE PEAK. Each probed rung becomes a published point, so a reader
         // can see the shape the search walked and re-derive the maximum rather than trusting it.
         //
