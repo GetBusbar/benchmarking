@@ -44,7 +44,11 @@ const USER_HZ: f64 = 100.0;
 /// two of these are ever published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {
-    /// utime+stime in jiffies, summed across the tree.
+    /// utime+stime in jiffies, summed across the tree, PLUS each member's cutime+cstime: the CPU of
+    /// its children that have already exited and been reaped. Without that, a worker that exits
+    /// mid-window takes its whole lifetime of CPU out of the end sample (it moves into its parent's
+    /// cutime, which was not read), and a gateway that recycles workers published a cost too low by
+    /// exactly the work those workers did.
     pub cpu_jiffies: u64,
     /// Major faults: a page that had to come from disk. NON-ZERO INVALIDATES THE WINDOW - the box
     /// was swapping, and what was measured is the disk, not the gateway.
@@ -133,12 +137,16 @@ pub fn cpu_busy_total<S: SystemStatSource>(source: &S, cores: &[u32]) -> Option<
             continue;
         }
         let f: Vec<u64> = it.filter_map(|v| v.parse::<u64>().ok()).collect();
-        // user nice system idle iowait irq softirq steal ...
+        // user nice system idle iowait irq softirq steal guest guest_nice
         if f.len() < 5 {
             continue;
         }
         seen = true;
-        let sum: u64 = f.iter().sum();
+        // GUEST AND GUEST_NICE ARE ALREADY INSIDE USER AND NICE (the kernel accounts guest time in
+        // both), so only the first eight columns are summed. Summing all ten counted a core's guest
+        // time twice in both busy and total. Steal stays in, as it always was: whether hypervisor
+        // steal is "busy" for a pinned-core ceiling is a methodology question, not a parse one.
+        let sum: u64 = f.iter().take(8).sum();
         // IDLE AND IOWAIT ARE BOTH NOT-BUSY. iowait is a core with nothing to run while a request is
         // outstanding; counting it as busy would report a blocked gateway as a saturated one, which
         // is the opposite of what this measurement exists to distinguish.
@@ -234,7 +242,7 @@ pub fn sample_live(root_pid: u32) -> Measurement<Counters> {
 ///
 /// Offsets (stat is 1-based, this index is 0-based over the post-`)` tail):
 ///   idx 0 = state (f3), 1 = ppid (f4), 9 = majflt (f12), 11 = utime (f14), 12 = stime (f15),
-///   17 = num_threads (f20).
+///   13 = cutime (f16), 14 = cstime (f17), 17 = num_threads (f20).
 fn stat_field(stat: &str, idx: usize) -> Option<u64> {
     let rparen = stat.rfind(')')?;
     stat[rparen + 1..].split_whitespace().nth(idx)?.parse().ok()
@@ -269,7 +277,10 @@ pub fn sample<S: CounterSource>(source: &S, root_pid: u32) -> Measurement<Counte
         if let Some(stat) = source.stat(pid) {
             // utime+stime are the metric; a stat line we cannot parse contributes nothing.
             if let (Some(u), Some(s)) = (stat_field(&stat, 11), stat_field(&stat, 12)) {
-                acc.cpu_jiffies += u + s;
+                // Reaped children's CPU (cutime+cstime) rides along; see `Counters::cpu_jiffies`.
+                let reaped =
+                    stat_field(&stat, 13).unwrap_or(0) + stat_field(&stat, 14).unwrap_or(0);
+                acc.cpu_jiffies += u + s + reaped;
                 read_any = true;
             }
             if let Some(m) = stat_field(&stat, 9) {
@@ -696,6 +707,51 @@ mod tests {
         // An inverted range is a manifest typo, not a request for zero cores.
         assert_eq!(parse_cores("7-4"), vec![4, 5, 6, 7]);
         assert_eq!(parse_cores(""), Vec::<u32>::new());
+    }
+
+    // A WORKER THAT EXITS MID-WINDOW KEEPS ITS CPU. Once reaped, its utime+stime move into the
+    // parent's cutime+cstime; reading only live members' utime+stime dropped its whole lifetime of
+    // CPU from the end sample and under-reported the window's cost.
+    #[test]
+    fn a_reaped_childs_cpu_is_still_counted_through_its_parents_cutime() {
+        fn with_reaped(utime: u64, stime: u64, cutime: u64, cstime: u64) -> String {
+            let mut f = vec!["0".to_string(); 20];
+            f[0] = "S".into();
+            f[1] = "1".into();
+            f[11] = utime.to_string();
+            f[12] = stime.to_string();
+            f[13] = cutime.to_string();
+            f[14] = cstime.to_string();
+            f[17] = "1".into();
+            format!("100 (gw) {}", f.join(" "))
+        }
+        // Start: a parent at 100 jiffies and a live worker at 400.
+        let mut before = Fixture::default();
+        before.ppids.insert(200, 100);
+        before.stats.insert(100, with_reaped(100, 0, 0, 0));
+        before.stats.insert(200, with_reaped(400, 0, 0, 0));
+        // End: the worker burned 100 more, exited and was reaped - its 500 is now the parent's
+        // cutime.
+        let mut after = Fixture::default();
+        after.stats.insert(100, with_reaped(150, 0, 450, 50));
+        let (Measurement::Measured(a), Measurement::Measured(b)) =
+            (sample(&before, 100), sample(&after, 100))
+        else {
+            panic!("both samples are readable")
+        };
+        assert_eq!(a.cpu_jiffies, 500);
+        assert_eq!(
+            b.cpu_jiffies, 650,
+            "the reaped worker's 500 jiffies must still be in the tree's total"
+        );
+    }
+
+    // GUEST TIME IS ALREADY INSIDE USER/NICE. Summing all ten /proc/stat columns counted it twice.
+    #[test]
+    fn guest_columns_are_not_counted_twice() {
+        // user 300 (of which guest 200), idle 700: busy 300 of 1000, not 500 of 1200.
+        let s = Stat("cpu4 300 0 0 700 0 0 0 0 200 0\n".to_string());
+        assert_eq!(cpu_busy_total(&s, &[4]), Some((300, 1000)));
     }
 
     #[test]
