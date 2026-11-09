@@ -19,14 +19,24 @@ def median_for(records, engine, mock_sha):
     return statistics.median(values) if values else None
 
 
-def resolve(root, rig_dir, engine, arch, instance_type):
+def calibration_file(root, rig_dir, engine, arch, instance_type):
+    """The frozen control calibration matching this exact instrument, or None."""
     arch={"aarch64":"arm64","graviton":"arm64","x86":"amd64","x86_64":"amd64"}.get(arch,arch)
     mock=hashlib.sha256((rig_dir/f'mock-{arch}').read_bytes()).hexdigest()
     loadgen=hashlib.sha256((rig_dir/f'otb-{arch}').read_bytes()).hexdigest()
-    # A frozen control calibration takes precedence over moving field history.
     for path in sorted((root/'results/calibrations').glob('*.json')):
         c=json.loads(path.read_text())
-        if (c.get('engine_commit'),c.get('mock_sha256'),c.get('load_generator_sha256'),c.get('instance_type')) != (engine,mock,loadgen,instance_type):continue
+        if (c.get('engine_commit'),c.get('mock_sha256'),c.get('load_generator_sha256'),c.get('instance_type')) == (engine,mock,loadgen,instance_type):return path
+    return None
+
+
+def resolve(root, rig_dir, engine, arch, instance_type):
+    arch={"aarch64":"arm64","graviton":"arm64","x86":"amd64","x86_64":"amd64"}.get(arch,arch)
+    mock=hashlib.sha256((rig_dir/f'mock-{arch}').read_bytes()).hexdigest()
+    # A frozen control calibration takes precedence over moving field history.
+    path=calibration_file(root,rig_dir,engine,arch,instance_type)
+    if path is not None:
+        c=json.loads(path.read_text())
         observations=c['observations']
         if not observations or any(o.get('fail') != 0 or not isinstance(o.get('rps'),(int,float)) or o['rps']<=0 for o in observations):raise ValueError('Invalid calibration observations')
         value=statistics.median(o['rps'] for o in observations)
