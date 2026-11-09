@@ -1240,8 +1240,12 @@ impl Manifest {
 
         // The config-necessity standard, reported the same way as everything else rather than as a
         // separate tool a maintainer has to know to run.
+        // Only BLOCKING findings are problems: `otb run` proceeds past a warning (it prints it), so
+        // `otb validate` - which run-on-ec2.sh runs first - must not refuse what the run would accept.
         for f in crate::config_lint::lint(self, &Default::default()) {
-            out.push(format!("definition.json: {}", f.message));
+            if f.severity == crate::config_lint::Severity::Block {
+                out.push(format!("definition.json: {}", f.message));
+            }
         }
 
         out
@@ -2246,6 +2250,28 @@ mod tests {
     }
 
     /// The nested launch/config declarations refuse unknown keys like `Manifest` and `Runtime` do.
+    #[test]
+    fn a_config_lint_warning_is_not_a_validate_problem() {
+        let dir = std::env::temp_dir().join(format!("otb-lint-warn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let m = Manifest {
+            config: vec![ConfigSetting {
+                key: "base_url".into(),
+                reason: ConfigReason::UpstreamToMock,
+                note: String::new(),
+            }],
+            launch: None,
+            ..docker_manifest()
+        };
+        let problems = m.problems(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            problems.iter().all(|p| !p.contains("base_url")),
+            "a blank note is a warning `otb run` proceeds past, so validate must not refuse it: \
+             {problems:?}"
+        );
+    }
+
     #[test]
     fn an_unknown_key_inside_a_launch_or_config_declaration_is_refused() {
         for bad in [
