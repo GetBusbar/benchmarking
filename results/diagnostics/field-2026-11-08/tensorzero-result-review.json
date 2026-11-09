@@ -1,0 +1,653 @@
+{
+  "gateway": "tensorzero",
+  "raw_path": "results/snapshots/result_tensorzero_2026-11-09T02-02-05Z.json",
+  "raw_sha256": "d2d1e5023702ce6a5f88e6705a0bf5afdbc1e1d8c1e43cbeefd43c5ac77fa932",
+  "reviewed_at": "2026-11-09T03:26:50.310551+00:00",
+  "publication_status": "checked",
+  "qualification": {
+    "band_pct": 20.0,
+    "baseline_rps": 94065.0,
+    "baseline_samples": 1,
+    "concurrency": 32,
+    "drift_pct": 12.727369372242597,
+    "observed_absent_detail": null,
+    "observed_absent_reason": null,
+    "observed_rps": 106037.0,
+    "outcome": "pass"
+  },
+  "invariants": "PASS; cost arithmetic excluded by existing low-utilisation/sample-count rule",
+  "supported_cells": 4,
+  "unsupported_cells": 31,
+  "rig_limited_cells": 1,
+  "attribution": "Every omission is a declared unsupported protocol, source-documented rig limitation, absent native mock stream, below-resolution difference/bound, or settled-window shape. Exact reasons and source notes are retained per cell. No failed cost window or interrupted throughput boundary. Cross-protocol cells all reverified upstream.",
+  "cells": [
+    {
+      "pair": "openai-responses>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>anthropic",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21067us) came in under the mock's (21068us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "below_resolution",
+          "detail": "the gateway's own inter-frame gap at this percentile (21131us) came in under the mock's (21142us), which a proxy cannot really do - the added gap here is below what this rig can resolve against the mock's 20ms pacing"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>anthropic",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>cohere",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai-responses",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer openai-responses with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai-responses",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>openai",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        }
+      },
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": "openai>openai is a same-dialect cell: there is no translation to prove, so a request-shape check upstream cannot distinguish a translating gateway from a forwarding one"
+    },
+    {
+      "pair": "anthropic>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>openai",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>gemini",
+      "served": "untestable",
+      "reason": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production",
+      "verdict_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>gemini",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai>bedrock",
+      "served": true,
+      "reason": null,
+      "verdict_note": "",
+      "absences": {
+        "memory.idle_shape": {
+          "reason": "not_measured",
+          "detail": "a settled idle window has no unsettled shape to describe"
+        },
+        "memory.shape": {
+          "reason": "not_measured",
+          "detail": "a settled window has no unsettled shape to describe"
+        },
+        "perf.frontier.10ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.10ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 10ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.1ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.concurrency": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.p99_us": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "perf.frontier.5ms.rps": {
+          "reason": "below_resolution",
+          "detail": "every cleanly-served rung that reported a tail had it at or above 5ms, so this gateway carried no measurable throughput under that bound"
+        },
+        "stream.added_gap_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_gap_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p50_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.added_ttft_p99_us": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_fps": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_headroom": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.streams_sustained_mock_ceiling": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_direct_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        },
+        "stream.ttft_gw_samples": {
+          "reason": "untestable",
+          "detail": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here"
+        }
+      },
+      "stream_error": "the mock does not answer bedrock with a native event stream, so the rig cannot pose the streaming question here",
+      "egress_reverified": true,
+      "reverify_note": null
+    },
+    {
+      "pair": "anthropic>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "gemini>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "cohere>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "bedrock>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    },
+    {
+      "pair": "openai-responses>bedrock",
+      "served": "not_configurable",
+      "reason": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "verdict_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json",
+      "absences": {},
+      "stream_error": null,
+      "egress_reverified": null,
+      "reverify_note": null
+    }
+  ]
+}
