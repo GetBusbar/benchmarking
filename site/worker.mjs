@@ -56,7 +56,8 @@ async function route(request, env) {
   if (path.length > 500 || url.search.length > 2000) return error(400, "Request URL too long");
   if (path.length > 1 && path.endsWith("/")) { url.pathname = path.slice(0, -1); return Response.redirect(url.href, 308); }
   if (path === "/gateways/methodology" || path === "/gateways/methodology.md") { url.pathname = path.replace("methodology", "method"); return Response.redirect(url.href, 308); }
-  if (path.endsWith(".txt") && path !== "/robots.txt" && !path.startsWith("/llms")) {
+  if (path === "/security.txt") { url.pathname = "/.well-known/security.txt"; return Response.redirect(url.href, 301); }
+  if (path.endsWith(".txt") && !["/robots.txt", "/humans.txt", "/.well-known/security.txt"].includes(path) && !path.startsWith("/llms")) {
     const alternate = new URL(url); alternate.pathname = path.replace(/\.txt$/, ".md");
     const response = await route(new Request(alternate, request), env);
     const headers = new Headers(response.headers); headers.set("Content-Type", "text/plain; charset=utf-8");
@@ -128,7 +129,8 @@ async function route(request, env) {
     }
     if (!historyMatch) return json({...page,comparisons});
     const canonical=path.replace(/\.md$/,'');
-    const html=renderArticle(await input('/_publication/template.html',false),{path:canonical,title:`${q.family} benchmark history`,body:historyArticle(q.family,page,q,comparisons)});
+    const display=(await getPublication()).gateways?.find(g=>g.id===q.family)?.name||q.family;
+    const html=renderArticle(await input('/_publication/template.html',false),{path:canonical,title:`${display} benchmark history`,body:historyArticle(q.family,page,q,comparisons,display)});
     return text(historyMatch[2]?htmlToMarkdown(html):html,historyMatch[2]?'text/markdown':'text/html');
   }
   const fieldRanks = path.match(/^\/api\/v1\/fields\/(field-[a-f0-9]{64})\/rankings$/);

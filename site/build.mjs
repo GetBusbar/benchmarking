@@ -91,13 +91,17 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const withdrawnPath = join(root, 'results/withdrawn-runs.json');
   const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
   json('/_publication/withdrawn-runs.json', withdrawn);
+  const withdrawnFiles = new Set();
   const archives = [], byFile = new Map(), byHash = new Map();
   function archive(file, bytes, current = false) {
     const snapshot = JSON.parse(bytes.toString("utf8"));
     if (!snapshot.gateway || !snapshot.matrix) return;
     if (!/^[a-z0-9][a-z0-9-]*$/.test(snapshot.gateway)) throw new Error(`Unsafe gateway ID in ${file}`);
     const sha256 = hash(bytes), id = `run-${snapshot.gateway}-${sha256}`;
-    if (withdrawn[sha256]) return;
+    // A withdrawn run is withdrawn in every byte version: earlier revisions of the same file come back
+    // through Git history with different hashes, so the file name is withdrawn along with the hash.
+    if (withdrawn[sha256]) { withdrawnFiles.add(basename(file)); return; }
+    if (withdrawnFiles.has(basename(file))) return;
     let item = byHash.get(sha256);
     if (!item) {
       item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null, ...(runReviews[sha256] ? { review: runReviews[sha256] } : {}) };
@@ -187,7 +191,8 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     deferredHistoryPages.push(() => {
       const entries=placements.get(`${family}/openai--openai`) || [];
       historyPage.points=historyPage.points.map(p=>({...p,placements:entries.filter(e=>e.run_id===p.run_id && e.metric===q.metric)}));
-      page(`/gateways/${family}/history`,renderArticle(template,{path:`/gateways/${family}/history`,title:`${family} benchmark history`,body:historyArticle(family,historyPage,q)}));
+      const display=data.gateways.find(g=>familyOf(g.key)===family)?.display||family;
+      page(`/gateways/${family}/history`,renderArticle(template,{path:`/gateways/${family}/history`,title:`${display} benchmark history`,body:historyArticle(family,historyPage,q,[],display)}));
     });
     for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) {
       const bundle=compactRecords(records.filter(m=>m.test.ingress_protocol===ingress && m.test.upstream_protocol===egress));
@@ -316,6 +321,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   page("/gateways/license", renderArticle(template, { path: "/gateways/license", title: "Dataset reuse and attribution", body: `<h1>Dataset reuse and attribution</h1>${licenseText.split(/\n\n/).filter(block => !block.startsWith("# ")).map(block => `<p>${esc(block).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")}</p>`).join("")}<p><a href="${DATA_LICENSE}">CC BY 4.0</a> · <a href="${DATA_LICENSE}legalcode">Legal terms</a></p>` }));
   write("/DATA-LICENSE.md", licenseText);
   write("/robots.txt", `User-agent: *\nAllow: /\nDisallow: /_publication/\nSitemap: ${ORIGIN}/sitemap.xml\n`);
+  // RFC 9116. Expires is tied to the publication time so a stale build cannot advertise a live contact forever.
+  const securityExpires = new Date(Date.parse(data.generated_at) + 365 * 864e5).toISOString().replace(/\.\d{3}Z$/, "Z");
+  write("/.well-known/security.txt", `Contact: https://github.com/GetBusbar/benchmarking/security/advisories/new\nExpires: ${securityExpires}\nPreferred-Languages: en\nCanonical: ${ORIGIN}/.well-known/security.txt\nPolicy: https://github.com/GetBusbar/benchmarking/security/policy\n`);
+  write("/humans.txt", `/* TEAM */\nOperator: Busbar team (also a benchmark entrant)\nSite: https://getbusbar.com\nGitHub: https://github.com/GetBusbar\n\n/* SITE */\nSource: https://github.com/GetBusbar/benchmarking\nData license: CC BY 4.0 (${ORIGIN}/gateways/license)\nMethodology: ${ORIGIN}/gateways/method\nAgent guide: ${ORIGIN}/llms.txt\nPublished: ${data.generated_at}\n`);
   // No lastmod is preferable to an invented timestamp on every metadata refresh.
   write("/sitemap.xml", `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${routes.map(r => `<url><loc>${ORIGIN}${esc(r.path)}</loc></url>`).join("")}</urlset>\n`);
   write("/404.html", renderArticle(template, { path: "/404", title: "Page not found", body: '<h1>Page not found</h1><p><a href="/gateways">Browse published gateway benchmarks</a>.</p>' }));

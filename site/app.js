@@ -3325,7 +3325,8 @@ const COL_WIDTHS = {
   // frontier: six reading columns. 6rem holds "44,363" and lets the sub-line under it wrap.
   f1: "6rem", f5: "6rem", f10: "6rem", f50: "6rem", f100: "6rem", fnone: "6rem",
   // streaming
-  sttft50: "7rem", sttft: "7rem", sgap50: "7rem", sgap: "7rem", streams: "6.5rem", streamfps: "6.5rem",
+  // the latency columns hold "106,702 (106.7 ms)" without overflowing
+  sttft50: "9.25rem", sttft: "9.25rem", sgap50: "9.25rem", sgap: "9.25rem", streams: "6.5rem", streamfps: "6.5rem",
   // memory. memcurve matches td.memcurve's own 180px: the lifecycle SVG is a fixed width and the column has
   // no reason to be wider than the picture in it.
   memidle: "7.5rem", mempeak: "7.5rem", memgrowth: "7.5rem", memrecov: "7.5rem", memcurve: "11.25rem",
