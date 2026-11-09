@@ -129,7 +129,8 @@ async function route(request, env) {
     }
     if (!historyMatch) return json({...page,comparisons});
     const canonical=path.replace(/\.md$/,'');
-    const html=renderArticle(await input('/_publication/template.html',false),{path:canonical,title:`${q.family} benchmark history`,body:historyArticle(q.family,page,q,comparisons)});
+    const display=(await getPublication()).gateways?.find(g=>g.id===q.family)?.name||q.family;
+    const html=renderArticle(await input('/_publication/template.html',false),{path:canonical,title:`${display} benchmark history`,body:historyArticle(q.family,page,q,comparisons,display)});
     return text(historyMatch[2]?htmlToMarkdown(html):html,historyMatch[2]?'text/markdown':'text/html');
   }
   const fieldRanks = path.match(/^\/api\/v1\/fields\/(field-[a-f0-9]{64})\/rankings$/);

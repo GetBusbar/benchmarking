@@ -925,3 +925,6 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
   .matrix-table thead th:not(.axis) { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; vertical-align: bottom; text-align: left; height: 9.5rem; padding: .4rem .2rem; }
 }
 #results-table td.shape .frontier-spark { max-width: 100%; height: auto; }
+/* Short identifiers (build tag, engine commit, evidence link) never split mid-token; prose cells wrap. */
+.publication-article td.nw { white-space: nowrap; overflow-wrap: normal; }
+.history-controls label:has(select[name="metric"]) { flex: 1.6 1 13rem; }

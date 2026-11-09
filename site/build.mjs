@@ -91,13 +91,17 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const withdrawnPath = join(root, 'results/withdrawn-runs.json');
   const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
   json('/_publication/withdrawn-runs.json', withdrawn);
+  const withdrawnFiles = new Set();
   const archives = [], byFile = new Map(), byHash = new Map();
   function archive(file, bytes, current = false) {
     const snapshot = JSON.parse(bytes.toString("utf8"));
     if (!snapshot.gateway || !snapshot.matrix) return;
     if (!/^[a-z0-9][a-z0-9-]*$/.test(snapshot.gateway)) throw new Error(`Unsafe gateway ID in ${file}`);
     const sha256 = hash(bytes), id = `run-${snapshot.gateway}-${sha256}`;
-    if (withdrawn[sha256]) return;
+    // A withdrawn run is withdrawn in every byte version: earlier revisions of the same file come back
+    // through Git history with different hashes, so the file name is withdrawn along with the hash.
+    if (withdrawn[sha256]) { withdrawnFiles.add(basename(file)); return; }
+    if (withdrawnFiles.has(basename(file))) return;
     let item = byHash.get(sha256);
     if (!item) {
       item = { id, sha256, gateway_id: snapshot.gateway, measured_at: snapshot.measured_at ?? null, build: snapshot.build ?? null, ...(runReviews[sha256] ? { review: runReviews[sha256] } : {}) };
@@ -187,7 +191,8 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     deferredHistoryPages.push(() => {
       const entries=placements.get(`${family}/openai--openai`) || [];
       historyPage.points=historyPage.points.map(p=>({...p,placements:entries.filter(e=>e.run_id===p.run_id && e.metric===q.metric)}));
-      page(`/gateways/${family}/history`,renderArticle(template,{path:`/gateways/${family}/history`,title:`${family} benchmark history`,body:historyArticle(family,historyPage,q)}));
+      const display=data.gateways.find(g=>familyOf(g.key)===family)?.display||family;
+      page(`/gateways/${family}/history`,renderArticle(template,{path:`/gateways/${family}/history`,title:`${display} benchmark history`,body:historyArticle(family,historyPage,q,[],display)}));
     });
     for (const ingress of PROTOCOLS) for (const egress of PROTOCOLS) {
       const bundle=compactRecords(records.filter(m=>m.test.ingress_protocol===ingress && m.test.upstream_protocol===egress));
