@@ -458,11 +458,19 @@ case "$ARCH" in
     CPU_LABEL="Intel (Sapphire Rapids)" ;;
   *) echo "unknown ARCH='$ARCH' (use arm64 or x86)"; exit 2 ;;
 esac
-OTB_QUALIFY_BASELINE="$(python3 "$HERE/lib/qualification_baseline.py" "$HERE" "$BENCH_RIG_DIR" "$BENCH_ENGINE_COMMIT" "$ARCH" "$ITYPE")" || exit 1
+OTB_QUALIFY_BASELINE=""
+if [ "$_NOGATE" = 0 ]; then
+  OTB_QUALIFY_BASELINE="$(python3 "$HERE/lib/qualification_baseline.py" "$HERE" "$BENCH_RIG_DIR" "$BENCH_ENGINE_COMMIT" "$ARCH" "$ITYPE")" || exit 1
+fi
 
 if [ -n "$OTB_QUALIFY_BASELINE" ]; then
   export OTB_QUALIFY_BASELINE
   echo "box qualification baseline: ${OTB_QUALIFY_BASELINE} rps (instrument-matched control/history)"
+elif [ "$_NOGATE" = 0 ] && [ "${BENCH_ALLOW_SEED:-0}" != 1 ]; then
+  # A field without an instrument-matched calibration would let every box "seed" and pass, so the
+  # qualification would judge nothing. Calibrate the exact binaries first (results/calibrations).
+  echo "REFUSING: no calibration or history matches engine $BENCH_ENGINE_COMMIT and these exact binaries; box qualification would judge nothing. Calibrate first, or set BENCH_ALLOW_SEED=1 deliberately." >&2
+  exit 1
 else
   echo "box qualification: no prior observations, this run seeds the baseline"
 fi
@@ -631,9 +639,14 @@ if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"
 # a concurrent run's ssh/rsync would break with "Permission denied (publickey)"); `run-on-ec2.sh kill`
 # stays the global cleanup for the shared key/SG.
 teardown() {
+  # TEARDOWN CANNOT BE INTERRUPTED. A Ctrl-C reaches every process in the terminal's group, and the
+  # orchestrator then sends this shell a TERM; either one landing here used to kill the terminate
+  # mid-way and leave the fleet billing until its 12 h backstop.
+  trap '' INT TERM HUP
   # Say so when the terminate cannot be done or confirmed: a silent failure here is a fleet left billing
   # until its 12 h backstop, with nothing on the operator's screen to say it happened.
-  local _ids
+  local _ids _pass
+  for _pass in 1 2; do
   if ! _ids="$(bench-aws ec2 describe-instances --filters "Name=tag:run,Values=$RUN_ID" \
       "Name=instance-state-name,Values=running,pending" --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)"; then
     echo "TEARDOWN: describe-instances FAILED - could not list run=$RUN_ID boxes; run './run-on-ec2.sh kill' to be sure none is left billing" >&2
@@ -642,6 +655,10 @@ teardown() {
   if [ -n "$_ids" ] && ! printf '%s\n' "$_ids" | xargs -n25 bench-aws ec2 terminate-instances --output text --instance-ids >/dev/null 2>&1; then
     echo "TEARDOWN: terminate-instances FAILED for run=$RUN_ID ($(printf '%s' "$_ids" | tr '\n' ' ')) - run './run-on-ec2.sh kill'" >&2
   fi
+  # A SECOND PASS catches a run-instances call that was already in flight when the jobs were stopped:
+  # it can create a box after the first describe, and nothing else would ever terminate it.
+  [ "$_pass" = 1 ] && [ "${#pids[@]}" -gt 0 ] && sleep 20
+  done
   # THE SHARED KEY IS ONLY DELETED WHEN NOTHING ELSE IS USING IT. "This invocation created it" is not
   # "this invocation is its only user": a later invocation (the documented re-run-one-gateway-while-the-
   # field-finishes workflow) reuses the pair, and deleting it - with the local .pem, whose private half
@@ -683,10 +700,17 @@ teardown() {
 # their peers had been terminated, and a Ctrl-C during `wait` carried on into the history append and
 # the final publish. The background bench_gateway jobs are stopped first so none of them keeps
 # polling (or publishing from) a box teardown is about to terminate.
+_stop_jobs() {
+  # The box jobs are subshells; their in-flight ssh/AWS children are stopped with them so none keeps
+  # launching or polling a box that teardown is about to terminate.
+  local _p
+  for _p in "${pids[@]}"; do pkill -TERM -P "$_p" 2>/dev/null; kill "$_p" 2>/dev/null; done
+}
 _on_signal() {
-  trap - INT TERM
+  # Ignored, not reset: a second signal must not interrupt the teardown that EXIT is about to run.
+  trap '' INT TERM HUP
   echo "[$(date +%H:%M:%S)] interrupted (signal $1) - stopping box jobs and tearing down run=$RUN_ID" >&2
-  [ "${#pids[@]}" -gt 0 ] && kill "${pids[@]}" 2>/dev/null
+  [ "${#pids[@]}" -gt 0 ] && _stop_jobs
   exit "$1"
 }
 pids=()
@@ -910,7 +934,8 @@ its result so the board updates just this row (matrix-sole-source)." \
 # data with a boot failure.
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 BENCH_QUALIFY="${BENCH_QUALIFY:-1}"                       # 0 disables the whole gate (local/dry runs)
-BENCH_QUALIFY_ATTEMPTS="${BENCH_QUALIFY_ATTEMPTS:-3}"     # boxes to try per gateway before giving up
+BENCH_STALL_MIN="${BENCH_STALL_MIN:-180}"                # minutes without a new cell before a run is ended
+BENCH_QUALIFY_ATTEMPTS="${BENCH_QUALIFY_ATTEMPTS:-1}"     # boxes to try per gateway; a field aborts rather than re-buying boxes
 BQ_RC_REPLACE=75                                          # bench_gateway_once: "this BOX is bad, retry"
 QUALIFY_DIR="$HERE/results/box-qualify"; mkdir -p "$QUALIFY_DIR"
 # Where a gateway that exhausted its box budget is recorded. bench_gateway runs in a background
@@ -1459,8 +1484,9 @@ bench_gateway_once() {
     # Narrow the grid for HARNESS iteration. The grid is dialects x dialects, so one dialect is one
     # cell and a debugging run costs seconds instead of the full 6x6. Unset for a real run, which is
     # what a field measurement always uses.
-    printf 'export OTB_DIALECTS=%q OTB_MIN_CONC=%q OTB_MAX_CONC=%q\n' \
-      "${OTB_DIALECTS:-}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
+    # OTB_CELLS names exact ingress>egress cells (e.g. one cell of a rebuilt gateway); unset walks all.
+    printf 'export OTB_DIALECTS=%q OTB_CELLS=%q OTB_MIN_CONC=%q OTB_MAX_CONC=%q\n' \
+      "${OTB_DIALECTS:-}" "${OTB_CELLS:-}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
     # gw is the orchestrator's loop variable and is not otherwise exported to the box, so it must be
     # written literally here (not `\$gw`, which would reach the box as an unset name).
     printf 'gw=%q\n' "$gw"
@@ -1720,7 +1746,7 @@ REMOTE
   # ever read it back here. Without it the fanout log goes silent from "running" to "DONE"/"INCOMPLETE"
   # with no way to tell a box that is 30/36 cells in from one that is wedged. Surface only the latest
   # line, and only when it changes, so a 30s poll doesn't spam a duplicate cell every tick.
-  local _last_cell=""
+  local _last_cell="" _last_progress=0
   # ONE ssh per poll answers all three questions - is the sentinel there, is the run script still
   # alive, what is the latest cell - instead of three sessions every 30 s on the box being measured.
   # A separate liveness probe runs only when that one ssh fails.
@@ -1764,7 +1790,13 @@ REMOTE
       done
       local _cell=""
       case "$_poll" in *$'\n'*) _cell="${_poll#*$'\n'}" ;; esac
-      if [ -n "$_cell" ] && [ "$_cell" != "$_last_cell" ]; then glog_echo "$_cell"; _last_cell="$_cell"; fi
+      if [ -n "$_cell" ] && [ "$_cell" != "$_last_cell" ]; then glog_echo "$_cell"; _last_cell="$_cell"; _last_progress=$waited; fi
+      # A RUN THAT STOPS MAKING PROGRESS IS ENDED, not waited out to the box ceiling. No new cell line
+      # for BENCH_STALL_MIN means a wedged engine or gateway; the field aborts on it.
+      if [ $(( waited - _last_progress )) -ge $(( BENCH_STALL_MIN * 60 )) ]; then
+        glog_echo "STALLED: no new cell for ${BENCH_STALL_MIN} min (last: ${_last_cell:-none}) - ending this run"
+        reachable=1; break
+      fi
       [ "$waited" -ge "$max_wait_s" ] && { glog_echo "incremental pull loop hit max wait (${max_wait_s}s) - giving up on the run"; reachable=0; break; }
       sleep 30; waited=$((waited+30))
     done
@@ -1915,7 +1947,28 @@ for gw in "${GATEWAYS[@]}"; do
   sleep 3   # stagger the AWS API calls a touch
 done
 fail=0
-for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
+# FIRST FAILURE ABORTS THE FIELD. A box job only fails when the RUN failed (no snapshot, crash, stall,
+# unreachable box, refused qualification) - a gateway that fails cells still completes its run. Such a
+# failure is usually systemic, and a field is expensive, so the remaining boxes are stopped at once and
+# torn down rather than left to rediscover it. BENCH_FIELD_ABORT=0 restores wait-for-all.
+# `wait -n -p` names the job that ended, so it can be dropped from the list: waiting on a list that
+# still holds a reaped job returns that job again, with status 0, forever.
+_live=("${pids[@]}")
+while [ "${#_live[@]}" -gt 0 ]; do
+  _rc=0; _done=""; wait -n -p _done "${_live[@]}" || _rc=$?
+  [ -n "$_done" ] || break
+  _next=(); for _p in "${_live[@]}"; do [ "$_p" != "$_done" ] && _next+=("$_p"); done; _live=("${_next[@]}")
+  _left=${#_live[@]}
+  if [ "$_rc" -ne 0 ]; then
+    fail=$((fail+1))
+    if [ "${BENCH_FIELD_ABORT:-1}" = 1 ]; then
+      log "FIELD ABORT: a box job failed (rc=$_rc) - stopping the remaining $_left box job(s) and tearing down; see results/fanout-*.log"
+      trap '' INT TERM HUP
+      _stop_jobs
+      exit 1
+    fi
+  fi
+done
 log "all boxes done ($fail job(s) reported an issue - check results/fanout-*.log)"
 
 # ── gateways that never got a sound box ───────────────────────────────────────────────────────────
