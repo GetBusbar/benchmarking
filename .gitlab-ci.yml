@@ -3,6 +3,7 @@
 # Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
 workflow:
   rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^ci\// && ($VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/ || $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/)'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
@@ -14,16 +15,12 @@ stages: [verify, publish]
 
 verify-website:
   stage: verify
-  tags: [onthebench-production]
   timeout: 30m
   image: node:22-bookworm
   rules:
     - if: '$VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/ || $CI_PIPELINE_SOURCE == "push"'
   variables:
     OTB_SINGLE_ENGINE: "1"
-    # The dedicated website runner requires this opt-in on every job. This job
-    # validates only; refresh-gateway-stars has its own pipeline-level rules.
-    REFRESH_GATEWAY_STARS: "1"
   script:
     # The protected controller can check an exact release candidate without
     # publishing it or changing the main branch's human promotion policy.
@@ -42,7 +39,13 @@ verify-website:
 
 refresh-gateway-stars:
   stage: publish
-  tags: [onthebench-production]
+  # Protected deploy runner (GCP, example-project): its own worker pool, no shared cache,
+  # one job per VM. The Cloudflare credentials are scoped to the production environment,
+  # so only this job receives them.
+  tags: [otb-deploy]
+  environment:
+    name: production
+    url: https://onthebench.ai
   timeout: 30m
   image: node:22-bookworm
   resource_group: onthebench-production
@@ -59,8 +62,9 @@ refresh-gateway-stars:
     # Full history retains original raw bytes when a snapshot is corrected.
     - git clone --quiet --single-branch --branch main "$CI_REPOSITORY_URL" "$publish_dir"
     - cd "$publish_dir"
-    # Fail the refresh on API errors; stale data must not look like a fresh run.
-    - node gateways/fetch-stars.mjs
+    # Only the nightly schedule refreshes GitHub stars (and fails on API errors, so stale data never
+    # looks fresh). Release deploys publish the committed counts and never hit GitHub's rate limit.
+    - if [ "$CI_PIPELINE_SOURCE" = "schedule" ]; then node gateways/fetch-stars.mjs; fi
     - node site/gen-data.mjs
     - node site/check-consistency.mjs site/data.json
     - node site/test-coverage.mjs
@@ -71,7 +75,6 @@ refresh-gateway-stars:
 # Build the immutable instrument separately from website publication.
 verify-engine:
   stage: verify
-  tags: [onthebench-production]
   image: rust:1.98-bookworm
   timeout: 60m
   # The instrument is verified once, at the exact commit it is built from, on request
@@ -79,8 +82,6 @@ verify-engine:
   # run-on-ec2.sh already proves the tree is byte-identical to the pinned instrument.
   rules:
     - if: '$VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
-  variables:
-    REFRESH_GATEWAY_STARS: "1"
   script:
     - export VERIFY_ENGINE_REF="${VERIFY_ENGINE_REF:-$CI_COMMIT_SHA}"
     - git fetch origin "$VERIFY_ENGINE_REF"
@@ -93,7 +94,11 @@ verify-engine:
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     # Library qualification tests spawn the CLI; clippy does not build that executable.
     - cargo build --workspace --bins --locked
-    - RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN="$CI_PROJECT_DIR/target/debug/otb" cargo test --workspace --locked
+    # The old runner executed as an unprivileged user; two tests (read-only directory, fd limits)
+    # assume that, so run the test step unprivileged here as well.
+    - useradd --create-home ci
+    - chown -R ci:ci "$CI_PROJECT_DIR"
+    - su ci -s /bin/bash -c "export PATH='$PATH' CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME'; cd '$CI_PROJECT_DIR' && RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN='$CI_PROJECT_DIR/target/debug/otb' cargo test --workspace --locked"
     - rustup target add aarch64-unknown-linux-musl
     - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
     - mkdir -p rig

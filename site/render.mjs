@@ -38,7 +38,30 @@ export function metadata(document, path, title, description, structured, markdow
     `<link data-publication rel="alternate" type="text/markdown" href="${esc(ORIGIN + markdown)}">` +
     `<link data-publication rel="alternate" type="application/json" href="${ORIGIN}/api/v1/summary">` +
     `<link data-publication rel="service-desc" type="application/json" href="${ORIGIN}/openapi.json"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/llms.txt"><link data-publication rel="sitemap" type="application/xml" href="${ORIGIN}/sitemap.xml"><link data-publication rel="describedby" type="text/plain" href="${ORIGIN}/robots.txt"><link data-publication rel="help" href="${ORIGIN}/gateways/data"><meta data-publication property="og:image" content="${ORIGIN}/social-card.png">` +
-    `<script data-publication type="application/ld+json">${jsonScript(structured)}</script>`);
+    `<script data-publication type="application/ld+json">${jsonScript(structured)}</script>` +
+    `<script data-publication type="application/ld+json">${jsonScript(siteIdentity(path, title))}</script>`);
+}
+
+// Who publishes the site, what the site is, and where this page sits in it. Kept in its own block so
+// the page's primary record (a Dataset, DataCatalog or WebPage) stays the first JSON-LD block.
+export function siteIdentity(path, fullTitle) {
+  const title = fullTitle.replace(/ \| On the Bench$/, "");
+  const org = {
+    "@type": "Organization", "@id": ORIGIN + "/#organization", name: "Busbar", url: "https://getbusbar.com",
+    logo: { "@type": "ImageObject", url: ORIGIN + "/favicon.svg" }, image: ORIGIN + "/social-card.png",
+    description: "The Busbar team operates On the Bench and also enters its own gateway in the benchmarks.",
+    sameAs: ["https://github.com/GetBusbar"],
+  };
+  const site = { "@type": "WebSite", "@id": ORIGIN + "/#website", name: "On the Bench", url: ORIGIN + "/",
+    description: "Reproducible AI gateway measurements.", publisher: { "@id": org["@id"] }, inLanguage: "en" };
+  const parts = path.split("/").filter(Boolean);
+  const crumbs = [{ name: "On the Bench", url: ORIGIN + "/" },
+    ...parts.map((p, i) => ({ name: i === parts.length - 1 ? title : p.charAt(0).toUpperCase() + p.slice(1), url: ORIGIN + "/" + parts.slice(0, i + 1).join("/") }))];
+  const breadcrumb = { "@type": "BreadcrumbList", "@id": ORIGIN + path + "#breadcrumb",
+    itemListElement: crumbs.map((c, i) => ({ "@type": "ListItem", position: i + 1, name: c.name, item: c.url })) };
+  const page = { "@type": "WebPage", "@id": ORIGIN + path + "#webpage", url: ORIGIN + path, name: title,
+    isPartOf: { "@id": site["@id"] }, publisher: { "@id": org["@id"] }, breadcrumb: { "@id": breadcrumb["@id"] }, inLanguage: "en" };
+  return { "@context": "https://schema.org", "@graph": [org, site, page, breadcrumb] };
 }
 
 export function renderDashboard(template, data, path, publication) {
