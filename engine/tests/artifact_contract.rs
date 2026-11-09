@@ -39,11 +39,14 @@ use otb_engine::record::{
 // THE SIX THROUGHPUT SCALARS ARE GONE, replaced by `CellPerf.frontier` - a sequence, so its absences
 // are keyed per bound (`frontier.10ms.rps`) rather than by a field name and cannot be listed here. Their
 // own contract is asserted directly in `record.rs`, which is where the per-bound keys are built.
-const PERF_METRICS: [&str; 13] = [
+const PERF_METRICS: [&str; 15] = [
     "added_latency_p50_us",
     "added_latency_p99_us",
     "gateway_c1_p99_us",
     "direct_c1_p99_us",
+    // The sample counts behind the four c=1 percentiles above.
+    "gateway_c1_samples",
+    "direct_c1_samples",
     // THE COST GROUP. A null in any of these must carry a reason like any other metric, and for two
     // of them the reason is a REFUSAL rather than a gap: a window with failures publishes no cost,
     // and a window on a swapping box has its cost marked a harness fault. An unexplained null there
@@ -58,7 +61,7 @@ const PERF_METRICS: [&str; 13] = [
     "cost_nonvol_ctxt_per_request",
     "cost_majflt",
 ];
-const STREAM_METRICS: [&str; 8] = [
+const STREAM_METRICS: [&str; 10] = [
     "added_ttft_p50_us",
     "added_ttft_p99_us",
     "added_gap_p50_us",
@@ -70,6 +73,9 @@ const STREAM_METRICS: [&str; 8] = [
     // nothing about how much to trust it.
     "ttft_gw_samples",
     "ttft_direct_samples",
+    // And behind the two added-gap percentiles.
+    "gap_gw_samples",
+    "gap_direct_samples",
 ];
 // DERIVED FROM `streams_sustained`, AND NOW CARRYING ITS REASON. These two are `Option<f64>` rather
 // than `Measurement`, so they have no slot of their own for a reason and `absences_of!` cannot reach
@@ -123,6 +129,8 @@ fn measured_perf() -> CellPerf {
         added_latency_p99_us: Measurement::Measured(480),
         gateway_c1_p99_us: Measurement::Measured(2_000),
         direct_c1_p99_us: Measurement::Measured(1_520),
+        gateway_c1_samples: Measurement::Measured(4_812),
+        direct_c1_samples: Measurement::Measured(5_003),
         // THE COST GROUP, because "fully measured" means every field the engine declares - not every
         // field it declared when this fixture was written. Leaving these at their absent default made
         // a cell that this test calls fully measured carry nine absences, which is precisely the
@@ -142,6 +150,7 @@ fn measured_perf() -> CellPerf {
             concurrency: Measurement::Measured(128),
             p99_us: Measurement::Measured(4_000),
             first_disqualified_conc: Measurement::Measured(256),
+            samples: Measurement::Measured(186_000),
             lower_bound: false,
         }],
         ..CellPerf::default()
@@ -159,6 +168,8 @@ fn measured_stream() -> CellStream {
         streams_sustained_fps: Measurement::Measured(39_000.0),
         ttft_gw_samples: Measurement::Measured(100),
         ttft_direct_samples: Measurement::Measured(100),
+        gap_gw_samples: Measurement::Measured(63),
+        gap_direct_samples: Measurement::Measured(63),
         // DERIVED, AND NOW HELD TO THE SAME BAR. These were absent in this "fully measured" fixture
         // and went unnoticed because the absence guard only ran when the PARENT was absent. A cell
         // that measured its sustained figure and could also state the ceiling it is a fraction of has

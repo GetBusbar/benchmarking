@@ -183,7 +183,9 @@ pub enum ConfigReason {
 }
 
 /// One declared config setting, with the necessity that justifies it.
+// deny_unknown_fields: same rule as `Manifest`/`Runtime` - a key nobody reads must fail at load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigSetting {
     pub key: String,
     pub reason: ConfigReason,
@@ -246,8 +248,9 @@ pub struct Manifest {
     /// specific pairing, because it fires before routing ever gets a chance to say "no such route".
     /// Grading that status as a probed failure would publish the gateway's own front-door behaviour
     /// as a genuine capability defect on a translation it never offered. A `'1'` cell, or any cell
-    /// when this field is empty, is measured exactly as before: the observed status alone decides
-    /// `NotConfigured` vs `Failed` (see `probe::persistent_transient_verdict`).
+    /// when this field is empty, is probed. A `'1'` cell's rejection is `Failed` even for 404/501;
+    /// those statuses cannot erase researched support. Undeclared cells keep the status-only
+    /// classification (see `probe::persistent_transient_verdict`).
     #[serde(default)]
     pub matrix: Vec<String>,
     /// The cited, source-referenced reasoning behind `matrix`'s `'0'` cells, shown to a reader
@@ -336,6 +339,7 @@ pub struct Manifest {
 
 /// One config file: a template beside the gateway, and where the rendered result goes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     /// Template path, relative to the gateway's own directory.
     pub template: String,
@@ -345,6 +349,7 @@ pub struct ConfigFile {
 
 /// A file the gateway reads, rendered by the harness and handed to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MountDecl {
     /// Path on the box, relative to the gateway's own directory.
     pub host_path: String,
@@ -392,8 +397,11 @@ fn core_count(cores: &str) -> u32 {
 }
 
 /// Everything needed to start one gateway, as DATA.
+/// deny_unknown_fields for the reason `Runtime` carries it: `launch` is where image, env, args and
+/// mounts live, so a typo'd or misplaced key here is exactly the silent no-op that once measured the
+/// wrong binary under another version's label.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaunchDecl {
     /// An image, an env block, some mounts and a port. Ten of the thirteen entrants.
     Docker {
@@ -478,22 +486,43 @@ impl std::error::Error for ManifestLoadError {}
 /// cannot express it.
 ///
 /// Deliberately parsed, never executed: nothing in the measurement path runs untrusted config.
-fn parse_env(raw: &str) -> (Vec<(String, String)>, Vec<String>) {
+///
+/// A LINE THAT IS NEITHER IS REFUSED, naming it. It used to be skipped, and a shell-style line was
+/// taken literally (`export FOO=bar` set a variable named "export FOO"): either way the gateway ran
+/// without a variable its env file declares, which surfaces as a gateway that boots wrong rather
+/// than as a setup error. Values are taken verbatim (quotes included), as `docker --env-file` does.
+fn parse_env(raw: &str) -> Result<EnvSidecar, String> {
     let mut set = Vec::new();
     let mut unset = Vec::new();
-    for line in raw.lines() {
+    for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        let name_ok = |n: &str| !n.is_empty() && !n.contains(char::is_whitespace);
         if let Some(name) = line.strip_prefix('-') {
-            unset.push(name.trim().to_string());
-        } else if let Some((k, v)) = line.split_once('=') {
+            let name = name.trim();
+            if !name_ok(name) {
+                return Err(format!(
+                    "line {}: {line:?} does not name one variable to remove",
+                    i + 1
+                ));
+            }
+            unset.push(name.to_string());
+        } else if let Some((k, v)) = line.split_once('=').filter(|(k, _)| name_ok(k.trim())) {
             set.push((k.trim().to_string(), v.trim().to_string()));
+        } else {
+            return Err(format!(
+                "line {}: {line:?} is neither NAME=value nor -NAME, so it would set nothing",
+                i + 1
+            ));
         }
     }
-    (set, unset)
+    Ok((set, unset))
 }
+
+/// A parsed env sidecar: the variables it sets, and the names it removes.
+type EnvSidecar = (Vec<(String, String)>, Vec<String>);
 
 /// Why a config could not be rendered. Every variant names the file, because "config render failed"
 /// with no path is the same as no message at all when a gateway has more than one.
@@ -560,6 +589,10 @@ pub enum ManifestError {
     /// time: by then the wrong process has already been signalled or measured, and the result looks
     /// like a number rather than like a fault.
     IndistinctProcMatch(String),
+    /// A declared `matrix` that is not one row per ingress dialect of one '0'/'1' per egress.
+    BadMatrix(String),
+    /// A header line with no colon, which cannot be sent as "Name: value".
+    HeaderWithoutColon(String),
 }
 
 /// How deep a constant may refer to other constants before it is treated as a cycle. One real chain
@@ -575,6 +608,12 @@ impl std::fmt::Display for ManifestError {
                 write!(f, "config setting {k:?} has no key to attach a reason to")
             }
             ManifestError::IndistinctProcMatch(why) => write!(f, "{why}"),
+            ManifestError::BadMatrix(why) => write!(f, "matrix {why}"),
+            ManifestError::HeaderWithoutColon(line) => write!(
+                f,
+                "header {line:?} has no colon, so it cannot be sent - write it as it appears on the \
+                 wire, \"Name: value\""
+            ),
             ManifestError::ConstantCycle { name } => {
                 write!(f, "constant {name:?} refers to itself, directly or through a ring of others")
             }
@@ -629,6 +668,32 @@ fn pinned_parallelism(ncore: u32) -> Vec<(String, String)> {
     .iter()
     .map(|k| ((*k).to_string(), n.clone()))
     .collect()
+}
+
+/// Why a declared `matrix` is not the documented grid, or `None` if it is (or is undeclared).
+///
+/// Empty means undeclared. Otherwise it must be one row per `Dialect::ALL` ingress, each exactly one
+/// '0'/'1' per egress: `matrix_declared_capable` reads every other byte as a declared '0', and a
+/// short row as undeclared, so a malformed grid would silently skip or probe the wrong cells.
+fn matrix_shape_problem(matrix: &[String]) -> Option<String> {
+    let n = crate::ingress::Dialect::ALL.len();
+    if matrix.is_empty() {
+        return None;
+    }
+    if matrix.len() != n {
+        return Some(format!(
+            "has {} rows; it must have {n} (one per ingress dialect)",
+            matrix.len()
+        ));
+    }
+    for (i, row) in matrix.iter().enumerate() {
+        if row.len() != n || !row.bytes().all(|b| b == b'0' || b == b'1') {
+            return Some(format!(
+                "row {i} is {row:?}; every row must be exactly {n} characters of '0' or '1'"
+            ));
+        }
+    }
+    None
 }
 
 /// This cell's declared capability, from a manifest's `matrix` (six rows of six `'0'`/`'1'` chars,
@@ -699,10 +764,23 @@ impl Manifest {
                 });
             }
         }
-        for h in &self.headers {
+        // The same wire, the same rationale: per-egress headers (headers.json) and per-cell paths
+        // reach the gateway exactly as `headers` do.
+        for (h, field) in self
+            .headers
+            .iter()
+            .map(|h| (h, "headers"))
+            .chain(
+                self.egress_headers
+                    .values()
+                    .flatten()
+                    .map(|h| (h, "egress_headers")),
+            )
+            .chain(self.cell_paths.values().map(|p| (p, "cell_paths")))
+        {
             if h.contains('$') {
                 return Err(ManifestError::UnexpandedVariable {
-                    field: "headers",
+                    field,
                     raw: h.clone(),
                 });
             }
@@ -732,6 +810,9 @@ impl Manifest {
             if c.key.trim().is_empty() {
                 return Err(ManifestError::ConfigWithoutReason(c.key.clone()));
             }
+        }
+        if let Some(why) = matrix_shape_problem(&self.matrix) {
+            return Err(ManifestError::BadMatrix(why));
         }
         Ok(())
     }
@@ -1159,8 +1240,12 @@ impl Manifest {
 
         // The config-necessity standard, reported the same way as everything else rather than as a
         // separate tool a maintainer has to know to run.
+        // Only BLOCKING findings are problems: `otb run` proceeds past a warning (it prints it), so
+        // `otb validate` - which run-on-ec2.sh runs first - must not refuse what the run would accept.
         for f in crate::config_lint::lint(self, &Default::default()) {
-            out.push(format!("definition.json: {}", f.message));
+            if f.severity == crate::config_lint::Severity::Block {
+                out.push(format!("definition.json: {}", f.message));
+            }
         }
 
         out
@@ -1195,8 +1280,12 @@ impl Manifest {
                     path: env_path.clone(),
                     why: e.to_string(),
                 })?;
-            let (env, unset) = parse_env(&raw);
-            m.apply_env(env, unset);
+            parse_env(&raw)
+                .and_then(|(env, unset)| m.apply_env(env, unset))
+                .map_err(|why| ManifestLoadError::Malformed {
+                    path: env_path.clone(),
+                    why,
+                })?;
         }
 
         // One command per line. Blank lines and `#` comments are skipped so the file can explain
@@ -1295,18 +1384,59 @@ impl Manifest {
     }
 
     /// Put a sidecar's env onto whichever launch kind this manifest declares.
-    fn apply_env(&mut self, env: Vec<(String, String)>, unset: Vec<String>) {
+    ///
+    /// REFUSED, rather than silently dropped or overwritten, when the env file cannot land anywhere:
+    /// variables with no launch to receive them, `-NAME` removals on a container (which inherits
+    /// nothing from the harness), or an environment declared both in definition.json and in the env
+    /// file (the file used to replace the definition's block wholesale, without a word).
+    fn apply_env(&mut self, env: Vec<(String, String)>, unset: Vec<String>) -> Result<(), String> {
         match self.launch.as_mut() {
-            Some(LaunchDecl::Docker { env: e, .. }) => *e = env,
+            None if env.is_empty() && unset.is_empty() => Ok(()),
+            None => Err(
+                "the env file declares variables but definition.json declares no launch, so \
+                 nothing would receive them"
+                    .to_string(),
+            ),
+            Some(LaunchDecl::Docker { env: e, .. }) => {
+                if !unset.is_empty() {
+                    return Err(format!(
+                        "-NAME removals ({}) apply only to a native launch: a container does not \
+                         inherit the harness environment, so there is nothing to remove",
+                        unset.join(", ")
+                    ));
+                }
+                if !e.is_empty() && !env.is_empty() {
+                    return Err(
+                        "both definition.json (launch.env) and the env file declare the \
+                         environment; declare it in one place"
+                            .to_string(),
+                    );
+                }
+                if !env.is_empty() {
+                    *e = env;
+                }
+                Ok(())
+            }
             Some(LaunchDecl::Native {
                 env: e,
                 env_unset: u,
                 ..
             }) => {
-                *e = env;
-                *u = unset;
+                if (!e.is_empty() && !env.is_empty()) || (!u.is_empty() && !unset.is_empty()) {
+                    return Err(
+                        "both definition.json (launch.env/env_unset) and the env file declare \
+                         the environment; declare it in one place"
+                            .to_string(),
+                    );
+                }
+                if !env.is_empty() {
+                    *e = env;
+                }
+                if !unset.is_empty() {
+                    *u = unset;
+                }
+                Ok(())
             }
-            None => {}
         }
     }
 
@@ -1377,9 +1507,12 @@ impl Manifest {
             let resolved = self.substitute(line, cores, mock_port, gw_dir)?;
             // A manifest writes headers the way they appear on the wire, "Name: value", because that
             // is how they are read in the gateway's own docs and how they were declared in shell.
-            if let Some((name, value)) = resolved.split_once(':') {
-                out.push((name.trim().to_string(), value.trim().to_string()));
-            }
+            // A line without a colon used to be dropped without a word, measuring the gateway
+            // without a header its own manifest declared; it is refused instead.
+            let Some((name, value)) = resolved.split_once(':') else {
+                return Err(ManifestError::HeaderWithoutColon(line.clone()));
+            };
+            out.push((name.trim().to_string(), value.trim().to_string()));
         }
         Ok(out)
     }
@@ -1986,6 +2119,178 @@ mod tests {
             ..docker_manifest()
         };
         assert!(m.rig_owned_headers_declared().is_empty());
+    }
+
+    /* A MALFORMED MATRIX IS REFUSED, NOT READ AS DECLARED ZEROS. `matrix_declared_capable` reads every
+    byte other than '1' as a declared '0', and a '0' cell is never probed and publishes
+    `not_configurable` - so "1x1111" or a five-character row silently erased cells. */
+    #[test]
+    fn a_matrix_that_is_not_the_documented_grid_is_refused() {
+        let with = |matrix: Vec<String>| Manifest {
+            matrix,
+            ..docker_manifest()
+        };
+        assert!(with(vec![]).validate().is_ok(), "empty is undeclared");
+        assert!(with(vec!["101010".to_string(); 6]).validate().is_ok());
+        let mut typo = vec!["111111".to_string(); 6];
+        typo[2] = "11x111".to_string();
+        for bad in [
+            typo,
+            vec!["111111".to_string(); 5],
+            vec!["11111".to_string(); 6],
+            vec!["1111111".to_string(); 6],
+        ] {
+            assert!(
+                matches!(
+                    with(bad.clone()).validate(),
+                    Err(ManifestError::BadMatrix(_))
+                ),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /* A HEADER WITH NO COLON STOPS THE RUN. `headers_for` dropped it without a word, so the gateway was
+    measured without a header its manifest declared and published as serving nothing. */
+    #[test]
+    fn a_header_without_a_colon_is_refused_at_resolution() {
+        let m = Manifest {
+            headers: vec!["x-api-key bench-token".to_string()],
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.headers_for("", "0-3", 9000, std::path::Path::new("/tmp")),
+            Err(ManifestError::HeaderWithoutColon(_))
+        ));
+    }
+
+    /// Per-egress headers and per-cell paths reach the wire like `headers`, so an unexpanded shell
+    /// reference in them is refused the same way.
+    #[test]
+    fn an_unexpanded_variable_in_egress_headers_or_cell_paths_is_rejected() {
+        let m = Manifest {
+            egress_headers: [("openai".to_string(), vec!["x-key: $KEY".to_string()])]
+                .into_iter()
+                .collect(),
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable {
+                field: "egress_headers",
+                ..
+            })
+        ));
+        let m = Manifest {
+            cell_paths: [("openai>openai".to_string(), "/v1/$P".to_string())]
+                .into_iter()
+                .collect(),
+            ..docker_manifest()
+        };
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::UnexpandedVariable {
+                field: "cell_paths",
+                ..
+            })
+        ));
+    }
+
+    /* AN ENV FILE LINE THAT SETS NOTHING IS REFUSED, and so is one whose declaration could not land.
+    `parse_env` skipped a line that was neither NAME=value nor -NAME (and took `export FOO=bar` as a
+    variable named "export FOO"); `apply_env` dropped -NAME on a docker launch, the whole file with no
+    launch, and replaced env already declared in definition.json. Each was a variable the gateway's own
+    directory says it runs with, silently absent. */
+    #[test]
+    fn an_env_sidecar_line_that_cannot_land_fails_the_load() {
+        assert!(parse_env("A=1\n# c\n\n-B\n").is_ok());
+        assert_eq!(
+            parse_env("A=\"q\"\n").expect("parses").0,
+            vec![("A".to_string(), "\"q\"".to_string())],
+            "values are verbatim, as docker --env-file takes them"
+        );
+        for bad in ["JUSTANAME", "export FOO=bar", "=v", "-", "- two words"] {
+            assert!(parse_env(bad).is_err(), "{bad:?} must be refused");
+        }
+
+        let docker = || Manifest {
+            launch: Some(LaunchDecl::Docker {
+                image: "x:1".into(),
+                env: vec![],
+                args: vec![],
+                mounts: vec![],
+            }),
+            ..docker_manifest()
+        };
+        assert!(docker()
+            .apply_env(vec![("A".into(), "1".into())], vec![])
+            .is_ok());
+        assert!(
+            docker().apply_env(vec![], vec!["B".into()]).is_err(),
+            "a removal a container cannot honour"
+        );
+        let mut declared = docker();
+        if let Some(LaunchDecl::Docker { env, .. }) = declared.launch.as_mut() {
+            env.push(("X".into(), "1".into()));
+        }
+        assert!(
+            declared
+                .apply_env(vec![("A".into(), "1".into())], vec![])
+                .is_err(),
+            "two places declaring the environment"
+        );
+        let mut no_launch = Manifest {
+            launch: None,
+            ..docker_manifest()
+        };
+        assert!(no_launch.apply_env(vec![], vec![]).is_ok());
+        assert!(no_launch
+            .apply_env(vec![("A".into(), "1".into())], vec![])
+            .is_err());
+    }
+
+    /// The nested launch/config declarations refuse unknown keys like `Manifest` and `Runtime` do.
+    #[test]
+    fn a_config_lint_warning_is_not_a_validate_problem() {
+        let dir = std::env::temp_dir().join(format!("otb-lint-warn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let m = Manifest {
+            config: vec![ConfigSetting {
+                key: "base_url".into(),
+                reason: ConfigReason::UpstreamToMock,
+                note: String::new(),
+            }],
+            launch: None,
+            ..docker_manifest()
+        };
+        let problems = m.problems(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            problems.iter().all(|p| !p.contains("base_url")),
+            "a blank note is a warning `otb run` proceeds past, so validate must not refuse it: \
+             {problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_inside_a_launch_or_config_declaration_is_refused() {
+        for bad in [
+            r#"{"kind":"docker","image":"x:1","enviroment":[]}"#,
+            r#"{"kind":"native","binary":["b"],"img":"x"}"#,
+        ] {
+            assert!(serde_json::from_str::<LaunchDecl>(bad).is_err(), "{bad}");
+        }
+        assert!(serde_json::from_str::<MountDecl>(
+            r#"{"host_path":"a","container_path":"/a","readonly":true}"#
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<ConfigFile>(r#"{"template":"a","output":"b","x":1}"#).is_err()
+        );
+        assert!(serde_json::from_str::<ConfigSetting>(
+            r#"{"key":"k","reason":"rig_binding","nte":"typo"}"#
+        )
+        .is_err());
     }
 }
 

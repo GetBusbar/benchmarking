@@ -78,6 +78,12 @@ pub enum Outcome {
     /// The TCP connection itself could not be made or was severed before any response existed.
     /// The gateway may genuinely never have seen the request; this must never carry a status.
     ConnectionFailed(String),
+    /// THIS HOST could not open the connection: no ephemeral source port or no descriptor left
+    /// (see `connect_error_is_ours`). Like `RigRefused` it describes US - the gateway was never
+    /// asked - and the streaming lane already says so (`SseEnd::RigExhausted`); folding it into
+    /// `ConnectionFailed` worded our exhaustion as "no connection to the gateway", which the grid
+    /// reads as a gateway that died and restarts it for.
+    RigExhausted(String),
     /// The deadline passed with nothing usable read yet. Distinct from `ConnectionFailed`: the
     /// connection was live, the peer just never (yet) answered. A hung gateway must not hang the
     /// suite, so this is always reached within the caller's timeout, never later.
@@ -131,8 +137,12 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
                 // A line with no bound would let a peer that never sends "\n" grow this
                 // unboundedly; a probe response has no legitimate reason to have a header or
                 // status line this long, so treat it as malformed rather than as an allocator.
-                if buf.len() > 64 * 1024 {
-                    return ReadOutcome::Eof(buf);
+                // Reported as the cap firing, NOT as Eof: every caller words Eof as "connection
+                // closed", which would name the wrong fault.
+                if buf.len() > MAX_LINE_BYTES {
+                    return ReadOutcome::Err(io::Error::other(format!(
+                        "a line exceeded the {MAX_LINE_BYTES} byte cap without a newline"
+                    )));
                 }
             }
             Err(e) => {
@@ -144,6 +154,14 @@ fn read_line(stream: &mut TcpStream, deadline: Instant) -> ReadOutcome {
         }
     }
 }
+
+/// Ceiling on ONE line `read_line` will accumulate (status line, header, chunk-size line).
+const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// Ceiling on the chunk-size lines of one chunked body, summed. 1 MiB is ~200,000 ordinary size
+/// lines; a probe body is kilobytes, so only a peer padding its framing (extensions on tiny chunks)
+/// gets near it.
+const MAX_CHUNK_FRAMING_BYTES: usize = 1024 * 1024;
 
 /// Hard ceiling on any response body we will accumulate from the gateway under test.
 ///
@@ -396,6 +414,14 @@ fn read_head(
     Ok((status, headers, raw))
 }
 
+/// A Content-Length header value as a length: one decimal number, or a comma list of identical
+/// ones (RFC 9110 section 8.6). `None` for anything else - negative, non-numeric, or disagreeing.
+fn content_length_value(v: &str) -> Option<usize> {
+    let mut parts = v.split(',').map(|p| p.trim().parse::<usize>().ok());
+    let first = parts.next()??;
+    parts.all(|p| p == Some(first)).then_some(first)
+}
+
 /// Reads a chunked (`Transfer-Encoding: chunked`) body to completion.
 fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> Outcome {
     let mut body = Vec::new();
@@ -417,6 +443,18 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
             }
         };
         seen.extend_from_slice(&size_line);
+        // THE FRAMING IS CAPPED TOO, not only the decoded `body`. Each size line may be up to
+        // MAX_LINE_BYTES (chunk extensions included), and a peer sending 1-byte chunks behind 64 KiB
+        // size lines grows `seen` ~65,000 times faster than `body`, so the body cap alone would let
+        // it reach gigabytes before firing.
+        if seen.len() - raw.len() - body.len() > MAX_CHUNK_FRAMING_BYTES {
+            return malformed(
+                &seen,
+                format!(
+                    "chunk framing exceeded the {MAX_CHUNK_FRAMING_BYTES} byte cap across {chunk_count} chunk(s)"
+                ),
+            );
+        }
         let size_text = std::str::from_utf8(strip_crlf(&size_line)).unwrap_or("");
         // Chunk extensions ("1a;foo=bar") are legal; only the hex size before ';' matters here.
         let size_hex = size_text.split(';').next().unwrap_or("").trim();
@@ -433,8 +471,13 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
             // terminal `0\r\n` and then legal trailers forever, never sending the closing blank line,
             // grows this at loopback speed for the whole deadline. Fixing read_head's loop and leaving
             // this one is the half-fix shape this audit keeps finding.
+            //
+            // THE TRAILER ONLY. `seen` already holds the head, every chunk and every size line, so
+            // comparing all of it to the head cap refused every valid chunked response whose body
+            // was over ~256 KiB the moment its terminal chunk arrived.
+            let trailer_from = seen.len();
             loop {
-                if seen.len() > MAX_HEAD_BYTES {
+                if seen.len() - trailer_from > MAX_HEAD_BYTES {
                     return malformed(
                         &seen,
                         format!("chunked trailer exceeds the {MAX_HEAD_BYTES} byte cap - refusing to keep reading"),
@@ -496,9 +539,18 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
                 format!("chunked body exceeded the {MAX_BODY_BYTES} byte cap across {chunk_count} chunk(s)"),
             );
         }
-        // Each chunk body is followed by a bare CRLF before the next chunk size line.
+        // Each chunk body is followed by a bare CRLF before the next chunk size line. Anything else
+        // means the declared size did not match the data, and reading on would decode the rest of
+        // the body out of step with its framing.
         match read_line(stream, deadline) {
-            ReadOutcome::Full(_) => {}
+            ReadOutcome::Full(line) if strip_crlf(&line).is_empty() => {}
+            ReadOutcome::Full(line) => {
+                seen.extend_from_slice(&line);
+                return malformed(
+                    &seen,
+                    "a chunk body was not followed by CRLF - its declared size does not match its data",
+                );
+            }
             ReadOutcome::TimedOut(partial) => {
                 seen.extend_from_slice(&partial);
                 return malformed(&seen, "timed out reading chunk trailer CRLF");
@@ -509,6 +561,22 @@ fn read_chunked_body(stream: &mut TcpStream, deadline: Instant, raw: &[u8]) -> O
             }
             ReadOutcome::Err(e) => return malformed(&seen, format!("error after chunk body: {e}")),
         }
+    }
+}
+
+/// The `Host` line for a request to `addr`, or nothing when the caller declares its own `Host`.
+///
+/// ONE HOST HEADER, NEVER TWO. A gateway that routes by virtual host (higress selects each upstream
+/// by `Host: <dialect>.bench`) is handed that name in the manifest's headers. Writing the socket
+/// address first and the manifest's name after it sent two `Host` headers; RFC 9112 makes that a
+/// malformed request, and envoy honoured the first, so every non-openai column was driven at the
+/// default (openai) route and re-verification correctly saw openai arrive upstream. A declared
+/// `Host` therefore REPLACES the default rather than following it.
+pub fn host_line(addr: impl std::fmt::Display, headers: &[(String, String)]) -> String {
+    if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("host")) {
+        String::new()
+    } else {
+        format!("Host: {addr}\r\n")
     }
 }
 
@@ -611,6 +679,9 @@ fn send(
 
     let mut stream = match TcpStream::connect_timeout(&addr, timeout) {
         Ok(s) => s,
+        // OUR OWN EXHAUSTION FIRST: no port or descriptor on this host is not the peer declining
+        // anything, and it must not be worded as the gateway being unreachable.
+        Err(e) if connect_error_is_ours(&e) => return Outcome::RigExhausted(e.to_string()),
         // A refused or unreachable connection is the one case that is unambiguously "never
         // reached": no bytes of ours ever left for the peer to act on.
         Err(e) => return Outcome::ConnectionFailed(e.to_string()),
@@ -618,7 +689,7 @@ fn send(
 
     let mut request = Vec::new();
     request.extend_from_slice(format!("{method} {path} HTTP/1.1\r\n").as_bytes());
-    request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
+    request.extend_from_slice(host_line(addr, headers).as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching what gen.rs's build_request sets:
     // a gateway that requires content-type on a JSON body would otherwise answer 415 to the probe
@@ -667,9 +738,19 @@ fn send(
         return read_chunked_body(&mut stream, deadline, &raw).map_status(status, &resp_headers);
     }
 
-    if let Some(len) =
-        header_value(&resp_headers, "content-length").and_then(|v| v.trim().parse::<usize>().ok())
-    {
+    // A Content-Length that is PRESENT but not a length is a framing fault of the peer's, not an
+    // absent header: reading to close instead would accept whatever arrived as a complete body.
+    // A list of identical values ("5, 5") is the one recoverable form (RFC 9110 section 8.6).
+    let content_length = match header_value(&resp_headers, "content-length") {
+        None => None,
+        Some(v) => match content_length_value(v) {
+            Some(n) => Some(n),
+            None => {
+                return malformed(&raw, format!("unparseable Content-Length {v:?}"));
+            }
+        },
+    };
+    if let Some(len) = content_length {
         return match read_exact_deadline(&mut stream, deadline, len) {
             ReadOutcome::Full(body) => Outcome::Response(HttpResponse {
                 status,
@@ -948,6 +1029,8 @@ pub struct SseReader {
     actually hold. */
     events_seen: usize,
     frames: Vec<String>,
+    /// Total bytes retained across `frames`, capped at `MAX_BODY_BYTES` like every other buffer.
+    frames_bytes: usize,
     offsets_us: Vec<u64>,
     budget: SseBudget,
     /// Which wire dialect these events are in, when the caller knows. The decoder does NOT inspect
@@ -958,6 +1041,9 @@ pub struct SseReader {
     dialect: Option<crate::ingress::Dialect>,
     content_frames: u64,
     finished: Option<SseEnd>,
+    /// Where the head of a refused response (non-2xx, or not an event stream) is recorded as
+    /// evidence. Diagnostics only: it never changes how the stream is read or classified.
+    failure_capture: Option<std::sync::Arc<crate::gen::FailureCapture>>,
 }
 
 impl SseReader {
@@ -973,11 +1059,13 @@ impl SseReader {
             pending: None,
             events_seen: 0,
             frames: Vec::new(),
+            frames_bytes: 0,
             offsets_us: Vec::new(),
             budget: budget.into(),
             dialect,
             content_frames: 0,
             finished: None,
+            failure_capture: None,
         }
     }
 
@@ -1112,6 +1200,13 @@ impl SseReader {
                 headers.push((name.trim().to_string(), value.trim().to_string()));
             }
         }
+        if let Some(capture) = &self.failure_capture {
+            let not_event_stream = header_value(&headers, "content-type")
+                .is_some_and(|ct| !ct.to_ascii_lowercase().contains("text/event-stream"));
+            if !(200..300).contains(&status) || not_event_stream {
+                capture.record_parts("sse_http_response", &head, &self.raw);
+            }
+        }
         // A content-type that is present and is not an event stream settles it immediately: waiting
         // out the deadline would learn nothing. A MISSING content-type is not a refusal - the frames
         // decide - so a peer that streams without announcing it is still read.
@@ -1229,6 +1324,16 @@ impl SseReader {
                 // The blank line IS the event boundary, whether or not the event carried data.
                 self.events_seen += 1;
                 self.flush_pending(elapsed_us);
+                // THE AGGREGATE, not only each frame: `pending` is capped per frame, but every
+                // dispatched frame is kept until the budget ends, so a peer sending near-cap frames
+                // held budget x 8 MiB per lane.
+                if self.frames_bytes > MAX_BODY_BYTES {
+                    return Some(self.finish_with(SseEnd::Malformed(format!(
+                        "the SSE frames retained exceeded the {MAX_BODY_BYTES} byte cap across {} \
+                         frame(s)",
+                        self.frames.len()
+                    ))));
+                }
                 if let Some(end) = self.budget_reached() {
                     return Some(self.finish_with(end));
                 }
@@ -1274,6 +1379,7 @@ impl SseReader {
                 self.content_frames += 1;
             }
             self.offsets_us.push(elapsed_us);
+            self.frames_bytes += data.len();
             self.frames.push(data);
         }
     }
@@ -1469,6 +1575,21 @@ pub async fn post_json_sse_async(
     budget: impl Into<SseBudget>,
     dialect: Option<crate::ingress::Dialect>,
 ) -> SseOutcome {
+    post_json_sse_async_captured(addr, path, body, headers, timeout, budget, dialect, None).await
+}
+
+/// `post_json_sse_async`, recording the head of a refused response into `capture` (diagnostics only).
+#[allow(clippy::too_many_arguments)] // The wire arguments above plus one bounded diagnostic sink.
+pub async fn post_json_sse_async_captured(
+    addr: SocketAddr,
+    path: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    timeout: Duration,
+    budget: impl Into<SseBudget>,
+    dialect: Option<crate::ingress::Dialect>,
+    capture: Option<std::sync::Arc<crate::gen::FailureCapture>>,
+) -> SseOutcome {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Resolved before the first await, so the lane's future carries an `SseBudget` rather than a
@@ -1518,6 +1639,7 @@ pub async fn post_json_sse_async(
     let sent_at = std::time::Instant::now();
     let deadline = lane_deadline;
     let mut reader = SseReader::new(budget, dialect);
+    reader.failure_capture = capture;
     let mut buf = vec![0u8; 16 * 1024];
     loop {
         let read = tokio::time::timeout_at(deadline, stream.read(&mut buf)).await;
@@ -1542,15 +1664,22 @@ pub async fn post_json_sse_async(
 /// descriptor left. Neither is the gateway declining anything - it was never asked. Everything else
 /// (refused, unreachable, reset) is the peer's, and stays a connection failure.
 fn connect_end(e: &std::io::Error) -> SseEnd {
-    let ours = matches!(
-        e.kind(),
-        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
-    ) || matches!(e.raw_os_error(), Some(23) | Some(24));
-    if ours {
+    if connect_error_is_ours(e) {
         SseEnd::RigExhausted(e.to_string())
     } else {
         SseEnd::ConnectionFailed(e.to_string())
     }
+}
+
+/// Whether a connect error is THIS HOST running out rather than the peer: EADDRNOTAVAIL/EADDRINUSE
+/// (no ephemeral source port left), EMFILE/ENFILE (no descriptor left). One rule for the streaming
+/// lane (`connect_end`) and the request lane (`send`), so the two cannot disagree about whose fault
+/// a failed connect was.
+fn connect_error_is_ours(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::AddrInUse
+    ) || matches!(e.raw_os_error(), Some(23) | Some(24))
 }
 
 /// The request both SSE transports send. Written once so the blocking lane and the async lane cannot
@@ -1571,7 +1700,7 @@ fn build_sse_request(
     }
     let mut request = Vec::new();
     request.extend_from_slice(format!("POST {path} HTTP/1.1\r\n").as_bytes());
-    request.extend_from_slice(format!("Host: {addr}\r\n").as_bytes());
+    request.extend_from_slice(host_line(addr, headers).as_bytes());
     request.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     // THE PROBE AND THE LOAD MUST SEND THE SAME REQUEST, matching gen.rs's build_request: a gateway
     // that requires content-type on a JSON body would otherwise answer 415 to the probe and be
@@ -1598,6 +1727,64 @@ mod tests {
     use std::io::BufRead;
     use std::net::{TcpListener, TcpStream as StdTcpStream};
     use std::thread;
+
+    // THIS HOST RUNNING OUT IS NOT THE PEER REFUSING. The request lane filed EADDRNOTAVAIL/EMFILE
+    // as `ConnectionFailed`, worded "no connection to the gateway" - the text the grid restarts a
+    // gateway on. One classifier now serves both lanes, so they cannot disagree about whose fault
+    // it was.
+    #[test]
+    fn a_connect_error_from_this_hosts_exhaustion_is_ours_and_a_refusal_is_not() {
+        use std::io::{Error, ErrorKind};
+        assert!(connect_error_is_ours(&Error::from(
+            ErrorKind::AddrNotAvailable
+        )));
+        assert!(connect_error_is_ours(&Error::from(ErrorKind::AddrInUse)));
+        assert!(connect_error_is_ours(&Error::from_raw_os_error(24)));
+        assert!(connect_error_is_ours(&Error::from_raw_os_error(23)));
+        assert!(!connect_error_is_ours(&Error::from(
+            ErrorKind::ConnectionRefused
+        )));
+        assert!(matches!(
+            connect_end(&Error::from(ErrorKind::AddrNotAvailable)),
+            SseEnd::RigExhausted(_)
+        ));
+        assert!(matches!(
+            connect_end(&Error::from(ErrorKind::ConnectionRefused)),
+            SseEnd::ConnectionFailed(_)
+        ));
+    }
+
+    #[test]
+    fn a_declared_host_replaces_the_default_rather_than_doubling_it() {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let routed = vec![("Host".to_string(), "cohere.bench".to_string())];
+        assert_eq!(host_line(addr, &routed), "");
+        assert_eq!(host_line(addr, &[]), "Host: 127.0.0.1:8080\r\n");
+        let sse = String::from_utf8(build_sse_request(addr, "/v1/chat", b"{}", &routed).unwrap())
+            .unwrap();
+        assert_eq!(
+            sse.to_ascii_lowercase().matches("\r\nhost:").count(),
+            1,
+            "{sse}"
+        );
+        assert!(sse.contains("Host: cohere.bench\r\n"));
+        // The probe lane: one Host on the wire, the declared one.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let gw = spawn_server(move |mut c| {
+            let mut buf = [0u8; 4096];
+            let n = c.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+        });
+        let _ = post_json(gw, "/v1/chat", b"{}", &routed, Duration::from_secs(5));
+        let seen = rx.recv().unwrap();
+        assert_eq!(
+            seen.to_ascii_lowercase().matches("\r\nhost:").count(),
+            1,
+            "{seen}"
+        );
+        assert!(seen.contains("Host: cohere.bench\r\n"), "{seen}");
+    }
 
     /// Binds an ephemeral port, hands the accepted connection to `serve` on a background thread,
     /// and returns the address to connect to. `serve` gets the raw request bytes read so far are
@@ -3451,6 +3638,153 @@ mod tests {
         let _ = content.feed(bytes.as_bytes(), 1);
         let content = content.finish(SseEnd::StreamClosed);
         assert_eq!(events, content);
+    }
+
+    // A LINE OVER THE CAP IS THE CAP FIRING, NOT THE PEER HANGING UP. `read_line` returned its 64 KiB
+    // refusal as Eof, so every caller reported "connection closed mid status line/headers" - the
+    // wrong fault, about a peer that was still sending.
+    #[test]
+    fn an_over_long_line_is_reported_as_the_cap_not_as_a_closed_connection() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nX-Long: ");
+            let _ = conn.write_all(&vec![b'a'; 70 * 1024]);
+            // Hold the connection open: the refusal must come from the cap, not from a close.
+            thread::sleep(Duration::from_millis(500));
+        });
+        match post_json(addr, "/x", b"{}", &[], Duration::from_secs(5)) {
+            Outcome::Malformed { message, .. } => {
+                assert!(message.contains("cap"), "{message:?}");
+                assert!(!message.contains("closed"), "{message:?}");
+            }
+            other => panic!("an over-long header line must be Malformed, got {other:?}"),
+        }
+    }
+
+    // THE TRAILER CAP MEASURES THE TRAILER. It compared everything read so far - head, every chunk,
+    // every size line - against the 256 KiB head cap, so a perfectly valid chunked response with a
+    // body over ~256 KiB was refused as Malformed the moment its terminal chunk arrived.
+    #[test]
+    fn a_valid_chunked_body_larger_than_the_head_cap_is_read_whole() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..8 {
+                let _ = conn.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
+                let _ = conn.write_all(&chunk);
+                let _ = conn.write_all(b"\r\n");
+            }
+            let _ = conn.write_all(b"0\r\n\r\n");
+        });
+        match post_json(addr, "/x", b"{}", &[], Duration::from_secs(10)) {
+            Outcome::Response(r) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.body.len(), 8 * 64 * 1024);
+            }
+            other => panic!("a valid 512 KiB chunked body must be a Response, got {other:?}"),
+        }
+    }
+
+    // A CHUNK WHOSE DATA OVERRUNS ITS DECLARED SIZE IS NOT FRAMED. Whatever line followed a chunk body
+    // was accepted as its CRLF, so a size of 4 over 6 bytes of data silently truncated the body and
+    // carried on as a clean Response.
+    #[test]
+    fn a_chunk_not_followed_by_crlf_is_malformed() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWikipe\r\n0\r\n\r\n",
+            );
+        });
+        match post_json(addr, "/x", b"{}", &[], Duration::from_secs(5)) {
+            Outcome::Malformed { message, .. } => {
+                assert!(message.contains("CRLF"), "{message:?}")
+            }
+            other => panic!("a mis-sized chunk must be Malformed, got {other:?}"),
+        }
+    }
+
+    // A CONTENT-LENGTH THAT IS NOT A LENGTH IS A FRAMING FAULT. It was treated as absent and the body
+    // read to close, so whatever arrived was accepted as complete. A list of identical values is the
+    // one recoverable form (RFC 9110 section 8.6).
+    #[test]
+    fn an_unparseable_content_length_is_malformed_and_an_identical_list_is_one_length() {
+        for bad in ["abc", "-1", "5, 6"] {
+            let addr = spawn_server(move |mut conn| {
+                let _ = read_request_head(&conn);
+                let cl = format!("Content-Length: {bad}");
+                let _ = conn.write_all(head("HTTP/1.1 200 OK", &[cl.as_str()]).as_bytes());
+                let _ = conn.write_all(b"hello");
+            });
+            match post_json(addr, "/x", b"{}", &[], Duration::from_secs(5)) {
+                Outcome::Malformed { message, .. } => {
+                    assert!(message.contains("Content-Length"), "{bad}: {message:?}")
+                }
+                other => panic!("Content-Length {bad:?} must be Malformed, got {other:?}"),
+            }
+        }
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(head("HTTP/1.1 200 OK", &["Content-Length: 5, 5"]).as_bytes());
+            let _ = conn.write_all(b"hello");
+        });
+        match post_json(addr, "/x", b"{}", &[], Duration::from_secs(5)) {
+            Outcome::Response(r) => assert_eq!(r.body, b"hello"),
+            other => panic!("an identical Content-Length list frames the body, got {other:?}"),
+        }
+    }
+
+    // THE CHUNK FRAMING IS CAPPED, NOT ONLY THE BODY. One-byte chunks behind ~64 KiB size lines (chunk
+    // extensions are legal) grew the evidence buffer ~65,000 times faster than the body, so the body
+    // cap alone let a peer push gigabytes before anything fired.
+    #[test]
+    fn chunk_size_lines_past_the_cap_are_refused() {
+        let addr = spawn_server(|mut conn| {
+            let _ = read_request_head(&conn);
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let ext = format!("1;x={}\r\n", "a".repeat(60 * 1024));
+            for _ in 0..40 {
+                if conn.write_all(ext.as_bytes()).is_err() || conn.write_all(b"x\r\n").is_err() {
+                    return;
+                }
+            }
+            let _ = conn.write_all(b"0\r\n\r\n");
+        });
+        match post_json(addr, "/x", b"{}", &[], Duration::from_secs(20)) {
+            Outcome::Malformed { message, .. } => {
+                assert!(message.contains("framing"), "{message:?}")
+            }
+            other => panic!("unbounded chunk framing must be Malformed, got {other:?}"),
+        }
+    }
+
+    // THE FRAMES KEPT ARE CAPPED IN AGGREGATE. `pending` was capped per frame, but every dispatched
+    // frame is retained until the budget ends, so near-cap frames held budget x 8 MiB per lane.
+    #[test]
+    fn the_retained_sse_frames_are_capped_in_aggregate() {
+        let mut r = SseReader::new(usize::MAX, None);
+        assert_eq!(
+            r.feed(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n",
+                0
+            ),
+            Step::NeedMore
+        );
+        let mut frame = b"data: ".to_vec();
+        frame.extend_from_slice(&vec![b'x'; 1024 * 1024]);
+        frame.extend_from_slice(b"\n\n");
+        let mut ended = None;
+        for _ in 0..12 {
+            if let Step::Done(end) = r.feed(&frame, 1) {
+                ended = Some(end);
+                break;
+            }
+        }
+        assert!(
+            matches!(ended, Some(SseEnd::Malformed(ref m)) if m.contains("retained")),
+            "{ended:?}"
+        );
     }
 }
 

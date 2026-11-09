@@ -21,13 +21,26 @@ use std::time::Duration;
 /// every probe should authenticate with instead of the manifest's declared (placeholder) `auth`.
 /// `None` for the absent, unreadable, or whitespace-only cases - every one of those means "nothing
 /// was minted", so the declared `auth` stands.
-fn resolve_minted_auth(gw_dir: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read_to_string(gw_dir.join(".minted-auth")).ok()?;
+///
+/// A file that exists but cannot be read is an error, not "no credential": falling back to the
+/// manifest's static `auth` would measure a gateway that minted its own with a token it rejects.
+fn resolve_minted_auth(gw_dir: &std::path::Path) -> Result<Option<String>, String> {
+    let path = gw_dir.join(".minted-auth");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "{} exists but could not be read ({e}), so the credential the gateway minted is unknown",
+                path.display()
+            ))
+        }
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(trimmed.to_string())
+    Ok(Some(trimmed.to_string()))
 }
 
 /// WHY A GATEWAY THAT MINTS ITS OWN CREDENTIAL CANNOT BE MEASURED THROUGH A RESTART.
@@ -82,25 +95,37 @@ fn usage() -> ExitCode {
          \x20 plateau-check <trend_pct> <range_pct>   prints 1 for steady, 0 otherwise (mirrors plateau_check)\n\
          \x20 growth-rate                             prints MiB/min to 3dp, or nothing (mirrors plateau_growth_rate)\n\
          \x20 window <window_s>                       prints the trailing window (mirrors plateau_window)\n\
+         \x20 engine-commit                           the instrument commit this binary was built from (-dirty/-unverified when not clean)\n\
+         \x20 build-commit                            the git HEAD of the tree this binary was built from\n\
          \x20 version\n",
         env!("CARGO_PKG_VERSION")
     );
     ExitCode::from(2)
 }
 
-fn read_samples() -> Vec<Sample> {
+/// A usage error with its reason, on stderr, exit 2.
+fn usage_error(why: &str) -> ExitCode {
+    eprintln!("{why}");
+    ExitCode::from(2)
+}
+
+/// The stdin series. Malformed LINES are skipped (the shell's own contract); a stdin that could not
+/// be read at all is an error, never an empty series that prints a verdict about nothing with exit
+/// status 0.
+fn read_samples() -> Result<Vec<Sample>, String> {
     let mut buf = String::new();
-    if std::io::stdin().read_to_string(&mut buf).is_err() {
-        return Vec::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+        return Err(format!("could not read the series from stdin: {e}"));
     }
-    buf.lines()
+    Ok(buf
+        .lines()
         .filter_map(|line| {
             let mut it = line.split_whitespace();
             let t = it.next()?.parse::<f64>().ok()?;
             let v = it.next()?.parse::<f64>().ok()?;
             Some(Sample { t_s: t, mib: v })
         })
-        .collect()
+        .collect())
 }
 
 /// Real ISO-8601, colons and all - `measured_at`'s own contract (snapshot.rs's `write_snapshot`
@@ -139,10 +164,28 @@ fn run_scope() -> String {
         .unwrap_or_else(|| std::process::id().to_string())
 }
 
-fn arg_f64(args: &[String], i: usize, default: f64) -> f64 {
-    args.get(i)
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default)
+/// A positional argument: absent or empty takes `default`, present must parse.
+///
+/// A malformed argument used to fall back to the default in silence, so `otb loadgen ... abc` ran a
+/// c=1 window and printed a normal stats line, and `otb run ... results abc` swept with 6-second
+/// windows - each published as the run that was asked for. Empty is treated as absent because the
+/// orchestrator exports unset settings as empty strings.
+fn arg_or<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> Result<T, String> {
+    parse_or(args.get(i).map(String::as_str), default).map_err(|raw| {
+        format!(
+            "argument {i} ({raw:?}) is not a valid {}",
+            std::any::type_name::<T>()
+        )
+    })
+}
+
+/// The shared rule behind `arg_or` and the `OTB_*` environment settings: `None` or blank is the
+/// default, anything else must parse. `Err` carries the raw text that did not.
+fn parse_or<T: std::str::FromStr>(raw: Option<&str>, default: T) -> Result<T, String> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(default),
+        Some(v) => v.parse().map_err(|_| v.to_string()),
+    }
 }
 
 fn main() -> ExitCode {
@@ -162,8 +205,14 @@ fn main() -> ExitCode {
                 }
             };
             let path = args.get(2).cloned().unwrap_or_else(|| "/".into());
-            let conc: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
-            let dur: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5);
+            let (conc, dur): (u32, u64) = match (arg_or(&args, 3, 1), arg_or(&args, 4, 5)) {
+                (Ok(c), Ok(d)) => (c, d),
+                (Err(e), _) | (_, Err(e)) => {
+                    return usage_error(&format!(
+                        "otb loadgen: {e}\nusage: otb loadgen <ip:port> <path> <concurrency> <duration_s> [body]"
+                    ))
+                }
+            };
             let body = args.get(5).cloned().unwrap_or_else(|| "{}".into());
             // THE HEADERS COME FROM THE ENGINE THAT SPAWNED THIS, via the environment.
             //
@@ -178,11 +227,17 @@ fn main() -> ExitCode {
             // Unset means NO headers, never a placeholder: see `loadgen::decode_headers` for why a
             // wrong credential is worse than none. The warning is because a hand-run `otb loadgen`
             // against an authenticating gateway would otherwise read as the gateway falling over.
-            let headers = otb_engine::loadgen::decode_headers(
+            let headers = match otb_engine::loadgen::decode_headers(
                 std::env::var(otb_engine::loadgen::HEADERS_ENV)
                     .ok()
                     .as_deref(),
-            );
+            ) {
+                Ok(h) => h,
+                Err(why) => {
+                    eprintln!("loadgen: {why}");
+                    return ExitCode::FAILURE;
+                }
+            };
             if headers.is_empty() {
                 eprintln!(
                     "loadgen: {} is unset or empty, so this window sends no credential; every request \
@@ -190,7 +245,7 @@ fn main() -> ExitCode {
                     otb_engine::loadgen::HEADERS_ENV
                 );
             }
-            let stats = gen::run(&GenConfig {
+            let (stats, failures) = gen::run_with_evidence(&GenConfig {
                 addr,
                 path,
                 body,
@@ -199,7 +254,13 @@ fn main() -> ExitCode {
                 duration: Duration::from_secs(dur),
                 ttft_ms: 0,
             });
-            println!("{}", stats.stats_line());
+            // The bounded failure evidence rides as an optional trailing field; the parent reads
+            // it as diagnostics only (see `loadgen::parse_failure_samples`).
+            println!(
+                "{}{}",
+                stats.stats_line(),
+                gen::failure_samples_field(&failures)
+            );
             ExitCode::SUCCESS
         }
         // End to end: probe the grid on a live gateway and sweep what it serves.
@@ -406,11 +467,29 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             }
-            let env_u32 = |k: &str, d: u32| {
-                std::env::var(k)
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(d)
+            // A SEARCH RANGE OR WINDOW THAT DOES NOT PARSE IS REFUSED, never replaced by the
+            // default in silence: a run that swept a range nobody asked for is published as the
+            // run that was asked for. Blank still means the default (the orchestrator exports
+            // unset settings as empty strings).
+            let env_u32 = |k: &str, d: u32| -> Result<u32, String> {
+                parse_or(std::env::var(k).ok().as_deref(), d)
+                    .map_err(|raw| format!("{k}={raw:?} is not a whole number"))
+            };
+            let (min_conc, max_conc) = match (
+                env_u32("OTB_MIN_CONC", 1),
+                env_u32("OTB_MAX_CONC", otb_engine::run::host_connection_ceiling()),
+            ) {
+                (Ok(lo), Ok(hi)) => (lo, hi),
+                (Err(e), _) | (_, Err(e)) => return usage_error(&e),
+            };
+            let sweep_duration_s = match arg_or::<f64>(&args, 4, 6.0) {
+                Ok(s) if s.is_finite() && s >= 1.0 => s as u64,
+                Ok(s) => {
+                    return usage_error(&format!(
+                        "sweep_s {s} is not a usable window length (whole seconds, at least 1)"
+                    ))
+                }
+                Err(e) => return usage_error(&e),
             };
             let gw_dir = dir.clone();
             let gw_cores = std::env::var("OTB_GW_CORES").unwrap_or_else(|_| "0-3".into());
@@ -437,7 +516,7 @@ fn main() -> ExitCode {
                 mock_addr: mk,
                 results_dir: results_dir.into(),
                 dialects,
-                sweep_duration_s: arg_f64(&args, 4, 6.0) as u64,
+                sweep_duration_s,
                 load_cores: std::env::var("LOADCORES").ok(),
                 // THE ENGINE'S OWN DEFAULT, not an orchestrator setting: a real field run must
                 // search wide enough to find ANY gateway's true peak, and a caller forgetting to
@@ -477,8 +556,8 @@ fn main() -> ExitCode {
                 // what the host can actually do. The orchestrator widens that range before a run
                 // (run-on-ec2.sh), and because the ceiling is derived rather than declared, widening
                 // it is the only thing anyone has to change - there is no second number to move.
-                min_conc: env_u32("OTB_MIN_CONC", 1),
-                max_conc: env_u32("OTB_MAX_CONC", otb_engine::run::host_connection_ceiling()),
+                min_conc,
+                max_conc,
                 measured_at: utc_stamp(),
                 arch: std::env::var("BENCH_ARCH").unwrap_or_else(|_| "unknown".into()),
                 // Same path as arch: the orchestrator knows the box shape, the box does not.
@@ -585,7 +664,18 @@ fn main() -> ExitCode {
                             // an `export` in one command is invisible to the next and to this
                             // process - the only thing that survives across those separate
                             // invocations is a file. See `resolve_minted_auth`.
-                            let minted = resolve_minted_auth(&gw_dir);
+                            let minted = match resolve_minted_auth(&gw_dir) {
+                                Ok(minted) => minted,
+                                Err(why) => {
+                                    eprintln!("{}: {why}", cfg.manifest.name);
+                                    let _ = otb_engine::supervise::stop_and_wait(
+                                        &spec.runtime,
+                                        spec.port,
+                                        Duration::from_secs(15),
+                                    );
+                                    return ExitCode::FAILURE;
+                                }
+                            };
                             // The harness owning the lifetime is exactly the condition under which
                             // the memory phase restarts the gateway, so a per-boot credential would
                             // go stale mid-run. Refused here, before a single measurement, rather
@@ -664,13 +754,26 @@ fn main() -> ExitCode {
                 args[1..].iter().map(std::path::PathBuf::from).collect()
             } else {
                 // No argument: check the whole field, which is what CI wants.
-                let mut all: Vec<_> = std::fs::read_dir("gateways")
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.join("definition.json").is_file())
-                    .collect();
+                // A directory that cannot be listed is an error, not an empty field that reports
+                // "no gateways found" as if there were none to check.
+                let entries = match std::fs::read_dir("gateways") {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        eprintln!("cannot list gateways/: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let mut all = Vec::new();
+                for entry in entries {
+                    match entry {
+                        Ok(e) if e.path().join("definition.json").is_file() => all.push(e.path()),
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("cannot list gateways/: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
                 all.sort();
                 all
             };
@@ -731,34 +834,48 @@ fn main() -> ExitCode {
 
         So the run asks the binary, and refuses to measure when the answer disagrees with the
         commit it is about to stamp. Empty output means the build could not establish its own
-        commit, which the caller must treat as unverifiable rather than as a match. */
+        commit, which the caller must treat as unverifiable rather than as a match. A local build
+        of modified engine/mock sources answers `<sha>-dirty` (`-unverified` when the tree's state
+        could not be read), so it can never match the clean commit a run pins. */
         Some("engine-commit") => {
             println!("{}", env!("OTB_ENGINE_COMMIT"));
             ExitCode::SUCCESS
         }
+        // THE TREE THE BINARY WAS BUILT FROM, as git saw it - independent of OTB_BUILD_COMMIT, so a
+        // release whose declared commit and actual checkout disagree can be told apart.
+        Some("build-commit") => {
+            println!("{}", env!("OTB_SOURCE_COMMIT"));
+            ExitCode::SUCCESS
+        }
         // The shell is handed an ALREADY-WINDOWED file, so window over everything here to match.
         Some("plateau-check") => {
-            let samples = read_samples();
-            let steady = stats::plateau_check(
-                &samples,
-                f64::INFINITY,
-                arg_f64(&args, 1, 1.0),
-                arg_f64(&args, 2, 2.0),
-            )
-            .is_steady();
+            let (samples, trend, range) =
+                match (read_samples(), arg_or(&args, 1, 1.0), arg_or(&args, 2, 2.0)) {
+                    (Ok(s), Ok(t), Ok(r)) => (s, t, r),
+                    (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return usage_error(&e),
+                };
+            let steady = stats::plateau_check(&samples, f64::INFINITY, trend, range).is_steady();
             println!("{}", u8::from(steady));
             ExitCode::SUCCESS
         }
         // %.3f matches plateau_growth_rate's own printf, so a diff compares numbers rather than
         // float formatting. An unmeasurable rate prints nothing, exactly as the shell's awk exits.
         Some("growth-rate") => {
-            if let Some(r) = stats::growth_rate(&read_samples()).copied() {
+            let samples = match read_samples() {
+                Ok(s) => s,
+                Err(e) => return usage_error(&e),
+            };
+            if let Some(r) = stats::growth_rate(&samples).copied() {
                 println!("{r:.3}");
             }
             ExitCode::SUCCESS
         }
         Some("window") => {
-            for s in stats::window(&read_samples(), arg_f64(&args, 1, 60.0)) {
+            let (samples, window_s) = match (read_samples(), arg_or(&args, 1, 60.0)) {
+                (Ok(s), Ok(w)) => (s, w),
+                (Err(e), _) | (_, Err(e)) => return usage_error(&e),
+            };
+            for s in stats::window(&samples, window_s) {
                 println!("{} {}", s.t_s, s.mib);
             }
             ExitCode::SUCCESS
@@ -887,7 +1004,7 @@ mod minted_auth_tests {
         std::fs::write(dir.join(".minted-auth"), "sk-real-key-123\n").unwrap();
         assert_eq!(
             resolve_minted_auth(&dir),
-            Some("sk-real-key-123".to_string())
+            Ok(Some("sk-real-key-123".to_string()))
         );
     }
 
@@ -895,7 +1012,7 @@ mod minted_auth_tests {
     #[test]
     fn no_file_means_no_override() {
         let dir = scratch_dir("absent");
-        assert_eq!(resolve_minted_auth(&dir), None);
+        assert_eq!(resolve_minted_auth(&dir), Ok(None));
     }
 
     // A command that ran but wrote nothing useful (a failed mint that still touched the file, an
@@ -905,13 +1022,67 @@ mod minted_auth_tests {
     fn a_whitespace_only_file_means_no_override() {
         let dir = scratch_dir("blank");
         std::fs::write(dir.join(".minted-auth"), "   \n\t\n").unwrap();
-        assert_eq!(resolve_minted_auth(&dir), None);
+        assert_eq!(resolve_minted_auth(&dir), Ok(None));
     }
 
     #[test]
     fn surrounding_whitespace_is_trimmed() {
         let dir = scratch_dir("padded");
         std::fs::write(dir.join(".minted-auth"), "  sk-abc  \n").unwrap();
-        assert_eq!(resolve_minted_auth(&dir), Some("sk-abc".to_string()));
+        assert_eq!(resolve_minted_auth(&dir), Ok(Some("sk-abc".to_string())));
+    }
+
+    // SOMETHING WAS MINTED AND WE COULD NOT READ IT. That is not "nothing was minted": folding it
+    // into the absent case skipped the stale-credential refusal and authenticated with the
+    // placeholder. A directory where the file should be is unreadable as a file on every platform.
+    #[test]
+    fn an_unreadable_minted_file_is_an_error_not_an_absence() {
+        let dir = scratch_dir("unreadable");
+        let _ = std::fs::remove_dir_all(dir.join(".minted-auth"));
+        std::fs::create_dir_all(dir.join(".minted-auth")).unwrap();
+        let got = resolve_minted_auth(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = got.expect_err("an unreadable credential must not read as no credential");
+        assert!(
+            err.contains(".minted-auth"),
+            "the error names the file: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::{arg_or, parse_or};
+
+    // A MALFORMED ARGUMENT IS REFUSED, NOT REPLACED BY THE DEFAULT. `otb loadgen ... abc` used to
+    // run a c=1 window and print an ordinary stats line, published as the concurrency asked for.
+    #[test]
+    fn a_present_but_malformed_argument_is_an_error() {
+        let args: Vec<String> = ["loadgen", "127.0.0.1:1", "/", "abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let err = arg_or::<u32>(&args, 3, 1).expect_err("abc is not a concurrency");
+        assert!(
+            err.contains("abc"),
+            "the refusal quotes what was passed: {err}"
+        );
+        assert_eq!(
+            arg_or::<u64>(&args, 4, 5),
+            Ok(5),
+            "an absent argument takes the default"
+        );
+    }
+
+    // EMPTY IS ABSENT. run-on-ec2.sh exports an unset override as an empty string, so treating ""
+    // as malformed would refuse every field run that did not narrow its range.
+    #[test]
+    fn an_empty_or_unset_setting_takes_the_default_and_garbage_does_not() {
+        assert_eq!(parse_or::<u32>(None, 7), Ok(7));
+        assert_eq!(parse_or::<u32>(Some(""), 7), Ok(7));
+        assert_eq!(parse_or::<u32>(Some("  "), 7), Ok(7));
+        assert_eq!(parse_or::<u32>(Some("1024"), 7), Ok(1024));
+        assert_eq!(parse_or::<u32>(Some("1o24"), 7), Err("1o24".to_string()));
+        assert_eq!(parse_or::<u32>(Some("-1"), 7), Err("-1".to_string()));
     }
 }

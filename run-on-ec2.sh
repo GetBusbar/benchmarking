@@ -1552,6 +1552,27 @@ echo "[rig] loadgen/mock fd limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
 sudoq sysctl -w net.ipv4.ip_local_port_range="16384 65535" >/dev/null 2>&1 || true
 sudoq sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
 echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo unknown) (tw_reuse=$(cat /proc/sys/net/ipv4/tcp_tw_reuse 2>/dev/null || echo unknown))"
+# THE MOCK'S ACCEPT QUEUE. A gateway that does not pool upstream connections opens about one mock
+# connection per in-flight request, so at the top of the ladder thousands of SYNs reach the mock at
+# once. The mock asks listen(2) for a 65535 backlog, but the kernel silently clamps that to
+# net.core.somaxconn (4096 on Ubuntu 24.04), and a full queue drops SYNs that the load generator
+# then charges to the gateway. tcp_max_syn_backlog is the half-open queue in front of it. Both are
+# raised here, logged, and refused below if they did not take, because a silent miss changes the
+# high-concurrency numbers rather than breaking the run. The engine records the effective values in
+# the snapshot's rig block.
+sudoq sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true
+sudoq sysctl -w net.ipv4.tcp_max_syn_backlog=65535 >/dev/null 2>&1 || true
+_somaxconn="$(cat /proc/sys/net/core/somaxconn 2>/dev/null || true)"
+echo "[rig] listen backlog: somaxconn=${_somaxconn:-unknown} tcp_max_syn_backlog=$(cat /proc/sys/net/ipv4/tcp_max_syn_backlog 2>/dev/null || echo unknown)"
+case "$_somaxconn" in
+  '' | *[!0-9]*) _somaxconn=0 ;;
+esac
+if [ "$_somaxconn" -lt 65535 ]; then
+  echo "RIG PREFLIGHT FAILED: net.core.somaxconn is ${_somaxconn} (< 65535), so the mock's listen backlog"
+  echo "  would be clamped below the 65535 it requests and SYN drops would be charged to the gateway."
+  echo 126 > .run-done
+  exit 0
+fi
 # The checkout is sparse (gateways + lib only), so results/ does not exist here and the snapshot
 # writer does not create its own output directory - it reports an error and writes nothing.
 mkdir -p results/snapshots

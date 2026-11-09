@@ -54,9 +54,13 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
     // know is still an ERROR, not a silent fallback"); it was only true when every name was bad.
     let mut parsed: Vec<Dialect> = Vec::new();
     let mut unknown: Vec<&str> = Vec::new();
+    // A NAME TWICE walked that dialect's rows and columns twice, the second result overwriting the
+    // first, so a repeat is refused like a typo rather than doubling the grid.
+    let mut repeated: Vec<&str> = Vec::new();
     for name in list.split(',') {
         let name = name.trim();
         match name.parse::<Dialect>() {
+            Ok(d) if parsed.contains(&d) => repeated.push(name),
             Ok(d) => parsed.push(d),
             // An empty element is a stray comma rather than a misspelled dialect, and reporting it as
             // an unknown name would send a reader hunting for a typo that is not there.
@@ -70,6 +74,17 @@ pub fn dialects_from(value: Option<&str>) -> Result<Vec<Dialect>, String> {
              dialect measures something other than what was asked for",
             if unknown.len() == 1 { "a dialect" } else { "dialects" },
             unknown.join(", ")
+        ));
+    }
+    if !repeated.is_empty() {
+        return Err(format!(
+            "OTB_DIALECTS={list:?} names {} more than once: {}",
+            if repeated.len() == 1 {
+                "a dialect"
+            } else {
+                "dialects"
+            },
+            repeated.join(", ")
         ));
     }
     if parsed.is_empty() {
@@ -119,6 +134,86 @@ pub fn cells_from(
 }
 
 impl Dialect {
+    /// Whether a 2xx non-streaming body is a well-formed response OF THIS (INGRESS) DIALECT carrying
+    /// non-empty assistant text - what a real client of this dialect would read as an answer.
+    ///
+    /// HTTP success alone is not a served pairing: the 2026-11-09 field run published as served an
+    /// anthropic message with `content: []`, an anthropic message with `content: null`, and a raw
+    /// cohere v1 body handed to an openai client. None of those is an answer a client can use.
+    pub fn valid_nonstream_response(self, body: &[u8]) -> bool {
+        self.nonstream_response_problem(body).is_none()
+    }
+
+    /// Why a 2xx non-streaming body is NOT a usable response of this dialect, or `None` if it is.
+    ///
+    /// Accepts the shapes the dialect's own API documents, each with at least one non-empty text
+    /// part: openai `choices[].message.content` (a string), openai-responses
+    /// `output[type=message].content[type=output_text].text`, anthropic `content[type=text].text`,
+    /// gemini `candidates[].content.parts[].text`, cohere v2 `message.content[type=text].text`,
+    /// bedrock converse `output.message.content[].text`. An `"error"` member that is present and
+    /// not `null` is a failure (openai-responses carries `"error": null` on every success).
+    pub fn nonstream_response_problem(self, body: &[u8]) -> Option<String> {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Some(format!(
+                "the 2xx body is not JSON, so it is not a response of the {self} dialect"
+            ));
+        };
+        if !v.is_object() {
+            return Some(format!(
+                "the 2xx body is not a JSON object, so it is not a response of the {self} dialect"
+            ));
+        }
+        if v.get("error").is_some_and(|e| !e.is_null()) {
+            return Some(format!("the 2xx {self} body carries an error object"));
+        }
+        let text = |value: &serde_json::Value| value.as_str().is_some_and(|s| !s.is_empty());
+        // A list of content parts at least one of which carries non-empty text. `kind` is the part
+        // type the dialect documents for text, where it documents one.
+        let parts = |value: &serde_json::Value, kind: Option<&str>| {
+            value.as_array().is_some_and(|a| {
+                a.iter().any(|p| {
+                    kind.is_none_or(|k| p.get("type").and_then(|t| t.as_str()) == Some(k))
+                        && text(&p["text"])
+                })
+            })
+        };
+        let any = |value: &serde_json::Value, f: &dyn Fn(&serde_json::Value) -> bool| {
+            value.as_array().is_some_and(|a| a.iter().any(f))
+        };
+        let (ok, wanted) = match self {
+            Self::Openai => (
+                any(&v["choices"], &|c| text(&c["message"]["content"])),
+                "choices[].message.content",
+            ),
+            Self::OpenaiResponses => (
+                any(&v["output"], &|m| {
+                    m["type"].as_str() == Some("message")
+                        && parts(&m["content"], Some("output_text"))
+                }),
+                "output[type=message].content[type=output_text].text",
+            ),
+            Self::Anthropic => (
+                parts(&v["content"], Some("text")),
+                "content[type=text].text",
+            ),
+            Self::Gemini => (
+                any(&v["candidates"], &|c| parts(&c["content"]["parts"], None)),
+                "candidates[].content.parts[].text",
+            ),
+            Self::Cohere => (
+                parts(&v["message"]["content"], Some("text")),
+                "message.content[type=text].text",
+            ),
+            Self::Bedrock => (
+                parts(&v["output"]["message"]["content"], None),
+                "output.message.content[].text",
+            ),
+        };
+        (!ok).then(|| {
+            format!("the 2xx body is not a response of the {self} dialect with assistant text at {wanted}")
+        })
+    }
+
     /// Every dialect, in the canonical order used across the harness (lib/ingress.sh, matrix/run.sh).
     pub const ALL: [Dialect; 6] = [
         Dialect::Openai,
@@ -440,6 +535,15 @@ mod tests {
             super::dialects_from(None).expect("unset"),
             Dialect::ALL.to_vec()
         );
+    }
+
+    // A NAME TWICE walked that dialect's rows and columns twice, the second result overwriting the
+    // first.
+    #[test]
+    fn a_repeated_dialect_is_an_error_not_a_doubled_grid() {
+        let e = super::dialects_from(Some("openai,anthropic,openai"))
+            .expect_err("a repeated dialect must not double the grid");
+        assert!(e.contains("more than once") && e.contains("openai"), "{e}");
     }
 
     use super::*;
@@ -853,5 +957,101 @@ mod tests {
         assert!(Dialect::Anthropic
             .rig_owned_header_names()
             .contains(&"x-api-key".to_string()));
+    }
+
+    // The mock's own envelopes (mock/src/main.rs), verbatim: what every correct gateway relays.
+    const MOCK_OK: [(Dialect, &str); 6] = [
+        (
+            Dialect::Openai,
+            r#"{"id":"chatcmpl-x","object":"chat.completion","created":1,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
+        ),
+        (
+            Dialect::OpenaiResponses,
+            r#"{"id":"resp_x","object":"response","status":"completed","output":[{"type":"message","id":"msg_x","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"error":null,"incomplete_details":null}"#,
+        ),
+        (
+            Dialect::Anthropic,
+            r#"{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#,
+        ),
+        (
+            Dialect::Gemini,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10}}"#,
+        ),
+        (
+            Dialect::Cohere,
+            r#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#,
+        ),
+        (
+            Dialect::Bedrock,
+            r#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10}}"#,
+        ),
+    ];
+
+    #[test]
+    fn every_dialects_own_valid_response_is_accepted() {
+        for (d, body) in MOCK_OK {
+            assert_eq!(d.nonstream_response_problem(body.as_bytes()), None, "{d}");
+        }
+    }
+
+    #[test]
+    fn a_2xx_without_assistant_text_or_carrying_an_error_is_rejected() {
+        for (d, _) in MOCK_OK {
+            for bad in [
+                "<!doctype html><html>Dashboard</html>",
+                "ok",
+                "[]",
+                "{}",
+                r#"{"error":{"message":"denied"}}"#,
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"x"}}"#,
+                r#"{"choices":[]}"#,
+                r#"{"choices":[{"message":{"role":"assistant","content":""}}]}"#,
+                r#"{"content":[]}"#,
+                r#"{"content":null}"#,
+            ] {
+                assert!(
+                    !d.valid_nonstream_response(bad.as_bytes()),
+                    "{d} accepted {bad}"
+                );
+            }
+        }
+        // A valid body of one dialect handed to a client of ANOTHER is not an answer it can read.
+        for (d, _) in MOCK_OK {
+            for (other, body) in MOCK_OK {
+                if d != other {
+                    assert!(
+                        !d.valid_nonstream_response(body.as_bytes()),
+                        "{d} accepted a {other} body"
+                    );
+                }
+            }
+        }
+        // An error object rejects even when content is present beside it.
+        let failed = br#"{"error":{"message":"failed"},"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}]}"#;
+        assert!(!Dialect::OpenaiResponses.valid_nonstream_response(failed));
+    }
+
+    #[test]
+    fn an_explicit_null_error_is_not_an_error() {
+        let body = br#"{"object":"response","status":"completed","error":null,"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}"#;
+        assert!(Dialect::OpenaiResponses.valid_nonstream_response(body));
+        let anthropic =
+            br#"{"type":"message","content":[{"type":"text","text":"ok"}],"error":null}"#;
+        assert!(Dialect::Anthropic.valid_nonstream_response(anthropic));
+    }
+
+    // The exact bodies the 2026-11-09 field run published as served (evidence-served-body-check.json).
+    #[test]
+    fn the_field_runs_hollow_served_bodies_are_rejected() {
+        // litellm-python anthropic>openai: an anthropic message with no content blocks.
+        let litellm = r#"{"id":"resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOm9wZW5haTttb2RlbF9pZDo2MTk3ZDQ1OWNlMzc1OTE2NzVlMTIyMTg3ZDAwOTViNzIyNDhmMTRmYTUwNzQzMDZkMzFlMzlhODkzMTM2OWQ4O3Jlc3BvbnNlX2lkOmNoYXRjbXBsLXg=","type":"message","role":"assistant","model":"gpt-4o-mini","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2},"content":[],"stop_reason":"end_turn","stop_details":null}"#;
+        assert!(!Dialect::Anthropic.valid_nonstream_response(litellm.as_bytes()));
+        // higress anthropic>cohere: content null, explicit null error.
+        let higress_anthropic = r#"{"id":"","type":"message","role":"assistant","content":null,"model":"","stop_reason":null,"stop_sequence":null,"usage":{},"error":null}"#;
+        assert!(!Dialect::Anthropic.valid_nonstream_response(higress_anthropic.as_bytes()));
+        // higress openai>cohere: the raw cohere v1 upstream body handed to an openai client.
+        let higress_openai = r#"{"response_id":"x","generation_id":"x","text":"ok","finish_reason":"COMPLETE","meta":{"api_version":{"version":"1"},"tokens":{"input_tokens":10,"output_tokens":2},"billed_units":{"input_tokens":10,"output_tokens":2}}}"#;
+        assert!(!Dialect::Openai.valid_nonstream_response(higress_openai.as_bytes()));
+        assert!(!Dialect::Cohere.valid_nonstream_response(higress_openai.as_bytes()));
     }
 }

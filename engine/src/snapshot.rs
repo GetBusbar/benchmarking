@@ -33,6 +33,12 @@ pub struct Paths {
 /// (or the directory fsync) it came from, and a promote-guard rejection is not an IO failure at all.
 #[derive(Debug)]
 pub enum SnapshotError {
+    /// Qualification rejected the machine (a Fail, confirmed by one retry) before any gateway grid
+    /// was measured. Its Display starts with `BOX_QUALIFICATION_FAILED:`, the marker an orchestrator
+    /// greps the box's run log for (`otb run` exits non-zero either way).
+    BoxQualificationFailed {
+        verdict: serde_json::Value,
+    },
     Io {
         path: PathBuf,
         source: io::Error,
@@ -67,6 +73,10 @@ pub enum SnapshotError {
 impl std::fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SnapshotError::BoxQualificationFailed { verdict } => write!(
+                f,
+                "BOX_QUALIFICATION_FAILED: {verdict}; refusing to measure the gateway grid"
+            ),
             SnapshotError::Io { path, source } => {
                 write!(f, "snapshot io error at {}: {source}", path.display())
             }
@@ -94,7 +104,8 @@ impl std::error::Error for SnapshotError {
         match self {
             SnapshotError::Io { source, .. } => Some(source),
             SnapshotError::Json(source) => Some(source),
-            SnapshotError::PromoteGuard { .. }
+            SnapshotError::BoxQualificationFailed { .. }
+            | SnapshotError::PromoteGuard { .. }
             | SnapshotError::UnsafeName { .. }
             | SnapshotError::UnresolvableHeader { .. } => None,
         }
@@ -466,6 +477,7 @@ mod tests {
     ) -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
+            gateway_provenance: None,
             definitions: Default::default(),
             gateway: gateway.to_string(),
             build: String::new(),
