@@ -37,7 +37,7 @@ verify-website:
     - node site/check-consistency.mjs site/data.json
     - node site/test-coverage.mjs
     - node site/test.mjs
-    - node --max-old-space-size=256 site/build.mjs "$verify_dir" "$verify_dir/publication"
+    - node --max-old-space-size=2048 site/build.mjs "$verify_dir" "$verify_dir/publication"
     - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs site/history.test.mjs site/retention-upload.test.mjs site/run-reviews.test.mjs site/withdrawal.test.mjs
 
 refresh-gateway-stars:
@@ -66,7 +66,7 @@ refresh-gateway-stars:
     - node site/test-coverage.mjs
     - node site/test.mjs
     - npm ci --prefix site --ignore-scripts
-    - node --max-old-space-size=256 site/publish.mjs
+    - node --max-old-space-size=2048 site/publish.mjs
 
 # Build the immutable instrument separately from website publication.
 verify-engine:
