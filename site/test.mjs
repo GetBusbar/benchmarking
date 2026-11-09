@@ -2814,7 +2814,7 @@ test("machine-readable served states map to distinct honest cell states", () => 
   // untestable = the gateway pins the real cloud host (fixed endpoint), its own state, never a red
   assert.equal(app.cellState({ served: "untestable", reason: "no_base_url_override" })[0], "untestable");
   assert.equal(app.cellState({ served: "untestable" })[1], "untestable");
-  assert.ok(app.matrixCellTip({ served: "untestable" }).includes("fixed cloud endpoint: the gateway hard-codes"));
+  assert.ok(app.matrixCellTip({ served: "untestable", verdict_note: "pins api.example" }) === "untestable: pins api.example");
   // served:false with an explicit reason (wrong_answer) is the ONLY red: not a harness gap
   assert.equal(app.cellState({ served: false, reason: "wrong_answer", status: "200" })[0], "failed");
   // An UNRECOGNISED value is not a recorded refusal: the engine's own `not_probed` default, a newer token,

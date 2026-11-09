@@ -4564,7 +4564,7 @@ function matrixCellTip(cell) {
     // in the grid we drafted / not tested", NOT a claim the gateway's own maintainer declined it.
     return `not declared (historical capability research, not a new probe of this tested build; cited research versions may differ from the build)${cell.verdict_note ? ": " + cell.verdict_note : ""}`;
   if (cell.served === "untestable")
-    return `fixed cloud endpoint: the gateway hard-codes the real provider address, so this pair cannot be pointed at the test upstream. Not a failure${cell.verdict_note ? ". Source: " + cell.verdict_note : ""}`;
+    return `untestable${cell.verdict_note ? ": " + cell.verdict_note : " (no reason recorded)"}`;
   if (cell.served === "failed")
     // The pairing is real (the status was not a 404/501-shaped absence); the gateway reached and
     // declined this specific attempt. Surface the actual evidence, not just the verdict label.
@@ -4753,7 +4753,7 @@ function renderMatrix() {
     if (t.fail) bits.push(`${t.fail} fail`);
     if (t.notdeclared) bits.push(`${t.notdeclared} not declared`);
     if (t.notconf) bits.push(`${t.notconf} not configured`);
-    if (t.untestable) bits.push(`${t.untestable} fixed cloud endpoint`);
+    if (t.untestable) bits.push(`${t.untestable} untestable`);
     if (t.unverified) bits.push(`${t.unverified} not verified`);
     if (t.unprobed) bits.push(`${t.unprobed} unprobed (auth)`);
     return `<section class="matrix-gw">
