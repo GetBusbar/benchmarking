@@ -8,7 +8,7 @@
   "calibration": "results/calibrations/2026-11-08-09547897-arm64.json",
   "field_state": "/Users/matthew/Developer/tmp/otb-august-readiness-20261108/field",
   "run_id": "otb-20261109T015651Z",
-  "status": "running",
+  "status": "HALTED_FOR_ENGINE_CORRECTION",
   "workers": 15,
   "results_checked": 0,
   "automatic_worker_publication": false,
@@ -72,5 +72,15 @@
   },
   "all_15_engine_mock_hash_verifications": true,
   "latest_production_version": "4badcfc7-f42e-4b1e-9e43-91a9528a486f",
-  "publication_correction": "Resolved by b7eabc6d: active-field selects corrected run; live summary exposes exactly APISIX/TensorZero and both downloaded raw hashes/engine/mock stamps match."
+  "publication_correction": "Resolved by b7eabc6d: active-field selects corrected run; live summary exposes exactly APISIX/TensorZero and both downloaded raw hashes/engine/mock stamps match.",
+  "completed_runs": 7,
+  "interrupted_runs": 8,
+  "owned_compute_active": 0,
+  "owned_network_deleted": true,
+  "engine_correction_scope": [
+    "Failed stream reconfirmation was attributed to rig residue without independent proof.",
+    "Interrupted throughput sweeps erase every derived frontier although clean partial rungs are retained; stop cause is not recorded.",
+    "Cost and stream failure examples are insufficient for request/response attribution."
+  ],
+  "publication_status": "provisional_diagnostic_evidence"
 }

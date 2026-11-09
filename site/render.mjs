@@ -46,7 +46,9 @@ export function renderDashboard(template, data, path, publication) {
   const app = browserApp.createApp(document);
   const state = app.renderForPublication(data, path);
   const url = new URL(path, ORIGIN);
-  if (data.active_field && data.gateways.some(g => !g.matrix)) {
+  if (data.active_field?.status === 'under_review') {
+    document.querySelector("main")?.insertAdjacentHTML("afterbegin", `<aside class="refresh-status" role="status"><strong>Provisional field — under review.</strong> ${esc(data.active_field.notice || 'Measurements are under review.')} <a href="/gateways/runs">Retained run evidence</a>.</aside>`);
+  } else if (data.active_field && data.gateways.some(g => !g.matrix)) {
     const completed = data.gateways.filter(g => g.matrix).length;
     document.querySelector("main")?.insertAdjacentHTML("afterbegin", `<aside class="refresh-status" role="status"><strong>Benchmark refresh: ${completed} of ${data.gateways.length} results published.</strong> Unfinished entrants show n/a. Results appear after validation. <a href="/gateways/runs">Previous runs remain in History</a>.</aside>`);
   }
@@ -58,6 +60,7 @@ export function renderDashboard(template, data, path, publication) {
   }
   const empty = document.getElementById("matrix-empty");
   if (empty?.classList.contains("hidden")) empty.textContent = "";
+  else if (empty && data.active_field?.status === 'under_review') empty.textContent = "This provisional field was halted for measurement-engine corrections.";
   else if (empty && data.active_field) empty.textContent = "Refresh in progress. Protocol measurements will appear as validated runs finish.";
   document.querySelectorAll("[data-wired]").forEach(n => n.removeAttribute("data-wired"));
   // A crawler must be able to read a protocol verdict without interpreting color

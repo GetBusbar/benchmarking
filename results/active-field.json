@@ -18,5 +18,7 @@
     "plano",
     "portkey",
     "tensorzero"
-  ]
+  ],
+  "status": "under_review",
+  "notice": "This field was halted for measurement-engine corrections. Results are provisional diagnostic evidence; no further results will be added to this instrument."
 }
