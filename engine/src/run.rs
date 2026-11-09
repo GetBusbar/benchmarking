@@ -2434,7 +2434,16 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                             if passed2 { first_fps = w2.fps(); }
                                             passed2
                                         }
-                                        None => false,
+                                        // THE RETRY COULD NOT RUN, which is the rig, not a second
+                                        // failure of the gateway. Falling through to the restart
+                                        // would let the restart's own elapsed time drain the host,
+                                        // pass the post-restart window, and publish
+                                        // `GatewayDidNotRecover` against the gateway for a window
+                                        // we never took.
+                                        None => {
+                                            stop = StreamStop::WindowUnavailable { at: ceiling };
+                                            break;
+                                        }
                                     }
                                 } else {
                                     false
