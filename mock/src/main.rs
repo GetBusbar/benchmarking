@@ -158,20 +158,29 @@ fn dialect_for(path: &str) -> &'static str {
 }
 
 /// Loose request-shape marker check per dialect: does the body carry the fields a client of that
-/// dialect must send? Deliberately shallow (substring, no JSON parse) - the matrix runner only
-/// needs "the gateway sent something recognizably shaped like that dialect's request".
+/// dialect must send? Most dialects use shallow substring markers; Converse parses its content
+/// blocks so JSON formatting cannot change the verdict. This runs only while recording is enabled.
 fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
     let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
     match dialect {
         "openai" => has("\"messages\""),
         // Bedrock Converse: the body carries `messages` whose content is an ARRAY of content BLOCKS
-        // ({"text":…}), not OpenAI's `"content":"<string>"`. Requiring the block marker (or an
-        // `inferenceConfig`) rejects a raw OpenAI chat body forwarded to /converse without being
-        // translated into the Converse shape.
-        "bedrock" => {
-            let block_content = has("\"content\":[") && has("\"text\":");
-            has("\"messages\"") && (block_content || has("\"inferenceConfig\""))
-        }
+        // ({"text":…}), not OpenAI's `"content":"<string>"`. Checking the PARSED content blocks
+        // rejects a raw OpenAI chat body forwarded to /converse without being translated into the
+        // Converse shape, and accepts a real Converse body whatever whitespace its serializer emits
+        // (the old substring markers missed `"content": [`).
+        "bedrock" => serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v["messages"].as_array().cloned())
+            .is_some_and(|messages| {
+                !messages.is_empty()
+                    && messages.iter().all(|message| {
+                        message["content"].as_array().is_some_and(|blocks| {
+                            !blocks.is_empty()
+                                && blocks.iter().all(|block| block["text"].is_string())
+                        })
+                    })
+            }),
         // Cohere: v2 chat carries `messages`; v1 chat carries `message`/`chat_history`.
         //
         // KNOWN WEAK, AND SAID SO RATHER THAN IMPLIED. A cohere v2 body and an OpenAI chat body are
@@ -716,6 +725,19 @@ mod tests {
         assert!(!request_shape_ok(
             "bedrock",
             br#"{"model":"m","messages":[{"role":"user","content":"hello"}]}"#
+        ));
+    }
+
+    #[test]
+    fn bedrock_request_validation_ignores_json_whitespace() {
+        assert!(request_shape_ok(
+            "bedrock",
+            br#"{ "messages": [ { "role": "user", "content": [ { "text": "hello" } ] } ] }"#
+        ));
+        // an inferenceConfig alone does not make plain-string content Converse
+        assert!(!request_shape_ok(
+            "bedrock",
+            br#"{"messages":[{"content":"hello"}],"inferenceConfig":{"maxTokens":16}}"#
         ));
     }
 
