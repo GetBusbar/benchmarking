@@ -25,6 +25,8 @@ import * as checkMod from "./check-consistency.mjs";
 import { sealMetric, displayedValue, THROUGHPUT_FIELDS, isMetricField, zeroNoteFor, ZERO_NO_CEILING, ZERO_MEASURED_FAIL,
   FRONTIER_BOUNDS_MS, DEFAULT_BOUND_MS, sealFrontier, sealRungs } from "./seal.mjs";
 import { oracleExpected } from "./check-consistency.mjs";
+import { projectMeasurements } from "./public-data.mjs";
+import { gatewayArticle } from "./evidence.mjs";
 // A HAND-BUILT fixture has no results/matrix/<key>.json oracle, so it needs an EXPLICIT opt-in
 // (the CLI never passes it) to waive the oracle-verifiable requirement.
 const SYNTH = { syntheticFixture: true };
@@ -7130,4 +7132,111 @@ test("F1-72: each sweep chart canvas is named and points at its own data table",
   assert.match(html, /<td>gw<\/td><td>8<\/td><td>1,500 µs p99<\/td>/);
   const css = readFileSync(join(HERE, "style.css"), "utf8");
   assert.match(css, /\.sr-only \{[^}]*clip-path: inset\(50%\)/, "the data tables are visually hidden, not drawn");
+});
+
+/* ---- ENGINE v1.1 FIELDS, END TO END -------------------------------------------------------------------
+   site/fixtures/result_tensorzero_v11-fixture.json is a current (old-engine) snapshot trimmed to a 2x2 grid
+   with every field the v1.1 engine adds, in the engine's own shape: `bound_not_met` frontier absences,
+   per-percentile sample counts, failed-probe evidence (body validation + a refuted re-verification),
+   stream-rung status counts, the rig's backlog tunables, box-qualification attempts and the gateway build
+   receipt. The site must carry each verbatim, and the board must keep reading older snapshots as before. */
+const V11_KEY = "v11-fixture";
+function v11Bundle() {
+  const root = mkdtempSync(join(tmpdir(), "site-v11-"));
+  const outDir = mkdtempSync(join(tmpdir(), "site-v11-out-"));
+  try {
+    const snap = JSON.parse(readFileSync(join(HERE, "fixtures", "result_tensorzero_v11-fixture.json"), "utf8"));
+    snap.gateway = V11_KEY; snap.matrix.gateway = V11_KEY;
+    const def = JSON.parse(readFileSync(join(ROOT, "gateways", "tensorzero", "definition.json"), "utf8"));
+    mkdirSync(join(root, "gateways", V11_KEY), { recursive: true });
+    writeFileSync(join(root, "gateways", V11_KEY, "definition.json"), JSON.stringify({ ...def, name: V11_KEY, display: "V11 Fixture" }));
+    mkdirSync(join(root, "results", "snapshots"), { recursive: true });
+    const file = `result_${V11_KEY}_${snap.measured_at.replace(/:/g, "-").replace(/\.\d+Z$/, "Z")}.json`;
+    writeFileSync(join(root, "results", "snapshots", file), JSON.stringify(snap));
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    const data = JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+    return { data, snap, file, g: data.gateways.find((x) => x.key === V11_KEY) };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+const V11 = v11Bundle();
+
+test("v1.1: bound_not_met reaches the bundle as its own state with the engine's detail, and the checker accepts it", () => {
+  const cell = V11.g.matrix.upstreams.openai.cells.openai;
+  const one = cell.perf.frontier.find((r) => r.bound_ms === 1);
+  assert.equal(one.rps.reason, "bound_not_met");
+  assert.equal(one.rps.detail, V11.snap.matrix.upstreams.openai.cells.openai.absences["perf.frontier.1ms.rps"].detail);
+  assert.equal(V11.g.best_cell.frontier.find((r) => r.bound_ms === 10).rps.reason, "bound_not_met");
+  // The dollar lane inherits the rate's absence and is undefined there, exactly as the old spelling was.
+  assert.equal(V11.g.best_cell.cost_per_million_usd.reason, "not_applicable");
+  assert.equal(V11.g.best_cell.rps_per_dollar.reason, "bound_not_met");
+  const { errors } = checkConsistency(V11.data, app, SYNTH);
+  assert.deepEqual(errors, [], "check-consistency accepts the v1.1 vocabulary");
+});
+
+test("v1.1: per-percentile sample counts pass into the bundle, the drawer and the frontier tooltip", () => {
+  const cell = V11.g.matrix.upstreams.openai.cells.openai;
+  assert.equal(cell.perf.gateway_c1_samples, 146);
+  assert.equal(cell.perf.direct_c1_samples, 70000);
+  assert.equal(cell.stream.gap_gw_samples, 63);
+  assert.equal(cell.stream.gap_direct_samples, 63);
+  assert.equal(cell.perf.frontier.find((r) => r.bound_ms == null).samples, 115704);
+  assert.equal("samples" in cell.perf.frontier.find((r) => r.bound_ms === 1), false, "an absent count is not a null or a 0");
+  assert.equal(app.samplesNote(V11.g.best_cell, "gateway_c1_p99_us"), "n=146");
+  assert.equal(app.samplesNote(V11.g.best_cell, "added_latency_p99_us"), "n=146 gateway / 70,000 direct");
+  assert.match(app.frontierCell(V11.g.best_cell, null).note, /p99 · n=115,704 completed requests/);
+  const st = app.newState(); st.data = V11.data;
+  assert.match(app.drawerHtml(V11.g, st), /· n=146 gateway \/ 70,000 direct/, "the drawer shows the count beside its percentile");
+});
+
+test("v1.1: failed-probe evidence (body validation, refuted re-verification) is shown verbatim", () => {
+  const bodyCell = V11.g.matrix.upstreams.anthropic.cells.openai;
+  const refuted = V11.g.matrix.upstreams.openai.cells.anthropic;
+  const rawBody = V11.snap.matrix.upstreams.anthropic.cells.openai, rawRef = V11.snap.matrix.upstreams.openai.cells.anthropic;
+  const tip = app.matrixCellTip(bodyCell);
+  assert.ok(tip.includes(rawBody.verdict_note), "the verdict note, verbatim");
+  assert.ok(tip.includes(rawBody.body_snippet), "and the body the verdict was decided from");
+  const rtip = app.matrixCellTip(refuted);
+  assert.ok(rtip.includes(rawRef.verdict_note), "the refutation reason, verbatim");
+  assert.equal(rtip.split(rawRef.verdict_note).length, 2, "said once when note and snippet are the same text");
+  const pop = app.cellPopFull(V11.g, "openai", "anthropic");
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  assert.ok(pop.includes(esc(rawBody.body_snippet)) || pop.includes(rawBody.body_snippet), "the popup carries the body evidence");
+});
+
+test("v1.1: API records and the evidence page carry the new evidence verbatim, additively", () => {
+  const archives = new Map([[V11.file, { id: "run-v11", sha256: "0".repeat(64), snapshot: V11.snap }]]);
+  const records = projectMeasurements(V11.g, archives);
+  const m = records.find((r) => r.test.ingress_protocol === "openai" && r.test.upstream_protocol === "openai");
+  assert.deepEqual(m.sample_counts, { gateway_c1_samples: 146, direct_c1_samples: 70000, ttft_gw_samples: 100, ttft_direct_samples: 100, gap_gw_samples: 63, gap_direct_samples: 63 });
+  assert.equal(m.frontier.find((f) => f.bound_ms == null).samples, 115704);
+  assert.equal(m.frontier.find((f) => f.bound_ms === 1).rps.state, "bound_not_met");
+  const last = m.stream_rung_diagnostics.at(-1);
+  assert.equal(last.stream_errors_no_response, 2);
+  assert.equal(last.http_status_counts["502"], 1);
+  assert.equal(m.test.somaxconn, 4096);
+  assert.equal(m.test.tcp_max_syn_backlog, 1024);
+  assert.deepEqual(m.test.gateway_provenance, V11.snap.gateway_provenance);
+  assert.equal(m.test.qualification.attempts.length, 2);
+  const failed = records.find((r) => r.test.ingress_protocol === "openai" && r.test.upstream_protocol === "anthropic");
+  assert.equal(failed.status.detail, V11.snap.matrix.upstreams.anthropic.cells.openai.verdict_note);
+  assert.equal(failed.status.response_excerpt, V11.snap.matrix.upstreams.anthropic.cells.openai.body_snippet);
+  const html = gatewayArticle(V11.g, records, [], V11.data.gateways, { full: true });
+  assert.match(html, /Bound not met/);
+  assert.match(html, /n=115,704/);
+  assert.match(html, /n=146 gateway \/ 70,000 direct/);
+  assert.match(html, /net\.core\.somaxconn/);
+  assert.match(html, /Box qualification attempts/);
+  assert.match(html, /Gateway build receipt/);
+  assert.match(html, /Stream sweep diagnostics/);
+  assert.match(html, /HTTP 502: 1/);
+  // An older record keeps exactly its old shape: no new keys appear for fields the run never recorded.
+  const old = projectMeasurements({ key: "x", matrix: { upstreams: { openai: { cells: { openai: { served: true,
+    perf: { frontier: [{ bound_ms: null, rps: sealMetric(10), concurrency: 1, p99_us: 5, first_disqualified_conc: null, lower_bound: false }] } } } } } } }, new Map()).at(0);
+  for (const k of ["sample_counts", "stream_rung_diagnostics"]) assert.equal(k in old, false, `${k} absent on an older record`);
+  for (const k of ["somaxconn", "tcp_max_syn_backlog", "gateway_provenance"]) assert.equal(k in old.test, false, `test.${k} absent on an older record`);
+  assert.equal("samples" in old.frontier[0], false);
+  assert.equal("samples" in sealFrontier([{ p99_bound_us: null, rps: 10, concurrency: 1, p99_us: 5, lower_bound: false }])[0], false);
 });

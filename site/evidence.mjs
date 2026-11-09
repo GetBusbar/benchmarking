@@ -32,17 +32,40 @@ export function noteIndex() {
 export const notesHtml = notes => notes?.list.length ? `<h2 id="recorded-notes">Recorded notes</h2><p>Text recorded with the cells above. Each note is shown once; rows refer to it by number.</p><ol class="recorded-notes">${notes.list.map((text, i) => `<li id="note-${i + 1}">${esc(text)}</li>`).join("")}</ol>` : "";
 const LONG_NOTE = 140;
 const noteHtml = (text, notes) => notes && String(text).length > LONG_NOTE ? notes.ref(String(text)) : esc(text);
+// WHICH RECORDED SAMPLE COUNT EACH PERCENTILE WAS TAKEN OVER, as the engine documents it (record.rs
+// CellPerf/CellStream): a c=1 leg's p99 over that leg's count, an added-latency/TTFT/gap difference over
+// both legs' populations. Shown only when the run recorded the count (engine v1.1 `sample_counts`).
+const SAMPLE_KEYS = {
+  gateway_c1_p99_us: [["gateway_c1_samples"]], direct_c1_p99_us: [["direct_c1_samples"]],
+  added_latency_p50_us: [["gateway_c1_samples", "gateway"], ["direct_c1_samples", "direct"]],
+  added_latency_p99_us: [["gateway_c1_samples", "gateway"], ["direct_c1_samples", "direct"]],
+  added_ttft_p50_us: [["ttft_gw_samples", "gateway"], ["ttft_direct_samples", "direct"]],
+  added_ttft_p99_us: [["ttft_gw_samples", "gateway"], ["ttft_direct_samples", "direct"]],
+  added_gap_p50_us: [["gap_gw_samples", "gateway"], ["gap_direct_samples", "direct"]],
+  added_gap_p99_us: [["gap_gw_samples", "gateway"], ["gap_direct_samples", "direct"]],
+};
+export function samplesFor(counts, key) {
+  const parts = (SAMPLE_KEYS[key] || []).filter(([k]) => Number.isFinite(counts?.[k]));
+  if (!parts.length) return null;
+  return { text: `n=${parts.map(([k, leg]) => `${formatNumber(counts[k])}${leg ? ` ${leg}` : ""}`).join(" / ")}`,
+    md: parts.map(([k]) => `${k}=${counts[k]}`).join("; ") };
+}
 export function measurementTable(measurements, notes = null) {
   return table(["Ingress → upstream", "Metric", "Value", "State / reason", "p99 bound (ms)"], measurements.flatMap(m => {
     const path = pairHtml(m.test.ingress_protocol, m.test.upstream_protocol);
     if (!Object.keys(m.metrics).length) return [[path, "—", "—",
       mdSpan(`${esc(stateLabel(m.status.state))}${m.status.detail ? `: ${noteHtml(m.status.detail, notes)}` : ""}`, m.status.state + (m.status.detail ? `: ${m.status.detail}` : "")), "—"]];
-    const rows = Object.entries(m.metrics).map(([key, v]) => [path, metricLabelHtml(key), valueHtml(v), mdSpan(esc(metricStateText(v)), v.reason || v.state), "—"]);
+    const rows = Object.entries(m.metrics).map(([key, v]) => {
+      const n = samplesFor(m.sample_counts, key);
+      return [path, metricLabelHtml(key), valueHtml(v), mdSpan(esc(metricStateText(v) + (n ? ` · ${n.text}` : "")), (v.reason || v.state) + (n ? `; ${n.md}` : "")), "—"];
+    });
     for (const f of m.frontier) {
-      const state = [f.rps?.state && f.rps.state !== "valid" ? stateLabel(f.rps.reason || f.rps.state) : f.rps?.note ? metricStateText(f.rps) : null, f.lower_bound ? "lower bound" : null, `concurrency ${f.concurrency == null ? "not recorded" : formatNumber(f.concurrency)}`].filter(Boolean).join("; ");
+      const state = [f.rps?.state && f.rps.state !== "valid" ? stateLabel(f.rps.reason || f.rps.state) : f.rps?.note ? metricStateText(f.rps) : null, f.lower_bound ? "lower bound" : null, `concurrency ${f.concurrency == null ? "not recorded" : formatNumber(f.concurrency)}`, f.samples != null ? `n=${formatNumber(f.samples)}` : null].filter(Boolean).join("; ");
+      // A v1.1 bound_not_met reading carries the engine's own sentence for why no rung met the bound.
+      const why = f.rps?.state === "bound_not_met" && f.rps.detail ? f.rps.detail : null;
       rows.push([path, metricLabelHtml("throughput_rps"),
         f.rps?.state === "valid" && typeof f.rps.value === "number" ? mdSpan(`<span title="${esc(f.rps.value)}">${esc(formatNumber(f.rps.value))}</span>`, `${rawMetricText(f.rps)} req/s`) : mdSpan("—", `${rawMetricText(f.rps)} req/s`),
-        mdSpan(esc(state), `${f.lower_bound ? "lower bound; " : ""}concurrency ${f.concurrency ?? "not recorded"}`),
+        mdSpan(esc(state) + (why ? `: ${noteHtml(why, notes)}` : ""), `${f.lower_bound ? "lower bound; " : ""}concurrency ${f.concurrency ?? "not recorded"}${f.samples != null ? `; samples ${f.samples}` : ""}${why ? `; ${why}` : ""}`),
         mdSpan(f.bound_ms == null ? "Unbounded" : `${esc(formatNumber(f.bound_ms))} ms`, String(f.bound_ms ?? "unbounded"))]);
     }
     return rows;
@@ -73,8 +96,14 @@ export function gatewayArticle(g, records, histories, gateways, { full = false, 
   // Instrument identity is usually one set for every cell of a run: list each distinct set once.
   const instruments = [...new Map(records.map(m => {
     const i = { harness_commit: m.test.harness_commit, mock_sha256: m.test.mock_sha256, load_generator_sha256: m.test.load_generator_sha256 };
+    // Engine v1.1 rig and gateway identity, only when the run recorded it (older runs keep their old set).
+    for (const k of ["somaxconn", "tcp_max_syn_backlog", "gateway_provenance"]) if (k in m.test) i[k] = m.test[k];
+    if (m.test.qualification && "attempts" in m.test.qualification) i.qualification_attempts = m.test.qualification.attempts;
     return [JSON.stringify(i), i];
   })).values()];
+  const rigExtra = i => [["somaxconn", "net.core.somaxconn"], ["tcp_max_syn_backlog", "net.ipv4.tcp_max_syn_backlog"],
+    ["qualification_attempts", "Box qualification attempts"], ["gateway_provenance", "Gateway build receipt"]]
+    .filter(([k]) => k in i).map(([k, label]) => `<dt>${mdSpan(esc(label), k)}</dt><dd>${factsHtml(i[k])}</dd>`).join("");
   const probeRows = records.map(m => [pairHtml(m.test.ingress_protocol, m.test.upstream_protocol),
     mdSpan(esc(stateLabel(m.status.state)), m.status.state),
     m.status.probe_http_status ? esc(m.status.probe_http_status) : "—",
@@ -90,12 +119,25 @@ export function gatewayArticle(g, records, histories, gateways, { full = false, 
     `<h2>Published measurements</h2>${measurementTable(records, notes)}` +
     `<h2>Probe evidence and instrument provenance</h2><p>Historical capability notes may reference an earlier product version. They are not a new probe or a current support claim. Full RSS samples remain in the immutable raw JSON.</p>` +
     table(["Ingress → upstream", "Cell state", "Probe HTTP status", "Recorded reason", "Recorded detail", "Evidence scope", "Response excerpt", "Tested build"], probeRows) +
-    `<dl class="record-facts">${instruments.map(i => `<dt>Harness commit</dt><dd><code>${esc(i.harness_commit || "not recorded")}</code></dd><dt>Mock SHA-256</dt><dd><code>${esc(i.mock_sha256 || "not recorded")}</code></dd><dt>Load generator SHA-256</dt><dd><code>${esc(i.load_generator_sha256 || "not recorded")}</code></dd>`).join("")}</dl>` +
+    `<dl class="record-facts">${instruments.map(i => `<dt>Harness commit</dt><dd><code>${esc(i.harness_commit || "not recorded")}</code></dd><dt>Mock SHA-256</dt><dd><code>${esc(i.mock_sha256 || "not recorded")}</code></dd><dt>Load generator SHA-256</dt><dd><code>${esc(i.load_generator_sha256 || "not recorded")}</code></dd>${rigExtra(i)}`).join("")}</dl>` +
+    streamRungTable(records) +
     notesHtml(notes) +
     `<h2>Evidence for the current measurements</h2><ul>${runs.map(id => `<li><a href="/gateways/runs/${id}">${esc(id)}</a> · <a href="/api/v1/runs/${id}/raw.json">complete raw record including RSS series</a></li>`).join("")}</ul>` +
     `<h2>Configuration recorded by the run</h2><pre>${esc(g.ootb_config || "Not recorded.")}</pre>` +
     `<h2>Compare a shared protocol cell</h2><ul>${gateways.filter(other => other.key !== g.key).map(other => `<li><a href="/gateways/compare/${esc(g.key)}-vs-${esc(other.key)}">${esc(g.display)} vs ${esc(other.display)}</a></li>`).join("")}</ul>` +
     `<h2>Historical measurements</h2><ul>${histories.map(r => `<li><a href="/gateways/runs/${r.id}">${timeHtml(r.measured_at, "Date not recorded")} — ${buildHtml(r.build, { fromSource })}</a></li>`).join("")}</ul>`;
+}
+// Engine v1.1 per stream-sweep rung: lanes per HTTP status and lanes that got no response, as recorded.
+// Rendered only when some record carries them, so pages built from older runs are unchanged.
+export function streamRungTable(records) {
+  const rows = records.flatMap(m => (m.stream_rung_diagnostics || []).map(r => [pairHtml(m.test.ingress_protocol, m.test.upstream_protocol),
+    r.conc == null ? "—" : numberHtml(r.conc),
+    r.http_status_counts && Object.keys(r.http_status_counts).length
+      ? mdSpan(Object.entries(r.http_status_counts).map(([s, n]) => `HTTP ${esc(s)}: ${esc(formatNumber(n))}`).join(", "), JSON.stringify(r.http_status_counts))
+      : "—",
+    r.stream_errors_no_response == null ? "—" : numberHtml(r.stream_errors_no_response)]));
+  return rows.length ? `<h2>Stream sweep diagnostics</h2><p>Per streaming-sweep concurrency, as recorded by the engine: lanes by final HTTP status, and lanes that received no response.</p>` +
+    table(["Ingress → upstream", "Concurrency", "Lanes by HTTP status", "Lanes with no response"], rows) : "";
 }
 const REASON_LABELS = {
   requested_cell_not_measured: "requested cell not measured", requested_cell_not_served: "requested cell not served",
@@ -149,7 +191,7 @@ export { measurementSchema, openapi } from "./api-contract.mjs";
 
 // A recorded object (the run's instrument provenance) as nested definition lists instead of a JSON dump.
 // Keys keep their recorded names on hover and in the Markdown twin; the raw JSON stays one link away.
-const FACT_LABELS = { arch: "Architecture", release_url: "Release URL", engine: "Engine (harness)", commit: "Commit", dirty: "Uncommitted changes", mock: "Mock upstream", origin: "Origin", sha256: "SHA-256", asset_updated_at: "Asset updated", ugen: "Load generator", box_qualify: "Box qualification", band_pct: "Band (%)", baseline_rps: "Baseline (req/s)", baseline_samples: "Baseline samples", concurrency: "Concurrency", drift_pct: "Drift (%)", observed_absent_detail: "Observation absence detail", observed_absent_reason: "Observation absence reason", observed_rps: "Observed (req/s)", outcome: "Outcome" };
+const FACT_LABELS = { arch: "Architecture", release_url: "Release URL", engine: "Engine (harness)", commit: "Commit", dirty: "Uncommitted changes", mock: "Mock upstream", origin: "Origin", sha256: "SHA-256", asset_updated_at: "Asset updated", ugen: "Load generator", box_qualify: "Box qualification", band_pct: "Band (%)", baseline_rps: "Baseline (req/s)", baseline_samples: "Baseline samples", concurrency: "Concurrency", drift_pct: "Drift (%)", observed_absent_detail: "Observation absence detail", observed_absent_reason: "Observation absence reason", observed_rps: "Observed (req/s)", outcome: "Outcome", somaxconn: "net.core.somaxconn", tcp_max_syn_backlog: "net.ipv4.tcp_max_syn_backlog", attempts: "Attempts", rps: "Rate (req/s)" };
 export function factsHtml(value) {
   if (value == null) return "Not recorded";
   if (typeof value !== "object") {

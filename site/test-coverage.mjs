@@ -461,3 +461,30 @@ test("the COMPARE markup tells all four stories, and the curves sit side by side
   assert.equal((h.match(/frontier-spark/g) || []).length, 2, "one curve per gateway being compared");
   assert.match(h, /class="best"/, "and a winner is called where there is a contest");
 });
+
+// ENGINE v1.1 SPLIT THE FRONTIER'S "NO RUNG MET THIS BOUND" OFF below_resolution INTO ITS OWN TOKEN,
+// `bound_not_met`. Every surface must tell exactly the story the old spelling told on a frontier reading
+// (a measured nothing: ranks as 0, drawn on the floor, "n/a" with the engine's own sentence), while never
+// borrowing below_resolution's "≈0" - and the token must survive verbatim into the envelope.
+test("bound_not_met tells the old frontier below_resolution story on every surface, verbatim", () => {
+  const detail = "every cleanly-served rung that reported a tail had it at or above 1ms, so this gateway carried no measurable throughput under that bound";
+  const reading = (reason) => ({ bound_ms: 1, concurrency: null, p99_us: null, first_disqualified_conc: null, lower_bound: false,
+    rps: sealMetric(null, { absent: { reason, detail } }) });
+  const ordinary = { bound_ms: null, concurrency: 64, p99_us: 4200, first_disqualified_conc: null, lower_bound: false, samples: 98, rps: sealMetric(20000) };
+  const newer = { frontier: [reading("bound_not_met"), ordinary] };
+  const older = { frontier: [reading("below_resolution"), ordinary] };
+  assert.equal(newer.frontier[0].rps.reason, "bound_not_met", "the engine token is carried, not rewritten");
+  assert.equal(newer.frontier[0].rps.detail, detail, "with the engine's own sentence");
+  const a = app.frontierCell(newer, 1), b = app.frontierCell(older, 1);
+  for (const k of ["v", "na", "text", "why"]) assert.equal(a[k], b[k], `frontierCell.${k} matches the old spelling`);
+  assert.equal(a.note, detail, "the tooltip is the engine's detail, verbatim");
+  assert.equal(app.mval(newer.frontier[0].rps), 0, "ranks as a measured 0 exactly as below_resolution did here");
+  assert.equal(app.mcode(newer.frontier[0].rps), null);
+  assert.notEqual(app.metric(newer.frontier[0].rps).text, "≈0", "a bound nobody met is not a too-small difference");
+  assert.equal(app.frontierSpark(newer.frontier, { min: 1, max: 20000 }), app.frontierSpark(older.frontier, { min: 1, max: 20000 }),
+    "drawn on the floor, identically");
+  // The sample count behind a reading's p99 rides into its tooltip when the engine recorded one.
+  assert.match(app.frontierCell(newer, null).note, /p99 · n=98 completed requests/);
+  assert.doesNotMatch(app.frontierCell({ frontier: [{ ...ordinary, samples: undefined }] }, null).note, /n=/,
+    "and an older reading without one reads exactly as before");
+});
