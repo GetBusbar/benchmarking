@@ -131,17 +131,27 @@ pub fn parse_state(body: &[u8]) -> Result<MockState, String> {
     let mut dialects = std::collections::BTreeMap::new();
     if let Some(map) = v.get("dialects").and_then(serde_json::Value::as_object) {
         for (name, row) in map {
+            // THE SAME RULE AS `recording`, per row. `count` and `body_ok` are what the verdict
+            // rests on, and a missing or mistyped one used to read as 0 / false - so a renamed field
+            // or a mock of another build turned a correctly translating gateway into a published
+            // refutation ("body is not the request shape"), an accusation drawn from our own parse.
+            let count = row
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    format!("the mock's state row for {name:?} carries no numeric `count`")
+                })?;
+            let body_ok = row
+                .get("body_ok")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    format!("the mock's state row for {name:?} carries no boolean `body_ok`")
+                })?;
             dialects.insert(
                 name.clone(),
                 DialectState {
-                    count: row
-                        .get("count")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0),
-                    body_ok: row
-                        .get("body_ok")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                    count,
+                    body_ok,
                     last_path: row
                         .get("last_path")
                         .and_then(serde_json::Value::as_str)
@@ -304,15 +314,38 @@ pub fn reverify_cell(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Reverifi
     let disabled = set_recording(cfg, false);
     // A recorder that could not be turned back off has left every window that follows measuring a
     // slower mock, which is a claim about the RIG's state and belongs beside this cell's verdict even
-    // though the verdict itself is sound.
-    if let Some(why) = disabled {
-        eprintln!("reverify: the mock's recorder could not be disabled after {}>{}, so the windows that follow are taken against a recording mock: {why}", ingress.as_str(), egress.as_str());
-    }
-
-    match outcome {
+    // though the verdict itself is sound. So it is written INTO the verdict's note - the one place
+    // the artifact carries for this cell - as well as to stderr; `verified` itself is unchanged.
+    let result = match outcome {
         Ok(state) => verdict(&state, ingress, egress),
         Err(unchecked) => unchecked,
+    };
+    note_disable_failure(result, disabled, ingress, egress)
+}
+
+/// Append a failed recorder disable to the verdict's note, leaving `verified` untouched: the
+/// verdict is about the gateway and stays sound; the note is about the rig state the windows that
+/// follow were taken in.
+fn note_disable_failure(
+    mut result: Reverified,
+    disabled: Option<String>,
+    ingress: Dialect,
+    egress: Dialect,
+) -> Reverified {
+    if let Some(why) = disabled {
+        let rig = format!(
+            "the mock's recorder could not be disabled after {}>{}, so the windows that follow are \
+             taken against a recording mock: {why}",
+            ingress.as_str(),
+            egress.as_str()
+        );
+        eprintln!("reverify: {rig}");
+        result.note = Some(match result.note.take() {
+            Some(note) => format!("{note}; {rig}"),
+            None => rig,
+        });
     }
+    result
 }
 
 /// Drive the one re-verification request and read the recorder back.
@@ -348,6 +381,19 @@ fn drive_and_read(cfg: &RunConfig, id: &CellId, ingress: Dialect) -> Result<Mock
         &headers,
         REVERIFY_TIMEOUT,
     );
+    // A non-2xx from the GATEWAY is its answer, not a rig fault, and it is never a refutation:
+    // there was no successful translation to observe upstream, so the cell is unchecked. The note
+    // says which it was, because "produced no answer" is only true of a connection failure or a
+    // timeout.
+    if let Outcome::Response(r) = &driven {
+        if !(200..300).contains(&r.status) {
+            return Err(Reverified::unchecked(format!(
+                "the gateway answered the re-verification request with HTTP {}, so there was no \
+                 successful translation to observe upstream",
+                r.status
+            )));
+        }
+    }
     if let Some(why) = control_failed(driven) {
         return Err(Reverified::unchecked(format!(
             "the re-verification request to the gateway produced no answer, so nothing was driven upstream to observe: {why}"
@@ -714,6 +760,98 @@ mod tests {
              gateway fails, so every load window that follows measures against a quiet mock; it is \
              still ON"
         );
+    }
+
+    // A gateway that ANSWERS, but with an error, is unchecked - never a refutation, which is what
+    // the run's retry gate withholds on - and the note names the status instead of claiming the
+    // gateway produced no answer. The recorder is still turned back off.
+    #[test]
+    fn a_non_2xx_reverify_answer_is_unchecked_with_its_status_never_refuted() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let gateway = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let mut chunk = [0u8; 4096];
+                let _ = c.read(&mut chunk);
+                let _ = c.write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
+                );
+            }
+        });
+        let recording = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock_addr = fake_mock(std::sync::Arc::clone(&recording));
+        let cfg = crate::run::test_fixture(gateway, mock_addr);
+
+        let v = reverify_cell(&cfg, &CellId::new("openai", "anthropic"), Dialect::Openai);
+
+        assert_eq!(v.verified, None, "a gateway error is not a refutation");
+        let note = v.note.unwrap_or_default();
+        assert!(note.contains("HTTP 502"), "{note}");
+        assert!(!note.contains("no answer"), "{note}");
+        assert!(!recording.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    // A state row missing (or mistyping) `count` or `body_ok` is a parse failure - unchecked - and
+    // never a 0 / false the verdict would read as "the body was not the request shape".
+    #[test]
+    fn a_state_row_without_count_or_body_ok_is_an_error_not_a_default() {
+        assert!(
+            parse_state(br#"{"recording":true,"dialects":{"anthropic":{"body_ok":true}}}"#)
+                .is_err()
+        );
+        assert!(
+            parse_state(br#"{"recording":true,"dialects":{"anthropic":{"count":1}}}"#).is_err()
+        );
+        assert!(parse_state(
+            br#"{"recording":true,"dialects":{"anthropic":{"count":"1","body_ok":true}}}"#
+        )
+        .is_err());
+    }
+
+    // A recorder that could not be turned back off is written into the verdict's evidence, beside
+    // whatever the verdict already said, and does not change the verdict itself.
+    #[test]
+    fn a_failed_recorder_disable_is_noted_in_the_verdict_without_changing_it() {
+        let proven = Reverified {
+            verified: Some(true),
+            note: None,
+        };
+        let v = note_disable_failure(
+            proven,
+            Some("timed out".into()),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
+        assert_eq!(v.verified, Some(true));
+        let note = v.note.unwrap_or_default();
+        assert!(
+            note.contains("could not be disabled") && note.contains("timed out"),
+            "{note}"
+        );
+
+        let refuted = Reverified {
+            verified: Some(false),
+            note: Some("forwarded verbatim".into()),
+        };
+        let v = note_disable_failure(
+            refuted,
+            Some("HTTP 500".into()),
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
+        assert_eq!(v.verified, Some(false));
+        let note = v.note.unwrap_or_default();
+        assert!(note.starts_with("forwarded verbatim; "), "{note}");
+
+        let quiet = note_disable_failure(
+            Reverified::unchecked("x"),
+            None,
+            Dialect::Openai,
+            Dialect::Anthropic,
+        );
+        assert_eq!(quiet.note.as_deref(), Some("x"));
     }
 
     /// A fake GATEWAY that records the request body it was handed, and answers 200.
