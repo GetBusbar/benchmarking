@@ -39,6 +39,15 @@ const activeField = existsSync(activeFieldPath) ? JSON.parse(readFileSync(active
 if (activeField && (!/^[a-f0-9]{40}$/.test(activeField.engine_commit) || !Number.isFinite(Date.parse(activeField.started_at)))) {
   throw new Error("Invalid active field engine or start timestamp");
 }
+// THE BOARD'S ENGINE AND THE PINNED INSTRUMENT ARE ONE FACT. When they disagree every row is blanked as
+// "awaiting" while each check still passes, which is how a green deploy shipped an empty board.
+const enginePinPath = join(ROOT, "ENGINE_PIN");
+if (activeField && existsSync(enginePinPath)) {
+  const pinned = readFileSync(enginePinPath, "utf8").split(/\s+/)[0];
+  if (pinned !== activeField.engine_commit) {
+    throw new Error(`results/active-field.json engine_commit ${activeField.engine_commit} differs from ENGINE_PIN ${pinned}`);
+  }
+}
 
 // GOVERNANCE RETIRED (matrix-sole-source): governance is not measured on the board - the governed
 // suite was busbar-only and is retired. `governed/run.sh` stays on disk (unused) but the suite is
@@ -609,6 +618,14 @@ const wasMeasured = (g) => Boolean(g.matrix || g.snapshot_file || g.perf || g.st
 // no snapshots, so this file would otherwise die at its own gen-data call before its first
 // assertion - a suite that gates nothing while reading as an unrelated failure).
 // A refresh explicitly retains every entrant, withholding all earlier runs.
+// A run measured on the active engine that the start time then excludes is the same silent blank.
+if (activeField) {
+  const onEngine = allGateways.filter((g) => g.rig?.engine?.commit === activeField.engine_commit);
+  const excluded = onEngine.filter((g) => !(displayedMeasuredMs(g) >= Date.parse(activeField.started_at)));
+  if (excluded.length) {
+    throw new Error(`active field ${activeField.id} started_at ${activeField.started_at} excludes runs measured on its own engine: ${excluded.map((g) => g.key).join(", ")}`);
+  }
+}
 if (activeField) for (const g of allGateways) {
   const current = g.rig?.engine?.commit === activeField.engine_commit &&
     displayedMeasuredMs(g) >= Date.parse(activeField.started_at);
