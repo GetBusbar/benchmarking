@@ -715,7 +715,6 @@ pub fn load_window_costed(
     // spec (the `smoke` path, which drives a gateway this process never pinned) yields no cores and
     // therefore an absent utilisation - measuring some other process's cores and labelling the
     // result this gateway's would be worse than reporting nothing.
-    let started = std::time::Instant::now();
     let cores = crate::procsample::parse_cores(&cfg.gw_cores);
     let cpu_before = if cores.is_empty() {
         None
@@ -730,6 +729,12 @@ pub fn load_window_costed(
             "the gateway's root pid did not resolve, so its cost cannot be attributed to this window",
         ),
     };
+    // THE CLOCK SPANS EXACTLY WHAT THE CPU DIFFERENCE SPANS: from the `before` read to the `after`
+    // read. It used to start ahead of the core parse, the /proc/stat scan and the first process-tree
+    // walk, and stop after `cost()` and a second /proc/stat scan - wall time with no gateway CPU
+    // counted against it, which biased utilisation low by an amount that grew with the size of the
+    // gateway's process tree and so differed by gateway.
+    let started = std::time::Instant::now();
     let stats = load_window_at(cfg, cfg.gateway_addr, path, body, headers, concurrency);
     // Re-resolve rather than reuse `pid`: a gateway is free to restart between the two reads, and a
     // second sample taken from a DIFFERENT process would be subtracted from the first as though it
@@ -742,6 +747,7 @@ pub fn load_window_costed(
             "the gateway's root pid did not resolve after the window",
         ),
     };
+    let elapsed_s = started.elapsed().as_secs_f64();
     // Requests come from the window's OWN completed count, never from its published rate: the rate is
     // already a derived figure, and deriving cost from a derivation makes one number's error the
     // other's too.
@@ -766,9 +772,8 @@ pub fn load_window_costed(
     // cross-check and only the bursty one failed. The error is therefore not uniform and cannot be
     // corrected for - it is worst exactly where "is this gateway CPU-bound?" is most interesting.
     //
-    // Wall time is MEASURED here rather than taken from `sweep_duration_s`, which is the CONFIGURED
-    // length and not what elapsed.
-    let elapsed_s = started.elapsed().as_secs_f64();
+    // Wall time is MEASURED (above, around the two samples) rather than taken from
+    // `sweep_duration_s`, which is the CONFIGURED length and not what elapsed.
     let util = match (cores.is_empty(), cost.cpu_us.copied()) {
         (true, _) => crate::measurement::Measurement::absent_because(
             crate::measurement::Absent::NotMeasured,
