@@ -238,7 +238,8 @@ async function route(request, env) {
     const comparison = compareMeasurements(publication.measurements, q);
     if (!pair) return json(comparison);
     const canonical = path.replace(/\.md$/, "");
-    const html = renderArticle(await input("/_publication/template.html", false), { path: canonical, title: `${q.a} vs ${q.b}`, body: comparisonArticle(comparison), markdown: canonical + ".md" + new URL(request.url).search });
+    const names = Object.fromEntries((publication.gateways || []).map(g => [g.id, g.name]));
+    const html = renderArticle(await input("/_publication/template.html", false), { path: canonical, title: `${names[q.a] || q.a} vs ${names[q.b] || q.b}`, body: comparisonArticle(comparison, names), markdown: canonical + ".md" + new URL(request.url).search });
     return text(pair[3] ? htmlToMarkdown(html) : html, pair[3] ? "text/markdown" : "text/html");
   }
   const dashboardPath = path === "/index.md" ? "/" : path === "/gateways/index.md" ? "/gateways" : path.replace(/\.md$/, "");
