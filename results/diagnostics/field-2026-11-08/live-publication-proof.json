@@ -1,0 +1,44 @@
+{
+  "dataset_id": "dataset-e5fe84c3d27c0f848b734ec3549114e29c2c6130d551868582f0acc9008d5fb2",
+  "active_field": {
+    "id": "otb-20261109T015651Z",
+    "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
+    "started_at": "2026-11-09T01:56:51Z",
+    "gateways": [
+      "agentgateway",
+      "aisix",
+      "apisix",
+      "bifrost",
+      "busbar",
+      "gomodel",
+      "helicone",
+      "higress",
+      "kong",
+      "litellm-python",
+      "litellm-rust",
+      "one-api",
+      "plano",
+      "portkey",
+      "tensorzero"
+    ]
+  },
+  "proof": [
+    {
+      "gateway": "apisix",
+      "sha256": "d51bb4cf969f13b635245fa757bd0c2714c73362193bfc76b5b2de11699146a9"
+    },
+    {
+      "gateway": "kong",
+      "sha256": "3165c43e6130084b393b6b4f0e430964f52d61b56f019961e2c6de565430075b"
+    },
+    {
+      "gateway": "litellm-rust",
+      "sha256": "953b9d142836b5f083cda599ba66a977cfaf9f3e885c493d03aa140626939c18"
+    },
+    {
+      "gateway": "tensorzero",
+      "sha256": "d2d1e5023702ce6a5f88e6705a0bf5afdbc1e1d8c1e43cbeefd43c5ac77fa932"
+    }
+  ],
+  "deployment_version": "fa28f318-cf8b-4653-aa51-f722689809d7"
+}

@@ -18,7 +18,7 @@
   "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
   "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
   "results_harvested": 7,
-  "results_published": 2,
+  "results_published": 4,
   "harvested_results": {
     "one-api": {
       "raw": "results/snapshots/result_one-api_2026-11-09T02-01-58Z.json",
@@ -58,19 +58,19 @@
     "litellm-rust": {
       "raw": "results/snapshots/result_litellm-rust_2026-11-09T02-01-52Z.json",
       "review": "results/diagnostics/field-2026-11-08/litellm-rust-result-review.json",
-      "publication": "checked_ready_with_failures",
+      "publication": "published_checked",
       "instance_id": "i-080e8438e2f043d18",
       "instance_state": "terminated"
     },
     "kong": {
       "raw": "results/snapshots/result_kong_2026-11-09T02-01-47Z.json",
       "review": "results/diagnostics/field-2026-11-08/kong-result-review.json",
-      "publication": "checked_ready",
+      "publication": "published_checked",
       "instance_id": "i-09cc29fca9554ce53",
       "instance_state": "terminated"
     }
   },
   "all_15_engine_mock_hash_verifications": true,
-  "latest_production_version": "161738f6-a2f4-4c49-af10-0daa43d0964f",
+  "latest_production_version": "fa28f318-cf8b-4653-aa51-f722689809d7",
   "publication_correction": "Resolved by b7eabc6d: active-field selects corrected run; live summary exposes exactly APISIX/TensorZero and both downloaded raw hashes/engine/mock stamps match."
 }
