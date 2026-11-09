@@ -20,7 +20,7 @@
 //! string is the honest answer when neither is available - never a guess, and never a value that
 //! could be mistaken for a real commit.
 
-fn main() {
+pub fn main() {
     let commit = std::env::var("OTB_BUILD_COMMIT")
         .ok()
         .filter(|s| !s.trim().is_empty());

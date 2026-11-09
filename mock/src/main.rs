@@ -535,6 +535,10 @@ async fn handle(
 async fn main() {
     let mut port: u16 = 8000;
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "engine-commit" {
+        println!("{}", env!("OTB_ENGINE_COMMIT"));
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "-port" || a == "--port") {
         if let Some(v) = args.get(i + 1) {
             port = v.parse().unwrap_or(8000);
