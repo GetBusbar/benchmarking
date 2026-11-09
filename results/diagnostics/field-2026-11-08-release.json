@@ -17,7 +17,7 @@
   "promotion_status": "MR26 remains opened in last API check despite owner reporting merged",
   "control_cleanup": "confirmed; both owned calibration instances terminated; networks deleted",
   "control_helper_issue": "First attempt failed before measurements while serializing EC2 datetime metadata; cleaned and corrected helper; second control attempt passed",
-  "results_harvested": 6,
+  "results_harvested": 7,
   "results_published": 2,
   "harvested_results": {
     "one-api": {
@@ -60,6 +60,13 @@
       "review": "results/diagnostics/field-2026-11-08/litellm-rust-result-review.json",
       "publication": "checked_ready_with_failures",
       "instance_id": "i-080e8438e2f043d18",
+      "instance_state": "terminated"
+    },
+    "kong": {
+      "raw": "results/snapshots/result_kong_2026-11-09T02-01-47Z.json",
+      "review": "results/diagnostics/field-2026-11-08/kong-result-review.json",
+      "publication": "checked_ready",
+      "instance_id": "i-09cc29fca9554ce53",
       "instance_state": "terminated"
     }
   },
