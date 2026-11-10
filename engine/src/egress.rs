@@ -38,14 +38,20 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// The trust variables a gateway's TLS stack may read, across the runtimes in the field: OpenSSL and
-/// Go (`SSL_CERT_FILE`), Python requests/httpx (`REQUESTS_CA_BUNDLE`), Node (`NODE_EXTRA_CA_CERTS`),
-/// curl (`CURL_CA_BUNDLE`) and the AWS SDKs (`AWS_CA_BUNDLE`).
-pub const TRUST_VARS: [&str; 5] = [
+/// Go (`SSL_CERT_FILE`), Python requests/httpx (`REQUESTS_CA_BUNDLE`), Node (`NODE_EXTRA_CA_CERTS`)
+/// and curl (`CURL_CA_BUNDLE`).
+///
+/// NOT `AWS_CA_BUNDLE` (v1.2.1). The AWS SDK for Go v2 treats that variable as an instruction to add
+/// the bundle to the client's transport, and fails outright when a gateway supplies its own
+/// `*http.Client` ("unable to add custom RootCAs HTTPClient, has no WithTransportOptions") - which
+/// broke gomodel's Bedrock cells in v1.2 although they reach the mock over plain HTTP. The bundle is
+/// already mounted over the system trust store, which the AWS SDKs read by default, so the variable
+/// added nothing but that failure.
+pub const TRUST_VARS: [&str; 4] = [
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
     "CURL_CA_BUNDLE",
-    "AWS_CA_BUNDLE",
 ];
 
 /// Where a container's system bundle lives, and so where the run's bundle is mounted.
@@ -460,6 +466,12 @@ mod tests {
                 "{k}"
             );
         }
+        // v1.2.1: AWS_CA_BUNDLE breaks the AWS SDK for Go v2 behind a custom http.Client (gomodel's
+        // Bedrock cells); the mounted system bundle already covers the AWS SDKs.
+        assert!(
+            !env.iter().any(|(k, _)| k == "AWS_CA_BUNDLE"),
+            "AWS_CA_BUNDLE must not be injected"
+        );
         assert_eq!(
             mounts,
             vec![Mount {
