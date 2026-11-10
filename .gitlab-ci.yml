@@ -101,6 +101,9 @@ verify-engine:
     - chown -R ci:ci "$CI_PROJECT_DIR"
     - su ci -s /bin/bash -c "export PATH='$PATH' CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME'; cd '$CI_PROJECT_DIR' && RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN='$CI_PROJECT_DIR/target/debug/otb' cargo test --workspace --locked"
     - rustup target add aarch64-unknown-linux-musl
+    # The mock's TLS (rustls with ring) compiles C for the static musl target.
+    - apt-get update -qq && apt-get install -y -qq musl-tools
+    - export CC_aarch64_unknown_linux_musl=musl-gcc
     - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
     - mkdir -p rig
     - cp target/aarch64-unknown-linux-musl/release/otb rig/otb-arm64
