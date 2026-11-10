@@ -140,7 +140,12 @@ fn body_for(path: &str) -> &'static [u8] {
 /// deliberately NOT reported as openai here: the matrix runner needs "the gateway posted to the
 /// openai chat endpoint" to mean exactly that, so unrecognized paths record under "other".
 fn dialect_for(path: &str) -> &'static str {
-    if path.contains("/chat/completions") {
+    if path.ends_with("/models") || path.contains("/models?") {
+        // A gateway's model discovery or refresh (`GET /v1beta/models`, `/v1/models`) is not a
+        // request on any dialect's endpoint. Recorded under a dialect it bumped that dialect's count
+        // and overwrote its body_ok with false (an empty GET body has no request shape).
+        "other"
+    } else if path.contains("/chat/completions") {
         "openai"
     } else if path.contains("/responses") {
         "openai-responses"
@@ -158,20 +163,29 @@ fn dialect_for(path: &str) -> &'static str {
 }
 
 /// Loose request-shape marker check per dialect: does the body carry the fields a client of that
-/// dialect must send? Deliberately shallow (substring, no JSON parse) - the matrix runner only
-/// needs "the gateway sent something recognizably shaped like that dialect's request".
+/// dialect must send? Most dialects use shallow substring markers; Converse parses its content
+/// blocks so JSON formatting cannot change the verdict. This runs only while recording is enabled.
 fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
     let has = |needle: &str| body.windows(needle.len()).any(|w| w == needle.as_bytes());
     match dialect {
         "openai" => has("\"messages\""),
         // Bedrock Converse: the body carries `messages` whose content is an ARRAY of content BLOCKS
-        // ({"text":…}), not OpenAI's `"content":"<string>"`. Requiring the block marker (or an
-        // `inferenceConfig`) rejects a raw OpenAI chat body forwarded to /converse without being
-        // translated into the Converse shape.
-        "bedrock" => {
-            let block_content = has("\"content\":[") && has("\"text\":");
-            has("\"messages\"") && (block_content || has("\"inferenceConfig\""))
-        }
+        // ({"text":…}), not OpenAI's `"content":"<string>"`. Checking the PARSED content blocks
+        // rejects a raw OpenAI chat body forwarded to /converse without being translated into the
+        // Converse shape, and accepts a real Converse body whatever whitespace its serializer emits
+        // (the old substring markers missed `"content": [`).
+        "bedrock" => serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v["messages"].as_array().cloned())
+            .is_some_and(|messages| {
+                !messages.is_empty()
+                    && messages.iter().all(|message| {
+                        message["content"].as_array().is_some_and(|blocks| {
+                            !blocks.is_empty()
+                                && blocks.iter().all(|block| block["text"].is_string())
+                        })
+                    })
+            }),
         // Cohere: v2 chat carries `messages`; v1 chat carries `message`/`chat_history`.
         //
         // KNOWN WEAK, AND SAID SO RATHER THAN IMPLIED. A cohere v2 body and an OpenAI chat body are
@@ -307,7 +321,9 @@ impl StreamFrames {
         let pad_for = |i: u32| -> String {
             let tag = i.to_string();
             if tag.len() >= width {
-                tag[..width].to_string()
+                // The LOW digits, which always differ between consecutive indices. Keeping the
+                // leading ones made frames 10..19 identical at width 1.
+                tag[tag.len() - width..].to_string()
             } else {
                 let mut s = tag;
                 s.push_str(&"x".repeat(width - s.len()));
@@ -531,10 +547,55 @@ async fn handle(
         .unwrap())
 }
 
+/// A numeric env knob: unset or blank takes the default, a value is trimmed (the engine trims the
+/// same knobs), and a value that is set but does not parse refuses to start.
+fn env_knob<T: std::str::FromStr>(name: &str, default: T) -> T
+where
+    T::Err: std::fmt::Display,
+{
+    match std::env::var(name) {
+        Err(_) => default,
+        Ok(v) if v.trim().is_empty() => default,
+        Ok(v) => match v.trim().parse() {
+            Ok(n) => n,
+            Err(e) => refuse_knob(name, &v, &e.to_string()),
+        },
+    }
+}
+
+/// Exit non-zero on a setting the mock cannot honour, before it binds or serves anything.
+fn refuse_knob(name: &str, value: &str, why: &str) -> ! {
+    eprintln!("mock: {name}={value:?} is not usable ({why}); refusing to start on a setting it cannot honour");
+    std::process::exit(2)
+}
+
+/// The listen(2) backlog the mock asks for. `TcpListener::bind` asks for 1024, and a gateway that
+/// does not pool upstream connections opens about one mock connection per in-flight request, so at
+/// high concurrency a 1024 queue overflows and the dropped SYNs are charged to the gateway. The
+/// kernel caps this at net.core.somaxconn, which the rig raises to the same value and records.
+const LISTEN_BACKLOG: u32 = 65_535;
+
+/// Bind with SO_REUSEADDR (as `TcpListener::bind` does on unix) and an explicit LISTEN_BACKLOG.
+fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
 #[tokio::main]
 async fn main() {
     let mut port: u16 = 8000;
     let args: Vec<String> = std::env::args().collect();
+    // The tree this binary was built from, from the same build.rs stamp as the engine.
+    if args.len() == 2 && args[1] == "build-commit" {
+        println!("{}", env!("OTB_SOURCE_COMMIT"));
+        return;
+    }
     if args.len() == 2 && args[1] == "engine-commit" {
         println!("{}", env!("OTB_ENGINE_COMMIT"));
         return;
@@ -549,10 +610,10 @@ async fn main() {
     // carrying whitespace - a shell export, a CI variable, a generated env file's trailing newline -
     // made `parse()` fail, `.ok()` swallow it, and the mock silently keep 0 while the operator believed
     // the TTFT they set was in effect.
-    let ttft_ms: u64 = std::env::var("MOCK_TTFT_MS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0);
+    //
+    // AND STRICT: a value that is set but does not parse refuses to start (env_knob) instead of
+    // `.ok()` swallowing it into the default, which ran the mock at a pace nobody asked for.
+    let ttft_ms: u64 = env_knob("MOCK_TTFT_MS", 0);
     // TRIMMED, BECAUSE THE ENGINE TRIMS. These knobs are read on BOTH sides of the measurement: the
     // mock paces frames by them, and the engine reads MOCK_STREAM_INTERVAL_MS to know what pace to
     // judge a stall against. The engine's reader is `v.trim().parse()`; this one was `v.parse()`, so a
@@ -560,15 +621,9 @@ async fn main() {
     // mock silently keep its DEFAULT while the engine believed the new number. Nothing reports that:
     // the two sides simply measure against different cadences, and every streaming rung is then judged
     // by a pace nothing is producing. One truth read two ways is the drift this repo keeps finding.
-    let envn = |k: &str, d: u64| {
-        std::env::var(k)
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(d)
-    };
-    let s_chunks = envn("MOCK_STREAM_CHUNKS", 64) as u32;
-    let s_interval = envn("MOCK_STREAM_INTERVAL_MS", 20);
-    let s_bytes = envn("MOCK_STREAM_CHUNK_BYTES", 16) as usize;
+    let s_chunks: u32 = env_knob("MOCK_STREAM_CHUNKS", 64);
+    let s_interval: u64 = env_knob("MOCK_STREAM_INTERVAL_MS", 20);
+    let s_bytes: usize = env_knob("MOCK_STREAM_CHUNK_BYTES", 16);
     let frames = Arc::new(StreamFrames::build(s_chunks, s_interval, s_bytes));
     // The STARTING state only. `/__mock/record` changes it at runtime, which is how the harness keeps
     // its load windows running against exactly the mock behaviour every previously published number
@@ -592,7 +647,7 @@ async fn main() {
     let listener = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            match TcpListener::bind(addr).await {
+            match bind_listener(addr) {
                 Ok(l) => break l,
                 Err(e) if std::time::Instant::now() < deadline => {
                     eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port - retrying");
@@ -626,7 +681,10 @@ async fn main() {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
+                // Back off briefly: a persistent accept error (EMFILE/ENFILE) returns at once, and
+                // retrying immediately spins a core the gateway under test is competing for.
                 eprintln!("mock: accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
         };
@@ -716,6 +774,19 @@ mod tests {
         assert!(!request_shape_ok(
             "bedrock",
             br#"{"model":"m","messages":[{"role":"user","content":"hello"}]}"#
+        ));
+    }
+
+    #[test]
+    fn bedrock_request_validation_ignores_json_whitespace() {
+        assert!(request_shape_ok(
+            "bedrock",
+            br#"{ "messages": [ { "role": "user", "content": [ { "text": "hello" } ] } ] }"#
+        ));
+        // an inferenceConfig alone does not make plain-string content Converse
+        assert!(!request_shape_ok(
+            "bedrock",
+            br#"{"messages":[{"content":"hello"}],"inferenceConfig":{"maxTokens":16}}"#
         ));
     }
 
@@ -939,6 +1010,13 @@ mod tests {
             1,
             "a one byte payload must give every frame the same size, got {sizes:?}"
         );
+        // AND STILL DISTINCT FROM ITS NEIGHBOUR. Truncation kept the LEADING digits, so frames 10..19
+        // were all "1" at width 1 and a gateway's repeat-guard saw identical consecutive tokens.
+        for deltas in [&f.openai_deltas, &f.anthropic_deltas] {
+            for w in deltas.windows(2) {
+                assert_ne!(w[0], w[1], "consecutive deltas must differ even at width 1");
+            }
+        }
     }
 
     // A zero-chunk stream must still build: `chunks.max(1)` keeps the delta vector non-empty, and
@@ -1220,6 +1298,36 @@ mod tests {
         assert_eq!(dialect_for("/v2/chat"), "cohere");
         assert_eq!(dialect_for("/v1beta/models/m:generateContent"), "gemini");
         assert_eq!(dialect_for("/something/else"), "other");
+        // A model discovery call is not a request on a dialect's endpoint: recorded under gemini it
+        // bumped that count and overwrote body_ok with false (an empty GET has no request shape).
+        assert_eq!(dialect_for("/v1beta/models"), "other");
+        assert_eq!(dialect_for("/v1/models"), "other");
+        assert_eq!(dialect_for("/v1/models?limit=100"), "other");
+    }
+
+    // The explicit-backlog bind must still give a listener that accepts (the kernel clamps the
+    // backlog to somaxconn rather than refusing it).
+    #[tokio::test]
+    async fn the_explicit_backlog_listener_binds_and_accepts() {
+        let listener = match super::bind_listener("127.0.0.1:0".parse().unwrap()) {
+            Ok(l) => l,
+            Err(e) => panic!("loopback bind with LISTEN_BACKLOG must succeed: {e}"),
+        };
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr);
+        let (accepted, connected) = tokio::join!(listener.accept(), client);
+        assert!(accepted.is_ok() && connected.is_ok());
+    }
+
+    // Unset and blank take the default; a set value is trimmed like the engine trims it. (A value
+    // that does not parse exits the process, so it is not exercised in-process.)
+    #[test]
+    fn env_knob_defaults_when_unset_or_blank_and_trims_a_set_value() {
+        assert_eq!(super::env_knob("OTB_MOCK_TEST_KNOB_UNSET", 7u64), 7);
+        std::env::set_var("OTB_MOCK_TEST_KNOB_BLANK", "  ");
+        assert_eq!(super::env_knob("OTB_MOCK_TEST_KNOB_BLANK", 7u64), 7);
+        std::env::set_var("OTB_MOCK_TEST_KNOB_SET", " 42\n");
+        assert_eq!(super::env_knob("OTB_MOCK_TEST_KNOB_SET", 7u64), 42);
     }
 
     // ── request body cap ────────────────────────────────────────────────────────────────────────

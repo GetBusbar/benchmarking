@@ -1,0 +1,28 @@
+{
+  "engine_commit": "fe27cc5aeae4479ac61efc577014f8cb2c9a759b",
+  "mock_sha256": "6b6215803d89be23b0159ba0f29793adc55ce2a67fdb6d8a25fc1b01591eb19a",
+  "load_generator_sha256": "c37187ec92917946febc87350a15b320d72e53a5e96cc355dfbfe1e63d244674",
+  "instance_type": "m7g.4xlarge",
+  "region": "ap-south-1",
+  "instance_id": "i-09b5563bac58135de",
+  "measured_at": "2026-11-09T20:18:02.685664+00:00",
+  "concurrency": 32,
+  "duration_seconds": 8,
+  "mock_cores": "10-15",
+  "load_cores": "4-9",
+  "observations": [
+    {
+      "rps": 98712.0,
+      "fail": 0
+    },
+    {
+      "rps": 101801.0,
+      "fail": 0
+    },
+    {
+      "rps": 98195.0,
+      "fail": 0
+    }
+  ],
+  "evidence": "2026-11-09-fe27cc5a-arm64-control.txt"
+}

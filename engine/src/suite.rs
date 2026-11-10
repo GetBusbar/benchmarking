@@ -185,6 +185,8 @@ fn judge_added_latency(
     out.added_latency_p99_us = as_i64(metrics.get("added_latency_p99_us"));
     out.gateway_c1_p99_us = as_i64(metrics.get("gateway_c1_p99_us"));
     out.direct_c1_p99_us = as_i64(metrics.get("direct_c1_p99_us"));
+    out.gateway_c1_samples = as_i64(metrics.get("gateway_c1_samples"));
+    out.direct_c1_samples = as_i64(metrics.get("direct_c1_samples"));
     out.c1_note = c1_note(metrics);
 }
 
@@ -452,6 +454,8 @@ fn cell_stream(
         stream_c1_note: stream_c1_note(metrics),
         ttft_gw_samples: as_i64(metrics.get("ttft_gw_samples")),
         ttft_direct_samples: as_i64(metrics.get("ttft_direct_samples")),
+        gap_gw_samples: gap_samples(metrics, "gateway_c1_frames"),
+        gap_direct_samples: gap_samples(metrics, "direct_c1_frames"),
         // THE RUNGS THE TWO STREAM SEARCHES WALKED, published whatever the verdict, for the same
         // reason `sweep_max_proxy` is: when a ceiling is suppressed as mock-bound or absent because
         // the search ran out of range, the rungs are the only thing that explains why.
@@ -460,6 +464,16 @@ fn cell_stream(
     };
     judge_streams_sustained(cfg, dialect, &mut out, metrics);
     out
+}
+
+/// The inter-frame gaps one c=1 stream yielded, from its frame count: a stream of n frames has n-1
+/// gaps, which is exactly the population `metric::gap_percentile_us` ranks over. Absent with the
+/// frame count's own reason.
+fn gap_samples(
+    metrics: &std::collections::BTreeMap<&'static str, Measurement<f64>>,
+    frames_key: &str,
+) -> Measurement<i64> {
+    as_i64(metrics.get(frames_key)).map(|f| (f - 1).max(0))
 }
 
 /// What the concurrency-1 streaming legs were actually taken over.
@@ -672,9 +686,15 @@ fn metric_definitions() -> std::collections::BTreeMap<String, String> {
              stopped qualifying - that pair is the proof it is a boundary. When nothing above it \
              disqualified, the sweep ran out of range instead of finding a limit, and the reading sets \
              `lower_bound: true`: the rate is real, it is simply a floor rather than a ceiling. \
+             A window in which the gateway completed no request at all is a failed rung like any \
+             other. Only a RIG stop (a thread or connection this host could not make, or a load \
+             generator with no readable result) interrupts the sweep; its frontier is then read from \
+             the rungs below the stop, every reading sets `lower_bound: true`, and the absences name \
+             the rung and the cause. A bound no rung met publishes `bound_not_met`. \
              \
              The `p99_us` on a reading is the tail the winning rung ACTUALLY produced, never the bound - \
-             4ms under a 100ms bound is not the same finding as 99ms.",
+             4ms under a 100ms bound is not the same finding as 99ms - and `samples` is the number of \
+             completed requests it was taken over.",
             bounds.join(", ")
         ),
     );
@@ -745,10 +765,8 @@ const QUALIFY_BAND_PCT: f64 = 20.0;
 /// BASELINE was the noisy run, and failing on it would terminate healthy boxes and burn the
 /// replacement budget. Only degradation counts.
 ///
-/// This RECORDS the verdict; it does not yet stop a failing run. `qualify`'s own header says the
-/// incident it exists to prevent is running a full matrix on a bad box, so gating the run on a Fail
-/// is the natural next step - but that changes what a run DOES, and it is a decision to take
-/// deliberately rather than as a side effect of wiring the module in.
+/// This takes ONE observation and judges it; `qualify_box_with_retry` decides what a Fail does to
+/// the run.
 fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     let direct = RunConfig {
         gateway_addr: cfg.mock_addr,
@@ -812,6 +830,62 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
     })
 }
 
+/// How long to wait before re-taking a failed box qualification.
+const QUALIFY_RETRY_PAUSE: Duration = Duration::from_secs(5);
+
+/// Qualify the box, re-taking a Fail once, and refuse the run only if the retry fails too.
+///
+/// A FAIL REFUSES THE GATEWAY (`BOX_QUALIFICATION_FAILED`, the marker an orchestrator greps for): the
+/// incident `qualify` exists to prevent is a whole grid measured on a bad box. But the observation
+/// is a single c=32 window, and one transient bad window would otherwise throw away a gateway's whole
+/// run - August drift was -3.3..+2.7 % against a 20 % band, so a real fail is a broken box and a
+/// broken box fails twice. So a Fail is re-taken once after `pause`, and the second verdict decides.
+/// Seed and skip keep their meaning and are never retried or refused.
+///
+/// WHEN A RETRY HAPPENED, BOTH OBSERVATIONS ARE PUBLISHED: the top-level fields are the deciding
+/// (second) verdict, exactly the shape a single-attempt verdict has, and `attempts` lists both. The
+/// attempt entries name their rate `rps`, not `observed_rps`, on purpose: run-on-ec2.sh builds the
+/// next run's baseline by grepping every `"observed_rps"` out of the snapshots, and a failed first
+/// attempt must not enter that median. A verdict with no retry carries no `attempts` key at all, so
+/// it is byte-for-byte the August shape.
+///
+/// `measure` and `pause` are injected so the rule is testable without a mock or a 5 s sleep.
+fn qualify_box_with_retry(
+    mut measure: impl FnMut() -> serde_json::Value,
+    mut pause: impl FnMut(Duration),
+) -> Result<serde_json::Value, SnapshotError> {
+    fn failed(v: &serde_json::Value) -> bool {
+        v.get("outcome").and_then(serde_json::Value::as_str) == Some("fail")
+    }
+    fn attempt(v: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "outcome": v.get("outcome").cloned().unwrap_or(serde_json::Value::Null),
+            "rps": v.get("observed_rps").cloned().unwrap_or(serde_json::Value::Null),
+            "drift_pct": v.get("drift_pct").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    let first = measure();
+    if !failed(&first) {
+        return Ok(first);
+    }
+    eprintln!(
+        "suite: box qualification failed ({}) - re-taking it once after {}s",
+        attempt(&first),
+        QUALIFY_RETRY_PAUSE.as_secs()
+    );
+    pause(QUALIFY_RETRY_PAUSE);
+    let mut second = measure();
+    let attempts = serde_json::Value::Array(vec![attempt(&first), attempt(&second)]);
+    if let Some(obj) = second.as_object_mut() {
+        obj.insert("attempts".to_string(), attempts);
+    }
+    if failed(&second) {
+        return Err(SnapshotError::BoxQualificationFailed { verdict: second });
+    }
+    Ok(second)
+}
+
 /// Every previous box-qualification observation available to this run.
 ///
 /// TWO SOURCES, BECAUSE THE BOX HAS NO HISTORY OF ITS OWN.
@@ -832,11 +906,18 @@ fn qualify_box(cfg: &SuiteConfig, history: &[f64]) -> serde_json::Value {
 /// which is why one pooled baseline across gateways is the right comparison and not a per-gateway
 /// one: it is the box being qualified.
 fn qualify_history(results_dir: &Path) -> Vec<f64> {
+    qualify_history_with(
+        results_dir,
+        std::env::var("OTB_QUALIFY_BASELINE").ok().as_deref(),
+    )
+}
+
+/// `qualify_history` over the env value as an argument (`None` when unset), so a test can exercise
+/// the rule without mutating a process-global that every concurrently running suite test reads -
+/// and that, now a confirmed Fail refuses the run, would turn those tests into refusals.
+fn qualify_history_with(results_dir: &Path, handed: Option<&str>) -> Vec<f64> {
     let mut out = qualify_history_on_disk(results_dir);
-    if let Some(v) = std::env::var("OTB_QUALIFY_BASELINE")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-    {
+    if let Some(v) = handed.and_then(|v| v.trim().parse::<f64>().ok()) {
         if v > 0.0 {
             out.push(v);
         }
@@ -903,6 +984,20 @@ pub fn run_suite_with(
     cfg: &SuiteConfig,
     gateway_addr: SocketAddr,
     metrics: &[&dyn crate::metric::Metric],
+) -> Result<Paths, SnapshotError> {
+    run_suite_qualified(cfg, gateway_addr, metrics, qualify_box, std::thread::sleep)
+}
+
+/// `run_suite_with` with the box qualification and its retry pause injected, so a test can drive
+/// the qualification gate through the whole suite without a real c=32 window or a 5 s sleep. (Under
+/// `cargo test` the load generator's child is the test binary, so a real qualification window never
+/// measures and `qualify::judge` reads that as a Fail.)
+fn run_suite_qualified(
+    cfg: &SuiteConfig,
+    gateway_addr: SocketAddr,
+    metrics: &[&dyn crate::metric::Metric],
+    mut qualify: impl FnMut(&SuiteConfig, &[f64]) -> serde_json::Value,
+    pause: impl FnMut(Duration),
 ) -> Result<Paths, SnapshotError> {
     // A HEADER THIS MANIFEST DECLARES THAT THE RIG ALREADY SENDS ITSELF, said once per gateway
     // before anything is measured.
@@ -1039,7 +1134,11 @@ pub fn run_suite_with(
     // THE BOX IS QUALIFIED BEFORE THE GRID, not after. The verdict is about the machine every
     // number below is measured on, so taking it afterwards would judge a box using a reading taken
     // once the run had already finished loading it.
-    let box_qualify = qualify_box(cfg, &qualify_history(Path::new(&cfg.results_dir)));
+    //
+    // A FAIL CONFIRMED BY ONE RETRY REFUSES THE GATEWAY before anything is measured: no snapshot is
+    // written, so the board keeps whatever it already had for this gateway.
+    let history = qualify_history(Path::new(&cfg.results_dir));
+    let box_qualify = qualify_box_with_retry(|| qualify(cfg, &history), pause)?;
 
     let mut upstreams: HashMap<String, Upstream> = HashMap::new();
     let mut any_served = false;
@@ -1204,27 +1303,40 @@ pub fn run_suite_with(
 
         // Read before `entry` takes ownership of the key.
         let configurable = cfg.manifest.egress.iter().any(|e| e == &eg);
-        upstreams
-            .entry(eg)
-            // `configurable` is whether this gateway can be POINTED at this upstream at all, which
-            // is exactly what the manifest's `egress` list declares, so it is read from there rather
-            // than hardcoded. It was `true` unconditionally, which made the field a constant: every
-            // egress column claimed to be configured, including ones the manifest never wired, and a
-            // constant that is published as an observation is the shape of a false claim even when
-            // it happens to be right. `served` stays true here because this entry is only created
-            // when a cell for this egress produced a row at all.
-            .or_insert_with(|| Upstream {
-                configurable,
-                served: true,
-                ..Default::default()
-            })
-            .cells
-            .insert(ing, cell);
+        let cell_served = matches!(cell.served, RecServed::Bool(true));
+        record_upstream_cell(&mut upstreams, eg, ing, configurable, cell_served, cell);
     });
 
     // The final write always happens, so a grid with a single egress column is not lost.
     let _ = written;
     flush(cfg, &upstreams, any_served, Some(box_qualify))
+}
+
+/// File one cell under its egress column, creating the column on its first cell.
+///
+/// `configurable` is whether this gateway can be POINTED at this upstream at all, which is exactly
+/// what the manifest's `egress` list declares, so it is read from there rather than hardcoded.
+///
+/// `served` is OBSERVED, not assumed: the column came up if at least one cell was served through
+/// it. It used to be a constant `true` for every column with a row, including columns whose every
+/// cell was untestable, refused or failed - and `lib/promote_guard.py` reads
+/// `upstreams.<egress>.served` as "this matrix served something", so the constant made a column
+/// that served nothing look served.
+fn record_upstream_cell(
+    upstreams: &mut HashMap<String, Upstream>,
+    egress: String,
+    ingress: String,
+    configurable: bool,
+    cell_served: bool,
+    cell: Cell,
+) {
+    let upstream = upstreams.entry(egress).or_insert_with(|| Upstream {
+        configurable,
+        served: false,
+        ..Default::default()
+    });
+    upstream.served |= cell_served;
+    upstream.cells.insert(ingress, cell);
 }
 
 /// A REFUTED RE-VERIFICATION WITHHOLDS THE NUMBERS, IT DOES NOT MERELY ANNOTATE THEM.
@@ -1360,6 +1472,8 @@ fn withhold_refuted_perf(p: CellPerf, why: &str) -> CellPerf {
         added_latency_p99_us: withheld(),
         gateway_c1_p99_us: withheld(),
         direct_c1_p99_us: withheld(),
+        gateway_c1_samples: withheld(),
+        direct_c1_samples: withheld(),
         // THE COST GOES TOO, for exactly the reason the latency legs do: CPU burned serving a wire
         // that is not this pairing is not this pairing's cost. Withholding the rate while publishing
         // what it cost would leave a cost-per-request for a request the cell never served.
@@ -1449,6 +1563,8 @@ fn withhold_refuted_stream(s: crate::record::CellStream, why: &str) -> crate::re
         // withheld number would describe the weight of a figure this cell is refusing to state.
         ttft_gw_samples: withheld(&detail),
         ttft_direct_samples: withheld(&detail),
+        gap_gw_samples: withheld(&detail),
+        gap_direct_samples: withheld(&detail),
         added_gap_p50_us: withheld(&detail),
         added_gap_p99_us: withheld(&detail),
         streams_sustained: withheld(&detail),
@@ -1526,6 +1642,35 @@ fn rendered_config(cfg: &SuiteConfig) -> crate::record::ConfigFiles {
     crate::record::ConfigFiles { files }
 }
 
+/// A kernel tunable read from /proc/sys, or None when the file is missing (non-Linux), unreadable,
+/// or not a number. Never a 0 standing in for "could not read".
+fn proc_sys_u64(path: &str) -> Option<u64> {
+    parse_proc_sys_u64(&std::fs::read_to_string(path).ok()?)
+}
+
+fn parse_proc_sys_u64(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
+/// The build receipt a source-built gateway's build script left in its directory, verbatim.
+///
+/// `None` when there is none (image gateways, older build scripts). A receipt that exists but
+/// cannot be read or is not JSON is recorded as an explicit `{"error": ...}` object: the finished
+/// measurement must not be discarded over its own provenance, and the gap must not be silent.
+fn built_gateway_provenance(dir: &Path) -> Option<serde_json::Value> {
+    let path = dir.join(".build-provenance.json");
+    let why = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => return Some(v),
+            Err(e) => format!("{} is not valid JSON: {e}", path.display()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => format!("{} could not be read: {e}", path.display()),
+    };
+    eprintln!("suite: gateway build provenance unusable: {why}");
+    Some(serde_json::json!({ "error": why }))
+}
+
 fn flush(
     cfg: &SuiteConfig,
     upstreams: &HashMap<String, Upstream>,
@@ -1544,6 +1689,8 @@ fn flush(
             // The load generator is this engine's own `loadgen` subcommand, so rig.engine names it.
             ugen: None,
             box_qualify,
+            somaxconn: proc_sys_u64("/proc/sys/net/core/somaxconn"),
+            tcp_max_syn_backlog: proc_sys_u64("/proc/sys/net/ipv4/tcp_max_syn_backlog"),
         },
     );
     // Resolved once and used at BOTH levels. `gateway_build` re-resolves the manifest's launch spec,
@@ -1553,6 +1700,7 @@ fn flush(
         gateway_build(cfg).unwrap_or_else(|| format!("otb-engine {}", env!("CARGO_PKG_VERSION")));
     let snap = ResultSnapshot {
         schema_version: 1,
+        gateway_provenance: built_gateway_provenance(&cfg.gw_dir),
         definitions: metric_definitions(),
         config: rendered_config(cfg),
         gateway: cfg.manifest.name.clone(),
@@ -1604,6 +1752,16 @@ fn flush(
 
 #[cfg(test)]
 mod tests {
+    // /proc/sys values end in a newline; anything that is not a number reads as unknown, and a
+    // missing file (macOS) is unknown too, never 0.
+    #[test]
+    fn a_proc_sys_tunable_parses_trimmed_and_is_none_when_unreadable() {
+        assert_eq!(super::parse_proc_sys_u64("65535\n"), Some(65535));
+        assert_eq!(super::parse_proc_sys_u64(""), None);
+        assert_eq!(super::parse_proc_sys_u64("abc\n"), None);
+        assert_eq!(super::proc_sys_u64("/nonexistent/otb/somaxconn"), None);
+    }
+
     // A DEFINITION THAT DRIFTS FROM THE CODE IS WORSE THAN NO DEFINITION.
     //
     // The retired throughput gate is the case: every surface said "p99 < 1 s" while the engine enforced
@@ -1692,7 +1850,7 @@ mod tests {
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
         let paths =
-            run_suite_with(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
+            run_suite_seeded(&cfg, gw, crate::metric::METRICS).expect("the suite should write");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
 
@@ -1728,7 +1886,11 @@ mod tests {
                     tokio::spawn(async move {
                         let mut b = [0u8; 4096];
                         while c.read(&mut b).await.unwrap_or(0) > 0 {
-                            let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                            let body = crate::run::TEST_PROTOCOL_OK;
+                            let r = format!(
+                                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
                             if c.write_all(r.as_bytes()).await.is_err() {
                                 return;
                             }
@@ -1850,7 +2012,7 @@ mod tests {
             template: "config.gen.yaml.tmpl".into(),
             output: "config.gen.yaml".into(),
         }];
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the run should complete");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the run should complete");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         assert_eq!(
@@ -1889,7 +2051,7 @@ mod tests {
             seen: std::sync::Arc::clone(&seen),
         };
         let metrics: Vec<&dyn crate::metric::Metric> = vec![&watcher];
-        run_suite_with(&cfg, gw, &metrics).expect("the run should complete");
+        run_suite_seeded(&cfg, gw, &metrics).expect("the run should complete");
 
         let seen = seen.lock().expect("watcher lock").clone();
         assert_eq!(seen.len(), 4, "two dialects is a 2x2 grid: {seen:?}");
@@ -1980,7 +2142,7 @@ mod tests {
         };
         crate::snapshot::write_snapshot(&dir, &seed).expect("seed snapshot should write");
 
-        let result = run_suite_with(&cfg, gw, &[]);
+        let result = run_suite_seeded(&cfg, gw, &[]);
         assert!(
             result.is_ok(),
             "a checkpoint guard trip must not abort the run: {result:?}"
@@ -2015,7 +2177,7 @@ mod tests {
         let dir = tmpdir("ok");
         let gw = serve(200);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite should write a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite should write a snapshot");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         assert_eq!(back.gateway, "gw");
@@ -2077,7 +2239,7 @@ mod tests {
         let dir = tmpdir("unserved");
         let gw = serve(404);
         let cfg = cfg_for(&dir, gw);
-        let paths = run_suite_with(&cfg, gw, &[]).expect("a refusing gateway is still a result");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("a refusing gateway is still a result");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("parse");
         let up = back
@@ -2088,7 +2250,184 @@ mod tests {
         let cell = up.cells.get("openai").expect("the cell row exists");
         assert!(!matches!(cell.served, RecServed::Bool(true)));
         assert!(cell.perf.is_none(), "an unserved cell carries no perf");
+        assert!(
+            !up.served,
+            "a column none of whose cells was served must not publish served: true"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn verdict(outcome: &str, rps: f64) -> serde_json::Value {
+        serde_json::json!({"outcome": outcome, "observed_rps": rps, "drift_pct": -1.0})
+    }
+
+    /// The suite with a box that seeds. Under `cargo test` a real qualification window cannot
+    /// measure (the load generator's child is the test binary), which `qualify::judge` reads as a
+    /// Fail and which would now refuse every run; tests about the grid are not tests of the box.
+    fn run_suite_seeded(
+        cfg: &SuiteConfig,
+        gw: SocketAddr,
+        metrics: &[&dyn crate::metric::Metric],
+    ) -> Result<Paths, SnapshotError> {
+        run_suite_qualified(
+            cfg,
+            gw,
+            metrics,
+            |_, _| verdict("seed", 1.0),
+            |_| panic!("a seeding box never pauses"),
+        )
+    }
+
+    // The gate through the WHOLE suite: a judge that fails once and then passes lets the run go on
+    // and write its snapshot, carrying both observations in rig.box_qualify.
+    #[test]
+    fn a_suite_whose_box_fails_qualification_once_still_measures_and_records_both_attempts() {
+        let dir = tmpdir("qualify-retry-pass");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let mut script = vec![verdict("fail", 10.0), verdict("pass", 20.0)].into_iter();
+        let mut pauses = 0;
+        let paths = run_suite_qualified(
+            &cfg,
+            gw,
+            &[],
+            |_, _| script.next().expect("exactly two qualification attempts"),
+            |_| pauses += 1,
+        )
+        .expect("a pass on the retry lets the suite proceed");
+        assert_eq!(pauses, 1);
+        let back: ResultSnapshot =
+            serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
+                .expect("parse");
+        let bq = back
+            .rig
+            .and_then(|r| r.box_qualify)
+            .expect("box_qualify published");
+        assert_eq!(bq["outcome"], "pass");
+        assert_eq!(bq["attempts"].as_array().map(Vec::len), Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // fail, fail: the gateway is refused before any grid is measured, and nothing is written.
+    #[test]
+    fn a_suite_whose_box_fails_qualification_twice_is_refused_and_writes_nothing() {
+        let dir = tmpdir("qualify-retry-fail");
+        let gw = serve(200);
+        let cfg = cfg_for(&dir, gw);
+        let err = run_suite_qualified(&cfg, gw, &[], |_, _| verdict("fail", 10.0), |_| {})
+            .expect_err("a confirmed fail refuses the gateway");
+        assert!(
+            matches!(err, SnapshotError::BoxQualificationFailed { .. }),
+            "{err:?}"
+        );
+        let written = std::fs::read_dir(&dir)
+            .map(|d| d.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(written, 0, "a refused gateway must not write a snapshot");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ONE TRANSIENT BAD WINDOW DOES NOT THROW AWAY A GATEWAY'S RUN: a fail followed by a pass
+    // proceeds, after exactly one pause, publishing the passing verdict with both attempts.
+    #[test]
+    fn a_box_qualification_that_fails_once_then_passes_lets_the_suite_proceed() {
+        let mut script = vec![verdict("fail", 100.0), verdict("pass", 200.0)].into_iter();
+        let mut pauses = Vec::new();
+        let v = qualify_box_with_retry(|| script.next().expect("two attempts"), |d| pauses.push(d))
+            .expect("a pass on the retry qualifies the box");
+        assert_eq!(pauses, vec![QUALIFY_RETRY_PAUSE]);
+        assert_eq!(v["outcome"], "pass");
+        assert_eq!(
+            v["observed_rps"], 200.0,
+            "the deciding attempt is the top level"
+        );
+        let attempts = v["attempts"]
+            .as_array()
+            .expect("both observations recorded");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["outcome"], "fail");
+        assert_eq!(attempts[0]["rps"], 100.0);
+        assert_eq!(attempts[1]["outcome"], "pass");
+        // run-on-ec2.sh greps every "observed_rps" for the next baseline; a failed attempt's rate
+        // must not be one of them.
+        assert_eq!(v.to_string().matches("\"observed_rps\"").count(), 1);
+    }
+
+    #[test]
+    fn a_box_qualification_that_fails_twice_refuses_the_gateway() {
+        let mut script = vec![verdict("fail", 100.0), verdict("fail", 90.0)].into_iter();
+        let mut pauses = 0;
+        let err = qualify_box_with_retry(|| script.next().expect("two attempts"), |_| pauses += 1)
+            .expect_err("a confirmed fail refuses");
+        assert_eq!(pauses, 1);
+        let SnapshotError::BoxQualificationFailed { verdict } = &err else {
+            panic!("expected BoxQualificationFailed, got {err:?}");
+        };
+        assert_eq!(verdict["attempts"].as_array().map(Vec::len), Some(2));
+        assert!(
+            err.to_string().starts_with("BOX_QUALIFICATION_FAILED:"),
+            "an orchestrator greps for this marker: {err}"
+        );
+    }
+
+    // Pass, seed and skip are taken once: no pause, no retry, no `attempts` key.
+    #[test]
+    fn a_box_qualification_that_does_not_fail_is_taken_once_and_unchanged() {
+        for outcome in ["pass", "seed", "skip"] {
+            let mut calls = 0;
+            let v = qualify_box_with_retry(
+                || {
+                    calls += 1;
+                    verdict(outcome, 1.0)
+                },
+                |_| panic!("no pause without a fail"),
+            )
+            .expect("not a fail");
+            assert_eq!(calls, 1);
+            assert_eq!(v, verdict(outcome, 1.0));
+        }
+    }
+
+    // `served` on an egress column is observed from its cells: any served cell makes it served, and
+    // a later unserved cell does not take that back.
+    #[test]
+    fn an_upstream_is_served_exactly_when_one_of_its_cells_was() {
+        let mut up: HashMap<String, Upstream> = HashMap::new();
+        let unserved = || Cell {
+            served: RecServed::Bool(false),
+            ..Default::default()
+        };
+        record_upstream_cell(
+            &mut up,
+            "openai".into(),
+            "openai".into(),
+            true,
+            false,
+            unserved(),
+        );
+        assert!(!up["openai"].served, "only unserved cells so far");
+        record_upstream_cell(
+            &mut up,
+            "openai".into(),
+            "anthropic".into(),
+            true,
+            true,
+            Cell::default(),
+        );
+        assert!(up["openai"].served, "one served cell serves the column");
+        record_upstream_cell(
+            &mut up,
+            "openai".into(),
+            "gemini".into(),
+            true,
+            false,
+            unserved(),
+        );
+        assert!(
+            up["openai"].served,
+            "a later unserved cell does not unserve it"
+        );
+        assert_eq!(up["openai"].cells.len(), 3);
     }
 
     // ── apply_sustained_verdict: the same rig-bound machinery as the peak, applied to the gate ──────
@@ -2297,6 +2636,39 @@ mod tests {
         );
     }
 
+    // The counts are published as fields too, not only as prose in the note.
+    #[test]
+    fn the_c1_sample_counts_reach_the_record_as_fields() {
+        let mut out = empty_perf();
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert("gateway_c1_samples", Measurement::Measured(4_812.0));
+        metrics.insert("direct_c1_samples", Measurement::Measured(5_003.0));
+        judge_added_latency(&mut out, &metrics);
+        assert_eq!(out.gateway_c1_samples.copied(), Some(4_812));
+        assert_eq!(out.direct_c1_samples.copied(), Some(5_003));
+    }
+
+    #[test]
+    fn the_gap_sample_count_is_frames_minus_one_and_absent_with_the_frames_reason() {
+        let mut metrics: std::collections::BTreeMap<&'static str, Measurement<f64>> =
+            std::collections::BTreeMap::new();
+        metrics.insert("gateway_c1_frames", Measurement::Measured(64.0));
+        metrics.insert("direct_c1_frames", Measurement::Measured(0.0));
+        assert_eq!(
+            gap_samples(&metrics, "gateway_c1_frames").copied(),
+            Some(63)
+        );
+        assert_eq!(gap_samples(&metrics, "direct_c1_frames").copied(), Some(0));
+        metrics.insert(
+            "gateway_c1_frames",
+            Measurement::absent_because(Absent::Untestable, "no SSE for this dialect"),
+        );
+        let g = gap_samples(&metrics, "gateway_c1_frames");
+        assert_eq!(g.reason(), Some(&Absent::Untestable));
+        assert_eq!(g.detail(), Some("no SSE for this dialect"));
+    }
+
     // No counts means the group never completed a c=1 window, and the added-latency fields are
     // already absent WITH the group's reason. A note restating that would publish one fact twice, in
     // two wordings, which is what a `Measurement`'s reason exists to prevent.
@@ -2353,7 +2725,7 @@ mod tests {
         let mut cfg = cfg_for(&dir, gw);
         // Two dialects, so the grid contains a translation cell rather than only the diagonal.
         cfg.dialects = vec![Dialect::Openai, Dialect::Anthropic];
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
 
@@ -2410,7 +2782,8 @@ mod tests {
         let mock = serve(200);
         let mut cfg = cfg_for(&dir, gw);
         cfg.mock_addr = mock;
-        let paths = run_suite_with(&cfg, gw, &[]).expect("a declining gateway still writes a row");
+        let paths =
+            run_suite_seeded(&cfg, gw, &[]).expect("a declining gateway still writes a row");
         let text = std::fs::read_to_string(&paths.current).expect("current file");
         let back: ResultSnapshot = serde_json::from_str(&text).expect("its own output must parse");
         let cell = back
@@ -2444,14 +2817,13 @@ mod tests {
     fn a_handed_baseline_lets_the_box_qualification_actually_judge() {
         let empty = std::path::Path::new("/nonexistent-results-dir-for-this-test");
         // What the field had: nothing on disk, and nothing handed over.
-        std::env::remove_var("OTB_QUALIFY_BASELINE");
         assert!(
-            qualify_history(empty).is_empty(),
+            qualify_history_with(empty, None).is_empty(),
             "with no history the baseline is absent and the qualification can only seed"
         );
         let (outcome, drift) = crate::qualify::judge(
             Measurement::Measured(500_000.0),
-            crate::qualify::rolling_baseline(qualify_history(empty)),
+            crate::qualify::rolling_baseline(qualify_history_with(empty, None)),
             QUALIFY_BAND_PCT,
             crate::qualify::Sense::HigherIsBetter,
         );
@@ -2463,14 +2835,13 @@ mod tests {
         );
 
         // What the orchestrator can hand over, since it holds the record the box does not.
-        std::env::set_var("OTB_QUALIFY_BASELINE", "497862");
-        assert_eq!(qualify_history(empty), vec![497_862.0]);
+        assert_eq!(qualify_history_with(empty, Some("497862")), vec![497_862.0]);
 
         // A healthy box - the widest real deviation across the 2026-07-28 field was 4.4% - passes.
         let judge_at = |rps: f64| {
             crate::qualify::judge(
                 Measurement::Measured(rps),
-                crate::qualify::rolling_baseline(qualify_history(empty)),
+                crate::qualify::rolling_baseline(qualify_history_with(empty, Some("497862"))),
                 QUALIFY_BAND_PCT,
                 crate::qualify::Sense::HigherIsBetter,
             )
@@ -2486,8 +2857,6 @@ mod tests {
         // The box this guard exists for: far enough under that its gateway's whole column would
         // have been measured on a rig nothing compared against anything.
         assert_eq!(judge_at(300_000.0), "fail");
-
-        std::env::remove_var("OTB_QUALIFY_BASELINE");
     }
 
     // WHAT IT RAN ON MUST REACH THE ARTIFACT.
@@ -2503,7 +2872,7 @@ mod tests {
         let mut cfg = cfg_for(&dir, gw);
         let label = "AWS m7g.4xlarge (16 cores / 64 GB), gateway pinned to 4";
         cfg.hardware = Some(label.into());
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let snap: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
                 .expect("parse");
@@ -2517,7 +2886,7 @@ mod tests {
         let dir2 = tmpdir("hardware-absent");
         let mut cfg2 = cfg_for(&dir2, gw);
         cfg2.hardware = None;
-        let paths2 = run_suite_with(&cfg2, gw, &[]).expect("the suite writes a snapshot");
+        let paths2 = run_suite_seeded(&cfg2, gw, &[]).expect("the suite writes a snapshot");
         let snap2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths2.current).expect("read"))
                 .expect("parse");
@@ -2539,7 +2908,7 @@ mod tests {
         let gw = serve(200);
         let mut cfg = cfg_for(&dir, gw);
         cfg.hardware = Some("AWS m7g.4xlarge (16 cores / 64 GB)".into());
-        let paths = run_suite_with(&cfg, gw, &[]).expect("the suite writes a snapshot");
+        let paths = run_suite_seeded(&cfg, gw, &[]).expect("the suite writes a snapshot");
         let back: ResultSnapshot =
             serde_json::from_str(&std::fs::read_to_string(&paths.current).expect("read"))
                 .expect("its own output must parse");
@@ -2744,5 +3113,45 @@ mod tests {
             mem.absences().contains_key("plateaued"),
             "and the absence must be reachable from the published absences map"
         );
+    }
+
+    // A SOURCE-BUILT GATEWAY'S RECEIPT REACHES THE ARTIFACT VERBATIM; no receipt is no field; a
+    // broken receipt is an explicit error object, never a silently dropped one or a lost run.
+    #[test]
+    fn built_gateway_identity_is_read_from_the_successful_build_receipt() {
+        let dir = tmpdir("build-proof");
+        let path = dir.join(".build-provenance.json");
+        let proof = serde_json::json!({
+            "source_commit": "a".repeat(40),
+            "source_dirty": false,
+            "binary_sha256": "b".repeat(64)
+        });
+        std::fs::write(&path, serde_json::to_vec(&proof).unwrap()).unwrap();
+        assert_eq!(built_gateway_provenance(&dir), Some(proof.clone()));
+        let mut cfg = cfg_for(&dir.join("results"), "127.0.0.1:1".parse().unwrap());
+        cfg.gw_dir = dir.clone();
+        std::fs::create_dir_all(&cfg.results_dir).unwrap();
+        let paths = flush(&cfg, &HashMap::new(), false, None).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.current).unwrap()).unwrap();
+        assert_eq!(snapshot["gateway_provenance"], proof);
+
+        std::fs::write(&path, b"broken json").unwrap();
+        let broken = built_gateway_provenance(&dir).expect("a broken receipt is recorded");
+        assert!(broken["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not valid JSON"));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(built_gateway_provenance(&dir), None);
+        let paths = flush(&cfg, &HashMap::new(), false, None).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.current).unwrap()).unwrap();
+        assert!(
+            snapshot.get("gateway_provenance").is_none(),
+            "no receipt must mean no field, so older readers see the shape they always did"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

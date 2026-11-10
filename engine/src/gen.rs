@@ -32,8 +32,8 @@
 // those are what the published numbers mean.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -44,6 +44,109 @@ const RESPONSE_BUDGET: Duration = Duration::from_secs(30);
 /// Hard ceiling on ONE connect attempt. A bound of ours exactly as `RESPONSE_BUDGET` is, and named
 /// so the code that charges a connect timeout can say which bound fired.
 const CONNECT_BUDGET: Duration = Duration::from_secs(5);
+
+/// How many failing exchanges a window keeps the bytes of. Diagnostics only: nothing measured
+/// reads them, and they never cross into `GenStats`.
+pub const FAILURE_SAMPLE_LIMIT: usize = 8;
+/// How many response bytes each kept failure holds.
+pub const FAILURE_RESPONSE_BYTES: usize = 1024;
+/// Ceiling on the `failure_samples=` field the child appends to its stats line, in hex characters.
+/// Enforced HERE, at the producer, by dropping whole samples from the end, so the parent never
+/// receives (and the run log never carries) more than this per window.
+pub const FAILURE_SAMPLES_HEX_CAP: usize = 32 * 1024;
+
+/// The first bytes of one failing exchange, kept as evidence of WHAT the peer sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FailureSample {
+    pub kind: String,
+    pub response_hex: String,
+    pub response_excerpt: String,
+    pub prefix_truncated: bool,
+}
+
+/// A bounded sink for failure evidence, shared by every lane of one window.
+///
+/// BOUNDED BY A CLAIM, not by the lock: a slot is claimed with one atomic update and only the
+/// first `FAILURE_SAMPLE_LIMIT` claimants ever allocate or take the mutex, so a window where every
+/// one of 10,000 lanes fails pays one relaxed atomic load per failure past the eighth and nothing
+/// else. Successes never enter this path.
+#[derive(Default)]
+pub struct FailureCapture {
+    claimed: AtomicUsize,
+    samples: Mutex<Vec<FailureSample>>,
+}
+
+impl FailureCapture {
+    pub fn record(&self, kind: &str, response: &[u8]) {
+        self.record_parts(kind, response, &[]);
+    }
+
+    /// Record `first` followed by `second` (a head and whatever body bytes arrived with it).
+    pub fn record_parts(&self, kind: &str, first: &[u8], second: &[u8]) {
+        if self.claimed.load(Ordering::Relaxed) >= FAILURE_SAMPLE_LIMIT
+            || self
+                .claimed
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    (n < FAILURE_SAMPLE_LIMIT).then_some(n + 1)
+                })
+                .is_err()
+        {
+            return;
+        }
+        let prefix: Vec<u8> = first
+            .iter()
+            .chain(second)
+            .take(FAILURE_RESPONSE_BYTES)
+            .copied()
+            .collect();
+        let sample = FailureSample {
+            kind: kind.to_string(),
+            response_hex: hex(&prefix),
+            response_excerpt: String::from_utf8_lossy(&prefix).into_owned(),
+            prefix_truncated: first.len().saturating_add(second.len()) > prefix.len(),
+        };
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sample);
+    }
+
+    pub fn samples(&self) -> Vec<FailureSample> {
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// The ` failure_samples=<hex of JSON>` suffix for the stats line, or an empty string when there is
+/// nothing to say. Capped at `FAILURE_SAMPLES_HEX_CAP` by dropping whole samples from the end, so
+/// the field is always one decodable value rather than a truncated one.
+pub fn failure_samples_field(samples: &[FailureSample]) -> String {
+    let mut keep = samples.len().min(FAILURE_SAMPLE_LIMIT);
+    while keep > 0 {
+        match serde_json::to_vec(&samples[..keep]) {
+            Ok(json) if json.len() * 2 <= FAILURE_SAMPLES_HEX_CAP => {
+                return format!(" failure_samples={}", hex(&json));
+            }
+            Ok(_) => keep -= 1,
+            Err(e) => {
+                eprintln!("loadgen: failure evidence could not be serialised ({e}); omitted");
+                return String::new();
+            }
+        }
+    }
+    String::new()
+}
 
 pub struct GenConfig {
     pub addr: SocketAddr,
@@ -302,6 +405,7 @@ async fn worker(
     req: Arc<String>,
     stop: Arc<AtomicBool>,
     window: Arc<Window>,
+    failures: Arc<FailureCapture>,
 ) -> WorkerStats {
     let mut w = WorkerStats {
         ok: 0,
@@ -341,6 +445,14 @@ async fn worker(
             if let Some(fault) = fault {
                 if window.contains(Instant::now()) {
                     w.charge_connect_fault(fault);
+                    failures.record(
+                        match fault {
+                            ConnectFault::RigExhausted => "host_connect_exhaustion",
+                            ConnectFault::OurConnectBound => "connect_budget_exceeded",
+                            ConnectFault::PeerRefused => "connect_error",
+                        },
+                        &[],
+                    );
                 }
                 // BACK OFF. Without this the loop spins at connect-refusal speed (microseconds on
                 // loopback) once a gateway stops accepting, burning a core and inflating `fail`
@@ -357,6 +469,8 @@ async fn worker(
             // A write that fails on a REUSED connection is the same stale-connection case as a read
             // that sees nothing: the peer closed it while it sat idle.
             if fresh {
+                // Nothing was read for THIS request; the buffer still holds the previous response.
+                acc.clear();
                 Exchange::Failed
             } else {
                 Exchange::ClosedBeforeAnyBytes
@@ -398,6 +512,7 @@ async fn worker(
                 if counted {
                     w.fail += 1;
                     w.budget_exceeded += 1;
+                    failures.record("response_budget_exceeded", &acc);
                 }
                 conn = None;
             }
@@ -405,6 +520,7 @@ async fn worker(
             Exchange::ClosedBeforeAnyBytes | Exchange::Failed => {
                 if counted {
                     w.fail += 1;
+                    failures.record("http_framing_or_connection_failure", &acc);
                 }
                 conn = None; // a broken connection is not reused: the next request would inherit its state
             }
@@ -442,9 +558,9 @@ fn build_request(cfg: &GenConfig) -> Result<String, String> {
         h.push_str(&format!("{k}: {v}\r\n"));
     }
     Ok(format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{}\r\n{}",
+        "POST {} HTTP/1.1\r\n{}content-type: application/json\r\ncontent-length: {}\r\n{}\r\n{}",
         cfg.path,
-        cfg.addr,
+        crate::http::host_line(cfg.addr, &cfg.headers),
         cfg.body.len(),
         h,
         cfg.body
@@ -522,9 +638,9 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
     let mut hdr_end: Option<usize> = None;
     // Parsed ONCE when the headers complete, then reused. Re-decoding and re-lowercasing the head
     // on every read put an allocation per read inside the timed window, which is charged to the
-    // gateway. `scanned` is how far the terminator search has already looked: rescanning the whole
-    // body on each read is O(N^2) in the number of reads, and chunked is the normal framing for a
-    // gateway that streams, so this was the worst case rather than the rare one.
+    // gateway. `scanned` is where the chunked parse resumes (the next unparsed chunk-size line):
+    // rescanning the whole body on each read is O(N^2) in the number of reads, and chunked is the
+    // normal framing for a gateway that streams, so this was the worst case rather than the rare one.
     let mut framing_kind: Option<Framing> = None;
     let mut scanned: usize = 0;
     let mut closing = false;
@@ -556,13 +672,18 @@ async fn read_response(s: &mut TcpStream, deadline: Instant, acc: &mut Vec<u8>) 
                     None => return Exchange::Failed,
                 },
                 Framing::Chunked => {
-                    // Only the newly-arrived bytes, overlapping by the terminator length so a
-                    // terminator split across two reads is still found.
-                    let from = scanned.saturating_sub(4).max(he);
-                    if acc[from..].windows(5).any(|w| w == b"0\r\n\r\n") {
-                        return complete(closing);
+                    // PARSED BY CHUNK SIZE, not by searching for `0\r\n\r\n`. A byte search ended
+                    // the response early on a chunk whose DATA held that sequence (leaving the rest on
+                    // a connection about to be reused, so the next exchange read body bytes as its
+                    // head), and never ended one whose last chunk carried trailers or an extension
+                    // (`0\r\nX: y\r\n\r\n`, `0;ext\r\n\r\n`), so a correct gateway waited out the
+                    // whole budget. `scanned` is where the next unparsed chunk-size line starts, so
+                    // each read resumes there instead of rescanning the body.
+                    match scan_chunks(acc, scanned.max(he)) {
+                        ChunkScan::Complete => return complete(closing),
+                        ChunkScan::NeedMore(at) => scanned = at,
+                        ChunkScan::Malformed => return Exchange::Failed,
                     }
-                    scanned = acc.len();
                 }
                 // An until-close body is only complete once the peer actually closes, which the
                 // n == 0 arm below handles. Returning here would call a body complete the moment the
@@ -638,6 +759,69 @@ enum Framing {
     UntilClose,
 }
 
+/// Where a chunked body stands after the bytes received so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChunkScan {
+    /// The last chunk and its trailer section have arrived.
+    Complete,
+    /// More bytes are needed; the next chunk-size line starts at this offset.
+    NeedMore(usize),
+    /// Not chunked framing (a size that is not hex, a chunk not followed by CRLF): a broken response.
+    Malformed,
+}
+
+/// Walk a chunked body (RFC 9112 section 7.1) from the chunk-size line starting at `at`.
+///
+/// Each chunk is `<hex size>[;extensions]\r\n<size bytes>\r\n`; the last chunk has size 0 and is
+/// followed by optional trailer fields and an empty line. Only sizes are read - the data itself is
+/// skipped, never searched - so no byte sequence inside a chunk can end the body.
+fn scan_chunks(acc: &[u8], mut at: usize) -> ChunkScan {
+    loop {
+        let Some(line_len) = find_crlf(&acc[at..]) else {
+            return ChunkScan::NeedMore(at);
+        };
+        let line = &acc[at..at + line_len];
+        let size_field = line.split(|b| *b == b';').next().unwrap_or(line);
+        let Some(size) = std::str::from_utf8(size_field)
+            .ok()
+            .map(|t| t.trim_matches([' ', '\t']))
+            .filter(|t| !t.is_empty())
+            .and_then(|t| usize::from_str_radix(t, 16).ok())
+        else {
+            return ChunkScan::Malformed;
+        };
+        let data = at + line_len + 2;
+        if size == 0 {
+            // The trailer section: zero or more field lines, then an empty line.
+            let mut t = data;
+            loop {
+                let Some(n) = find_crlf(&acc[t..]) else {
+                    return ChunkScan::NeedMore(at);
+                };
+                if n == 0 {
+                    return ChunkScan::Complete;
+                }
+                t += n + 2;
+            }
+        }
+        let Some(end) = data.checked_add(size).and_then(|e| e.checked_add(2)) else {
+            return ChunkScan::Malformed;
+        };
+        if acc.len() < end {
+            return ChunkScan::NeedMore(at);
+        }
+        if acc[end - 2..end] != *b"\r\n" {
+            return ChunkScan::Malformed;
+        }
+        at = end;
+    }
+}
+
+/// Offset of the first CRLF in `b`, if any.
+fn find_crlf(b: &[u8]) -> Option<usize> {
+    b.windows(2).position(|w| w == b"\r\n")
+}
+
 /// How the body's end is signalled. Absent framing is its own case, never a zero-length body.
 fn framing(head_lower: &str) -> Framing {
     if head_lower
@@ -670,6 +854,14 @@ fn content_length(head_lower: &str) -> Option<usize> {
 /// built here, used, and dropped, so async is an implementation detail of the generator rather than
 /// something the engine has to adopt.
 pub fn run(cfg: &GenConfig) -> GenStats {
+    run_with_evidence(cfg).0
+}
+
+/// `run`, plus the bounded failure evidence the window captured (see `FailureCapture`).
+///
+/// SEPARATE FROM `GenStats` ON PURPOSE: the evidence is diagnostics, and keeping it out of the
+/// struct every measurement reads means no count, rate or percentile can ever come to depend on it.
+pub fn run_with_evidence(cfg: &GenConfig) -> (GenStats, Vec<FailureSample>) {
     // Worker threads default to `available_parallelism`, which honours the CPU affinity mask
     // `taskset -c $LOADCORES` sets, so the generator still runs on exactly the cores it is pinned
     // to. That pinning is the comparability basis of every published number.
@@ -682,10 +874,13 @@ pub fn run(cfg: &GenConfig) -> GenStats {
             // The rig could not pose the question at all. Reported the same way a refused thread
             // was: a window that never ran is not a measurement of the gateway at any concurrency.
             eprintln!("loadgen: could not build the async runtime: {e}");
-            return GenStats {
-                spawn_failed: true,
-                ..Default::default()
-            };
+            return (
+                GenStats {
+                    spawn_failed: true,
+                    ..Default::default()
+                },
+                Vec::new(),
+            );
         }
     };
 
@@ -696,10 +891,13 @@ pub fn run(cfg: &GenConfig) -> GenStats {
         // gateway would be charged with.
         Err(why) => {
             eprintln!("loadgen: refusing to send this window's request: {why}");
-            return GenStats {
-                spawn_failed: true,
-                ..Default::default()
-            };
+            return (
+                GenStats {
+                    spawn_failed: true,
+                    ..Default::default()
+                },
+                Vec::new(),
+            );
         }
     };
     let addr = cfg.addr;
@@ -709,6 +907,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
     rt.block_on(async move {
         let stop = Arc::new(AtomicBool::new(false));
         let window = Arc::new(Window::default());
+        let failures = Arc::new(FailureCapture::default());
         let mut handles = Vec::with_capacity(concurrency as usize);
         for _ in 0..concurrency {
             handles.push(tokio::spawn(worker(
@@ -716,6 +915,7 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                 Arc::clone(&req),
                 Arc::clone(&stop),
                 Arc::clone(&window),
+                Arc::clone(&failures),
             )));
         }
 
@@ -758,10 +958,17 @@ pub fn run(cfg: &GenConfig) -> GenStats {
                 // stderr rather than folding a silent hole into a published rate: the release
                 // profile aborts on panic, so this is reachable only in a debug build, and a
                 // quietly smaller `ok` would read as the gateway being slower.
-                Err(e) => eprintln!("loadgen: a connection task did not finish cleanly: {e}"),
+                //
+                // AND MARK THE WINDOW. A lost lane means the window did not run at the concurrency
+                // it reports, which is exactly what `spawn_failed` tells the parent; a stderr line
+                // alone left a normal-looking stats line to be scored as the gateway's result.
+                Err(e) => {
+                    eprintln!("loadgen: a connection task did not finish cleanly: {e}");
+                    g.spawn_failed = true;
+                }
             }
         }
-        g
+        (g, failures.samples())
     })
 }
 
@@ -1498,6 +1705,16 @@ mod tests {
         ))
         .expect("a real credential must still send");
         assert!(ok.contains("authorization: Bearer sk-abc.DEF_123-+/=\r\n"));
+
+        // ONE Host header: a declared virtual host replaces the socket address, never follows it.
+        let routed = build_request(&with(
+            vec![("Host".into(), "cohere.bench".into())],
+            "/v1/chat/completions",
+        ))
+        .expect("a routing host must send");
+        assert_eq!(routed.to_ascii_lowercase().matches("\r\nhost:").count(), 1);
+        assert!(routed.contains("Host: cohere.bench\r\n"));
+        assert_eq!(ok.to_ascii_lowercase().matches("\r\nhost:").count(), 1);
     }
 
     // And the window built from such a manifest NEVER RUNS: a sanitised header would send a
@@ -1517,6 +1734,145 @@ mod tests {
         });
         assert!(g.spawn_failed, "the rig could not pose the question");
         assert_eq!((g.ok, g.fail), (0, 0), "and nothing is charged to anyone");
+    }
+
+    // ---- failure evidence is bounded diagnostics -------------------------------------------------
+
+    // THE BOUND HOLDS UNDER CONTENTION. Ten thousand lanes failing at once must still leave exactly
+    // FAILURE_SAMPLE_LIMIT samples of at most FAILURE_RESPONSE_BYTES each - the cost a failing
+    // window pays is one atomic per failure, never an allocation per failure.
+    #[test]
+    fn the_failure_capture_bound_holds_under_ten_thousand_concurrent_failures() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .build()
+            .expect("runtime");
+        let capture = Arc::new(FailureCapture::default());
+        rt.block_on(async {
+            let tasks: Vec<_> = (0..10_000)
+                .map(|i| {
+                    let capture = Arc::clone(&capture);
+                    tokio::spawn(async move {
+                        capture.record_parts(
+                            "http_failure",
+                            b"HTTP/1.1 503 x\r\n\r\n",
+                            &[b'x'; 4096],
+                        );
+                        i
+                    })
+                })
+                .collect();
+            for t in tasks {
+                t.await.expect("task");
+            }
+        });
+        let samples = capture.samples();
+        assert_eq!(samples.len(), FAILURE_SAMPLE_LIMIT);
+        assert!(samples.iter().all(|s| s.prefix_truncated
+            && s.response_hex.len() == 2 * FAILURE_RESPONSE_BYTES
+            && s.response_excerpt.starts_with("HTTP/1.1 503")));
+        assert!(
+            failure_samples_field(&samples).len() <= FAILURE_SAMPLES_HEX_CAP + 32,
+            "the producer caps the stats-line field"
+        );
+    }
+
+    // Real failing exchanges leave their first bytes behind, and the counts are unchanged by it.
+    #[test]
+    fn failed_http_requests_retain_response_evidence() {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    while c.read(&mut b).unwrap_or(0) > 0 {
+                        if c.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 2\r\n\r\n{}",
+                        )
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let (g, samples) = run_with_evidence(&GenConfig {
+            addr,
+            path: "/x".into(),
+            body: "{}".into(),
+            headers: vec![],
+            concurrency: 2,
+            duration: Duration::from_millis(100),
+            ttft_ms: 0,
+        });
+        assert_eq!(g.ok, 0);
+        assert!(g.fail > 0);
+        assert!(!samples.is_empty() && samples.len() <= FAILURE_SAMPLE_LIMIT);
+        assert!(samples
+            .iter()
+            .all(|s| s.response_excerpt.starts_with("HTTP/1.1 503")));
+    }
+
+    // ---- chunked framing is parsed by size, never searched for ----------------------------------
+
+    // A CHUNK WHOSE DATA CONTAINS THE TERMINATOR'S BYTES. A raw search for `0\r\n\r\n` ended this
+    // body at the first chunk, leaving the real last chunk on a connection about to be reused.
+    #[test]
+    fn a_terminator_shaped_sequence_inside_chunk_data_does_not_end_the_body() {
+        // One 7-byte chunk whose data is "ab0\r\n\r\n", then the real last chunk.
+        let body = b"7\r\nab0\r\n\r\n\r\n";
+        assert_eq!(scan_chunks(body, 0), ChunkScan::NeedMore(12));
+        let full = b"7\r\nab0\r\n\r\n\r\n0\r\n\r\n";
+        assert_eq!(scan_chunks(full, 0), ChunkScan::Complete);
+    }
+
+    // TRAILERS AND EXTENSIONS ARE LEGAL HTTP/1.1. A byte search never recognised a last chunk that
+    // carried either, so a correct gateway waited out the whole response budget on every request.
+    #[test]
+    fn a_last_chunk_with_trailers_or_an_extension_completes() {
+        assert_eq!(
+            scan_chunks(b"4\r\nabcd\r\n0\r\nx-trailer: y\r\n\r\n", 0),
+            ChunkScan::Complete
+        );
+        assert_eq!(
+            scan_chunks(b"4;name=v\r\nabcd\r\n0;ext\r\n\r\n", 0),
+            ChunkScan::Complete
+        );
+        assert_eq!(
+            scan_chunks(b"A\r\n0123456789\r\n0\r\n\r\n", 0),
+            ChunkScan::Complete
+        );
+        // The trailer section is not finished until its empty line arrives.
+        assert_eq!(
+            scan_chunks(b"4\r\nabcd\r\n0\r\nx-trailer: y\r\n", 0),
+            ChunkScan::NeedMore(9)
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_chunked_framing_is_malformed() {
+        assert_eq!(scan_chunks(b"zz\r\nabcd\r\n", 0), ChunkScan::Malformed);
+        assert_eq!(scan_chunks(b"\r\nabcd\r\n", 0), ChunkScan::Malformed);
+        // A chunk whose data is not followed by CRLF.
+        assert_eq!(scan_chunks(b"2\r\nabcd\r\n", 0), ChunkScan::Malformed);
+    }
+
+    // The parse resumes where it stopped: a body arriving a byte at a time completes exactly when
+    // its last byte lands, and never before.
+    #[test]
+    fn a_chunked_body_arriving_byte_by_byte_completes_only_on_its_last_byte() {
+        let whole = b"4\r\nabcd\r\n3\r\nefg\r\n0\r\n\r\n";
+        let mut at = 0;
+        for end in 1..whole.len() {
+            match scan_chunks(&whole[..end], at) {
+                ChunkScan::NeedMore(next) => at = next,
+                other => panic!("completed early at {end} of {}: {other:?}", whole.len()),
+            }
+        }
+        assert_eq!(scan_chunks(whole, at), ChunkScan::Complete);
     }
 }
 

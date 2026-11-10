@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared projection for current and historical raw evidence.
-import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor, sampleCounts, PERF_SAMPLE_FIELDS, STREAM_SAMPLE_FIELDS } from "./seal.mjs";
 const UNGATED_LAT = UNGATED_LAT_FIELDS;
 function absentEntryFor(absences, prefix, k) {
   if (!absences || typeof absences !== "object") return null;
@@ -50,6 +50,9 @@ function sealPerfCellPerf(perf, absences = null) {
   // gateway round trips and 254967 direct-to-mock round trips"). The stream rebuild already carries its
   // twin (stream_c1_note); dropping this one published a thin percentile indistinguishable from a solid one.
   if (perf.c1_note != null) rec.c1_note = perf.c1_note;
+  // And the same weight as numbers, where the engine records them (v1.1 gateway_c1_samples /
+  // direct_c1_samples). Absent on older snapshots, so their records keep exactly their old shape.
+  Object.assign(rec, sampleCounts(perf, PERF_SAMPLE_FIELDS));
   return rec;
 }
 // sealPerfCell: a matrix/fallback perf object -> the canonical {path, source, <sealed metrics>} record.
@@ -97,6 +100,9 @@ function sealStreamRecord(s, absences = null, cpuSource = null) {
   // and 7 were measured at a concurrency where the delivery gate did not hold - a frame rate recorded
   // while dropping frames. See the engine's `run.rs` for the per-gateway numbers.
   void cpuSource;
+  // The sample counts behind the TTFT and inter-frame-gap percentiles (record.rs CellStream
+  // ttft_*_samples / gap_*_samples), carried verbatim where the engine recorded a number.
+  Object.assign(rec, sampleCounts(s, STREAM_SAMPLE_FIELDS));
   return rec;
 }
 function sealStreaming(s, dialect, source, absences = null, cpuSource = null) {

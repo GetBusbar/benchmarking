@@ -3,16 +3,14 @@
 //
 // Classifying what a cell probe OBSERVED, and deciding how hard to try.
 //
-// FAIRNESS. `Observation` carries only what the rig saw, no cell identity and no capability claim,
-// and `transient_budget()` takes no arguments at all, so neither a gateway's declaration nor a
-// cell's identity can reach the verdict or the measurement effort spent earning it, even by
-// accident: two cells that differ only in what the gateway claims about them must classify
-// identically and get the same number of attempts.
+// FAIRNESS. No gateway identity enters this rule. A researched capability declaration distinguishes
+// an absent pairing from a supported pairing that failed; HTTP 501 can also mean a rejected
+// parameter on an implemented route. `transient_budget()` takes no arguments, so every gateway
+// gets this same rule and retry budget: a declaration never buys a cell extra attempts.
 
 use serde::{Deserialize, Serialize};
 
-/// Exactly what the rig observed. There is deliberately no cell identity and no capability claim
-/// here: a field that does not exist cannot be consulted.
+/// The observed response and the manifest's researched expectation, without gateway identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
     /// The final HTTP status. `None` models curl's 000: no HTTP answer at all, so the gateway may
@@ -21,18 +19,20 @@ pub struct Observation {
     /// Whether the recording mock confirmed it was healthy for this probe. When it did not, an
     /// upstream really may have been missing, and the observation cannot be attributed.
     pub mock_healthy: bool,
+    /// The manifest explicitly declares this pairing supported. A rejection must not erase that
+    /// capability and turn a real failure into an unsupported grey.
+    pub pairing_supported: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// The gateway answered, deterministically, that this pairing does not exist at all (a
-    /// 404/501-shaped response). Grey on the board, never a red: no gateway is failed for a
-    /// pairing it never claimed to serve.
+    /// An undeclared pairing returned 404/501. This is a routing observation, not independent
+    /// proof of absent product support. Researched supported pairings never take this verdict.
     NotConfigured,
-    /// The gateway answered, deterministically, but declined the request for a reason OTHER than
-    /// "this route does not exist": an auth rejection, a malformed-request response, a server
-    /// error. The pairing is real; this specific attempt failed. Published as a genuine defect,
+    /// The gateway rejected a supported request (including a 404/501 on a pairing the manifest
+    /// declares supported), or returned another application rejection: an auth rejection, a
+    /// malformed-request response, a server error. This specific attempt failed. Published as a genuine defect,
     /// not folded into the same grey "not configured" a truly absent route gets - collapsing the
     /// two let a gateway that supports a pairing but rejects the probe (wrong auth shape, a bug on
     /// its own error path) read identically to one that never built the route at all.
@@ -74,9 +74,8 @@ const TRANSIENT_PAUSE_S: u32 = 30; // seconds between them, on ANY cell
 /// gateway had served all 36 the day before. Every egress lane still answered under openai ingress,
 /// which is what proves the lanes were fine and the moment was not.
 ///
-/// 404 and 501 are excluded deliberately: those are the gateway stating the route does not exist,
-/// which is an answer, not a hiccup, and `NotConfigured` already carries it without spending a
-/// budget. 4xx that mean "your request was wrong" are equally deterministic - retrying an argument
+/// 404 and 501 are excluded deliberately: they are deterministic rejections, whether the pairing
+/// is declared supported or not, and they do not gain retries from that declaration. 4xx that mean "your request was wrong" are equally deterministic - retrying an argument
 /// the gateway already rejected on its merits just spends box-time to hear it again.
 pub const fn status_is_transient(status: u16) -> bool {
     matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 507 | 509)
@@ -90,10 +89,9 @@ pub const fn status_is_transient(status: u16) -> bool {
 /// observation, and the most informative one available. Calling it `not_verified` would throw away
 /// the status evidence and assert something false about our own ability to read the cell.
 ///
-/// NotConfigured vs Failed is decided from the status ALONE, never from what a gateway declares it
-/// supports (that would violate the fairness rule this module's header states): 404 and 501 are the
-/// HTTP-standard ways a server says "this route/method is not implemented at all", so those two
-/// mean the pairing itself is absent. Every other real status (400, 401, 403, 422, 429, 500, 502,
+/// A researched supported pairing that rejects the common request is Failed, including 404/501:
+/// those statuses cannot erase declared support. For undeclared pairings 404 and 501 keep the
+/// NotConfigured routing observation (the HTTP-standard "route/method not implemented"). Every other real status (400, 401, 403, 422, 429, 500, 502,
 /// 503, ...) means the gateway recognised the request enough to evaluate and decline it for some
 /// OTHER reason - the pairing is real, and this attempt is what failed.
 pub fn persistent_transient_verdict(obs: Observation) -> Verdict {
@@ -102,7 +100,7 @@ pub fn persistent_transient_verdict(obs: Observation) -> Verdict {
         (None, _) => Verdict::NotVerified,
         // The rig could not confirm itself, so nothing observed here is attributable.
         (_, false) => Verdict::NotVerified,
-        (Some(404), true) | (Some(501), true) => Verdict::NotConfigured,
+        (Some(404 | 501), true) if !obs.pairing_supported => Verdict::NotConfigured,
         (Some(_), true) => Verdict::Failed,
     }
 }
@@ -115,12 +113,11 @@ mod tests {
         Observation {
             status,
             mock_healthy,
+            pairing_supported: false,
         }
     }
 
-    // The verdict must depend only on what was observed, so two cells that differ ONLY in what the
-    // gateway claimed about them must classify identically. There is no capability argument to
-    // pass: the API makes that unrepresentable, not merely unlikely.
+    // Identical observations and support declarations use the same rule for every gateway.
     #[test]
     fn the_same_observation_always_gets_the_same_verdict() {
         let a = persistent_transient_verdict(obs(Some(503), true));
@@ -143,12 +140,35 @@ mod tests {
     // but a 404/501 (route not implemented at all) is a different claim from every other status
     // (the route exists and this attempt was declined), and they must not collapse into one label.
     #[test]
-    fn not_found_and_not_implemented_mean_the_pairing_is_absent() {
+    fn undeclared_not_found_and_not_implemented_retain_the_routing_observation() {
         for status in [404u16, 501] {
             assert_eq!(
                 persistent_transient_verdict(obs(Some(status), true)),
                 Verdict::NotConfigured,
-                "status {status} with a healthy rig means the pairing does not exist"
+                "an undeclared status {status} retains the routing observation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_supported_pairing_rejecting_the_request_is_failed_even_for_404_or_501() {
+        for status in [404, 501] {
+            let observation = Observation {
+                status: Some(status),
+                mock_healthy: true,
+                pairing_supported: true,
+            };
+            assert_eq!(persistent_transient_verdict(observation), Verdict::Failed);
+            assert_eq!(
+                persistent_transient_verdict(Observation {
+                    mock_healthy: false,
+                    ..observation
+                }),
+                Verdict::NotVerified,
+            );
+            assert!(
+                !status_is_transient(status),
+                "support must not buy extra retries"
             );
         }
     }

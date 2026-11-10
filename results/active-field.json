@@ -1,7 +1,7 @@
 {
-  "id": "otb-20261109T052740Z",
-  "engine_commit": "c4965b2b4cc89f9730f207ceed91232c314a5a28",
-  "started_at": "2026-11-09T05:27:40Z",
+  "id": "otb-20261109T204248Z",
+  "engine_commit": "fe27cc5aeae4479ac61efc577014f8cb2c9a759b",
+  "started_at": "2026-11-09T20:19:14Z",
   "gateways": [
     "agentgateway",
     "aisix",

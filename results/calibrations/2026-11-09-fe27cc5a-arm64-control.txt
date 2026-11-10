@@ -1,0 +1,50 @@
+Linux ip-10-240-0-127 7.0.0-1014-aws #14~24.04.1-Ubuntu SMP PREEMPT Fri Sep 18 21:50:22 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+Architecture:                            aarch64
+CPU op-mode(s):                          32-bit, 64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  16
+On-line CPU(s) list:                     0-15
+Vendor ID:                               ARM
+Model name:                              Neoverse-V1
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      16
+Socket(s):                               1
+Stepping:                                r1p1
+BogoMIPS:                                2100.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng
+L1d cache:                               1 MiB (16 instances)
+L1i cache:                               1 MiB (16 instances)
+L2 cache:                                16 MiB (16 instances)
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-15
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; CSV2, BHB
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+c37187ec92917946febc87350a15b320d72e53a5e96cc355dfbfe1e63d244674  otb-arm64
+6b6215803d89be23b0159ba0f29793adc55ce2a67fdb6d8a25fc1b01591eb19a  mock-arm64
+fe27cc5aeae4479ac61efc577014f8cb2c9a759b
+fe27cc5aeae4479ac61efc577014f8cb2c9a759b
+rps=98712 fail=0 p50=0.33 p99=0.59 p50us=326 p99us=592 ok=789756 rigrefused=0 budgetexceeded=0 spawnfailed=0
+rps=101801 fail=0 p50=0.32 p99=0.57 p50us=316 p99us=572 ok=814447 rigrefused=0 budgetexceeded=0 spawnfailed=0
+rps=98195 fail=0 p50=0.33 p99=0.60 p50us=327 p99us=598 ok=785590 rigrefused=0 budgetexceeded=0 spawnfailed=0
+loadgen: OTB_LOADGEN_HEADERS is unset or empty, so this window sends no credential; every request will fail against a gateway that requires one
+loadgen: OTB_LOADGEN_HEADERS is unset or empty, so this window sends no credential; every request will fail against a gateway that requires one
+loadgen: OTB_LOADGEN_HEADERS is unset or empty, so this window sends no credential; every request will fail against a gateway that requires one
