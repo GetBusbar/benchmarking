@@ -13,13 +13,15 @@
     "openai",
     "openai-responses",
     "anthropic",
+    "gemini",
     "bedrock"
   ],
   "egress_models": {
     "anthropic": "tensorzero::model_name::mock-anthropic",
     "bedrock": "tensorzero::model_name::mock-bedrock",
     "openai": "tensorzero::model_name::mock-openai",
-    "openai-responses": "tensorzero::model_name::mock-openai-responses"
+    "openai-responses": "tensorzero::model_name::mock-openai-responses",
+    "gemini": "tensorzero::model_name::mock-gemini"
   },
   "lang": "Rust",
   "launch": {
@@ -46,17 +48,13 @@
     "container": "tensorzero-bench",
     "kind": "docker"
   },
-  "untestable": [
-    "openai/gemini"
-  ],
-  "untestable_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production.",
   "matrix": [
-    "111001",
+    "111101",
     "000000",
     "000000",
     "000000",
     "000000",
     "000000"
   ],
-  "matrix_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json"
+  "matrix_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini (google_ai_studio_gemini) hardcodes generativelanguage.googleapis.com over HTTPS; the engine v1.2 catch-all DNS resolves it to the mock, so that cell is probed and carries upstream_transport \"tls\". Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json"
 }

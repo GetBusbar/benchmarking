@@ -21,8 +21,8 @@ curl upstream  # the admin-API calls that wire this gateway's upstreams to the t
 
 ## Current channel configuration
 
-The pinned v0.6.10 relay router implements OpenAI chat ingress. Four channels target the local mock: OpenAI, Anthropic, Gemini and Cohere v1. Every channel must return nonempty assistant content during setup; failure aborts measurement rather than producing a misleading result.
+The pinned v0.6.10 relay router implements OpenAI chat ingress. Four channels target the local mock by URL: OpenAI, Anthropic, Gemini and Cohere v1; each must return nonempty assistant content during setup, and failure aborts measurement rather than producing a misleading result. A fifth, AWS (type 33, model claude-3-haiku-20240307), has no URL to point: relay/adaptor/aws builds a bedrockruntime client with only a region and static keys (from the channel config) and calls InvokeModel at the SDK's default https://bedrock-runtime.us-east-1.amazonaws.com. Engine v1.2 resolves every name to the mock and makes the gateway trust the run's CA, so that cell is probed like any other; it is not gated at setup because its outcome is the cell's verdict.
 
-Native Responses, Anthropic, Gemini, Cohere and Bedrock ingress are absent from router/relay.go and are excluded by the versioned capability matrix. Dashboard HTML is never inference evidence. Bedrock upstream uses an AWS SDK invocation adapter without a local endpoint override, so it remains explicitly untestable on this rig.
+Native Responses, Anthropic, Gemini, Cohere and Bedrock ingress are absent from router/relay.go and are excluded by the versioned capability matrix. Dashboard HTML is never inference evidence. Bedrock upstream uses the AWS SDK's InvokeModel at its default HTTPS host; with engine v1.2 it is measured through the catch-all DNS and the mock's TLS listener (upstream_transport "tls").
 
 Source revision: 3915ce9814b8261a1ab13ed93adec58b463cd75c. Evidence: router/relay.go; relay/channeltype/define.go; relay/adaptor/cohere/adaptor.go; relay/adaptor/aws/adaptor.go. The discarded November refresh is not retained as benchmark evidence.
