@@ -1,3 +1,4 @@
 # GOMAXPROCS is deliberately absent; the harness sets it for every gateway from the cores it
 # pinned, so no entrant can state its own.
 INITIAL_ROOT_TOKEN={GW_AUTH}
+TIKTOKEN_CACHE_DIR=/tiktoken-cache

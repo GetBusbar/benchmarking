@@ -22,7 +22,13 @@
     "args": [],
     "image": "justsong/one-api:v0.6.10@sha256:af6b361630bdf408b86fce7aa8fc131b37ea5177ae866d121ba7c002e773e477",
     "kind": "docker",
-    "mounts": []
+    "mounts": [
+      {
+        "container_path": "/tiktoken-cache",
+        "host_path": "tiktoken-cache",
+        "read_only": true
+      }
+    ]
   },
   "model": "gpt-4o-mini",
   "name": "one-api",
