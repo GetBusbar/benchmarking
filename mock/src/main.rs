@@ -9,6 +9,7 @@
 //   /responses             -> OpenAI Responses
 //   /messages              -> Anthropic Messages
 //   …:generateContent      -> Google Gemini
+//   /model/…/invoke        -> AWS Bedrock InvokeModel (Anthropic-on-Bedrock message)
 //   /converse | /model/…   -> AWS Bedrock (Converse)
 //   /v2/chat -> Cohere v2, /v1/chat -> Cohere v1
 //   (anything else)        -> OpenAI chat.completion (safe default)
@@ -62,6 +63,14 @@
 //   MOCK_STREAM_INTERVAL_MS=20   pause before each content delta after the first
 //   MOCK_STREAM_CHUNK_BYTES=16   text payload bytes per content delta
 // Other protocols (Gemini/Bedrock/Cohere) ignore stream:true and answer their normal JSON.
+//
+// HTTPS AND CATCH-ALL DNS (engine v1.2, opt-in by flag): `--tls-port 443` adds a TLS 1.3 listener
+// serving these same handlers (tls.rs), and `--dns 127.0.0.1:53` answers every A query with that
+// address (dns.rs). The plain listener above is unchanged. GET /__mock/ca returns the run's CA
+// certificate so the engine can make the gateway trust it.
+
+mod dns;
+mod tls;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -83,6 +92,10 @@ static OPENAI: &[u8] = br#"{"id":"chatcmpl-x","object":"chat.completion","create
 const RESPONSES: &[u8] = br#"{"id":"resp_x","object":"response","created_at":1,"status":"completed","model":"mock","output":[{"type":"message","id":"msg_x","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":12},"error":null,"incomplete_details":null,"instructions":null,"parallel_tool_calls":true,"tools":[],"tool_choice":"auto","temperature":1.0,"top_p":1.0,"metadata":{},"previous_response_id":null,"truncation":"disabled","max_output_tokens":null,"store":false}"#;
 static ANTHROPIC: &[u8] = br#"{"id":"msg_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}"#;
 const GEMINI: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}"#;
+// InvokeModel for an Anthropic model on Bedrock answers the Anthropic Messages document as its raw
+// body. Its own static, not ANTHROPIC: the stream dispatch below compares by identity, and an
+// InvokeModel stream is AWS event-stream framing, never Anthropic SSE.
+static BEDROCK_INVOKE: &[u8] = br#"{"id":"msg_bdrk_x","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":2}}"#;
 const BEDROCK: &[u8] = br#"{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}"#;
 const COHERE: &[u8] = br#"{"id":"x","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"usage":{"tokens":{"input_tokens":10,"output_tokens":2}}}"#;
 // Cohere v1 adapters read top-level text and meta.tokens, not the v2 message envelope.
@@ -112,10 +125,19 @@ fn models_for(path: &str) -> &'static [u8] {
     }
 }
 
+/// Bedrock InvokeModel (`POST /model/{modelId}/invoke`), as opposed to Converse on the same prefix.
+/// The streaming variant answers the same JSON, like every non-SSE dialect here.
+fn is_bedrock_invoke(path: &str) -> bool {
+    path.contains("/model/")
+        && (path.ends_with("/invoke") || path.ends_with("/invoke-with-response-stream"))
+}
+
 /// Pick the response body from the request path - protocol detection, ordered so specific paths win.
 fn body_for(path: &str) -> &'static [u8] {
     if path.ends_with("/models") || path.contains("/models?") {
         models_for(path)
+    } else if is_bedrock_invoke(path) {
+        BEDROCK_INVOKE
     } else if path.contains("/chat/completions") {
         OPENAI
     } else if path.contains("/responses") {
@@ -145,6 +167,8 @@ fn dialect_for(path: &str) -> &'static str {
         // request on any dialect's endpoint. Recorded under a dialect it bumped that dialect's count
         // and overwrote its body_ok with false (an empty GET body has no request shape).
         "other"
+    } else if is_bedrock_invoke(path) {
+        "bedrock"
     } else if path.contains("/chat/completions") {
         "openai"
     } else if path.contains("/responses") {
@@ -209,6 +233,42 @@ fn request_shape_ok(dialect: &str, body: &[u8]) -> bool {
     }
 }
 
+/// The shape check for a request at `path`: Bedrock InvokeModel carries a different body from
+/// Converse on the same dialect, so it is told apart by path; every other request is checked
+/// exactly as `request_shape_ok` always has.
+fn request_shape_ok_at(dialect: &str, path: &str, body: &[u8]) -> bool {
+    if dialect == "bedrock" && is_bedrock_invoke(path) {
+        invoke_shape_ok(body)
+    } else {
+        request_shape_ok(dialect, body)
+    }
+}
+
+/// Anthropic-on-Bedrock InvokeModel request: `anthropic_version` names a Bedrock version (Bedrock
+/// rejects the body without it), `max_tokens` is a number, and `messages` is a non-empty array whose
+/// every entry has a role and content that is a string or an array of typed blocks. A raw OpenAI chat
+/// body forwarded to /invoke fails on the version; a Converse body fails on the version and on its
+/// untyped `{"text":…}` blocks. Parsed, so JSON formatting cannot change the verdict.
+fn invoke_shape_ok(body: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    v["anthropic_version"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("bedrock-"))
+        && v["max_tokens"].is_u64()
+        && v["messages"].as_array().is_some_and(|messages| {
+            !messages.is_empty()
+                && messages.iter().all(|m| {
+                    m["role"].is_string()
+                        && (m["content"].is_string()
+                            || m["content"].as_array().is_some_and(|blocks| {
+                                !blocks.is_empty() && blocks.iter().all(|b| b["type"].is_string())
+                            }))
+                })
+        })
+}
+
 const DIALECTS: [&str; 7] = [
     "openai",
     "openai-responses",
@@ -271,7 +331,24 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-fn state_json(rec: &Recorder, recording: bool) -> String {
+/// What the v1.2 egress additions share with the handler: the run CA's certificate (when the TLS
+/// listener is on) and how many requests per dialect arrived over TLS. Only the TLS listener ever
+/// increments these; the plain listener's hot path does not touch them.
+#[derive(Default)]
+struct Egress {
+    ca_pem: Option<String>,
+    tls_requests: [std::sync::atomic::AtomicU64; DIALECTS.len()],
+}
+
+impl Egress {
+    fn count_tls(&self, dialect: &str) {
+        if let Some(i) = DIALECTS.iter().position(|d| *d == dialect) {
+            self.tls_requests[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn state_json(rec: &Recorder, recording: bool, egress: &Egress) -> String {
     let map = rec.lock().unwrap();
     let mut out = format!("{{\"recording\":{recording},\"dialects\":{{");
     for (i, d) in DIALECTS.iter().enumerate() {
@@ -287,6 +364,17 @@ fn state_json(rec: &Recorder, recording: bool) -> String {
             json_escape(&r.last_path),
             json_escape(&r.last_snippet)
         ));
+    }
+    // Requests per dialect that arrived on the TLS listener, counted whether or not recording is on
+    // (a relaxed increment on the TLS path only). The engine reads it before and after a cell's
+    // probe to record how the gateway reached the mock (`upstream_transport`).
+    out.push_str("},\"tls_requests\":{");
+    for (i, d) in DIALECTS.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let n = egress.tls_requests[i].load(std::sync::atomic::Ordering::Relaxed);
+        out.push_str(&format!("\"{d}\":{n}"));
     }
     out.push_str("}}");
     out
@@ -448,15 +536,34 @@ async fn handle(
     frames: Arc<StreamFrames>,
     recorder: Arc<Recorder>,
     recording: Arc<RecordFlag>,
+    egress: Arc<Egress>,
+    over_tls: bool,
 ) -> Result<Response<OutBody>, Infallible> {
     let path = req.uri().path().to_string();
+    if over_tls {
+        egress.count_tls(dialect_for(&path));
+    }
+    // The run CA's certificate, for the engine to add to the gateway's trust bundle. 404 when the
+    // TLS listener is off, so a caller can tell "no HTTPS on this mock" from an empty answer.
+    if path == "/__mock/ca" {
+        return Ok(match &egress.ca_pem {
+            Some(pem) => Response::builder()
+                .header("content-type", "application/x-pem-file")
+                .body(Full::new(Bytes::from(pem.clone())).boxed())
+                .unwrap(),
+            None => Response::builder()
+                .status(hyper::StatusCode::NOT_FOUND)
+                .body(Full::new(Bytes::from_static(b"no tls listener")).boxed())
+                .unwrap(),
+        });
+    }
     // Matrix-runner control endpoints - served whether or not recording is on, so the runner can tell
     // recording apart from "no requests arrived" (state carries a `recording` flag).
     if path == "/__mock/state" {
         let on = recording.load(std::sync::atomic::Ordering::Relaxed);
         return Ok(Response::builder()
             .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(state_json(&recorder, on))).boxed())
+            .body(Full::new(Bytes::from(state_json(&recorder, on, &egress))).boxed())
             .unwrap());
     }
     if path == "/__mock/reset" {
@@ -525,7 +632,7 @@ async fn handle(
         // the reference every gateway's number is judged against. The critical section is now three
         // moves.
         let d = dialect_for(&path);
-        let body_ok = request_shape_ok(d, &reqbody);
+        let body_ok = request_shape_ok_at(d, &path, &reqbody);
         let last_path = path.clone();
         let last_snippet = String::from_utf8_lossy(&reqbody[..reqbody.len().min(200)]).into_owned();
         let mut map = recorder.lock().unwrap();
@@ -635,6 +742,36 @@ async fn main() {
     ));
     let recorder: Arc<Recorder> = Arc::new(Recorder::default());
 
+    // v1.2 egress: both off unless asked for, so a mock started the v1.1 way is the v1.1 mock.
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .map(|i| match args.get(i + 1) {
+                Some(v) => v.clone(),
+                None => refuse_knob(name, "", "a value is required"),
+            })
+    };
+    let tls_port: Option<u16> = flag("--tls-port").map(|v| match v.trim().parse::<u16>() {
+        Ok(p) if p != 0 => p,
+        Ok(_) => refuse_knob("--tls-port", &v, "port 0"),
+        Err(e) => refuse_knob("--tls-port", &v, &e.to_string()),
+    });
+    let dns_addr: Option<SocketAddr> = flag("--dns").map(|v| match v.trim().parse() {
+        Ok(a) => a,
+        Err(e) => refuse_knob("--dns", &v, &format!("{e}")),
+    });
+    let run_ca = match tls_port {
+        None => None,
+        Some(_) => match tls::RunCa::generate() {
+            Ok(ca) => Some(Arc::new(ca)),
+            Err(e) => refuse_knob("--tls-port", "", &e),
+        },
+    };
+    let egress = Arc::new(Egress {
+        ca_pem: run_ca.as_ref().map(|ca| ca.ca_pem().to_string()),
+        ..Egress::default()
+    });
+
     // Bind 0.0.0.0 (not just loopback) so container-networked gateways (Arch via host.docker.internal,
     // Envoy AI via the kind bridge IP) can reach the mock; the loopback path 127.0.0.1 that the
     // --network-host and native gateways use is unchanged.
@@ -644,19 +781,7 @@ async fn main() {
     // not be fatal on the first try. lib/harness.sh's mock_stop_wait is the primary defense (it waits
     // for the port to actually free); this retry only covers the race it occasionally still loses.
     // Still fatal if the port never frees within the deadline.
-    let listener = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            match bind_listener(addr) {
-                Ok(l) => break l,
-                Err(e) if std::time::Instant::now() < deadline => {
-                    eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port - retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-                Err(e) => panic!("mock: could not bind {addr} within 20s: {e}"),
-            }
-        }
-    };
+    let listener = bind_retrying(addr).await;
     eprintln!("mock listening on {addr} (ttft={ttft_ms}ms, proto=h1+h2c, stream={s_chunks}x{s_bytes}B@{s_interval}ms on stream:true) - OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere");
     // Backstop against unbounded in-flight connections over an 8-hour run (a leak or a runaway
     // client), not a tight operational limit.
@@ -677,6 +802,30 @@ async fn main() {
     // Raised to sit above the host's own connection ceiling so it is once again the thing it claims to
     // be: reachable only by a leak, never by the benchmark running as designed.
     let conn_permits = Arc::new(tokio::sync::Semaphore::new(40_000));
+    if let Some(dns) = dns_addr {
+        if let Err(e) = dns::start(dns).await {
+            refuse_knob("--dns", &dns.to_string(), &e);
+        }
+    }
+    if let (Some(port), Some(ca)) = (tls_port, run_ca) {
+        let config = match tls::server_config(ca) {
+            Ok(c) => Arc::new(c),
+            Err(e) => refuse_knob("--tls-port", &port.to_string(), &e),
+        };
+        let tls_addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let tls_listener = bind_retrying(tls_addr).await;
+        eprintln!("mock tls listening on {tls_addr} (TLS 1.3, per-SNI certificates from this run's CA, same routes)");
+        tokio::spawn(serve_tls(
+            tls_listener,
+            tokio_rustls::TlsAcceptor::from(config),
+            conn_permits.clone(),
+            ttft_ms,
+            frames.clone(),
+            recorder.clone(),
+            recording.clone(),
+            egress.clone(),
+        ));
+    }
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
@@ -700,6 +849,7 @@ async fn main() {
         let frames = frames.clone();
         let recorder = recorder.clone();
         let recording = recording.clone();
+        let egress = egress.clone();
         tokio::spawn(async move {
             // Held for the life of the connection; dropped (releasing the permit) when this task ends.
             let _permit = permit;
@@ -718,6 +868,96 @@ async fn main() {
                             frames.clone(),
                             recorder.clone(),
                             recording.clone(),
+                            egress.clone(),
+                            false,
+                        )
+                    }),
+                )
+                .await;
+        });
+    }
+}
+
+/// Bind with the plain listener's retry: the harness may relaunch the mock before the old process
+/// has released the port. Fatal if the port never frees within 20s.
+async fn bind_retrying(addr: SocketAddr) -> TcpListener {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match bind_listener(addr) {
+            Ok(l) => break l,
+            Err(e) if std::time::Instant::now() < deadline => {
+                eprintln!("mock: bind {addr} failed ({e}); the previous mock may still hold the port - retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => panic!("mock: could not bind {addr} within 20s: {e}"),
+        }
+    }
+}
+
+/// How long a TLS client gets to complete its handshake before the connection is dropped, so a peer
+/// that connects and stalls cannot hold a permit for the rest of the run.
+const TLS_HANDSHAKE_BUDGET: Duration = Duration::from_secs(10);
+
+/// The TLS listener's accept loop: the plain loop's shape, with a handshake in front and the same
+/// handler behind it (flagged `over_tls` so its requests are counted).
+#[allow(clippy::too_many_arguments)]
+async fn serve_tls(
+    listener: TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    conn_permits: Arc<tokio::sync::Semaphore>,
+    ttft_ms: u64,
+    frames: Arc<StreamFrames>,
+    recorder: Arc<Recorder>,
+    recording: Arc<RecordFlag>,
+    egress: Arc<Egress>,
+) {
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("mock tls: accept failed: {e}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+        };
+        let permit = match conn_permits.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let _ = stream.set_nodelay(true);
+        let acceptor = acceptor.clone();
+        let frames = frames.clone();
+        let recorder = recorder.clone();
+        let recording = recording.clone();
+        let egress = egress.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let tls =
+                match tokio::time::timeout(TLS_HANDSHAKE_BUDGET, acceptor.accept(stream)).await {
+                    Ok(Ok(t)) => t,
+                    // Said, because a gateway refusing our certificate shows up here first (its own
+                    // error then reaches the cell's evidence through the gateway's answer).
+                    Ok(Err(e)) => {
+                        eprintln!("mock tls: handshake from {peer} failed: {e}");
+                        return;
+                    }
+                    Err(_) => {
+                        eprintln!("mock tls: handshake from {peer} timed out");
+                        return;
+                    }
+                };
+            let _ = auto::Builder::new(TokioExecutor::new())
+                .serve_connection(
+                    TokioIo::new(tls),
+                    service_fn(move |r| {
+                        handle(
+                            r,
+                            ttft_ms,
+                            frames.clone(),
+                            recorder.clone(),
+                            recording.clone(),
+                            egress.clone(),
+                            true,
                         )
                     }),
                 )
@@ -729,9 +969,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        body_for, dialect_for, handle, json_escape, models_for, request_shape_ok, send_frame,
-        state_json, wants_recording, wants_stream, Arc, BodyExt, Bytes, Frame, Full, Limited,
-        RecordFlag, Recorder, StreamFrames, ANTHROPIC, DIALECTS, MAX_BODY_BYTES, OPENAI,
+        body_for, dialect_for, handle, invoke_shape_ok, is_bedrock_invoke, json_escape, models_for,
+        request_shape_ok, request_shape_ok_at, send_frame, state_json, wants_recording,
+        wants_stream, Arc, BodyExt, Bytes, Egress, Frame, Full, Limited, RecordFlag, Recorder,
+        StreamFrames, ANTHROPIC, BEDROCK_INVOKE, DIALECTS, MAX_BODY_BYTES, OPENAI,
         SSE_SEND_TIMEOUT,
     };
     use hyper::service::service_fn;
@@ -1075,7 +1316,7 @@ mod tests {
     #[test]
     fn the_state_document_lists_every_dialect_even_untouched_ones() {
         let rec: Recorder = Recorder::default();
-        let doc = state_json(&rec, true);
+        let doc = state_json(&rec, true, &Egress::default());
         let parsed: serde_json::Value = match serde_json::from_str(&doc) {
             Ok(v) => v,
             Err(e) => panic!("the state document must be valid JSON: {e} in {doc}"),
@@ -1099,8 +1340,8 @@ mod tests {
     #[test]
     fn the_state_document_reports_whether_it_was_recording_at_all() {
         let rec: Recorder = Recorder::default();
-        assert!(state_json(&rec, false).contains("\"recording\":false"));
-        assert!(state_json(&rec, true).contains("\"recording\":true"));
+        assert!(state_json(&rec, false, &Egress::default()).contains("\"recording\":false"));
+        assert!(state_json(&rec, true, &Egress::default()).contains("\"recording\":true"));
     }
 
     // A recorded dialect must carry its count, its shape verdict and the evidence for both. The
@@ -1120,10 +1361,11 @@ mod tests {
             r.last_path = "/v1/messages".to_string();
             r.last_snippet = "{\"messages\":[]}".to_string();
         }
-        let parsed: serde_json::Value = match serde_json::from_str(&state_json(&rec, true)) {
-            Ok(v) => v,
-            Err(e) => panic!("the state document must be valid JSON: {e}"),
-        };
+        let parsed: serde_json::Value =
+            match serde_json::from_str(&state_json(&rec, true, &Egress::default())) {
+                Ok(v) => v,
+                Err(e) => panic!("the state document must be valid JSON: {e}"),
+            };
         assert_eq!(parsed["dialects"]["anthropic"]["count"], 3);
         assert_eq!(parsed["dialects"]["anthropic"]["body_ok"], true);
         assert_eq!(parsed["dialects"]["anthropic"]["last_path"], "/v1/messages");
@@ -1208,7 +1450,15 @@ mod tests {
                         .serve_connection(
                             io,
                             service_fn(move |r| {
-                                handle(r, 0, frames.clone(), recorder.clone(), recording.clone())
+                                handle(
+                                    r,
+                                    0,
+                                    frames.clone(),
+                                    recorder.clone(),
+                                    recording.clone(),
+                                    Arc::default(),
+                                    false,
+                                )
                             }),
                         )
                         .await;
@@ -1359,7 +1609,15 @@ mod tests {
                 .serve_connection(
                     io,
                     service_fn(move |r| {
-                        handle(r, 0, frames.clone(), recorder.clone(), recording.clone())
+                        handle(
+                            r,
+                            0,
+                            frames.clone(),
+                            recorder.clone(),
+                            recording.clone(),
+                            Arc::default(),
+                            false,
+                        )
                     }),
                 )
                 .await;
@@ -1463,5 +1721,249 @@ mod tests {
             "must wait out SSE_SEND_TIMEOUT before giving up, elapsed {elapsed:?}"
         );
         drop(rx);
+    }
+
+    // ── Bedrock InvokeModel (v1.2) ──────────────────────────────────────────────────────────────
+
+    // What one-api v0.6.10's AWS adaptor sends (relay/adaptor/aws/claude: anthropic.Request copied
+    // into a body with anthropic_version "bedrock-2023-05-31", content as typed blocks, no model).
+    const ONE_API_INVOKE: &[u8] = br#"{"anthropic_version":"bedrock-2023-05-31","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"max_tokens":16}"#;
+
+    #[test]
+    fn invoke_model_is_routed_as_bedrock_and_answered_with_an_anthropic_message() {
+        let path = "/model/anthropic.claude-3-haiku-20240307-v1%3A0/invoke";
+        assert!(is_bedrock_invoke(path));
+        assert_eq!(dialect_for(path), "bedrock");
+        assert_eq!(body_for(path), BEDROCK_INVOKE);
+        let v: serde_json::Value = serde_json::from_slice(body_for(path)).expect("valid json");
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["content"][0]["text"], "ok");
+        assert!(v["usage"]["input_tokens"].is_u64() && v["usage"]["output_tokens"].is_u64());
+        // Converse on the same prefix keeps its own body, and the streaming invoke variant answers
+        // the same JSON (never SSE: it is not the ANTHROPIC body by identity).
+        assert!(!is_bedrock_invoke("/model/m/converse"));
+        assert_eq!(
+            body_for("/model/m/invoke-with-response-stream"),
+            BEDROCK_INVOKE
+        );
+        assert_ne!(body_for(path), ANTHROPIC);
+    }
+
+    #[test]
+    fn invoke_model_validation_accepts_the_bedrock_anthropic_body_and_nothing_else() {
+        let path = "/model/m/invoke";
+        assert!(invoke_shape_ok(ONE_API_INVOKE));
+        assert!(request_shape_ok_at("bedrock", path, ONE_API_INVOKE));
+        assert!(invoke_shape_ok(
+            br#"{ "anthropic_version" : "bedrock-2023-05-31", "max_tokens": 8, "messages": [ {"role":"user","content":"hi"} ] }"#
+        ));
+        for bad in [
+            // a raw OpenAI chat body forwarded to /invoke
+            &br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#[..],
+            // a Converse body sent to /invoke
+            br#"{"messages":[{"role":"user","content":[{"text":"hi"}]}],"inferenceConfig":{"maxTokens":16}}"#,
+            // the direct Anthropic API body (wrong version marker)
+            br#"{"anthropic_version":"2023-06-01","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#,
+            // no max_tokens, empty messages, untyped blocks
+            br#"{"anthropic_version":"bedrock-2023-05-31","messages":[{"role":"user","content":"hi"}]}"#,
+            br#"{"anthropic_version":"bedrock-2023-05-31","messages":[],"max_tokens":16}"#,
+            br#"{"anthropic_version":"bedrock-2023-05-31","messages":[{"role":"user","content":[{"text":"hi"}]}],"max_tokens":16}"#,
+            b"not json",
+        ] {
+            assert!(
+                !request_shape_ok_at("bedrock", path, bad),
+                "{} must be refused on /invoke",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // Converse validation on /converse is exactly what it was.
+        assert!(request_shape_ok_at(
+            "bedrock",
+            "/model/m/converse",
+            br#"{"messages":[{"role":"user","content":[{"text":"hello"}]}]}"#
+        ));
+    }
+
+    // ── the TLS listener (v1.2) ─────────────────────────────────────────────────────────────────
+
+    /// One HTTPS request over `stream`, returning the raw response.
+    async fn https_call<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        tls: &mut S,
+        path: &str,
+        body: &[u8],
+    ) -> String {
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        tls.write_all(head.as_bytes()).await.expect("write head");
+        tls.write_all(body).await.expect("write body");
+        let mut resp = Vec::new();
+        let _ = tls.read_to_end(&mut resp).await;
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    // An arbitrary SNI gets a TLS 1.3 handshake with a certificate chaining to this run's CA, the
+    // request is served by the same dialect routing, it is counted as a TLS request on its dialect,
+    // and a second connection resumes rather than repeating the full handshake.
+    #[tokio::test]
+    async fn the_tls_listener_serves_any_sni_with_a_run_ca_certificate_and_counts_it() {
+        use rustls::pki_types::pem::PemObject;
+        let ca = Arc::new(super::tls::RunCa::generate().expect("a run CA"));
+        let ca_pem = ca.ca_pem().to_string();
+        let config = Arc::new(super::tls::server_config(ca).expect("server config"));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let egress = Arc::new(Egress {
+            ca_pem: Some(ca_pem.clone()),
+            ..Egress::default()
+        });
+        tokio::spawn(super::serve_tls(
+            listener,
+            tokio_rustls::TlsAcceptor::from(config),
+            Arc::new(tokio::sync::Semaphore::new(16)),
+            0,
+            Arc::new(StreamFrames::build(1, 0, 1)),
+            Arc::new(Recorder::default()),
+            Arc::new(RecordFlag::new(false)),
+            egress.clone(),
+        ));
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from_pem_slice(ca_pem.as_bytes()).expect("pem"))
+            .expect("root");
+        let client = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+        let host = "bedrock-runtime.us-east-1.amazonaws.com";
+
+        let mut kinds = Vec::new();
+        for _ in 0..2 {
+            let tcp = TcpStream::connect(addr).await.expect("connect");
+            let name = rustls::pki_types::ServerName::try_from(host).expect("name");
+            let mut tls = connector
+                .connect(name, tcp)
+                .await
+                .expect("handshake verifies against the run CA");
+            {
+                let (_, conn) = tls.get_ref();
+                assert_eq!(
+                    conn.protocol_version(),
+                    Some(rustls::ProtocolVersion::TLSv1_3)
+                );
+                kinds.push(conn.handshake_kind());
+            }
+            let r = https_call(
+                &mut tls,
+                "/model/anthropic.claude-3-haiku-20240307-v1%3A0/invoke",
+                ONE_API_INVOKE,
+            )
+            .await;
+            assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+            assert!(
+                r.contains("msg_bdrk_x"),
+                "the invoke body is served over TLS: {r}"
+            );
+        }
+        assert_eq!(kinds[0], Some(rustls::HandshakeKind::Full));
+        assert_eq!(
+            kinds[1],
+            Some(rustls::HandshakeKind::Resumed),
+            "a reconnect resumes the session"
+        );
+
+        // A name the client did not trust a certificate for is still issued one - any SNI works.
+        let tcp = TcpStream::connect(addr).await.expect("connect");
+        let name = rustls::pki_types::ServerName::try_from("generativelanguage.googleapis.com")
+            .expect("name");
+        let mut tls = connector
+            .connect(name, tcp)
+            .await
+            .expect("second name handshakes");
+        let r = https_call(
+            &mut tls,
+            "/v1beta/models/gemini-1.5-pro:generateContent",
+            br#"{"contents":[]}"#,
+        )
+        .await;
+        assert!(r.contains("candidates"), "{r}");
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&state_json(&Recorder::default(), false, &egress))
+                .expect("state json");
+        assert_eq!(doc["tls_requests"]["bedrock"], 2);
+        assert_eq!(doc["tls_requests"]["gemini"], 1);
+        assert_eq!(doc["tls_requests"]["openai"], 0);
+    }
+
+    // The plain listener never counts as TLS, and serves the CA only when TLS is on.
+    #[tokio::test]
+    async fn the_plain_listener_serves_the_ca_and_never_counts_tls() {
+        for ca in [
+            None,
+            Some("-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n".to_string()),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let egress = Arc::new(Egress {
+                ca_pem: ca.clone(),
+                ..Egress::default()
+            });
+            let e2 = egress.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let e3 = e2.clone();
+                    tokio::spawn(async move {
+                        let frames = Arc::new(StreamFrames::build(1, 0, 1));
+                        let recorder: Arc<Recorder> = Arc::default();
+                        let recording = Arc::new(RecordFlag::new(false));
+                        let _ = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(
+                                TokioIo::new(stream),
+                                service_fn(move |r| {
+                                    handle(
+                                        r,
+                                        0,
+                                        frames.clone(),
+                                        recorder.clone(),
+                                        recording.clone(),
+                                        e3.clone(),
+                                        false,
+                                    )
+                                }),
+                            )
+                            .await;
+                    });
+                }
+            });
+            let mut c = TcpStream::connect(addr).await.expect("connect");
+            c.write_all(b"GET /__mock/ca HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("w");
+            let mut resp = Vec::new();
+            let _ = c.read_to_end(&mut resp).await;
+            let resp = String::from_utf8_lossy(&resp);
+            match &ca {
+                None => assert!(resp.starts_with("HTTP/1.1 404"), "{resp}"),
+                Some(pem) => assert!(resp.contains(pem.as_str()), "{resp}"),
+            }
+            let mut c = TcpStream::connect(addr).await.expect("connect");
+            let req = "POST /model/m/invoke HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            c.write_all(req.as_bytes()).await.expect("w");
+            let _ = c.read_to_end(&mut Vec::new()).await;
+            assert!(egress
+                .tls_requests
+                .iter()
+                .all(|n| n.load(std::sync::atomic::Ordering::Relaxed) == 0));
+        }
     }
 }
