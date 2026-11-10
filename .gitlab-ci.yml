@@ -1,11 +1,11 @@
 # Publish the website and its machine-readable evidence from production main.
-# GitHub Actions stays retired. The schedule uses REFRESH_GATEWAY_STARS=1,
-# Every night at 03:00 America/Los_Angeles; web pipelines can refresh immediately.
+# GitHub Actions stays retired. DEPLOY_WEBSITE=1 on dev runs deploy-website. The nightly
+# schedule (03:00 America/Los_Angeles) also refreshes GitHub stars; release deploys never do.
 workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH =~ /^ci\// && ($VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/ || $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/)'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_ENGINE_REF =~ /^[0-9a-f]{40}$/'
-    - if: '$CI_COMMIT_BRANCH == "dev" && $REFRESH_GATEWAY_STARS == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+    - if: '$CI_COMMIT_BRANCH == "dev" && $DEPLOY_WEBSITE == "1" && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
     - if: '$CI_COMMIT_BRANCH == "dev" && $VERIFY_WEBSITE_REF =~ /^[0-9a-f]{40}$/'
     - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
       changes: [site/**/*, engine/**/*, mock/**/*, .gitlab-ci.yml]
@@ -37,7 +37,7 @@ verify-website:
     - node --max-old-space-size=2048 site/build.mjs "$verify_dir" "$verify_dir/publication"
     - OTB_TEST_ARTIFACT="$verify_dir/publication" node --test site/publishing.test.mjs site/history.test.mjs site/retention-upload.test.mjs site/run-reviews.test.mjs site/withdrawal.test.mjs
 
-refresh-gateway-stars:
+deploy-website:
   stage: publish
   # Protected deploy runner (GCP, example-project): its own worker pool, no shared cache,
   # one job per VM. The Cloudflare credentials are scoped to the production environment,
@@ -50,7 +50,7 @@ refresh-gateway-stars:
   image: node:22-bookworm
   resource_group: onthebench-production
   rules:
-    - if: '$REFRESH_GATEWAY_STARS == "1"'
+    - if: '$DEPLOY_WEBSITE == "1"'
   variables:
     OTB_SINGLE_ENGINE: "1"
     WRANGLER_SEND_METRICS: "false"
@@ -101,6 +101,9 @@ verify-engine:
     - chown -R ci:ci "$CI_PROJECT_DIR"
     - su ci -s /bin/bash -c "export PATH='$PATH' CARGO_HOME='$CARGO_HOME' RUSTUP_HOME='$RUSTUP_HOME'; cd '$CI_PROJECT_DIR' && RUST_TEST_THREADS=1 OTB_TEST_ENGINE_BIN='$CI_PROJECT_DIR/target/debug/otb' cargo test --workspace --locked"
     - rustup target add aarch64-unknown-linux-musl
+    # The mock's TLS (rustls with ring) compiles C for the static musl target.
+    - apt-get update -qq && apt-get install -y -qq musl-tools
+    - export CC_aarch64_unknown_linux_musl=musl-gcc
     - OTB_BUILD_COMMIT="$VERIFY_ENGINE_REF" cargo build --release --locked --workspace --target aarch64-unknown-linux-musl
     - mkdir -p rig
     - cp target/aarch64-unknown-linux-musl/release/otb rig/otb-arm64

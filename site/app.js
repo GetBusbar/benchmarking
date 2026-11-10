@@ -3852,7 +3852,7 @@ const isHarnessGap = (cell) => {
 const cellState = (cell) =>
   cell.perf?.egress_reverified === false ? ["failed", "not served"]
     : cell.served === true ? ["served", "served"]
-    : cell.served === "not_measured" ? ["unverified", "not measured"]
+    : cell.served === "not_measured" ? ["notconf", "not measured"]
     : cell.served === "unprobed_auth" ? ["unprobed", "unprobed auth"]
       // PROBE-FIRST (matrix v3): every cell is probed; a failed probe is "not configured" with the
       // probe's evidence (probe_note) - it renders like the old declaration-grey, never as a red.
@@ -4378,7 +4378,7 @@ function drawerHtml(g, st = state) {
       if (!cell) return `<li><span class="cell na"></span> ${esc(MATRIX_LABELS[c])}: <span class="muted">n/a</span></li>`;
       const [cls, label] = cellState(cell);
       return `<li><span class="cell ${cls}${label === "not declared" ? " notdecl" : ""}"></span> <b>${esc(MATRIX_LABELS[c])}</b>: ${label}` +
-        ` <span class="muted">(HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")})</span>` +
+        ` <span class="muted">(HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")}${cell.upstream_transport === "tls" ? ", upstream over HTTPS" : ""})</span>` +
         (cell.verdict_note ? `<div class="muted evidence">${esc(cell.verdict_note)}</div>` : "") +
         (cell.served !== true && cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "") +
         `</li>`;
@@ -4757,7 +4757,7 @@ function cellPopFull(g, ingress, egress) {
   if (!cell) return "";
   const [, label] = cellState(cell);
   const head = `<h4>${esc(g.display)}: ${esc(MATRIX_LABELS[ingress])} in / ${esc(MATRIX_LABELS[egress])} upstream — ${esc(label)}${
-    cell.status ? ` (HTTP ${esc(cell.status)})` : ""}</h4>`;
+    cell.status ? ` (HTTP ${esc(cell.status)})` : ""}${cell.upstream_transport === "tls" ? " · upstream over HTTPS" : ""}</h4>`;
   // Read the SAME gated values the tables read, by pinning a synthetic Custom-mode state on this cell.
   const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
   const rows = [];
@@ -4908,7 +4908,7 @@ function renderMatrix() {
             if (!cell) return `<td class="na" title="${esc(missing ? matrixFailureReason(g)
               : "not measured (v1 result: this upstream dialect was not probed)")}">n/a</td>`;
             const [cls, label] = cellState(cell);
-            const diag = e === c ? " diag" : "";
+            const diag = "";
             // No native `title` here: the richer hover popup (cellPopHtml/showPop) carries the
             // verdict + perf, and a native title on top of it would double up. But the VERDICT must not be
             // colour-only: it rides as the accessible name, and the cell is focusable so the popup opens

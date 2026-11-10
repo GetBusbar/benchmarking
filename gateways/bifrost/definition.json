@@ -22,9 +22,9 @@
     "cohere>cohere": "/cohere/v2/chat",
     "bedrock>cohere": "/bedrock/model/cohere%2Fcommand-r-plus/converse",
     "anthropic>bedrock": "/anthropic/v1/messages",
-    "gemini>bedrock": "/genai/v1beta/models/gpt-4o-mini:generateContent",
+    "gemini>bedrock": "/genai/v1beta/models/bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0:generateContent",
     "cohere>bedrock": "/cohere/v2/chat",
-    "bedrock>bedrock": "/bedrock/model/bedrock%2Fgpt-4o-mini/converse"
+    "bedrock>bedrock": "/bedrock/model/bedrock%2Fanthropic.claude-3-5-sonnet-20240620-v1%3A0/converse"
   },
   "class": "LLM gateway",
   "config": [],
@@ -40,14 +40,16 @@
     "openai-responses",
     "anthropic",
     "gemini",
-    "cohere"
+    "cohere",
+    "bedrock"
   ],
   "egress_models": {
     "anthropic": "claude-3-5-sonnet-20241022",
     "cohere": "command-r-plus",
     "gemini": "gemini-1.5-pro",
     "openai": "bench-chat/gpt-4o-mini",
-    "openai-responses": "bench-responses/gpt-4o-mini"
+    "openai-responses": "bench-responses/gpt-4o-mini",
+    "bedrock": "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0"
   },
   "lang": "Go",
   "launch": {
@@ -71,25 +73,16 @@
     "container": "bifrost",
     "kind": "docker"
   },
-  "untestable": [
-    "openai/bedrock",
-    "openai-responses/bedrock",
-    "anthropic/bedrock",
-    "gemini/bedrock",
-    "cohere/bedrock",
-    "bedrock/bedrock"
-  ],
-  "untestable_note": "Bifrost transports/v2.5.0 (69f4d56d18b9ba00ac5f9cf969b4501a882b9967), core/providers/bedrock/bedrock.go, constructs HTTPS Bedrock runtime endpoints. The benchmark mock serves plain HTTP, so this harness cannot measure that upstream. This is a mock limitation, not a claim that Bifrost lacks Bedrock support.",
   "headers": [
     "x-bf-vk: sk-bf-benchmark-dummy"
   ],
   "matrix": [
-    "101110",
-    "111110",
-    "111110",
-    "111110",
-    "101110",
-    "111110"
+    "101111",
+    "111111",
+    "111111",
+    "111111",
+    "101111",
+    "111111"
   ],
-  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967. Every upstream uses the field's common model gpt-4o-mini. OpenAI Chat and Cohere ingress into the Responses-only upstream are not enabled: Bifrost only converts them when the model catalog marks the model Responses-only (plugins/compat/main.go::markForConversion), and selecting a different model (o3-pro) to trigger that path also triggers the compat plugin's default parameter dropping (it removed max_completion_tokens in the preflight), which the benchmark's out-of-the-box rule excludes. Six Bedrock upstream cells are separate rig limitations."
+  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967. Every upstream except Bedrock uses the field's common model gpt-4o-mini; Bedrock uses a Claude model id (anthropic.claude-3-5-sonnet-20240620-v1:0) so Bifrost stays on the bedrock-runtime Converse surface rather than routing an OpenAI model family to its OpenAI-compatible Mantle surface (core/providers/bedrock/bedrock.go resolveSurface). OpenAI Chat and Cohere ingress into the Responses-only upstream are not enabled: Bifrost only converts them when the model catalog marks the model Responses-only (plugins/compat/main.go::markForConversion), and selecting a different model (o3-pro) to trigger that path also triggers the compat plugin's default parameter dropping (it removed max_completion_tokens in the preflight), which the benchmark's out-of-the-box rule excludes. The Bedrock upstream uses Bifrost's default HTTPS runtime host (bedrock-runtime.us-east-1.amazonaws.com), which the engine v1.2 catch-all DNS resolves to the mock; its six cells are probed and carry upstream_transport \"tls\"."
 }

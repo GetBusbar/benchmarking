@@ -605,6 +605,9 @@ fn main() -> ExitCode {
             // still does. Declaring a launch means the harness owns the gateway's lifetime: it starts
             // it, measures it, and stops it, so a run cannot silently measure a container left over
             // from a previous one.
+            // The box resolver while the gateway runs (engine v1.2, `egress.rs`). Held to the end of
+            // the run; dropping it on any return path below puts the box's own resolver back.
+            let mut isolation: Option<otb_engine::egress::Isolation> = None;
             let launched = match cfg.manifest.launch_spec(
                 &gw_cores,
                 cfg.mock_addr.port(),
@@ -617,8 +620,27 @@ fn main() -> ExitCode {
                     eprintln!("manifest {manifest_path} cannot be launched: {e}");
                     return ExitCode::FAILURE;
                 }
-                Some(Ok(spec)) => {
+                Some(Ok(mut spec)) => {
                     let mut launcher = otb_engine::launch::RealLauncher::default();
+                    // SETUP ON THE REAL INTERNET, THEN THE CATCH-ALL DNS. The image pull and the
+                    // source build happen first and once; only then does every name resolve to the
+                    // mock and the run CA become trusted, before the gateway starts.
+                    if let Err(e) =
+                        otb_engine::egress::setup_with_internet(&mut launcher, &mut spec)
+                    {
+                        eprintln!("{} never became ready: {e}", spec.runtime.identity());
+                        return ExitCode::FAILURE;
+                    }
+                    match otb_engine::egress::isolate(cfg.mock_addr, &gw_dir) {
+                        Ok(iso) => isolation = iso,
+                        Err(e) => {
+                            eprintln!(
+                                "egress: refusing to launch {}: {e}",
+                                spec.runtime.identity()
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    }
                     match otb_engine::launch::launch_default(&mut launcher, &spec) {
                         Ok(l) => {
                             println!(
@@ -727,6 +749,13 @@ fn main() -> ExitCode {
                 if let Some(why) = end_of_run_stop_failure(&spec.runtime.identity(), &stop) {
                     eprintln!("{why}");
                     stop_failed = true;
+                }
+            }
+            // The box's own resolver back, now that the gateway is gone.
+            if let Some(mut iso) = isolation.take() {
+                match iso.restore() {
+                    Ok(()) => eprintln!("egress: /etc/resolv.conf restored"),
+                    Err(e) => eprintln!("egress: could not restore /etc/resolv.conf: {e}"),
                 }
             }
 

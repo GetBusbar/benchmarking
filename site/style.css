@@ -461,22 +461,11 @@ tbody tr { cursor: pointer; }
      not declared    - empty square, solid outline (research only, no probe)
      not verified    - dashed outline with a centre dot (the harness could not get it serving)
      untestable      - outline crossed by one diagonal (a recorded harness limitation) */
-.cell.notconf {
-  background: repeating-linear-gradient(45deg, var(--fg-mute) 0 2px, transparent 2px 5px);
-  border: 1px solid var(--fg-mute);
-}
-.cell.notconf.notdecl { background: transparent; border: 1.5px solid var(--fg-mute); }
-/* not verified: the harness could not get the gateway serving under this egress config; a dashed
-   grey border reads as "we could not test this", visibly distinct from the solid "not declared". */
-.cell.unverified { background: radial-gradient(circle, var(--fg-dim) 0 2px, transparent 2.5px); border: 1.5px dashed var(--fg-dim); }
-/* untestable: the gateway supports the pair in production but pins the real cloud host (no
-   base-URL override), so our mock cannot stand in - a rig limit, dotted border, never a red. */
-.cell.untestable {
-  background: linear-gradient(135deg, transparent calc(50% - 1px), var(--fg-dim) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px));
-  border: 1.5px solid var(--fg-dim);
-}
-/* diagonal cells (same dialect in and out, no translation required): subtle ring */
-.cell.diag { outline: 1px solid var(--fg-dim); outline-offset: 1px; }
+/* THREE COLOURS ONLY: green served, grey no result (not configured, not declared, untestable,
+   unprobed), red fail (not served, or the harness could not get it serving). The engine's exact
+   wording rides on hover, in the accessible name and in the drawer; colour never carries it alone. */
+.cell.notconf, .cell.notconf.notdecl, .cell.untestable { background: var(--grey); }
+.cell.unverified { background: var(--red); }
 /* compact cell legend: one line of colored squares + short labels, mirrors the cell classes */
 .matrix-legend {
   list-style: none; margin: .2rem 0 .1rem; padding: 0;
@@ -485,13 +474,8 @@ tbody tr { cursor: pointer; }
 .matrix-legend li { display: flex; align-items: center; gap: .4rem; }
 .matrix-legend .lg { display: inline-block; width: .9rem; height: .9rem; border-radius: 3px; }
 .matrix-legend .lg-pass { background: var(--green); }
-.matrix-legend .lg-notconf { background: repeating-linear-gradient(45deg, var(--fg-mute) 0 2px, transparent 2px 5px); border: 1px solid var(--fg-mute); }
-.matrix-legend .lg-notdecl { background: transparent; border: 1.5px solid var(--fg-mute); }
-.matrix-legend .lg-unverified { background: radial-gradient(circle, var(--fg-dim) 0 2px, transparent 2.5px); border: 1.5px dashed var(--fg-dim); }
-.matrix-legend .lg-untestable { background: linear-gradient(135deg, transparent calc(50% - 1px), var(--fg-dim) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); border: 1.5px solid var(--fg-dim); }
-.matrix-legend .lg-unprobed { background: var(--grey); }
+.matrix-legend .lg-none { background: var(--grey); }
 .matrix-legend .lg-failed { background: var(--red); }
-.matrix-legend .lg-diag { background: var(--green); outline: 1px solid var(--fg-dim); outline-offset: 1px; }
 .matrix-legend-note { font-size: .78rem; margin: 0 0 .8rem; }
 .matrix-detail {
   margin-top: 1rem; border: 1px solid var(--border); border-radius: 8px;

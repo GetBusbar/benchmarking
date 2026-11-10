@@ -3362,6 +3362,12 @@ pub struct CellResult {
     /// them. `Default` (both `None`) for a cell that was never served, where there is nothing to
     /// re-verify.
     pub reverify: crate::reverify::Reverified,
+    /// How the gateway reached the mock for this cell (engine v1.2): `"tls"` when a request on the
+    /// egress dialect arrived on the mock's TLS listener while the cell was probed, `"http"` when the
+    /// cell was served and none did, `None` when that cannot be said (see
+    /// `egress::transport_for`). The cell's latency includes that hop either way; nothing is
+    /// subtracted.
+    pub upstream_transport: Option<&'static str>,
 }
 
 /// How long to wait before asking a refuted re-verification once more. One recorder read can be
@@ -3496,6 +3502,7 @@ pub fn run_grid_cells(
                     series: None,
                     timings_s: None,
                     reverify: Default::default(),
+                    upstream_transport: None,
                 });
                 continue;
             }
@@ -3522,6 +3529,7 @@ pub fn run_grid_cells(
                     series: None,
                     timings_s: None,
                     reverify: Default::default(),
+                    upstream_transport: None,
                 });
                 continue;
             }
@@ -3543,6 +3551,7 @@ pub fn run_grid_cells(
                     series: None,
                     timings_s: None,
                     reverify: Default::default(),
+                    upstream_transport: None,
                 });
                 continue;
             }
@@ -3562,6 +3571,9 @@ pub fn run_grid_cells(
             if !healthy {
                 eprintln!("[cell {done}/{total}] {id}: the mock did not answer its own health check - nothing observed here is attributable to the gateway");
             }
+            // The mock's TLS count for this egress before the probe; read again after it, the two
+            // say whether the gateway reached the mock over HTTPS (`upstream_transport`).
+            let tls_before = crate::egress::tls_count(cfg.mock_addr, eg.as_str());
             let mut served = probe_cell(cfg, &id, healthy);
             // A GATEWAY THAT DIED TAKES THE REST OF THE GRID WITH IT, UNLESS SOMETHING RESTARTS IT.
             //
@@ -3609,6 +3621,11 @@ pub fn run_grid_cells(
                     }
                 }
             }
+            let upstream_transport = crate::egress::transport_for(
+                tls_before,
+                crate::egress::tls_count(cfg.mock_addr, eg.as_str()),
+                served.is_measurable(),
+            );
             // THE ENGINE, IN TWO LINES: if the cell is served, run every metric on it. The list of
             // metrics lives in one place (`metric::METRICS`) rather than being reached for here, so
             // a measurement cannot be implemented, tested, and then silently never taken.
@@ -3700,6 +3717,7 @@ pub fn run_grid_cells(
                 series,
                 timings_s: timings,
                 reverify,
+                upstream_transport,
             });
         }
     }
@@ -4741,6 +4759,65 @@ while True:
         assert!(mock_healthy(&cfg_for(up, up)));
         let dead: SocketAddr = "127.0.0.1:1".parse().expect("literal");
         assert!(!mock_healthy(&cfg_for(dead, dead)));
+    }
+
+    /// Plays gateway and mock at once, for `upstream_transport`: `/__mock/state` reports a TLS count
+    /// for openai, and every POST bumps it when `over_tls` (the probe "reached the mock over TLS").
+    fn serve_counting_tls(over_tls: bool) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        let tls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(7));
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let tls = tls.clone();
+                std::thread::spawn(move || {
+                    let mut b = [0u8; 4096];
+                    loop {
+                        let n = c.read(&mut b).unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        let head = String::from_utf8_lossy(&b[..n]).into_owned();
+                        let body = if head.starts_with("GET /__mock/state") {
+                            format!(
+                                r#"{{"recording":false,"dialects":{{}},"tls_requests":{{"openai":{}}}}}"#,
+                                tls.load(std::sync::atomic::Ordering::SeqCst)
+                            )
+                        } else {
+                            if over_tls && head.starts_with("POST") {
+                                tls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            super::TEST_PROTOCOL_OK.to_string()
+                        };
+                        let r = format!(
+                            "HTTP/1.1 200 X\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if c.write_all(r.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    // v1.2: the cell records which mock listener its probe reached; a fixture whose state carries no
+    // TLS counts (the v1.1 mock) leaves it unknown.
+    #[test]
+    fn the_grid_records_how_each_cell_reached_the_mock() {
+        for (fixture, want) in [
+            (serve_counting_tls(true), Some("tls")),
+            (serve_counting_tls(false), Some("http")),
+            (serve(200), None),
+        ] {
+            let cfg = cfg_for(fixture, fixture);
+            let rows = run_grid_with(&cfg, 1, 2, &[]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].upstream_transport, want);
+        }
     }
 
     // Every pairing appears, served or not. A dropped row hides a failure.

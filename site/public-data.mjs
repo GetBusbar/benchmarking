@@ -83,6 +83,8 @@ export function projectMeasurements(gateway, archivesByFile) {
         status: { state: cellStatus(cell), raw_state: cell.publication_review?.original_state ?? cell.served ?? null, reason: cell.reason ?? null, detail: cell.probe_note || cell.verdict_note || null, evidence_scope: cell.publication_review ? "Publication correction; original observation is retained in raw_state and the immutable raw result." : cell.served === "not_configurable" ? "Historical capability research, not a fresh probe of the tested build. Referenced versions may differ from gateway_build; do not infer current capability." : "Recorded run evidence", probe_http_status: cell.status || null, response_excerpt: cell.body_snippet || null },
         test: {
           ingress_protocol: ingress, upstream_protocol: egress,
+          // Engine v1.2: how the gateway reached the mock, recorded per cell ("tls" or "http"); absent before v1.2.
+          ...(cell.upstream_transport ? { upstream_transport: cell.upstream_transport } : {}),
           hardware: raw?.hardware ?? matrix.hardware ?? null,
           architecture: raw?.arch ?? rig?.arch ?? matrix.arch ?? null,
           harness_commit: rig?.engine?.commit ?? null,
