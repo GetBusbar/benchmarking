@@ -1562,6 +1562,11 @@ echo "[rig] ephemeral ports: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev
 # the snapshot's rig block.
 sudoq sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true
 sudoq sysctl -w net.ipv4.tcp_max_syn_backlog=65535 >/dev/null 2>&1 || true
+# ENGINE v1.2: THE MOCK ALSO ANSWERS DNS ON :53 AND HTTPS ON :443, as the unprivileged user it has
+# always run as. Lowering the unprivileged-port floor to 53 is what lets it bind them without root;
+# nothing else on this disposable box binds below 1024. A mock that still cannot bind refuses to
+# start, and the readiness check below then refuses the run.
+sudoq sysctl -w net.ipv4.ip_unprivileged_port_start=53 >/dev/null 2>&1 || true
 _somaxconn="$(cat /proc/sys/net/core/somaxconn 2>/dev/null || true)"
 echo "[rig] listen backlog: somaxconn=${_somaxconn:-unknown} tcp_max_syn_backlog=$(cat /proc/sys/net/ipv4/tcp_max_syn_backlog 2>/dev/null || echo unknown)"
 case "$_somaxconn" in
@@ -1667,7 +1672,11 @@ pkill -f "bin/mock-$BENCH_ARCH" 2>/dev/null; sleep 1
 # the reference instrument and quietly convert real gateway measurements into suppressed ones. The
 # mock is also the least-touched, most-trusted code in the harness; it stays in exactly the state
 # every previously published number was taken against, and pays the recording cost once per cell.
-setsid taskset -c $MOCKCORES ./bin/mock-$BENCH_ARCH --port 8000 </dev/null >mock.log 2>&1 &
+# ENGINE v1.2: --tls-port and --dns add the HTTPS listener and the catch-all DNS responder (both
+# answer as 127.0.0.1, the address every gateway reaches the mock on). The engine points the box
+# resolver at the responder only after the gateway's image pull/build, and restores it at the end.
+# A v1.1 mock ignores both flags.
+setsid taskset -c $MOCKCORES ./bin/mock-$BENCH_ARCH --port 8000 --tls-port 443 --dns 127.0.0.1:53 </dev/null >mock.log 2>&1 &
 # Give it a moment to bind, then refuse to measure anything if it did not: every not-served verdict
 # is conditioned on the mock being up, so a run against a dead mock publishes rig failures as
 # gateway capability denials. (Any HTTP answer counts as bound; the loop used to fall through to
@@ -1686,6 +1695,13 @@ if [ "$_mock_up" != 1 ]; then
 fi
 # Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that will
 # not boot after the box-hours are already spent.
+# ENGINE v1.2 PREFETCH. The engine cuts every outbound name over to the mock once the gateway is set
+# up, so a gateway whose own start-up needs the network (a dependency download, not the measurement)
+# fetches it here, while the box still has real DNS. Optional and per gateway: gateways/<gw>/prefetch.sh.
+if [ -f "gateways/$gw/prefetch.sh" ]; then
+  echo "[rig] prefetch: gateways/$gw/prefetch.sh (real DNS, before the engine starts)"
+  bash "gateways/$gw/prefetch.sh" || { echo "RIG FAILURE: gateways/$gw/prefetch.sh failed - refusing to measure"; echo 126 > .run-done; exit 0; }
+fi
 ./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
 OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
   ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots

@@ -6,7 +6,11 @@
 # the quota so a throughput run cannot exhaust it, wire each upstream as a channel pointing at the
 # mock, then check that the credential the harness will authenticate with actually works.
 #
-# The channel type selects the native egress dialect: 1 is OpenAI, 14 is Anthropic, 24 is Gemini, 35 is Cohere v1.
+# The channel type selects the native egress dialect: 1 is OpenAI, 14 is Anthropic, 24 is Gemini, 35 is Cohere v1,
+# 33 is AWS (Bedrock InvokeModel through the AWS SDK). The AWS channel has no base_url: the SDK always
+# calls https://bedrock-runtime.<region>.amazonaws.com, which engine v1.2's catch-all DNS resolves to
+# the mock. Its region and placeholder keys travel in the channel config (relay/adaptor/aws reads
+# meta.Config.Region/AK/SK), and the mock accepts any signature.
 # The model lists are strictly disjoint on purpose. Routing selects on (group, model) and not on
 # channel type, so overlapping lists would let one model resolve to either channel at random and a
 # column would silently measure an upstream it did not ask for.
@@ -16,6 +20,7 @@ curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-t
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-14","type":14,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"claude-3-5-sonnet-20240620","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-24","type":24,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gemini-1.5-pro","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-35","type":35,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"command-r-plus","group":"default","status":1}' -o /dev/null
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"aws-33","type":33,"key":"AKIAMOCKACCESSKEY|mock-secret-access-key|us-east-1","config":"{\"region\":\"us-east-1\",\"ak\":\"AKIAMOCKACCESSKEY\",\"sk\":\"mock-secret-access-key\"}","models":"claude-3-haiku-20240307","group":"default","status":1}' -o /dev/null
 # THE RELAY CREDENTIAL IS A BOOT-TIME ONE, NOT A MINTED ONE. One-API's AddToken handler
 # (controller/token.go) ignores any client-supplied "key" and always writes a random one of its own,
 # and UpdateToken discards "key" too - so no admin-API call can make the manifest's declared auth
@@ -37,6 +42,9 @@ curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-t
 # retry covers the channel rows this file just inserted not yet being visible to the router. No -f on
 # the curl: the 401 body is exactly what this loop inspects, and -f discards it on any non-2xx.
 #
-# Every declared channel must return actual assistant content before the benchmark begins.
+# Every declared mock-URL channel must return actual assistant content before the benchmark begins.
 # An unroutable secondary lane is a setup failure, not permission to publish a partial run.
+# The AWS channel (claude-3-haiku-20240307) is NOT gated here: it reaches the mock over HTTPS on a
+# default cloud host, and whether that works (certificate trust, SDK behaviour) is exactly what its
+# cell's probe records as the engine's verdict - it must not abort the gateway's other lanes.
 for m in gpt-4o-mini claude-3-5-sonnet-20240620 gemini-1.5-pro command-r-plus; do i=1; ok=0; while [ $i -le 20 ]; do curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" -o /tmp/oa-auth-check; if python3 -c 'import json; d=json.load(open("/tmp/oa-auth-check")); assert not d.get("error"); assert any(isinstance(c.get("message",{}).get("content"),str) and c["message"]["content"].strip() for c in d.get("choices",[]))' 2>/dev/null; then ok=1; break; fi; sleep 0.5; i=$((i+1)); done; if [ "$ok" != 1 ]; then echo "one-api: setup failed for declared channel $m; refusing measurement" >&2; cat /tmp/oa-auth-check >&2; exit 1; fi; done

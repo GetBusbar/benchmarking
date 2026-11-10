@@ -1049,7 +1049,16 @@ fn run_suite_qualified(
                 Duration::from_secs(60),
                 Duration::from_secs(2),
             )
-            .and_then(|r| r.ok()),
+            .and_then(|r| r.ok())
+            // A RESTART RELAUNCHES; IT DOES NOT REBUILD. The source build ran once, before the first
+            // launch and before the catch-all DNS took the box off the internet (`egress.rs`), and a
+            // rebuild of the same pinned commit produces the same binary - but under the catch-all
+            // DNS its `git fetch`/`apt-get` would fail and take the restart, and the rest of the
+            // grid, with it.
+            .map(|mut spec| {
+                spec.pre_launch = None;
+                spec
+            }),
         // Replayed on every restart: a docker stop destroys the writable layer, and with it any
         // configuration these commands wrote (one-api's channels and quota live in an in-container
         // database). See `RunConfig::relaunch_commands`.
@@ -1298,6 +1307,7 @@ fn run_suite_qualified(
                 .timings_s
                 .as_ref()
                 .map(|t| t.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()),
+            upstream_transport: result.upstream_transport.map(str::to_string),
             ..Default::default()
         };
 

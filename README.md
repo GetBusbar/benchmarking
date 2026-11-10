@@ -330,7 +330,7 @@ node site/serve.mjs /path/to/empty/build-directory
 
 Production is built from `main`, including its committed results and full Git history.
 The GitLab workflow on `dev` is the production controller: trigger it with
-`REFRESH_GATEWAY_STARS=1` (also scheduled nightly). It clones `main`, refreshes metadata,
+`DEPLOY_WEBSITE=1` (also scheduled nightly, which alone refreshes GitHub stars). It clones `main`,
 runs checks, and invokes `site/publish.mjs`. The publisher deploys a Worker with static assets
 on `onthebench.ai/*`; it does not deploy a JavaScript-only Pages shell. The existing analytics
 relay routes remain separate. `site/wrangler.jsonc` declares the route and the `PUBLICATIONS`
