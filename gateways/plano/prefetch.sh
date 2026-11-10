@@ -10,5 +10,5 @@ IMAGE="$(python3 -c 'import json; print(json.load(open("definition.json"))["laun
 rm -rf venv && mkdir -p venv
 D=docker; docker info >/dev/null 2>&1 || D="sudo -n docker"
 $D run --rm --entrypoint sh -v "$PWD/venv:/app/.venv" "$IMAGE" -c 'cd /app && uv sync --frozen'
-test -x venv/bin/python
-echo "plano prefetch: /app/.venv built from the image's uv.lock ($(du -sh venv | cut -f1))"
+test -f venv/pyvenv.cfg   # venv/bin/python links into the container, not the host
+echo "plano prefetch: /app/.venv built from the image's uv.lock "
