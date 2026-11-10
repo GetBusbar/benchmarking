@@ -65,11 +65,12 @@ refresh-gateway-stars:
     # Only the nightly schedule refreshes GitHub stars (and fails on API errors, so stale data never
     # looks fresh). Release deploys publish the committed counts and never hit GitHub's rate limit.
     - if [ "$CI_PIPELINE_SOURCE" = "schedule" ]; then node gateways/fetch-stars.mjs; fi
+    # Install first: site/test.mjs loads render.mjs, which imports linkedom.
+    - npm ci --prefix site --ignore-scripts
     - node site/gen-data.mjs
     - node site/check-consistency.mjs site/data.json
     - node site/test-coverage.mjs
     - node site/test.mjs
-    - npm ci --prefix site --ignore-scripts
     - node --max-old-space-size=2048 site/publish.mjs
 
 # Build the immutable instrument separately from website publication.
