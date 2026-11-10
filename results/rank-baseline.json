@@ -1,0 +1,5 @@
+{
+  "label": "August 2026 run",
+  "baseline": "2026-11-08-before-refresh",
+  "note": "Rank movement compares each row's position on the sorted column with the published August 2026 field. The engine changed between the two runs, so a difference can include instrument changes; this is a descriptive comparison, not a statistical one."
+}

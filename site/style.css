@@ -933,7 +933,7 @@ tbody tr.tied-above > td {
 
 .publication-article{font-size:.9rem;line-height:1.55}.publication-article h1{font-size:1.4rem;line-height:1.25;margin:0 0 1rem}.publication-article h2{font-size:1.05rem;margin:1.6rem 0 .7rem}.publication-article p,.publication-article li{max-width:90ch}.publication-article pre{overflow:auto;max-width:100%;font-size:.8rem}.publication-article code{overflow-wrap:anywhere}
 
-.publication-resources{margin-top:2rem;border-top:1px solid var(--border);padding-top:1rem}.publication-resources .data-links{border:0;margin:0;padding:0;font-size:.82rem;gap:.6rem 1.25rem}.publication-resources .crawler-links{margin:.65rem 0 0;color:var(--fg-mute)}.crawler-links summary{cursor:pointer}.crawler-links nav{padding:.5rem 0}.publication-article{min-width:0}.publication-article table{font-size:.82rem}.publication-article ul{padding-left:1.3rem}.publication-article p{overflow-wrap:anywhere}
+.publication-resources{margin-top:2rem;border-top:1px solid var(--border);padding-top:1rem}.site-footer .publication-resources{margin-top:.75rem;padding-top:.75rem}.publication-resources .data-links{border:0;margin:0;padding:0;font-size:.82rem;gap:.6rem 1.25rem}.publication-resources .crawler-links{margin:.65rem 0 0;color:var(--fg-mute)}.crawler-links summary{cursor:pointer}.crawler-links nav{padding:.5rem 0}.publication-article{min-width:0}.publication-article table{font-size:.82rem}.publication-article ul{padding-left:1.3rem}.publication-article p{overflow-wrap:anywhere}
 
 main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow-wrap:anywhere}.publication-article .table-scroll{max-width:100%;overflow-x:auto}#home-measurements{max-width:100%;overflow-x:auto}
 
@@ -965,6 +965,9 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
 .metric-trend:hover, .metric-trend:focus-visible { text-decoration: underline; }
 
 .rank-change { color: var(--muted); }
+/* Rank movement vs the August 2026 field, right-aligned in the Gateway cell. */
+#results-table td.name .rank-move { float: right; margin-left: .4rem; font-size: .75em; font-weight: 600; font-variant-numeric: tabular-nums; line-height: inherit; cursor: help; }
+#results-table td.name .rank-move.trend-flat { color: var(--muted, #66717c); font-weight: 400; }
 
 .build > span { display: inline-block; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
 
@@ -1014,4 +1017,17 @@ main.wrap{padding-top:1.6rem;padding-bottom:3rem}.publication-article a{overflow
   .publication-article table.history-runs tbody td::before, .publication-article table.cards tbody td::before { content: attr(data-label); float: left; width: 6.5rem; margin-left: -7rem; font-weight: 600; color: var(--fg-mute); }
   .publication-article .record-facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .publication-article .record-facts dd { margin-bottom: .45rem; }
+}
+
+/* History pages: the then → now summary leads; the runs table follows. */
+.history-summary { margin: 1.25rem 0 2rem; }
+.history-summary h2 { margin-bottom: .35rem; }
+.history-note { color: var(--fg-mute); font-size: .85rem; margin: .35rem 0 .75rem; }
+.publication-article .history-summary-table th[scope="row"] { font-weight: 500; text-align: left; }
+.publication-article .history-summary-table td { font-variant-numeric: tabular-nums; }
+.publication-article .history-runs .unit { color: var(--fg-mute); font-size: .85em; }
+.publication-article .history-runs td.nw { white-space: nowrap; }
+@media (max-width: 640px) {
+  .publication-article table.history-summary-table tbody th[scope="row"] { display: block; font-weight: 600; padding: 0 0 .25rem; }
+  .publication-article .history-runs td.nw { white-space: normal; }
 }

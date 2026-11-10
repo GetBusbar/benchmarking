@@ -478,14 +478,60 @@ function withHistoryTrend(cell, g, record, key, bound) {
   if (trend.bound != null) query.set("bound",trend.bound);
   return {...cell,historyTrend:{...trend,url:`/gateways/${encodeURIComponent(g.history_family || g.key)}/history?${query}`}};
 }
-function historyTrendMarkup(trend) {
-  if (!trend || !trend.rank_change) return "";
-  const rank = trend.rank_change;
-  const detail = `${rank ? `Position ${rank.before} → ${rank.after}. ` : ""}${trend.label}: ${trend.change_percent > 0 ? "+" : ""}${trend.change_percent.toFixed(1)}% since ${trend.previous_measured_at.slice(0,10)}. Within ±5% is roughly unchanged.`;
-  const neutral = trend.state === "flat" || !rank.change;
-  const symbol = neutral ? "—" : rank.change > 0 ? "↑" : "↓";
-  const label = neutral ? symbol : `${symbol} ${rank.change > 0 ? "+" : ""}${rank.change}`;
-  return ` <span class="metric-trend trend-${neutral ? "flat" : rank.change > 0 ? "improved" : "regressed"}" title="${esc(detail)}" aria-label="${esc(detail)}">${label}</span>`;
+/* RANK MOVEMENT SINCE THE AUGUST 2026 FIELD (data.rank_baseline).
+   The table's own sort decides the ranking: the rows that have a reading in the sorted column today AND in
+   the baseline are ranked twice with the same comparator - once on today's rows, once on the baseline rows
+   built by the same projection - and a row's movement is the difference in place. A row counts as moved only
+   when its value changed by more than RANK_TOLERANCE_PERCENT (the history pages' ±5% display tolerance);
+   otherwise it reads "–". The two runs were measured by different engines, so this is a descriptive
+   comparison with the published August field, not a statistical claim. */
+const RANK_TOLERANCE_PERCENT = 5;
+function rankMovements(rows, baselineRows, col, desc, tiebreak) {
+  const out = new Map();
+  if (!col || col.sortable === false || !baselineRows) return out;
+  const num = (v) => typeof v === "number" && Number.isFinite(v);
+  const value = (g) => { const v = col.get(g).v; return num(v) ? v : null; };
+  const now = rows.filter((g) => value(g) !== null);
+  // A text column (gateway name, tested-on dialect) is not a measurement; no movement is claimed for it.
+  if (rows.some((g) => typeof col.get(g).v === "string")) return out;
+  const both = now.filter((g) => baselineRows[g.key] && value(baselineRows[g.key]) !== null);
+  const cmp = rowComparator(col, desc, tiebreak);
+  const after = both.slice().sort(cmp).map((g) => g.key);
+  const before = both.map((g) => baselineRows[g.key]).sort(cmp).map((g) => g.key);
+  for (const g of now) {
+    const base = baselineRows[g.key];
+    const was = base ? value(base) : null;
+    if (was === null) { out.set(g.key, { state: "no_baseline" }); continue; }
+    const is = value(g);
+    const a = before.indexOf(g.key) + 1, b = after.indexOf(g.key) + 1;
+    const pct = was === 0 ? (is === 0 ? 0 : null) : (is - was) / Math.abs(was) * 100;
+    const flat = Math.abs(is - was) <= Math.abs(was) * RANK_TOLERANCE_PERCENT / 100 + Number.EPSILON * Math.max(Math.abs(was), Math.abs(is), 1);
+    const change = flat ? 0 : a - b;
+    out.set(g.key, { state: change > 0 ? "up" : change < 0 ? "down" : "flat", change, before: a, after: b, change_percent: pct,
+      within_tolerance: flat, baseline_measured_at: base.measured_at || null });
+  }
+  return out;
+}
+function rankBaselineNote(baseline) {
+  const label = baseline.label || "August 2026 run";
+  return `Beside each name: places moved on the sorted column vs the ${label} (+ up, − down, – no movement or within ±${RANK_TOLERANCE_PERCENT}%). Different engines measured the two runs; this is descriptive, not a statistical result.`;
+}
+function rankMoveMarkup(move, baseline) {
+  if (!move) return "";
+  const label = (baseline && baseline.label) || "August 2026 run";
+  const since = (at) => `since ${label.replace(/ run$/, "")}${at ? ` (${String(at).slice(0, 10)})` : ""}`;
+  let text = "–", title;
+  if (move.state === "no_baseline") {
+    title = `No ${label} reading for this column, so no movement is shown.`;
+  } else {
+    const pct = move.change_percent == null ? "no percentage baseline" : `${move.change_percent > 0 ? "+" : ""}${move.change_percent.toFixed(1)}%`;
+    title = `Position ${move.before} → ${move.after}; value change ${pct} ${since(move.baseline_measured_at)}` +
+      (move.within_tolerance ? `. Within ±${RANK_TOLERANCE_PERCENT}%, counted as no movement.` : ".") + ` Compared with the ${label}; the engine changed between the runs.`;
+    if (move.change > 0) text = `+${move.change}`;
+    else if (move.change < 0) text = `\u2212${-move.change}`;
+  }
+  const cls = move.state === "up" ? "trend-improved" : move.state === "down" ? "trend-regressed" : "trend-flat";
+  return `<span class="rank-move ${cls}" title="${esc(title)}" aria-label="${esc(`Rank movement: ${text === "–" ? "none" : text}. ${title}`)}">${text}</span>`;
 }
 function metricTd(cell, sc = "") {
   if (cell.na)
@@ -494,7 +540,7 @@ function metricTd(cell, sc = "") {
   // note token: a frontier reading where no rung held the bound is a measured 0 whose reason lives on the
   // READING, not on the envelope, and "0" alone would read as "no data" for the gateways it matters most on.
   const zeroWhy = cell.why || (cell.v === 0 && cell.env && ZERO_WHY[cell.env.note]);
-  return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${historyTrendMarkup(cell.historyTrend)}${
+  return `<td class="${sc.trim()}"${cell.note ? ` title="${esc(cell.note)}"` : ""}>${esc(cell.text)}${
     zeroWhy ? `<span class="zero-why">${esc(zeroWhy)}</span>` : ""}</td>`;
 }
 function metric(env, fmt = fmtInt) {
@@ -3585,14 +3631,25 @@ function renderTable() {
      Only the SORTED column is considered: a tie on some other column is not what the reader is
      being shown a ranking of. */
   const tiedWithPrev = tiedRuns(rows, col, state, rigResolutionPct(state.data));
+  const baseline = data.rank_baseline || null;
+  const moves = baseline ? rankMovements(rows, baseline.gateways, col, state.sortDesc, tiebreak) : new Map();
+  const rankNote = document.getElementById("rank-baseline-note");
+  if (rankNote) {
+    rankNote.hidden = !baseline;
+    rankNote.textContent = baseline ? rankBaselineNote(baseline) : "";
+  }
   tbody.innerHTML = rows.map((g) =>
     `<tr data-gw="${esc(g.key)}" tabindex="0"${tiedWithPrev.has(g.key) ? ' class="tied-above" title="Within the rig\u2019s own measurement resolution of the row above — this ordering is not a finding"' : ""}>` + cols.map((c) => {
       const sc = c.id === state.sortCol ? " sorted-col" : "";
+      if (c.id === "name" && moves.size) {
+        const td = c.render(g, state).replace(/<\/td>$/, `${rankMoveMarkup(moves.get(g.key), baseline)}</td>`);
+        return sc ? td.replace("<td", `<td class="sorted-col"`).replace('class="sorted-col" class="', 'class="sorted-col ') : td;
+      }
       if (c.render) {
         // render columns emit their own <td>; tint the sorted one by injecting the class.
         return sc ? c.render(g, state).replace("<td", `<td class="sorted-col"`).replace('class="sorted-col" class="', 'class="sorted-col ') : c.render(g, state);
       }
-      return metricTd({...c.get(g), historyTrend: sc ? c.get(g).historyTrend : null}, sc);
+      return metricTd(c.get(g), sc);
     }).join("") + "</tr>"
   ).join("");
   // Empty-state line: filters that clear the table must never render as a bare header over nothing.
@@ -5845,7 +5902,7 @@ if (NODE) {
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, mcode, samplesNote, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
-    metricTd,
+    metricTd, rankMovements, rankMoveMarkup, rankBaselineNote, RANK_TOLERANCE_PERCENT,
     // The roster's row order, the compare row's tied-best set, the lane served predicate and the
     // memory-tab dialect seed: pure functions the suite drives directly, because each of them was a
     // defect that no DOM-free test could reach while it lived inside a renderer.

@@ -250,8 +250,8 @@ test("thin HTML, semantic guide, compact exports and run discovery", { skip: !ar
   const dictionaryResponse = await call(`/api/v1/definitions/${pub.dataset_id}`);
   assert.equal(dictionaryResponse.status, 200); assert.match(dictionaryResponse.headers.get("Cache-Control"), /immutable/);
   if (full.measurements.length) assert.ok(csv.length < (await (await call(`/gateways/data.csv?gateway=${first}&compact=0`)).text()).length);
-  const runs = await (await call("/api/v1/runs?family=busbar&limit=2")).json();
-  assert.ok(runs.runs.every(r => r.gateway_family === "busbar")); assert.equal(runs.limit, 2); assert.ok(runs.next);
+  const runs = await (await call("/api/v1/runs?family=kong&limit=1")).json();
+  assert.ok(runs.runs.every(r => r.gateway_family === "kong")); assert.equal(runs.limit, 1); assert.ok(runs.next);
   assert.equal((await call("/api/v1/runs?family=nonexistent")).status, 404);
   for (const path of ["/", "/gateways", "/gateways/performance", "/gateways/memory", "/gateways/charts"]) {
     const html = await (await call(path)).text(), doc = parseHTML(html).document;
@@ -265,7 +265,8 @@ test("thin HTML, semantic guide, compact exports and run discovery", { skip: !ar
     assert.ok(!doc.querySelector("#view-method"), path);
     assert.ok(!doc.querySelector("#matrix-grid"), path);
     assert.ok(doc.querySelector('meta[property="og:image"]'));
-    for (const href of ["/gateways/data", "/api/v1", "/llms.txt"]) assert.ok(doc.querySelector(`main a[href="${href}"]`));
+    // The data/API links live in the site footer, below the results, and stay crawler-visible HTML.
+    for (const href of ["/gateways/data", "/api/v1", "/llms.txt"]) assert.ok(doc.querySelector(`footer.site-footer .footer-content .publication-resources a[href="${href}"]`), `${path} ${href}`);
   }
   assert.equal(pub.license, "https://creativecommons.org/licenses/by/4.0/");
   assert.match(await (await call("/gateways/license")).text(), /CC BY 4.0/);
@@ -335,14 +336,39 @@ test('completed null metrics sort ahead of pending rows in both directions', asy
   for (const desc of [true,false]) assert.deepEqual(rows.slice().sort(app.rowComparator({get:g=>({v:g.v})},desc)).map(g=>g.display),['Kong','One-API','agentgateway']);
 });
 
-test('table trends are compact position changes and respect the neutral band', async () => {
+test('sorted metric cells no longer carry an in-cell rank marker', async () => {
  const {default:app}=await import('./app.js');
  const trend={state:'improved',label:'Improved',change_percent:12,previous_measured_at:'2026-08-01',rank_change:{before:8,after:1,change:7}};
- const render=t=>app.metricTd({v:100,text:'100',historyTrend:t});
- assert.match(render(trend),/↑ \+7/);
- assert.match(render({...trend,state:'flat',change_percent:1}),/trend-flat[^>]*>—/);
- assert.doesNotMatch(render({...trend,rank_change:null}),/metric-trend/);
- assert.doesNotMatch(render(trend),/<a /);
+ assert.doesNotMatch(app.metricTd({v:100,text:'100',historyTrend:trend}),/metric-trend|rank-move/);
+});
+
+test('rank movement vs the August baseline: up, down, flat within 5%, and no baseline reading', async () => {
+ const {default:app}=await import('./app.js');
+ const col={id:'rps',get:g=>({v:g.v})};
+ const row=(key,v,extra={})=>({key,display:key,v,measured_at:'2026-11-10T17:40:00Z',...extra});
+ // August order (higher is better): a 100, b 90, c 80, d 70. Today: c jumps to 120 (1st), a slips to 85 (+/-15%),
+ // b moves 3% only, d has no August reading, e is not measured today.
+ const now=[row('a',85),row('b',92.7),row('c',120),row('d',60),row('e',null)];
+ const base={a:row('a',100,{measured_at:'2026-08-26T19:08:42Z'}),b:row('b',90),c:row('c',80),d:row('d',null)};
+ const m=app.rankMovements(now,base,col,true);
+ assert.deepEqual([m.get('c').before,m.get('c').after,m.get('c').change,m.get('c').state],[3,1,2,'up']);
+ assert.deepEqual([m.get('a').before,m.get('a').after,m.get('a').change,m.get('a').state],[1,3,-2,'down']);
+ // b went 2 -> 2 here, and even if its place had changed, a 3% move is inside the tolerance.
+ assert.equal(m.get('b').state,'flat'); assert.equal(m.get('b').within_tolerance,true);
+ assert.equal(m.get('d').state,'no_baseline');
+ assert.equal(m.has('e'),false);
+ const html=k=>app.rankMoveMarkup(m.get(k),{label:'August 2026 run'});
+ assert.match(html('c'),/trend-improved[^>]*>\+2</);
+ assert.match(html('a'),/trend-regressed[^>]*>\u22122</);
+ assert.match(html('a'),/Position 1 → 3; value change -15\.0% since August 2026 \(2026-08-26\)/);
+ assert.match(html('b'),/>–</);
+ assert.match(html('d'),/No August 2026 run reading for this column[^>]*>–</);
+ // A place change inside the ±5% band is not a movement.
+ const tight=app.rankMovements([row('x',101),row('y',99)],{x:row('x',99),y:row('y',100)},col,true);
+ assert.equal(tight.get('x').change,0); assert.equal(tight.get('x').before,2); assert.equal(tight.get('x').after,1);
+ // Text columns (gateway name, tested-on) claim no movement.
+ assert.equal(app.rankMovements(now,base,{id:'name',get:g=>({v:g.display})},false).size,0);
+ assert.equal(app.RANK_TOLERANCE_PERCENT,5);
 });
 
  test("refuted upstream verification cannot appear as a served matrix pairing", async () => {

@@ -90,20 +90,87 @@ export function currentTrends(records, current) {
   }
   return trends;
 }
+// THE "THEN → NOW" SUMMARY. The published history keeps two runs per gateway: the August 2026 field run and the
+// current field run. The summary puts the readings a reader actually compares side by side for the
+// representative OpenAI → OpenAI cell, with the change, a ±5% flat band and the placement in each field. The
+// two runs can be measured by different engines; the summary says so instead of hiding the change.
+export const SUMMARY_READINGS = [
+  { metric: 'added_latency_p50_us' }, { metric: 'added_latency_p99_us' },
+  { metric: 'throughput_rps', bound: '1' }, { metric: 'throughput_rps', bound: '5' }, { metric: 'throughput_rps', bound: '10' }, { metric: 'throughput_rps', bound: 'none' },
+  { metric: 'cpu_us_per_request' }, { metric: 'idle_rss_mib' }, { metric: 'peak_rss_mib' },
+];
+const readingOf = (m, q) => !m ? null : q.metric === 'throughput_rps'
+  ? m.frontier?.find(f => f.bound_ms === (q.bound === 'none' ? null : Number(q.bound)))?.rps?.value ?? null
+  : m.metrics?.[q.metric]?.value ?? null;
+export const readingLabel = q => q.metric === 'throughput_rps' ? `Throughput, p99 ${q.bound === 'none' ? 'unbounded' : `≤ ${q.bound} ms`} (req/s)` : metricLabel(q.metric);
+export function historySummary(records, runs, placements = [], ingress = 'openai', egress = 'openai') {
+  const dated = runs.filter(r => r.evidence_available && r.measured_at).sort((a, b) => a.measured_at.localeCompare(b.measured_at));
+  if (!dated.length) return null;
+  const first = dated[0], last = dated.length > 1 ? dated.at(-1) : null;
+  const record = run => run && records.find(m => m.run_id === run.id && m.test.ingress_protocol === ingress && m.test.upstream_protocol === egress);
+  const a = record(first), b = record(last);
+  const place = (run, q) => { const p = run && placements.find(p => p.run_id === run.id && p.metric === q.metric && (p.bound ?? null) === (q.bound ?? null));
+    return p ? { rank: p.rank, eligible: p.eligible, rostered: p.rostered, field_id: p.field_id, field: p.field_label || p.field_name } : null; };
+  const side = run => run && { run_id: run.id, measured_at: run.measured_at, engine: run.engine ?? null, build: run.build ?? null, source_url: run.source_url ?? null };
+  const readings = SUMMARY_READINGS.map(q => {
+    const before = readingOf(a, q), after = readingOf(b, q);
+    const t = last ? trendIndicator(before, after, metricDirection(q.metric)) : null;
+    return { metric: q.metric, bound: q.bound ?? null, label: readingLabel(q), before, after,
+      change_percent: t?.change_percent ?? null, trend: t && { state: t.state, symbol: t.symbol, label: t.label, tolerance_percent: t.tolerance_percent },
+      rank_before: place(first, q), rank_after: place(last, q) };
+  }).filter(r => r.before != null || r.after != null);
+  return { ingress, egress, from: side(first), to: side(last), engine_changed: !!last && (first.engine ?? null) !== (last.engine ?? null), readings };
+}
+const monthOf = iso => { const t = formatTimestamp(String(iso || '').slice(0, 10)); return t ? t.replace(/^\d+ /, '') : 'Undated'; };
+const shortSha = sha => sha ? `<code title="${esc(sha)}">${esc(sha.slice(0, 7))}</code>` : 'Not recorded';
+const unitOf = metric => metric === 'throughput_rps' ? 'req/s' : /_mib_per_min$/.test(metric) ? 'MiB/min' : /_us$/.test(metric) ? 'µs' : /_mib$/.test(metric) ? 'MiB' : /_s$/.test(metric) ? 's' : '';
+const valueHtml = (v, metric) => v == null ? '<span class="muted">n/a</span>' : `${numberHtml(v)}${unitOf(metric) ? ` <span class="unit">${esc(unitOf(metric))}</span>` : ''}`;
+const placeHtml = p => p ? `<span title="${esc(`${p.rank} of ${p.eligible} eligible / ${p.rostered} rostered — ${p.field}`)}">${p.rank} of ${p.eligible}</span>` : '<span class="muted">—</span>';
+const changeHtml = r => !r.trend ? '' : r.change_percent == null
+  ? `<span class="history-trend trend-not_comparable" title="${esc(r.trend.label)}">·</span>`
+  : `<span class="history-trend trend-${r.trend.state}" title="${esc(`${r.trend.label}; ±${r.trend.tolerance_percent}% counts as roughly unchanged`)}">${esc(r.trend.symbol)} ${r.change_percent > 0 ? '+' : ''}${r.change_percent.toFixed(1)}%</span>`;
+export function summaryHtml(summary) {
+  if (!summary) return '';
+  const { from, to } = summary;
+  const then = monthOf(from.measured_at), now = to ? monthOf(to.measured_at) : null;
+  const note = !to ? `<p class="history-note">Only the ${esc(then)} run is published so far; the current field has not measured this gateway yet.</p>`
+    : `<p class="history-note">${esc(summary.ingress)} → ${esc(summary.egress)} cell. ${summary.engine_changed ? `The engine changed between these runs (${shortSha(from.engine)} → ${shortSha(to.engine)}), so differences can include instrument changes, not only gateway changes. ` : ''}Changes within ±5% show as roughly unchanged (—); this is a display tolerance, not a statistical margin.</p>`;
+  const head = to ? `<tr><th scope="col">Reading</th><th scope="col">${esc(then)}</th><th scope="col">${esc(now)}</th><th scope="col">Change</th><th scope="col">Rank ${esc(then)} → ${esc(now)}</th></tr>`
+    : `<tr><th scope="col">Reading</th><th scope="col">${esc(then)}</th><th scope="col">Rank</th></tr>`;
+  const rows = summary.readings.map(r => to
+    ? `<tr><th scope="row" data-label="Reading">${esc(r.label)}</th><td data-label="${esc(then)}">${valueHtml(r.before, r.metric)}</td><td data-label="${esc(now)}">${valueHtml(r.after, r.metric)}</td><td data-label="Change">${changeHtml(r)}</td><td data-label="Rank">${placeHtml(r.rank_before)} → ${placeHtml(r.rank_after)}</td></tr>`
+    : `<tr><th scope="row" data-label="Reading">${esc(r.label)}</th><td data-label="${esc(then)}">${valueHtml(r.before, r.metric)}</td><td data-label="Rank">${placeHtml(r.rank_before)}</td></tr>`).join('');
+  return `<section class="history-summary"><h2>${to ? `${esc(then)} → ${esc(now)}` : `${esc(then)} run`}</h2>${note}<div class="table-scroll"><table class="history-runs history-summary-table"><thead>${head}</thead><tbody>${rows || `<tr><td colspan="${to ? 5 : 3}">No readings recorded for this cell.</td></tr>`}</tbody></table></div></section>`;
+}
+const SHORT_TREND = { 'Engine changed': 'Engine changed', 'First recorded run': 'First run', 'Comparison unavailable': 'Not comparable' };
+function shortTrendHtml(t) {
+  if (!t) return '<span class="muted">—</span>';
+  const reasons = t.reasons?.length ? `Comparability: ${t.reasons.map(reasonText).join('; ')}` : '';
+  if (t.change_percent == null || t.state === 'not_comparable') {
+    const label = SHORT_TREND[t.label] || t.label || 'Not comparable';
+    return `<span class="history-trend trend-not_comparable"${reasons ? ` title="${esc(reasons)}"` : ''}>${mdSpan(esc(label), t.label || label)}</span>`;
+  }
+  return `<span class="history-trend trend-${t.state}" title="${esc(`${t.label} vs the previous comparable run${reasons ? `. ${reasons}` : ''}`)}">${esc(t.symbol)} ${t.change_percent > 0 ? '+' : ''}${t.change_percent.toFixed(1)}%</span>`;
+}
+const PROTOCOL_OPTIONS = ['openai','openai-responses','anthropic','gemini','cohere','bedrock'];
 export function historyArticle(family, page, q, comparisons = [], display = family) {
   const link = `/gateways/${family}`;
   const options = values => values.map(v => `<option value="${esc(v)}"${v === q.metric ? ' selected' : ''}>${esc(metricLabel(v))}</option>`).join('');
-  const points = page.points;
+  const protocol = (name, value) => `<select name="${name}">${[...new Set([...PROTOCOL_OPTIONS, value])].map(p => `<option value="${esc(p)}"${p === value ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select>`;
+  // One row per run: the catalog never repeats a run, and a repeated id would be a projection fault, not a second run.
+  const points = page.points.filter((p, i, all) => all.findIndex(o => o.run_id === p.run_id) === i);
+  const runOption = p => `<option value="${esc(p.run_id)}">${esc(formatTimestamp(p.measured_at) || p.measured_at || 'Undated')} — ${esc(p.gateway_build?.split('@')[0] || 'build not recorded')}</option>`;
+  const metricName = q.metric === 'throughput_rps' ? readingLabel({ metric: q.metric, bound: q.bound || '10' }) : metricLabel(q.metric);
   return `<h1>${esc(display)} history</h1><nav aria-label="Gateway"><a href="${link}">Overview</a> · <strong>History</strong> · <a href="${link}/evidence">Evidence</a></nav>
-  <p>Every retained run, including incomplete and unavailable evidence. Values describe the recorded local-mock configuration. Missing readings are never zero.</p>
-  <form method="get" class="history-controls"><label>Ingress <input name="ingress" value="${esc(q.ingress)}" list="protocols"></label> <label>Upstream <input name="egress" value="${esc(q.egress)}" list="protocols"></label><datalist id="protocols">${['openai','openai-responses','anthropic','gemini','cohere','bedrock'].map(p=>`<option value="${p}">`).join('')}</datalist> <label>Metric <select name="metric">${options(page.metrics)}</select></label> <label>Throughput p99 bound <select name="bound">${['1','5','10','50','100','none'].map(b=>`<option value="${b}"${b === (q.bound || '10') ? ' selected' : ''}>${b === 'none' ? 'Unbounded' : `${b} ms`}</option>`).join('')}</select></label> <label>From <input type="date" name="from" value="${esc(q.from || '')}"></label> <label>Through <input type="date" name="to" value="${esc(q.to || '')}"></label> <button>Show runs</button></form>
-  <p>↑ Improved · ↓ Regressed · — Roughly unchanged (within ±5%). This is a display tolerance, not a statistical margin of error. Trends use the preceding comparable run; unknown evidence is neutral.</p>
-  <p>${page.total} retained runs. Catalog <code>${esc(page.catalog_id)}</code>.</p>
-  <div class="table-scroll"><table class="history-runs"><caption class="sr-only">${esc(metricLabel(q.metric))}, ${esc(q.ingress)} → ${esc(q.egress)}</caption><thead><tr><th>Measured</th><th>Build</th><th>Harness</th><th>Result</th><th>Trend</th><th>Field placement</th><th>Evidence</th></tr></thead><tbody>${points.map(p=>`<tr><td data-label="Measured">${timeHtml(p.measured_at, 'Undated')}</td><td class="nw" data-label="Build">${buildHtml(p.gateway_build)}</td><td class="nw" data-label="Harness">${p.engine ? `<code title="${esc(p.engine)}">${esc(p.engine.slice(0,12))}</code>` : 'Not recorded'}</td><td data-label="Result">${p.value == null ? 'n/a' : numberHtml(p.value)} — ${mdSpan(esc(stateLabel(p.state).toLowerCase()), String(p.state).replaceAll('_', ' '))}</td><td data-label="Trend">${trendHtml(p.trend)}</td><td data-label="Field placement">${p.placements?.length ? p.placements.map(r=>`<a href="/api/v1/fields/${esc(r.field_id)}">${r.rank} of ${r.eligible} eligible / ${r.rostered} rostered</a> (${mdSpan(esc(fieldName(r.field_name)), r.field_name)})`).join("<br>") : "Not ranked in a retained field"}</td><td class="nw" data-label="Evidence"><a href="${esc(p.provenance?.run_url || '#')}">Run evidence</a></td></tr>`).join('')}</tbody></table></div>
+  ${summaryHtml(page.summary)}
+  <h2>Runs</h2>
+  <form method="get" class="history-controls"><label>Ingress ${protocol('ingress', q.ingress)}</label><label>Upstream ${protocol('egress', q.egress)}</label><label>Metric <select name="metric">${options(page.metrics)}</select></label><label>Throughput p99 bound <select name="bound">${['1','5','10','50','100','none'].map(b=>`<option value="${b}"${b === (q.bound || '10') ? ' selected' : ''}>${b === 'none' ? 'Unbounded' : `${b} ms`}</option>`).join('')}</select></label><label>From <input type="date" name="from" value="${esc(q.from || '')}"></label><label>Through <input type="date" name="to" value="${esc(q.to || '')}"></label><button>Show runs</button></form>
+  <p class="history-note">${page.total} published run${page.total === 1 ? '' : 's'} · ${esc(metricName)}, ${esc(q.ingress)} → ${esc(q.egress)} · values describe the recorded local-mock configuration; a missing reading is never zero. Hover a trend for its comparability details.</p>
+  <div class="table-scroll"><table class="history-runs"><caption class="sr-only">${esc(metricName)}, ${esc(q.ingress)} → ${esc(q.egress)}</caption><thead><tr><th>Measured</th><th>Build</th><th>Engine</th><th>Result</th><th>Trend</th><th>Field placement</th><th>Evidence</th></tr></thead><tbody>${points.map(p=>`<tr><td class="nw" data-label="Measured">${timeHtml(p.measured_at, 'Undated')}</td><td class="nw" data-label="Build">${buildHtml(p.gateway_build)}</td><td class="nw" data-label="Engine">${shortSha(p.engine)}</td><td class="nw" data-label="Result">${p.value == null ? mdSpan(`<span class="muted">${esc(stateLabel(p.state))}</span>`, String(p.state).replaceAll('_', ' ')) : valueHtml(p.value, q.metric)}</td><td data-label="Trend">${shortTrendHtml(p.trend)}</td><td data-label="Field placement">${p.placements?.length ? p.placements.map(r=>`<a href="/api/v1/fields/${esc(r.field_id)}" title="${esc(`${r.rank} of ${r.eligible} eligible / ${r.rostered} rostered — ${r.field_label || fieldName(r.field_name)}`)}">${r.rank} of ${r.eligible}</a> <span class="muted">${esc(r.field_label || fieldName(r.field_name))}</span>`).join("<br>") : '<span class="muted">Not ranked</span>'}</td><td class="nw" data-label="Evidence"><a href="${esc(p.provenance?.run_url || '#')}">Run evidence</a></td></tr>`).join('')}</tbody></table></div>
   ${page.next ? `<p><a href="${esc(page.next)}">Next page of runs</a></p>` : ''}
-  <details><summary>Compare any two runs across recorded metrics</summary><form method="get" class="history-controls"><input type="hidden" name="ingress" value="${esc(q.ingress)}"><input type="hidden" name="egress" value="${esc(q.egress)}"><label>Earlier run <select name="a">${points.map(p=>`<option value="${esc(p.run_id)}">${esc(formatTimestamp(p.measured_at) || p.measured_at || 'Undated')} — ${esc(p.gateway_build?.split('@')[0] || 'build not recorded')}</option>`).join('')}</select></label> <label>Later run <select name="b">${points.map(p=>`<option value="${esc(p.run_id)}">${esc(formatTimestamp(p.measured_at) || p.measured_at || 'Undated')} — ${esc(p.gateway_build?.split('@')[0] || 'build not recorded')}</option>`).join('')}</select></label> <button>Compare</button></form></details>
-  ${comparisons.length ? `<h2>Selected run comparison</h2><table class="history-runs"><thead><tr><th>Metric</th><th>Earlier</th><th>Later</th><th>Comparison</th></tr></thead><tbody>${comparisons.map(c=>`<tr><td data-label="Metric">${mdSpan(esc(metricOptionLabel(c.metric)), c.metric)}</td><td data-label="Earlier">${c.before == null ? 'n/a' : numberHtml(c.before)}</td><td data-label="Later">${c.after == null ? 'n/a' : numberHtml(c.after)}</td><td data-label="Comparison">${trendHtml(c.trend)} · ${mdSpan(esc(stateLabel(c.status)), c.status)}${c.change_percent == null ? '' : `: ${c.change_percent.toFixed(2)}%`}${c.reasons.length ? `; ${mdSpan(esc(c.reasons.map(reasonText).join(', ')), c.reasons.join(', '))}` : ''}</td></tr>`).join('')}</tbody></table>` : ''}
-  <p><a href="/api/v1/history?family=${esc(family)}">Bounded history JSON</a> · <a href="/gateways/runs">All gateway runs</a></p>`;
+  ${points.length > 1 ? `<details><summary>Compare two runs across every recorded metric</summary><form method="get" class="history-controls"><input type="hidden" name="ingress" value="${esc(q.ingress)}"><input type="hidden" name="egress" value="${esc(q.egress)}"><label>Earlier run <select name="a">${points.slice().reverse().map(runOption).join('')}</select></label><label>Later run <select name="b">${points.map(runOption).join('')}</select></label><button>Compare</button></form></details>` : ''}
+  ${comparisons.length ? `<h2>Selected run comparison</h2><div class="table-scroll"><table class="history-runs"><thead><tr><th>Metric</th><th>Earlier</th><th>Later</th><th>Comparison</th></tr></thead><tbody>${comparisons.map(c=>`<tr><td data-label="Metric">${mdSpan(esc(metricOptionLabel(c.metric)), c.metric)}</td><td data-label="Earlier">${c.before == null ? 'n/a' : numberHtml(c.before)}</td><td data-label="Later">${c.after == null ? 'n/a' : numberHtml(c.after)}</td><td data-label="Comparison">${trendHtml(c.trend)} · ${mdSpan(esc(stateLabel(c.status)), c.status)}${c.change_percent == null ? '' : `: ${c.change_percent.toFixed(2)}%`}${c.reasons.length ? `; ${mdSpan(esc(c.reasons.map(reasonText).join(', ')), c.reasons.join(', '))}` : ''}</td></tr>`).join('')}</tbody></table></div>` : ''}
+  <p><a href="/api/v1/history?family=${esc(family)}">History JSON</a> · <a href="/gateways/runs">All gateways</a></p>`;
 }
 export function historicalComparison(left, right) {
   const metrics = [...new Set([...Object.keys(left.metrics), ...Object.keys(right.metrics)])].map(metric => ({metric}));

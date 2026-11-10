@@ -11,7 +11,7 @@ import { renderDashboard, renderArticle, htmlToMarkdown, esc, datasetMetadata, s
 import { projectMeasurements, measurementsCsv, compareMeasurements, DISCLOSURE, POLICY, ORIGIN, freshness, compactSummary, compactRecords, PROTOCOLS } from "./public-data.mjs";
 import { measurementTable, gatewayArticle, comparisonArticle, dataArticle, schemaIndex, measurementSchema, openapi, disclosureHtml, buildHtml, factsHtml } from "./evidence.mjs";
 
-import { expandHistorical, historicalMeasurements, historyPoints, currentTrends, historyArticle, fieldRankings, rankChanges, metricDirection, PROJECTOR } from "./history.mjs";
+import { expandHistorical, historicalMeasurements, historyPoints, currentTrends, historyArticle, historySummary, fieldRankings, rankChanges, metricDirection, PROJECTOR } from "./history.mjs";
 import { semanticGuide, retrievalGuide, compactCsv, DATA_LICENSE, gatewayFamily } from "./retrieval.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -79,11 +79,15 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const builtFromSource = key => { try { return Boolean(JSON.parse(readFileSync(join(root, "gateways", key, "definition.json"), "utf8")).launch?.build); } catch { return false; } };
   const families = JSON.parse(readFileSync(join(root, "site/gateway-families.json"), "utf8"));
   const familyOf = id => Object.entries(families).find(([, aliases]) => aliases.includes(id))?.[0] || id;
+  const withdrawnPath = join(root, 'results/withdrawn-runs.json');
+  const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
   const reviewPath = join(root, 'results/run-reviews.json');
   const runReviews = existsSync(reviewPath) ? JSON.parse(readFileSync(reviewPath, 'utf8')) : {};
-  json('/api/v1/run-reviews.json', runReviews);
+  // A review of a withdrawn run is withdrawn with it: it names the run and would publish its evidence.
+  const publishedReviews = Object.fromEntries(Object.entries(runReviews).filter(([sha]) => !withdrawn[sha]));
+  json('/api/v1/run-reviews.json', publishedReviews);
   const reviewNames = [];
-  for (const review of Object.values(runReviews)) {
+  for (const review of Object.values(publishedReviews)) {
     const name = basename(new URL(review.evidence).pathname);
     const diagnosticRoot = resolve(root, 'results/diagnostics');
     const proof = resolve(diagnosticRoot, review.evidence_file || join('refresh-configuration', name));
@@ -92,8 +96,6 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     json(`/api/v1/reviews/${name}`, JSON.parse(readFileSync(proof, 'utf8')));
     reviewNames.push(name);
   }
-  const withdrawnPath = join(root, 'results/withdrawn-runs.json');
-  const withdrawn = existsSync(withdrawnPath) ? JSON.parse(readFileSync(withdrawnPath, 'utf8')).runs : {};
   json('/_publication/withdrawn-runs.json', withdrawn);
   const withdrawnFiles = new Set();
   const archives = [], byFile = new Map(), byHash = new Map();
@@ -166,6 +168,8 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   const historyDir = join(root, 'results/history');
   if (existsSync(historyDir)) for (const file of readdirSync(historyDir).filter(f => f.endsWith('.jsonl'))) {
     for (const line of readFileSync(join(historyDir,file),'utf8').split('\n').filter(Boolean)) {
+      // A metadata-only line is withdrawn by the SHA-256 of its exact bytes, the same way a raw run is.
+      if (withdrawn[hash(line)]) continue;
       const record = JSON.parse(line), gateway = record.gateway || file.replace(/\.jsonl$/, '');
       const measured = record.measured_at || record.timestamp || record.at || null;
       if (archives.some(r => r.gateway_id === gateway && measured && r.measured_at === measured && r.build === (record.build ?? null))) continue;
@@ -195,6 +199,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     deferredHistoryPages.push(() => {
       const entries=placements.get(`${family}/openai--openai`) || [];
       historyPage.points=historyPage.points.map(p=>({...p,placements:entries.filter(e=>e.run_id===p.run_id && e.metric===q.metric)}));
+      historyPage.summary=historySummary(records,familyRuns,entries);
       const display=data.gateways.find(g=>familyOf(g.key)===family)?.display||family;
       page(`/gateways/${family}/history`,renderArticle(template,{path:`/gateways/${family}/history`,title:`${display} benchmark history`,body:historyArticle(family,historyPage,q,[],display)}));
     });
@@ -228,6 +233,9 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
   json("/_publication/runs.json", archives.map(r => ({ ...r, gateway_family: r.gateway_family, raw_result_url: r.raw_result_url ?? null, source_url: r.source_url })));
   const fields = [];
   function retainField(collection, name, published) {
+    // A short reader-facing name for placements: the month(s) the field was measured, or "Current field".
+    const months = [collection.measured_range?.earliest, collection.measured_range?.latest].filter(Boolean).map(iso => formatTimestamp(String(iso).slice(0, 10))?.replace(/^\d+ /, '')).filter(Boolean);
+    const fieldLabel = name === 'Current field' ? 'Current field' : months.length ? `${[...new Set(months)].join('–')} field` : name;
     const selected = collection.measurements.map(m => ({ gateway_id: m.gateway_id, measurement_id: m.measurement_id, run_id: m.run_id, ingress: m.test.ingress_protocol, egress: m.test.upstream_protocol }));
     const manifest = { schema_version: '1.0', dataset_id: collection.dataset_id, roster: [...new Set(collection.gateways?.map(g=>g.id) || collection.measurements.map(m=>m.gateway_id))].sort(), selected_measurements: selected, comparison_policy: collection.comparison_policy, measured_range: collection.measured_range ?? null };
     const id = `field-${hash(JSON.stringify(manifest))}`;
@@ -243,7 +251,7 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
         for (const group of ranking.groups) for (const row of group.rankings) {
           const key=`${familyOf(row.gateway_id)}/${ingress}--${egress}`;
           if(!placements.has(key)) placements.set(key,[]);
-          placements.get(key).push({...row,metric,bound:bound??null,field_id:id,field_name:name,eligible:group.eligible,rostered:ranking.rostered,group:group.group});
+          placements.get(key).push({...row,metric,bound:bound??null,field_id:id,field_name:name,field_label:fieldLabel,eligible:group.eligible,rostered:ranking.rostered,group:group.group});
         }
       }
     }
@@ -314,9 +322,10 @@ export function build({ root = resolve(HERE, ".."), out = join(HERE, "dist"), ge
     const runs = archives.filter(r => r.gateway_family === family);
     const dates = runs.map(r => r.measured_at).filter(Boolean).sort();
     const name = data.gateways.find(g => familyOf(g.key) === family)?.display || family;
-    return `<tr><td><a href="/gateways/${encodeURIComponent(family)}/history">${esc(name)}</a></td><td>${runs.length}</td><td>${timeHtml(dates.at(-1)?.slice(0, 10))}</td><td><a href="/gateways/${encodeURIComponent(family)}/history">View history →</a></td></tr>`;
+    const engines = [...new Set(runs.map(r => r.engine).filter(Boolean))];
+    return `<tr><td data-label="Gateway"><a href="/gateways/${encodeURIComponent(family)}/history">${esc(name)}</a></td><td data-label="Runs">${runs.length}</td><td data-label="First run">${timeHtml(dates[0]?.slice(0, 10))}</td><td data-label="Latest run">${timeHtml(dates.at(-1)?.slice(0, 10))}</td><td class="nw" data-label="Engines">${engines.map(e => `<code title="${esc(e)}">${esc(e.slice(0, 7))}</code>`).join(' → ') || 'Not recorded'}</td><td data-label="History"><a href="/gateways/${encodeURIComponent(family)}/history">View history →</a></td></tr>`;
   }).join("");
-  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Gateway history", body: `<h1>Gateway history</h1><p>Choose a gateway to see its previous results, changes and original evidence. All tested versions are grouped together.</p><div class="table-scroll"><table><thead><tr><th>Gateway</th><th>Retained runs</th><th>Latest measurement</th><th>History</th></tr></thead><tbody>${historyDirectory}</tbody></table></div><p><a href="/api/v1/runs">Machine-readable run catalog</a></p>` }));
+  page("/gateways/runs", renderArticle(template, { path: "/gateways/runs", title: "Gateway history", body: `<h1>Gateway history</h1><p>Each gateway's published runs: the August 2026 field and the current field. Open a gateway for its readings side by side, changes and original evidence. All tested versions of a gateway are grouped together.</p><div class="table-scroll"><table class="history-runs"><thead><tr><th>Gateway</th><th>Runs</th><th>First run</th><th>Latest run</th><th>Engines</th><th>History</th></tr></thead><tbody>${historyDirectory}</tbody></table></div><p><a href="/api/v1/runs">Machine-readable run catalog</a></p>` }));
   write("/gateways/data.csv", compactCsv(measurements, measurements, datasetId));
   const index = `# On the Bench\n\n> Reproducible AI gateway measurements. Operated by the Busbar team, also an entrant.\n\nPublication generated ${data.generated_at}; newest measurement ${dates.at(-1) || "not recorded"}. Independent runs, not one simultaneous field experiment.\n\n## Resources\n\n- [Gateway benchmarks](${ORIGIN}/gateways)\n- [Markdown results](${ORIGIN}/gateways/performance.md)\n- [Data and API documentation](${ORIGIN}/gateways/data)\n- [Dataset reuse license](${ORIGIN}/gateways/license)\n- [Compact summary — start here](${ORIGIN}/api/v1/summary)\n- [Gateway catalog](${ORIGIN}/api/v1/gateways)\n- [API discovery](${ORIGIN}/api/v1)\n- [Latest dataset — large; prefer summary or paginated measurements](${ORIGIN}/api/v1/benchmarks/latest)\n- [Methodology](${ORIGIN}/gateways/method.md)\n- [Historical runs](${ORIGIN}/gateways/runs)\n- [OpenAPI](${ORIGIN}/openapi.json)\n\n## Gateways\n\n${publication.gateways.map(g => `- [${g.name}](${g.url}.md)`).join("\n")}\n\n## Retrieval alternatives\n\nMarkdown pages also have text/plain .txt twins. Use the HTML URL without .md if your tool rejects text/markdown.\n\n- [Compact CSV](${ORIGIN}/gateways/data.csv)\n- [Schema index](${ORIGIN}/api/v1/schema)\n\n## Example workflow\n\nCompare Busbar and Bifrost: read the gateway catalog, then [compare OpenAI to OpenAI p99 added latency](${ORIGIN}/api/v1/compare?a=busbar&b=bifrost&ingress=openai&egress=openai&metric=added_latency_p99_us). Inspect comparability.status before reporting a ratio; read measured_at, definitions, and provenance.run_url. Cite both runs and methodology with the numbers and caveats.\n\n## Agent guidance\n\n- The dashboard uses representative cells that can differ between gateways; do not rank those rows as like-for-like.\n- Choose explicit ingress and egress (upstream) protocols in /api/v1/measurements and /api/v1/compare.\n- Measurement pages are capped at 1 MiB of UTF-8 JSON. Always follow next until null, even when fewer than limit rows are returned. Use gateway, ingress, egress and metric filters to narrow retrieval.\n- Inspect comparability.status: only comparable supports a ratio. Missing evidence is not proof of comparability.\n- Distinguish measured_at from generated_at and published_at (unknown when null). Age is relative to age_as_of, not retrieval time. current_metadata contains dated repository statistics, not run-time statistics.\n- Never treat null, unavailable, or below-resolution values as zero.\n- Cite provenance.run_url with gateway_build, measured_at, the protocol pair, metric definition, and methodology. Verify raw_result_url against raw_sha256 when checking evidence.\n- [Measurement JSON Schema](${ORIGIN}/api/v1/schema/measurement.json)\n\n## Interpretation\n\n${POLICY.description}\n`;
   write("/llms.txt", index);

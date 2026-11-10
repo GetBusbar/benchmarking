@@ -215,8 +215,7 @@ export function renderDashboard(template, data, path, publication) {
     document.querySelector("main").insertAdjacentHTML("beforeend", `<section id="home-measurements" class="sr-only"><h2>Published OpenAI → OpenAI measurements</h2><p>Gateway overhead against a local mock. Independent runs; compare configurations before drawing ratios.</p><table><thead><tr><th>Gateway</th><th>Added p99 (µs)</th><th>State</th><th>Measured at</th></tr></thead><tbody>${rows.map(m => { const metric = m.metrics.added_latency_p99_us; return `<tr><td><a href="/gateways/${esc(m.gateway_id)}">${mdSpan(esc(names.get(m.gateway_id) || m.gateway_id), m.gateway_id)}</a></td><td>${metric?.value == null ? "n/a" : numberHtml(metric.value)}</td><td>${mdSpan(esc(stateLabel(metric?.state || m.status.state)), metric?.state || m.status.state)}</td><td>${timeHtml(m.measured_at, "")}</td></tr>`; }).join("")}</tbody></table></section>`);
   }
   document.querySelector("main").insertAdjacentHTML("afterbegin", `<h1 class="sr-only">${esc(title)}</h1><noscript><p class="muted">Published results are available below. <a href="/gateways/data">Browse all data and evidence</a>.</p><p class="muted"><strong>Comparison warning:</strong> Default rows use each gateway’s representative protocol cell, which can differ between gateways. This is not a like-for-like ranking. Select the same ingress and upstream protocols and check the <a href="/gateways/data">comparison evidence</a> before naming a winner.</p><style>canvas{display:none}#chart-canvas-data,#home-measurements{position:static;width:auto;height:auto;clip:auto;clip-path:none;overflow:visible;white-space:normal;margin:0}</style></noscript>`);
-  document.querySelector("main").insertAdjacentHTML("beforeend",
-    resourceLinks());
+  placeResourceLinks(document);
   return document.toString();
 }
 
@@ -234,6 +233,14 @@ export function datasetMetadata(publication, path = "/gateways") {
 }
 
 
+// The data/API links belong with the other reference links in the site footer, BELOW the results, not between
+// the page heading and the table. They stay plain HTML so crawlers and no-JS readers still see them. A page
+// without the site footer keeps them at the end of <main>.
+function placeResourceLinks(document) {
+  const footer = document.querySelector("footer.site-footer .footer-content");
+  if (footer) footer.insertAdjacentHTML("beforeend", resourceLinks());
+  else document.querySelector("main").insertAdjacentHTML("beforeend", resourceLinks());
+}
 function resourceLinks() {
   return `<div class="publication-resources"><nav class="data-links" aria-label="Benchmark data"><a href="/gateways/data">Data and API documentation</a><a href="/api/v1">API discovery</a><a href="/api/v1/summary">Compact results</a><a href="/llms.txt">Agent guide</a><a href="/gateways/runs">Historical measurements</a></nav><details class="crawler-links"><summary>Crawler files</summary><nav aria-label="Crawler discovery"><a href="${ORIGIN}/robots.txt">robots.txt</a> · <a href="${ORIGIN}/sitemap.xml">sitemap.xml</a> · <a href="${ORIGIN}/llms.txt">llms.txt</a></nav></details></div>`;
 }
@@ -242,7 +249,8 @@ export function renderArticle(template, { path, title, body, markdown, structure
   const document = dom(template);
   document.body.classList.remove("home");
   document.getElementById("catnav").innerHTML = '<span class="catnav-label">Benchmarking</span><a class="cat active" href="/gateways">Gateways</a>';
-  document.querySelector("main").innerHTML = `<article class="publication-article">${body}</article>${resourceLinks()}`;
+  document.querySelector("main").innerHTML = `<article class="publication-article">${body}</article>`;
+  placeResourceLinks(document);
   document.querySelectorAll('script[src="/app.js"]').forEach(n => n.setAttribute("src", "/article.js"));
   document.querySelectorAll(".tab").forEach(n => n.classList.remove("active"));
   for (const id of ["backdrop", "drawer", "compare-panel", "compare-bar"]) document.getElementById(id)?.remove();
