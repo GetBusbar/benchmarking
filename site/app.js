@@ -4378,7 +4378,7 @@ function drawerHtml(g, st = state) {
       if (!cell) return `<li><span class="cell na"></span> ${esc(MATRIX_LABELS[c])}: <span class="muted">n/a</span></li>`;
       const [cls, label] = cellState(cell);
       return `<li><span class="cell ${cls}${label === "not declared" ? " notdecl" : ""}"></span> <b>${esc(MATRIX_LABELS[c])}</b>: ${label}` +
-        ` <span class="muted">(HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")})</span>` +
+        ` <span class="muted">(HTTP ${esc(cell.status || "?")}, ${esc(cell.path || "")}${cell.upstream_transport === "tls" ? ", upstream over HTTPS" : ""})</span>` +
         (cell.verdict_note ? `<div class="muted evidence">${esc(cell.verdict_note)}</div>` : "") +
         (cell.served !== true && cell.body_snippet ? `<pre>${esc(cell.body_snippet)}</pre>` : "") +
         `</li>`;
@@ -4757,7 +4757,7 @@ function cellPopFull(g, ingress, egress) {
   if (!cell) return "";
   const [, label] = cellState(cell);
   const head = `<h4>${esc(g.display)}: ${esc(MATRIX_LABELS[ingress])} in / ${esc(MATRIX_LABELS[egress])} upstream — ${esc(label)}${
-    cell.status ? ` (HTTP ${esc(cell.status)})` : ""}</h4>`;
+    cell.status ? ` (HTTP ${esc(cell.status)})` : ""}${cell.upstream_transport === "tls" ? " · upstream over HTTPS" : ""}</h4>`;
   // Read the SAME gated values the tables read, by pinning a synthetic Custom-mode state on this cell.
   const st = { mode: "custom", xlateIn: ingress, xlateOut: egress };
   const rows = [];

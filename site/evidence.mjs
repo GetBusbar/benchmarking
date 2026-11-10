@@ -52,7 +52,7 @@ export function samplesFor(counts, key) {
 }
 export function measurementTable(measurements, notes = null) {
   return table(["Ingress → upstream", "Metric", "Value", "State / reason", "p99 bound (ms)"], measurements.flatMap(m => {
-    const path = pairHtml(m.test.ingress_protocol, m.test.upstream_protocol);
+    const path = pairHtml(m.test.ingress_protocol, m.test.upstream_protocol) + (m.test.upstream_transport === "tls" ? " (upstream over HTTPS)" : "");
     if (!Object.keys(m.metrics).length) return [[path, "—", "—",
       mdSpan(`${esc(stateLabel(m.status.state))}${m.status.detail ? `: ${noteHtml(m.status.detail, notes)}` : ""}`, m.status.state + (m.status.detail ? `: ${m.status.detail}` : "")), "—"]];
     const rows = Object.entries(m.metrics).map(([key, v]) => {
