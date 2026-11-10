@@ -6848,9 +6848,10 @@ testWithData("the dollar lanes are never more certain than the rate they are der
         // second is the one that flatters the gateway.
         // EXCEPT a below_resolution rate on the cost lane: every reader ranks below_resolution as 0, and
         // $0 per million is the cheapest value on a lower-is-better axis. The cost lane must be undefined.
-        if (lane === "cost_per_million_usd" && rate.reason === "below_resolution")
+        // The v1.1 engine spells the same finding bound_not_met; it gets the same treatment.
+        if (lane === "cost_per_million_usd" && (rate.reason === "below_resolution" || rate.reason === "bound_not_met"))
           assert.equal(env.reason, "not_applicable",
-            `${g.key}.cost_per_million_usd inherits below_resolution, which ranks as $0 - the cheapest gateway`);
+            `${g.key}.cost_per_million_usd inherits ${rate.reason}, which ranks as $0 - the cheapest gateway`);
         else
           assert.equal(env.reason, rate.reason,
             `${g.key}.${lane} reports ${env.reason} where the rate says ${rate.reason} - a flattened reason`);
