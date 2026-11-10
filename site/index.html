@@ -201,16 +201,11 @@
   <section id="view-matrix" class="view hidden">
     <h2>Protocol support matrix (6x6)</h2>
     <ul class="matrix-legend" aria-label="cell legend">
-      <li><span class="lg lg-pass"></span>served (probe passed)</li>
-      <li><span class="lg lg-notdecl"></span>not declared (historical capability research; not a probe)</li>
-      <li><span class="lg lg-notconf"></span>not configured (probe failed; evidence on hover)</li>
-      <li><span class="lg lg-unverified"></span>not verified (harness could not get it serving)</li>
-      <li><span class="lg lg-untestable"></span>untestable (the engine's recorded reason is shown on hover)</li>
-      <li><span class="lg lg-unprobed"></span>unprobed auth (authentication was not tested in this run)</li>
-      <li><span class="lg lg-failed"></span>not served (the gateway declined a pairing it is set up for; evidence on hover)</li>
-      <li><span class="lg lg-diag"></span>same-dialect passthrough</li>
+      <li><span class="lg lg-pass"></span>pass</li>
+      <li><span class="lg lg-none"></span>not configured (no result: not configured, not declared, or untestable)</li>
+      <li><span class="lg lg-failed"></span>fail</li>
     </ul>
-    <p class="matrix-legend-note muted">Served means a recorded probe passed. Not declared means historical capability research, not an attempted probe. Not configured means a probe did not complete correctly. Untestable marks a harness limitation. Inspect each cell’s evidence and pinned harness version; a passing probe does not establish complete semantic equivalence.</p>
+    <p class="matrix-legend-note muted">Hover or open a cell for the engine’s exact verdict and evidence. A passing probe does not establish complete semantic equivalence.</p>
     <div id="matrix-grid"></div>
     <div id="matrix-detail" class="matrix-detail hidden"></div>
     <p id="matrix-empty" class="muted hidden">No protocol matrix measurements are available in this collection.</p>
