@@ -29,7 +29,7 @@ import { absentEntryFor, sealMatrixCellsInPlace, sealPerfCell, sealStreaming, cp
 import { snapshotCellCoords, isScopedRelativeTo, layerScopedMatrix } from "./snapshots.mjs";
 import { applyRunReview } from "./run-reviews.mjs";
 import { instrumentOf } from "./check-consistency.mjs";
-import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor } from "./seal.mjs";
+import { sealMetric, sealFrontier, sealRungs, makeSource, SWEEP, UNGATED_LAT_FIELDS, UNGATED_COST_FIELDS, DEFAULT_BOUND_MS, frontierAt, UNGATED_STREAM_FIELDS, isMetricField, zeroNoteFor, BOUND_ZERO_REASONS } from "./seal.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
@@ -121,7 +121,9 @@ function costLanes(cell) {
            the frontier's "no rung held this tail"; inherited by a lower-is-better DOLLAR lane it read as
            "$0 per million", the cheapest gateway on the board, for a gateway that carried nothing under
            the bound. A cost with no rate is undefined, exactly like the measured-zero case below. */
-        absent: (rateAbsent && rateAbsent.reason === "below_resolution"
+        // `bound_not_met` is the v1.1 engine's own token for that same frontier state; older snapshots
+        // spell it below_resolution. Either way the cost at this bound is undefined, never $0.
+        absent: (rateAbsent && BOUND_ZERO_REASONS.includes(rateAbsent.reason)
           ? { reason: "not_applicable",
               detail: `${rateAbsent.detail} - so cost per request at the ${DEFAULT_BOUND_MS} ms bound is undefined, not $0` }
           : rateAbsent)

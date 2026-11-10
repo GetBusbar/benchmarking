@@ -53,8 +53,9 @@ pub struct Finding {
 }
 
 /// Whether any finding in the list should stop a run. Everything this lint checks is a fairness
-/// defect rather than a style nit, so today every rule blocks; this stays a function rather than a
-/// blanket `!findings.is_empty()` call site so a future Warn-only rule does not have to touch callers.
+/// defect rather than a style nit, so every rule blocks except `EmptyValue` (a blank free-text note
+/// cannot compromise fairness); this stays a function rather than a blanket `!findings.is_empty()`
+/// call site so Warn-only rules do not have to touch callers.
 pub fn blocks(findings: &[Finding]) -> bool {
     findings.iter().any(|f| f.severity == Severity::Block)
 }
@@ -112,9 +113,13 @@ pub fn lint(manifest: &Manifest, defaults: &Defaults) -> Vec<Finding> {
                 gateway: manifest.name.clone(),
                 key: key.to_string(),
                 rule: Rule::EmptyValue,
-                severity: Severity::Block,
+                // WARN, NOT BLOCK. The "value" read here is the free-text `note`, which the schema
+                // lets a manifest omit. A blank note is worth saying, never a reason to refuse the
+                // run - nor to advise deleting a setting that may be required to boot.
+                severity: Severity::Warn,
                 message: format!(
-                    "{}: setting {:?} has an empty value, so it configures nothing and should be deleted",
+                    "{}: setting {:?} records no value in its note, so whether it restates a default \
+                     cannot be checked",
                     manifest.name, key
                 ),
             });
@@ -254,6 +259,8 @@ mod tests {
             .find(|f| f.rule == Rule::EmptyValue)
             .unwrap();
         assert!(f.message.contains("base_url"));
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(!blocks(&findings), "{findings:?}");
     }
 
     #[test]

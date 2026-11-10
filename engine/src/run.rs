@@ -331,6 +331,11 @@ fn stream_ceiling_from(soft_fds: u32, port_ceiling: u32) -> u32 {
     ceiling.min(port_ceiling).min(STREAM_RUNAWAY_CAP)
 }
 
+/// The probe's wording for a gateway that refused or dropped the connection. The grid restarts the
+/// gateway when a probe ends with it (`run_grid_cells`), so a rig-side failure must never use it:
+/// restarting the gateway cannot give this host a free port.
+const NO_CONNECTION_PREFIX: &str = "no connection to the gateway";
+
 /// a real status with a healthy rig is the gateway's own answer, no HTTP answer at all is not.
 pub fn probe_cell(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> Served {
     let (attempts, pause_s) = crate::probe::transient_budget();
@@ -424,7 +429,28 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
         &headers_for(cfg, ing, &id.egress),
         cfg.probe_timeout,
     ) {
-        Outcome::Response(r) if (200..300).contains(&r.status) => (Served::Yes, None),
+        // A 2xx IS NOT AN ANSWER UNTIL IT IS ONE. The body must be a well-formed response of the
+        // INGRESS dialect carrying assistant text; an empty message, an error object or another
+        // dialect's body is a failed probe with the body kept as evidence. Not retryable: it is a
+        // real answer the gateway keeps giving.
+        Outcome::Response(r) if (200..300).contains(&r.status) => {
+            match ing.nonstream_response_problem(r.body()) {
+                None => (Served::Yes, None),
+                Some(why) => (
+                    Served::No(
+                        Verdict::Failed,
+                        crate::cell::Evidence {
+                            status: r.status,
+                            body_snippet: crate::cell::Evidence::snippet_within(
+                                &format!("{why}: {}", String::from_utf8_lossy(r.body())),
+                                600,
+                            ),
+                        },
+                    ),
+                    None,
+                ),
+            }
+        }
         Outcome::Response(r) => {
             // WHAT IT ACTUALLY SAID. Without this a declined cell is a bare verdict, and a whole
             // field answering 4xx for one rig-side reason reads as every gateway supporting nothing.
@@ -443,17 +469,25 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
                 return (Served::UnprobedAuth(evidence), None);
             }
             // The verdict decides which of the three this is, and they are NOT interchangeable.
-            // NotConfigured is the gateway's own answer that the pairing does not exist. Failed is
-            // the gateway's own answer that it reached and declined this attempt at a pairing that
-            // is otherwise real. NotVerified means the rig could not get a fair reading, so nothing
-            // was learned about the gateway, and recording it as "does not serve" would convict on
-            // the rig's failure.
+            // A cell the manifest DECLARES supported stays a failure when it rejects the common
+            // request, even with 404/501: those statuses cannot erase researched support and turn
+            // a broken cell grey. Only an undeclared pairing can receive the NotConfigured routing
+            // observation. NotVerified means the rig could not get a fair reading, regardless of
+            // support, and recording it as "does not serve" would convict on the rig's failure.
             let retry = crate::probe::status_is_transient(r.status)
                 .then(|| format!("HTTP {} is transient", r.status));
-            match persistent_transient_verdict(Observation { status: Some(r.status), mock_healthy }) {
+            match persistent_transient_verdict(Observation {
+                status: Some(r.status),
+                mock_healthy,
+                pairing_supported: crate::manifest::matrix_declared_capable(
+                    &cfg.matrix,
+                    &id.ingress,
+                    &id.egress,
+                ) == Some(true),
+            }) {
                 v @ (Verdict::NotConfigured | Verdict::Failed) => {
-                    // Only a Failed verdict is worth another ask: NotConfigured is the gateway
-                    // stating the route does not exist, which asking again cannot change.
+                    // Retry only transient statuses: a supported 404/501 is Failed but
+                    // deterministic, and NotConfigured cannot change by asking again.
                     let retry = if v == Verdict::Failed { retry } else { None };
                     (Served::No(v, evidence), retry)
                 }
@@ -469,8 +503,19 @@ fn probe_cell_once(cfg: &RunConfig, id: &CellId, mock_healthy: bool) -> (Served,
         // No HTTP answer at all: the gateway may never have been reached, so this says nothing
         // about it. Never a gateway fault.
         Outcome::ConnectionFailed(e) => (
-            Served::Untestable(format!("no connection to the gateway: {e}")),
+            Served::Untestable(format!("{NO_CONNECTION_PREFIX}: {e}")),
             Some("the connection was refused".to_string()),
+        ),
+        // THIS HOST ran out of ports or descriptors, so the gateway was never asked. Untestable like
+        // a refused connection, but NOT worded with `NO_CONNECTION_PREFIX`: that text is what makes
+        // the grid restart the gateway, and restarting it cannot give this host a free port. Worth
+        // another ask, because ports drain out of TIME_WAIT while the probe pauses.
+        Outcome::RigExhausted(e) => (
+            Served::Untestable(format!(
+                "this host could not open a connection (ephemeral ports or descriptors exhausted), \
+                 so the gateway was never asked: {e}"
+            )),
+            Some("this host had no free connection to make".to_string()),
         ),
         Outcome::TimedOut => (
             Served::Untestable("the gateway accepted the connection and never answered".into()),
@@ -516,6 +561,117 @@ struct SweepProbe<'a> {
     /// than rebuilt inside `spawn_pinned`, so the window and the probe cannot end up speaking to the
     /// gateway as two different clients.
     headers: Vec<(String, String)>,
+    /// Why the most recent window could not be run, when it could not. Read by `sweep_cell` after
+    /// the climb so an interrupted sweep names its cause and rung instead of only stopping.
+    stop: Option<SweepInterruption>,
+}
+
+/// A throughput sweep the RIG stopped: the rung whose window could not run, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SweepInterruption {
+    pub conc: u32,
+    /// `RigLimited` when the rig itself refused (a thread, or its own connections);
+    /// `NotMeasured` when the loadgen child gave back no readable stats line, which does not say
+    /// whether the rig or the harness was at fault.
+    pub reason: Absent,
+    pub cause: String,
+}
+
+/// Classify one sweep window. `Err` is a window the RIG could not run (the climb stops and keeps
+/// what it has); `Ok` is a real observation of the gateway, failed or not.
+///
+/// A free function so the classification is testable without spawning a loadgen child.
+fn sweep_sample(
+    concurrency: u32,
+    stats: Option<GenStats>,
+    elapsed: Duration,
+) -> Result<Sample, SweepInterruption> {
+    let stop = |reason: Absent, cause: String| SweepInterruption {
+        conc: concurrency,
+        reason,
+        cause,
+    };
+    let Some(stats) = stats else {
+        return Err(stop(
+            Absent::NotMeasured,
+            "the load generator child returned no readable stats line (it could not be run, or its \
+             output could not be parsed)"
+                .to_string(),
+        ));
+    };
+    // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
+    // limit, not a gateway result, so the search must stop rather than read a turnover.
+    if stats.spawn_failed {
+        eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
+        return Err(stop(
+            Absent::RigLimited,
+            "the rig refused a load-generator thread, so the window never ran at this concurrency"
+                .to_string(),
+        ));
+    }
+    // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
+    // `spawn_failed` already models: the window never ran at the concurrency it claims, so
+    // nothing about the gateway was learned at any concurrency we could name.
+    //
+    // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
+    // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
+    // failed and the search recorded our own port range as the gateway's ceiling. Counting them
+    // separately was only half the fix: a window containing any of them still failed, and still
+    // failed for our reason. It is unmeasured instead.
+    if stats.rig_refused > 0 {
+        eprintln!(
+            "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
+             (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency",
+            stats.rig_refused
+        );
+        return Err(stop(
+            Absent::RigLimited,
+            format!(
+                "this host refused {} of its own connections (ephemeral ports or descriptors \
+                 exhausted)",
+                stats.rig_refused
+            ),
+        ));
+    }
+    // A WINDOW THE RIG RAN AND THE GATEWAY ANSWERED NOTHING IN IS A FAILED RUNG, not an interruption.
+    //
+    // The generator only counts exchanges that finish inside the window, so a gateway whose requests
+    // all take longer than the window (plano near c=512: p99 5.9 s at c=256 against a 6 s window)
+    // reports ok=0 fail=0. Nothing on the rig went wrong - the child ran, nothing refused - so this
+    // is the turnover the climb is looking for. It ends the climb normally, the frontier keeps every
+    // rung below it, and this rung becomes the boundary evidence. No percentile: nothing completed,
+    // and a 0 us tail would be the best on the board.
+    if stats.ok == 0 && stats.fail == 0 {
+        eprintln!(
+            "loadgen: the window at c={concurrency} completed no request in {:.3}s; recorded as a \
+             failed rung (the gateway finished nothing inside the window), not a rig interruption",
+            elapsed.as_secs_f64()
+        );
+        return Ok(
+            Sample::new(0.0, false).with_reading(crate::search::Reading {
+                p99_us: None,
+                ok: 0,
+                fail: 0,
+            }),
+        );
+    }
+    // THE LATENCY RIDES ALONG WITH THE RATE, because the generator already measured it.
+    //
+    // This used to return the rate and the verdict alone, and the p99 this window ran at died
+    // here. That single narrowing is why the engine ran a SECOND search to answer "and how much
+    // at 20ms?": the answer was not readable off the sweep it had just taken. The second search
+    // ran after the memory group had restarted the gateway, so the two published throughput
+    // numbers described two different states of it. Carrying the reading is what lets one sweep
+    // answer both, from one set of windows, on one state of the gateway.
+    Ok(
+        Sample::new(stats.rps(), stats.fail == 0 && stats.ok > 0).with_reading(
+            crate::search::Reading {
+                p99_us: stats.p99_us,
+                ok: stats.ok,
+                fail: stats.fail,
+            },
+        ),
+    )
 }
 
 impl Probe for SweepProbe<'_> {
@@ -528,51 +684,18 @@ impl Probe for SweepProbe<'_> {
         // generator measures a different machine than a pinned one, and the difference is invisible
         // in the artifact. Same binary, separate process, same pinning the load generator has always
         // had.
-        let stats = self.spawn_pinned(concurrency)?;
-        // The OS refusing a thread means the window never ran at the requested concurrency: a RIG
-        // limit, not a gateway result, so the search must stop rather than read a turnover.
-        if stats.spawn_failed {
-            eprintln!("loadgen: could not reach c={concurrency}; the rig refused a thread");
-            return None;
+        let started = std::time::Instant::now();
+        let stats = self.spawn_pinned(concurrency);
+        match sweep_sample(concurrency, stats, started.elapsed()) {
+            Ok(sample) => {
+                self.stop = None;
+                Some(sample)
+            }
+            Err(why) => {
+                self.stop = Some(why);
+                None
+            }
         }
-        // THE RIG RUNNING OUT IS NOT A GATEWAY RESULT, and it is the same class of fact
-        // `spawn_failed` already models: the window never ran at the concurrency it claims, so
-        // nothing about the gateway was learned at any concurrency we could name.
-        //
-        // These are connections THIS HOST could not make - ephemeral ports or descriptors exhausted
-        // (EADDRNOTAVAIL/EMFILE). They used to land in `fail` beside a genuine refusal, so the gate
-        // failed and the search recorded our own port range as the gateway's ceiling. Counting them
-        // separately was only half the fix: a window containing any of them still failed, and still
-        // failed for our reason. It is unmeasured instead.
-        if stats.rig_refused > 0 {
-            eprintln!(
-                "loadgen: could not reach c={concurrency}; this host refused {} of its own connections \
-                 (ephemeral ports or descriptors exhausted) - the window never ran at that concurrency",
-                stats.rig_refused
-            );
-            return None;
-        }
-        // A window that produced nothing is UNMEASURED, not a zero.
-        if stats.ok == 0 && stats.fail == 0 {
-            return None;
-        }
-        // THE LATENCY RIDES ALONG WITH THE RATE, because the generator already measured it.
-        //
-        // This used to return the rate and the verdict alone, and the p99 this window ran at died
-        // here. That single narrowing is why the engine ran a SECOND search to answer "and how much
-        // at 20ms?": the answer was not readable off the sweep it had just taken. The second search
-        // ran after the memory group had restarted the gateway, so the two published throughput
-        // numbers described two different states of it. Carrying the reading is what lets one sweep
-        // answer both, from one set of windows, on one state of the gateway.
-        Some(
-            Sample::new(stats.rps(), stats.fail == 0 && stats.ok > 0).with_reading(
-                crate::search::Reading {
-                    p99_us: stats.p99_us,
-                    ok: stats.ok,
-                    fail: stats.fail,
-                },
-            ),
-        )
     }
 }
 
@@ -580,6 +703,241 @@ impl SweepProbe<'_> {
     /// Run one window in a pinned child and read its stats line back.
     fn spawn_pinned(&self, concurrency: u32) -> Option<GenStats> {
         load_window(self.cfg, &self.path, &self.body, &self.headers, concurrency)
+    }
+}
+
+#[cfg(test)]
+mod sweep_interruption_tests {
+    use super::*;
+    use crate::search::{climb_rungs_report, ProbedPoint};
+
+    /// Drives `sweep_sample` - the same classification `SweepProbe::probe` applies - over windows a
+    /// closure fabricates, so the climb and the frontier see exactly what a real sweep would.
+    struct StubSweep<F: FnMut(u32) -> Option<GenStats>> {
+        window: F,
+        stop: Option<SweepInterruption>,
+    }
+
+    impl<F: FnMut(u32) -> Option<GenStats>> Probe for StubSweep<F> {
+        fn probe(&mut self, concurrency: u32) -> Option<Sample> {
+            let stats = (self.window)(concurrency);
+            match sweep_sample(concurrency, stats, Duration::from_secs(6)) {
+                Ok(s) => Some(s),
+                Err(why) => {
+                    self.stop = Some(why);
+                    None
+                }
+            }
+        }
+    }
+
+    /// A clean window whose tail grows with concurrency and whose rate turns over past c=128.
+    fn clean(c: u32) -> GenStats {
+        let ok = u64::from(c.min(128)) * 600;
+        GenStats {
+            ok,
+            fail: 0,
+            elapsed_s: 6.0,
+            p50_us: Some(u64::from(c) * 100),
+            p99_us: Some(u64::from(c) * 400),
+            ..GenStats::default()
+        }
+    }
+
+    fn perf_of(points: Vec<ProbedPoint>, interrupted: Option<SweepInterruption>) -> CellPerf {
+        CellPerf {
+            points,
+            interrupted,
+        }
+    }
+
+    #[test]
+    fn an_empty_window_is_a_failed_rung_without_a_tail_not_an_interruption() {
+        // The child reports p99=0 on an empty window; that zero must not become a tail.
+        let empty = GenStats {
+            elapsed_s: 0.0,
+            p50_us: Some(0),
+            p99_us: Some(0),
+            ..GenStats::default()
+        };
+        let s = sweep_sample(512, Some(empty), Duration::from_secs(6))
+            .expect("an empty window the rig ran is an observation, not a rig stop");
+        assert!(!s.passed);
+        assert_eq!(s.value, 0.0);
+        assert_eq!(
+            s.reading,
+            Some(crate::search::Reading {
+                p99_us: None,
+                ok: 0,
+                fail: 0
+            })
+        );
+    }
+
+    // C2(a): plano near c=512 finishes nothing inside the window. The climb must end there as a
+    // turnover, and every published rate must be the one August published from the rungs below.
+    #[test]
+    fn a_gateway_answering_nothing_at_c512_ends_the_climb_with_a_disqualified_rung() {
+        let mut p = StubSweep {
+            window: |c: u32| {
+                Some(if c >= 512 {
+                    GenStats {
+                        elapsed_s: 0.0,
+                        p99_us: Some(0),
+                        ..GenStats::default()
+                    }
+                } else {
+                    clean(c)
+                })
+            },
+            stop: None,
+        };
+        let climb = climb_rungs_report(&mut p, 1, 65_536);
+        assert_eq!(climb.interrupted_at, None, "not a rig interruption");
+        assert!(p.stop.is_none());
+        let top: Vec<&ProbedPoint> = climb
+            .points
+            .iter()
+            .filter(|pt| pt.concurrency == 512)
+            .collect();
+        assert_eq!(top.len(), crate::search::WINDOWS_PER_RUNG);
+        assert!(top.iter().all(|pt| !pt.passed));
+        assert_eq!(
+            climb.points.iter().map(|pt| pt.concurrency).max(),
+            Some(512),
+            "the climb stops at the failed rung"
+        );
+
+        let frontier = metric::frontier_for_perf(&perf_of(climb.points.clone(), None));
+        // What August published: the same rungs without the c=512 windows, which it dropped.
+        let august_points: Vec<ProbedPoint> = climb
+            .points
+            .iter()
+            .filter(|pt| pt.concurrency < 512)
+            .cloned()
+            .collect();
+        let august = metric::frontier_for_perf(&perf_of(august_points, None));
+        assert_eq!(frontier.len(), august.len());
+        for (now, then) in frontier.iter().zip(&august) {
+            assert_eq!(now.p99_bound_us, then.p99_bound_us);
+            assert_eq!(now.rps.copied(), then.rps.copied());
+            assert_eq!(now.concurrency.copied(), then.concurrency.copied());
+            assert_eq!(now.p99_us.copied(), then.p99_us.copied());
+            assert!(!now.lower_bound, "a turnover is a ceiling, not a floor");
+        }
+        let unbounded = frontier
+            .iter()
+            .find(|r| r.p99_bound_us.is_none())
+            .expect("the unbounded reading is always published");
+        assert_eq!(unbounded.rps.copied(), Some(12_800.0));
+        assert_eq!(unbounded.concurrency.copied(), Some(128));
+        assert_eq!(
+            unbounded.first_disqualified_conc.copied(),
+            Some(512),
+            "the rung that answered nothing is the boundary evidence"
+        );
+    }
+
+    // C2(b)/(c): a REAL rig stop at rung k keeps rungs below k, marks every reading a lower bound and
+    // names the cause and the rung.
+    #[test]
+    fn a_spawn_failure_at_rung_k_keeps_the_rungs_below_it_as_a_named_lower_bound() {
+        let mut p = StubSweep {
+            window: |c: u32| {
+                Some(if c >= 64 {
+                    GenStats {
+                        spawn_failed: true,
+                        ..GenStats::default()
+                    }
+                } else {
+                    // A 2ms+ tail everywhere, so the 1ms bound is met by no rung.
+                    GenStats {
+                        p99_us: Some(2_000 + u64::from(c) * 400),
+                        ..clean(c)
+                    }
+                })
+            },
+            stop: None,
+        };
+        let climb = climb_rungs_report(&mut p, 1, 65_536);
+        assert_eq!(climb.interrupted_at, Some(64));
+        assert!(climb.points.iter().all(|pt| pt.concurrency < 64));
+        assert_eq!(
+            climb.points.len(),
+            6 * crate::search::WINDOWS_PER_RUNG,
+            "rungs 1..32 are kept"
+        );
+        let stop = p.stop.take().expect("the probe records why it stopped");
+        assert_eq!(stop.conc, 64);
+        assert_eq!(stop.reason, Absent::RigLimited);
+
+        let perf = perf_of(climb.points, Some(stop));
+        let frontier = metric::frontier_for_perf(&perf);
+        assert_eq!(frontier.len(), crate::frontier::P99_BOUNDS_US.len() + 1);
+        let unbounded = frontier
+            .iter()
+            .find(|r| r.p99_bound_us.is_none())
+            .expect("unbounded");
+        assert_eq!(
+            unbounded.rps.copied(),
+            Some(3_200.0),
+            "the frontier is kept"
+        );
+        assert_eq!(unbounded.concurrency.copied(), Some(32));
+        assert!(unbounded.lower_bound);
+        assert_eq!(unbounded.first_disqualified_conc.copied(), None);
+        assert_eq!(
+            unbounded.first_disqualified_conc.reason(),
+            Some(&Absent::RigLimited)
+        );
+        let d = unbounded
+            .first_disqualified_conc
+            .detail()
+            .unwrap_or_default();
+        assert!(d.contains("sweep interrupted by the rig at c=64"), "{d}");
+        assert!(d.contains("thread"), "the cause is named: {d}");
+        for r in frontier.iter().filter(|r| r.rps.is_measured()) {
+            assert!(
+                r.lower_bound,
+                "every reading of an interrupted sweep is a floor"
+            );
+        }
+        let tight = frontier
+            .iter()
+            .find(|r| r.p99_bound_us == Some(1_000))
+            .expect("1ms");
+        assert!(!tight.rps.is_measured());
+        let d = tight.rps.detail().unwrap_or_default();
+        assert!(d.contains("interrupted by the rig at c=64"), "{d}");
+
+        // And the cause reaches the published absences map, where nothing else carries it.
+        let rec = crate::record::CellPerf {
+            frontier,
+            ..Default::default()
+        };
+        let abs = rec.absences();
+        let e = abs
+            .get("frontier.unbounded.first_disqualified_conc")
+            .expect("an interrupted boundary is published with its reason");
+        assert_eq!(e.reason, Absent::RigLimited);
+    }
+
+    #[test]
+    fn an_uninterrupted_boundary_that_ran_out_of_range_stays_out_of_the_absences_map() {
+        let mut p = StubSweep {
+            window: |c: u32| Some(clean(c)),
+            stop: None,
+        };
+        let climb = climb_rungs_report(&mut p, 1, 256);
+        assert_eq!(climb.interrupted_at, None);
+        let rec = crate::record::CellPerf {
+            frontier: metric::frontier_for_perf(&perf_of(climb.points, None)),
+            ..Default::default()
+        };
+        assert!(!rec
+            .absences()
+            .keys()
+            .any(|k| k.ends_with("first_disqualified_conc")));
     }
 }
 
@@ -670,7 +1028,6 @@ pub fn load_window_costed(
     // spec (the `smoke` path, which drives a gateway this process never pinned) yields no cores and
     // therefore an absent utilisation - measuring some other process's cores and labelling the
     // result this gateway's would be worse than reporting nothing.
-    let started = std::time::Instant::now();
     let cores = crate::procsample::parse_cores(&cfg.gw_cores);
     let cpu_before = if cores.is_empty() {
         None
@@ -685,6 +1042,12 @@ pub fn load_window_costed(
             "the gateway's root pid did not resolve, so its cost cannot be attributed to this window",
         ),
     };
+    // THE CLOCK SPANS EXACTLY WHAT THE CPU DIFFERENCE SPANS: from the `before` read to the `after`
+    // read. It used to start ahead of the core parse, the /proc/stat scan and the first process-tree
+    // walk, and stop after `cost()` and a second /proc/stat scan - wall time with no gateway CPU
+    // counted against it, which biased utilisation low by an amount that grew with the size of the
+    // gateway's process tree and so differed by gateway.
+    let started = std::time::Instant::now();
     let stats = load_window_at(cfg, cfg.gateway_addr, path, body, headers, concurrency);
     // Re-resolve rather than reuse `pid`: a gateway is free to restart between the two reads, and a
     // second sample taken from a DIFFERENT process would be subtracted from the first as though it
@@ -697,6 +1060,7 @@ pub fn load_window_costed(
             "the gateway's root pid did not resolve after the window",
         ),
     };
+    let elapsed_s = started.elapsed().as_secs_f64();
     // Requests come from the window's OWN completed count, never from its published rate: the rate is
     // already a derived figure, and deriving cost from a derivation makes one number's error the
     // other's too.
@@ -721,9 +1085,8 @@ pub fn load_window_costed(
     // cross-check and only the bursty one failed. The error is therefore not uniform and cannot be
     // corrected for - it is worst exactly where "is this gateway CPU-bound?" is most interesting.
     //
-    // Wall time is MEASURED here rather than taken from `sweep_duration_s`, which is the CONFIGURED
-    // length and not what elapsed.
-    let elapsed_s = started.elapsed().as_secs_f64();
+    // Wall time is MEASURED (above, around the two samples) rather than taken from
+    // `sweep_duration_s`, which is the CONFIGURED length and not what elapsed.
     let util = match (cores.is_empty(), cost.cpu_us.copied()) {
         (true, _) => crate::measurement::Measurement::absent_because(
             crate::measurement::Absent::NotMeasured,
@@ -805,7 +1168,8 @@ pub fn load_window_at(
                 crate::loadgen::HEADERS_ENV,
                 crate::loadgen::encode_headers(headers),
             )
-            .stderr(std::process::Stdio::inherit())
+            // PIPED, then forwarded below, so the last line can name why a child exited non-zero.
+            .stderr(std::process::Stdio::piped())
             .output();
         // THE ONE FAILURE THAT KILLS EVERY WINDOW IN THE RUN WAS THE SILENT ONE.
         //
@@ -827,8 +1191,33 @@ pub fn load_window_at(
                 return None;
             }
         };
+        // Forwarded whole: the child's own diagnostics belong in the run log exactly as before.
+        {
+            use std::io::Write as _;
+            let _ = std::io::stderr().write_all(&out.stderr);
+        }
+        // A CHILD THAT EXITED NON-ZERO DID NOT FINISH ITS WINDOW (the generator exits 0 whenever it
+        // prints a stats line; anything else is a usage error, a kill or an abort), so whatever it
+        // left on stdout is not a window to score.
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("<no stderr>");
+            eprintln!(
+                "[load-window-evidence] load generator exited unsuccessfully ({}) at c={concurrency} \
+                 on {path}; its last stderr line: {last}",
+                out.status
+            );
+            return None;
+        }
         let line = String::from_utf8_lossy(&out.stdout);
         let parsed = crate::loadgen::parse_ugen_line(line.trim());
+        if let Some(u) = parsed.value() {
+            log_load_window_evidence(&addr, path, body, concurrency, u);
+        }
         // OUR OWN WIRE CONTRACT BREAKING IS NOT AN EMPTY WINDOW.
         //
         // `parse_ugen_line` classifies a stats line missing a required field, or carrying a
@@ -851,32 +1240,89 @@ pub fn load_window_at(
                 detail.map(|d| format!(": {d}")).unwrap_or_default()
             );
         }
-        parsed.into_value().map(|u| GenStats {
-            ok: u.ok.max(0) as u64,
-            fail: u.fail.max(0) as u64,
-            // `u.rps` is f64 now (fractional below 1/s), so the comparison and the division are
-            // both float. A sub-1/s window previously could not even reach here: it failed the i64
-            // parse and the whole window was classified as a HarnessError.
-            elapsed_s: if u.rps > 0.0 {
-                u.ok as f64 / u.rps
-            } else {
-                0.0
-            },
-            latencies_us: Vec::new(),
-            // FROM THE CHILD, not assumed. This was hardcoded `false`, so `if stats.spawn_failed` in
-            // `SweepProbe::probe` - the check that stops the search when the OS refused a thread -
-            // could never fire on the subprocess path, and a window that never ran at its stated
-            // concurrency was read as an ordinary result of the gateway.
-            spawn_failed: u.spawn_failed,
-            rig_refused: u.rig_refused.max(0) as u64,
-            budget_exceeded: u.budget_exceeded.max(0) as u64,
-            // The subprocess never sends its raw samples back, only the percentiles it already
-            // computed over them, so these are filled straight from the stats line rather than left
-            // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
-            p50_us: Some(u.p50_us.max(0) as u64),
-            p99_us: Some(u.p99_us.max(0) as u64),
-        })
+        parsed.into_value().map(gen_stats_from_child)
     }
+}
+
+/// The child's stats line, as the `GenStats` every caller reads.
+///
+/// Separate from `load_window_at` so the conversion - the only place the subprocess path decides
+/// what a percentile is - can be tested without spawning a child.
+fn gen_stats_from_child(u: crate::loadgen::UgenStats) -> GenStats {
+    // A WINDOW THAT COMPLETED NOTHING HAS NO PERCENTILE. The child computes p50/p99 over its
+    // successes only and prints 0 for an empty set, so passing that through published a collapsed
+    // rung (every request failed) as `p99_us: 0` - an absence dressed as the best tail on the board.
+    let percentile = |v: i64| (u.ok > 0).then_some(v.max(0) as u64);
+    GenStats {
+        ok: u.ok.max(0) as u64,
+        fail: u.fail.max(0) as u64,
+        // `u.rps` is f64 now (fractional below 1/s), so the comparison and the division are
+        // both float. A sub-1/s window previously could not even reach here: it failed the i64
+        // parse and the whole window was classified as a HarnessError.
+        elapsed_s: if u.rps > 0.0 {
+            u.ok as f64 / u.rps
+        } else {
+            0.0
+        },
+        latencies_us: Vec::new(),
+        // FROM THE CHILD, not assumed. This was hardcoded `false`, so `if stats.spawn_failed` in
+        // `SweepProbe::probe` - the check that stops the search when the OS refused a thread -
+        // could never fire on the subprocess path, and a window that never ran at its stated
+        // concurrency was read as an ordinary result of the gateway.
+        spawn_failed: u.spawn_failed,
+        rig_refused: u.rig_refused.max(0) as u64,
+        budget_exceeded: u.budget_exceeded.max(0) as u64,
+        // The subprocess never sends its raw samples back, only the percentiles it already
+        // computed over them, so these are filled straight from the stats line rather than left
+        // for a caller to (wrongly) derive from the now-empty `latencies_us` above.
+        p50_us: percentile(u.p50_us),
+        p99_us: percentile(u.p99_us),
+    }
+}
+
+/// Log a request body ONCE per (lane, address, path, body): it is constant across every window of
+/// a cell, so repeating it on each failing window only buried the evidence that does change.
+fn log_request_once(lane: &str, addr: &str, path: &str, body: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = format!("{lane}\0{addr}\0{path}\0{body}");
+    let first = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key);
+    if first {
+        eprintln!(
+            "[{lane}-request] {}",
+            serde_json::json!({"address": addr, "path": path, "request_body": body})
+        );
+    }
+}
+
+/// DIAGNOSTICS ONLY: a window that failed, lost a lane, or completed nothing logs its counts and
+/// the child's bounded failure samples. Reads the parsed line; never changes it.
+fn log_load_window_evidence(
+    addr: &str,
+    path: &str,
+    body: &str,
+    concurrency: u32,
+    u: &crate::loadgen::UgenStats,
+) {
+    if !(u.fail > 0 || u.spawn_failed || (u.ok == 0 && u.fail == 0)) {
+        return;
+    }
+    log_request_once("load-window", addr, path, body);
+    eprintln!(
+        "[load-window-evidence] {}",
+        serde_json::json!({
+            "address": addr, "path": path, "concurrency": concurrency,
+            "ok": u.ok, "fail": u.fail, "rig_refused": u.rig_refused,
+            "budget_exceeded": u.budget_exceeded, "spawn_failed": u.spawn_failed,
+            "failure_samples": u.failure_samples,
+            "response_capture_scope": "first bytes available at failure (bounded); a body may not have arrived"
+        })
+    );
 }
 
 pub struct CellPerf {
@@ -892,6 +1338,10 @@ pub struct CellPerf {
     /// for a number the bisection produced; there is no bisection and no such number, and these rungs are
     /// the evidence for every reading taken from them.
     pub points: Vec<crate::search::ProbedPoint>,
+    /// Set when the RIG stopped the climb (a thread or connection it could not make, or a loadgen
+    /// child with no readable stats line). `points` then holds every rung below that one, and the
+    /// frontier read from them is a lower bound that names this cause and rung.
+    pub interrupted: Option<SweepInterruption>,
 }
 
 /// One load window at ONE concurrency. A point measurement, not a search.
@@ -913,6 +1363,7 @@ pub fn measure_at(cfg: &RunConfig, id: &CellId, concurrency: u32) -> Measurement
         path: path_for(cfg, ing, &id.egress),
         body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
+        stop: None,
     };
     match p.probe(concurrency) {
         // The gate still applies: a window with failures is not a throughput reading, it is a window
@@ -943,13 +1394,17 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
         // Nothing was probed, so there is no evidence to carry. The CELL's own `served` verdict says
         // why; a sweep with no rungs needs no separate reason of its own, and inventing one here would
         // be a second vocabulary for one fact.
-        return CellPerf { points: Vec::new() };
+        return CellPerf {
+            points: Vec::new(),
+            interrupted: None,
+        };
     };
     let mut p = SweepProbe {
         cfg,
         path: path_for(cfg, ing, &id.egress),
         body: ing.body(&model_for(cfg, &id.egress)),
         headers: headers_for(cfg, ing, &id.egress),
+        stop: None,
     };
     // No start argument: the climb always begins at the floor. A start derived from the range made the
     // ladder arbitrary and made a WIDER range open with a HIGHER first probe, which is how a 1..65536
@@ -959,8 +1414,28 @@ pub fn sweep_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> CellPerf {
     // it would keep going past the throughput plateau until the gate broke - a union of two stopping
     // rules for two summaries. There is one rule now (stop when requests start failing) and no summary:
     // every rung comes back and `frontier.rs` reads whichever bound a caller asks for.
+    let climb = search::climb_rungs_report(&mut p, lo, hi);
+    // ONLY A REAL RIG STOP IS AN INTERRUPTION. The probe records why the window it could not run
+    // failed; a gateway that answered nothing came back as a failed rung and never reaches here.
+    let interrupted = climb.interrupted_at.map(|conc| {
+        p.stop.take().unwrap_or_else(|| SweepInterruption {
+            conc,
+            reason: Absent::NotMeasured,
+            cause: "the window could not be run (no cause recorded)".to_string(),
+        })
+    });
+    if let Some(i) = &interrupted {
+        eprintln!(
+            "sweep: {id} interrupted by the rig at c={}: {}; keeping the {} window(s) below it as a \
+             lower-bound frontier",
+            i.conc,
+            i.cause,
+            climb.points.len()
+        );
+    }
     CellPerf {
-        points: search::climb_rungs(&mut p, lo, hi),
+        points: climb.points,
+        interrupted,
     }
 }
 
@@ -1050,10 +1525,10 @@ enum StreamStop {
     WindowUnavailable { at: u32 },
     /// The step-down budget was genuinely spent without finding a rung that holds.
     BudgetExhausted,
-    /// A rung failed at a concurrency this same cell had ALREADY proved clean. Never the gateway's
-    /// result: a gate that fails at 3,088 after passing 6,144 is measuring how far the rig has
-    /// drained, not what the gateway can carry.
-    RigContaminated { at: u32, proven: u32 },
+    /// A previously clean rung still failed after settling and (where the harness owns the
+    /// process) restarting the gateway. This does not identify the cause: gateway state, upstream
+    /// behaviour and host residue all remain possible, so it is not filed as either side's fault.
+    ReconfirmationUnresolved { at: u32, proven: u32 },
     /// The gateway stopped serving after an overload and did not come back on its own. THIS ONE IS
     /// ABOUT THE GATEWAY, and it is a finding rather than a gap: aisix passed every rung to c=8,192,
     /// was pushed to c=16,384, and then failed seventeen consecutive windows including c=4,096 which
@@ -1068,6 +1543,10 @@ enum StreamStop {
         proven: u32,
         restart_cleared: bool,
     },
+    /// The restart that would have separated "the rig is dirty" from "the gateway is wedged" itself
+    /// FAILED. Ours: the harness could not put the process back, so nothing about the gateway was
+    /// learned here. A failed reconfirmation alone does not establish which component caused it.
+    RestartFailed { at: u32, proven: u32 },
 }
 
 impl StreamStop {
@@ -1075,10 +1554,11 @@ impl StreamStop {
     ///
     /// ONLY WHERE THE HOST IS NOT THE SUSPECT. The floor fallback re-measures a rung on the same box
     /// that just failed several, so it is only meaningful when the failures were the gateway's or the
-    /// budget's. `RigRanShort`, `WindowUnavailable` and `RigContaminated` all say the instrument is
-    /// the variable, and a number taken on a host we have just accused would be exactly the
+    /// budget's. `RigRanShort` and `WindowUnavailable` say the instrument is the variable, and
+    /// `ReconfirmationUnresolved` leaves the host a live suspect, and a number taken on a host we have just accused would be exactly the
     /// attribution error the rest of this enum exists to prevent - with the flattering sign, because
-    /// it would publish a figure where honesty published none.
+    /// it would publish a figure where honesty published none. `RestartFailed` is excluded for the
+    /// same reason: the harness could not even put the process back.
     ///
     /// `GatewayDidNotRecover` is excluded for the opposite reason: the process serving the fallback
     /// window is not the process the sweep measured, so whatever it carries is not this cell's
@@ -1098,11 +1578,19 @@ impl StreamStop {
         match self {
             StreamStop::RigRanShort { .. }
             | StreamStop::WindowUnavailable { .. }
-            | StreamStop::RigContaminated { .. } => Absent::HarnessError,
+            | StreamStop::RestartFailed { .. } => Absent::HarnessError,
             // A gateway that does not recover from overload is the GATEWAY's result, so it must not
             // be filed under our own faults - that would be the attribution error in reverse.
-            StreamStop::GatewayDidNotRecover { .. } => Absent::NotMeasured,
-            _ => Absent::NotMeasured,
+            //
+            // Listed rather than caught by a wildcard: a new ending must be classified on purpose,
+            // or a rig fault added later compiles silently into the gateway's results.
+            StreamStop::GatewayDidNotRecover { .. }
+            // Cause unresolved: neither proven ours nor proven the gateway's, so it is a measurement
+            // that did not resolve rather than a harness fault.
+            | StreamStop::ReconfirmationUnresolved { .. }
+            | StreamStop::FloorReached { .. }
+            | StreamStop::SteppedRungFailed { .. }
+            | StreamStop::BudgetExhausted => Absent::NotMeasured,
         }
     }
 
@@ -1126,11 +1614,12 @@ impl StreamStop {
                 "the bisection proved c={proved}, but re-measurement could not take a window at all \
                  at c={at} - a rig failure, so nothing is published about the gateway here"
             ),
-            StreamStop::RigContaminated { at, proven } => format!(
+            StreamStop::ReconfirmationUnresolved { at, proven } => format!(
                 "the bisection proved c={proved}, but re-measurement failed at c={at} - a concurrency \
-                 THIS CELL had already carried cleanly up to c={proven}. A rung cannot fail below one \
-                 it has already passed because of the gateway, so this is our rig not having drained \
-                 between windows, and nothing is published about the gateway here"
+                 this cell had already carried cleanly up to c={proven}. Settling (and a gateway \
+                 restart, where the harness owns the process) did not restore the earlier result. \
+                 The gateway-versus-rig cause is unresolved; no sustained ceiling is established by \
+                 these inconsistent windows"
             ),
             StreamStop::GatewayDidNotRecover { at, proven, restart_cleared } => format!(
                 "the gateway stopped serving after being pushed past c={proven} and did not recover: \
@@ -1142,6 +1631,12 @@ impl StreamStop {
                 } else {
                     ", and a restart did not bring it back either"
                 }
+            ),
+            StreamStop::RestartFailed { at, proven } => format!(
+                "the bisection proved c={proved}, but re-measurement failed at c={at} although this \
+                 cell had already carried c={proven}, and the restart that would have told the rig \
+                 apart from the gateway failed - a harness fault, so nothing is published about the \
+                 gateway here"
             ),
             StreamStop::BudgetExhausted => format!(
                 "the bisection proved c={proved}, but that concurrency did not hold the stream gate \
@@ -1338,6 +1833,9 @@ pub const STREAM_MAX_ERROR_RATIO: f64 = 0.001;
 /// two-populations defect `metric.rs`'s module doc names.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamWindow {
+    /// How many lanes ended with each HTTP status (lanes that never got a status are not counted).
+    /// Diagnostics: no verdict reads it.
+    pub http_status_counts: std::collections::BTreeMap<u16, u64>,
     pub concurrency: u32,
     /// Streams opened, and of those, the ones that never became a readable event stream at all
     /// (no connection, a non-2xx, a malformed head, or a peer that answered with something that is
@@ -1605,7 +2103,8 @@ impl HostState {
 /// collapse and reads exactly the same when the peer reset every one of them for a reason of ours.
 ///
 /// These are attribution classes, not error codes. `Refused`/`Reset` is the peer declining a
-/// connection it was asked for; `Status` is the peer answering and saying no; `NoFrames` is a 2xx
+/// connection it was asked for; `Status` is the peer answering and saying no; `NoResponse` is the
+/// peer taking the connection and never producing a response head; `NoFrames` is a 2xx
 /// that never produced an event; `Malformed`/`NotEventStream` is the peer speaking something that is
 /// not SSE. Rig-side ends (`RigExhausted`, `RigRefused`) never reach here - `stream_window` discards
 /// the whole window for those, so they cannot be laundered into a gateway's error rate.
@@ -1615,6 +2114,10 @@ pub struct StreamErrorKinds {
     pub connect_failed: u64,
     /// The peer answered with a non-2xx status.
     pub status: u64,
+    /// The connection was made but no response head ever arrived (or none that parsed): the lane
+    /// timed out or was closed before the peer said anything. Not `status` - that bucket says the
+    /// peer ANSWERED with an error, and a gateway that never answered must not read as one that did.
+    pub no_response: u64,
     /// A 2xx that delivered no event at all.
     pub no_frames: u64,
     /// The peer answered 2xx but did not speak a well-formed event stream.
@@ -1623,7 +2126,11 @@ pub struct StreamErrorKinds {
 
 impl StreamErrorKinds {
     pub fn total(&self) -> u64 {
-        self.connect_failed + self.status + self.no_frames + self.not_event_stream
+        self.connect_failed
+            + self.status
+            + self.no_response
+            + self.no_frames
+            + self.not_event_stream
     }
     fn add(&mut self, o: &crate::http::SseOutcome) {
         use crate::http::SseEnd;
@@ -1632,6 +2139,8 @@ impl StreamErrorKinds {
         // erase the distinction this type exists for.
         if matches!(o.end, SseEnd::ConnectionFailed(_)) {
             self.connect_failed += 1;
+        } else if o.status.is_none() {
+            self.no_response += 1;
         } else if !o.status.is_some_and(|s| (200..300).contains(&s)) {
             self.status += 1;
         } else if matches!(o.end, SseEnd::Malformed(_) | SseEnd::NotAnEventStream(_)) {
@@ -1830,9 +2339,15 @@ pub fn stream_window(
             return None;
         }
     };
+    let request_path = path.to_string();
+    let request_body = body.to_string();
     let path = path.to_string();
     let body = body.to_string();
     let headers = headers.to_vec();
+
+    // DIAGNOSTICS ONLY: the first bytes of up to eight failing responses, shared by every lane.
+    let failure_capture = std::sync::Arc::new(crate::gen::FailureCapture::default());
+    let lane_capture = std::sync::Arc::clone(&failure_capture);
 
     // SAMPLED HERE, before a single connection is opened, because the question this answers is what
     // the window INHERITED - not what it left behind. Sampling after would measure this window's own
@@ -1846,8 +2361,9 @@ pub fn stream_window(
                 let path = path.clone();
                 let body = body.clone();
                 let headers = headers.clone();
+                let capture = std::sync::Arc::clone(&lane_capture);
                 lanes.push(tokio::spawn(async move {
-                    crate::http::post_json_sse_async(
+                    crate::http::post_json_sse_async_captured(
                         addr,
                         &path,
                         body.as_bytes(),
@@ -1855,6 +2371,7 @@ pub fn stream_window(
                         crate::metric::STREAM_TIMEOUT,
                         lane_budget,
                         Some(dialect),
+                        Some(capture),
                     )
                     .await
                 }));
@@ -1883,6 +2400,7 @@ pub fn stream_window(
             (out, panicked, started.elapsed().as_secs_f64())
         });
     let mut w = StreamWindow {
+        http_status_counts: Default::default(),
         concurrency,
         streams: 0,
         errored: 0,
@@ -1923,6 +2441,9 @@ pub fn stream_window(
         return None;
     }
     for o in outcomes {
+        if let Some(status) = o.status {
+            *w.http_status_counts.entry(status).or_default() += 1;
+        }
         w.streams += 1;
         w.expected_frames += budget as u64;
         w.expected_content_frames += content_budget;
@@ -1933,6 +2454,22 @@ pub fn stream_window(
         w.frames += o.frame_offsets_us.len() as u64;
         w.content_frames += o.content_frames;
         w.stalls += stalls_in(&o.frame_offsets_us);
+    }
+    // DIAGNOSTICS ONLY, after every count above is final: nothing below reads what is logged here.
+    if w.errored > 0 {
+        let addr = addr.to_string();
+        log_request_once("stream-window", &addr, &request_path, &request_body);
+        eprintln!(
+            "[stream-window-evidence] {}",
+            serde_json::json!({
+                "address": addr, "path": request_path, "concurrency": concurrency,
+                "streams": w.streams, "errored": w.errored,
+                "http_status_counts": w.http_status_counts,
+                "failure_samples": failure_capture.samples(),
+                "host_before": w.host_before.to_json(),
+                "response_capture_scope": "first bytes of non-2xx or non-event-stream responses (bounded)"
+            })
+        );
     }
     // A WINDOW MISSING LANES NEVER RAN AT THE CONCURRENCY IT CLAIMS. Identical reasoning to the
     // rig-exhaustion check above, which already refuses a window for the same defect arriving by a
@@ -2040,6 +2577,8 @@ pub struct StreamPoint {
     /// clause that tripped with the counts that tripped it, so "no rung passed" is never a bare
     /// absence a reader has to re-derive from the raw counts.
     pub why: Option<String>,
+    /// Lanes per HTTP status - see `StreamWindow::http_status_counts`.
+    pub http_status_counts: std::collections::BTreeMap<u16, u64>,
 }
 
 impl StreamPoint {
@@ -2063,6 +2602,7 @@ impl StreamPoint {
             // are distinguishable in the snapshot.
             "stream_errors_connect_failed": self.error_kinds.connect_failed,
             "stream_errors_status": self.error_kinds.status,
+            "stream_errors_no_response": self.error_kinds.no_response,
             "stream_errors_no_frames": self.error_kinds.no_frames,
             "stream_errors_not_event_stream": self.error_kinds.not_event_stream,
             "host_before": self.host_before.to_json(),
@@ -2070,6 +2610,13 @@ impl StreamPoint {
         });
         if let (Some(why), Some(obj)) = (&self.why, v.as_object_mut()) {
             obj.insert("why".to_string(), serde_json::json!(why));
+        }
+        // OPTIONAL, so a point from before this field existed and one with no status read alike.
+        if let (false, Some(obj)) = (self.http_status_counts.is_empty(), v.as_object_mut()) {
+            obj.insert(
+                "http_status_counts".to_string(),
+                serde_json::json!(self.http_status_counts),
+            );
         }
         v
     }
@@ -2094,6 +2641,7 @@ fn point_of(w: &StreamWindow, passed: bool) -> StreamPoint {
         } else {
             streams_gate_verdict(w)
         },
+        http_status_counts: w.http_status_counts.clone(),
     }
 }
 
@@ -2152,6 +2700,13 @@ fn stream_target(cfg: &RunConfig, id: &CellId) -> Option<StreamTarget> {
         headers: headers_for(cfg, ing, &id.egress),
         dialect: ing,
     })
+}
+
+/// May the stream search fall back to confirming its proven floor? Only when there is one, when the
+/// way the search ended leaves the host unaccused (`StreamStop::floor_fallback_ok`), and when that
+/// floor has not already failed a full confirmation of its own in this search.
+fn floor_fallback_due(proven_clean: u32, floor_refuted: bool, stop: StreamStop) -> bool {
+    proven_clean > 0 && !floor_refuted && stop.floor_fallback_ok()
 }
 
 /// Find the highest concurrency at which the gateway still carries clean streams.
@@ -2218,6 +2773,10 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 // Defaults to the budget case, which is what the loop ends on when nothing else
                 // interrupts it; every other exit overwrites this at its own `break`.
                 let mut stop = StreamStop::BudgetExhausted;
+                // Whether `proven_clean` itself has already had a FULL confirmation and lost it.
+                // The floor fallback below exists to give that rung the vote the search never
+                // gave it; a rung that already had the vote and failed must not get a second one.
+                let mut floor_refuted = false;
                 /* A STEPPED RUNG WHOSE SEED WINDOW FAILS MUST STEP DOWN AGAIN, NOT END THE SEARCH.
                    plano `anthropic>anthropic` is what this costs: the ascending sweep carried c=64,
                    the bisection settled on c=79, confirmation failed, the step-down bisected to
@@ -2295,6 +2854,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                             wanted: crate::search::WINDOWS_PER_RUNG,
                         };
                         break;
+                    }
+                    if ceiling == proven_clean {
+                        floor_refuted = true;
                     }
                     }
                     /* STEP DOWN INSIDE THE BRACKET, NOT BY HALVING.
@@ -2374,7 +2936,16 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                             if passed2 { first_fps = w2.fps(); }
                                             passed2
                                         }
-                                        None => false,
+                                        // THE RETRY COULD NOT RUN, which is the rig, not a second
+                                        // failure of the gateway. Falling through to the restart
+                                        // would let the restart's own elapsed time drain the host,
+                                        // pass the post-restart window, and publish
+                                        // `GatewayDidNotRecover` against the gateway for a window
+                                        // we never took.
+                                        None => {
+                                            stop = StreamStop::WindowUnavailable { at: ceiling };
+                                            break;
+                                        }
                                     }
                                 } else {
                                     false
@@ -2394,6 +2965,7 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                    two different processes as one measurement. What gets published
                                    instead is the finding: it did not recover. */
                                 if !recovered && contaminated {
+                                    let mut restart_failed = false;
                                     let restart_cleared = match cfg.relaunch.as_ref() {
                                         Some(spec) => {
                                             eprintln!(
@@ -2409,8 +2981,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                                         passed3
                                                     })
                                                     .unwrap_or(false),
+                                                // A FAILED RESTART IS OURS, and it is named as one
+                                                // rather than folded into the undrained-host story.
                                                 Err(e) => {
                                                     eprintln!("streams: the gateway could not be restarted: {e}");
+                                                    restart_failed = true;
                                                     false
                                                 }
                                             }
@@ -2420,27 +2995,27 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                         // the rig-side one it already had.
                                         None => false,
                                     };
-                                    /* THE RESTART IS THE ATTRIBUTION TEST, and its two outcomes
-                                       point at opposite culprits.
+                                    /* THE RESTART IS THE ATTRIBUTION TEST.
 
                                        Cleared by a restart: the process that had been serving was
                                        wedged, a fresh one is not, and the host was the same
                                        throughout - so it is the GATEWAY that did not recover.
 
-                                       NOT cleared: a brand-new gateway process still cannot carry a
-                                       rung this cell already carried. The gateway is the thing that
-                                       just changed and the failure did not, which leaves the host as
-                                       the variable - so this stays OURS. Calling it a gateway
-                                       failure here would be the flattering direction of the same
-                                       error, and the one nobody would catch. */
-                                    stop = if restart_cleared {
+                                       NOT cleared (or no restart was possible): a rung this cell
+                                       already carried still fails. That is an inconsistency, not
+                                       proof of either side: gateway state, upstream behaviour and
+                                       host residue all remain possible, so the cause is recorded as
+                                       unresolved rather than charged to the gateway or to us. */
+                                    stop = if restart_failed {
+                                        StreamStop::RestartFailed { at: ceiling, proven: proven_clean }
+                                    } else if restart_cleared {
                                         StreamStop::GatewayDidNotRecover {
                                             at: ceiling,
                                             proven: proven_clean,
                                             restart_cleared,
                                         }
                                     } else {
-                                        StreamStop::RigContaminated { at: ceiling, proven: proven_clean }
+                                        StreamStop::ReconfirmationUnresolved { at: ceiling, proven: proven_clean }
                                     };
                                     break;
                                 }
@@ -2454,6 +3029,9 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                                 }
                             } else {
                                 first_fps = w.fps();
+                                // A seed that HOLDS supersedes an earlier rung's seed failure: if
+                                // the budget runs out from here, that is how the search ended.
+                                stop = StreamStop::BudgetExhausted;
                             }
                         }
                         None => {
@@ -2480,8 +3058,11 @@ pub fn sweep_streams_cell(cfg: &RunConfig, id: &CellId, lo: u32, hi: u32) -> Cel
                 
                    It costs WINDOWS_PER_RUNG windows and only on the failure path. It cannot inflate a
                    result: `proven_clean` is a rung this cell drove cleanly during its own ascent, and
-                   it still has to hold a majority now to be published at all. */
-                if winner.is_none() && proven_clean > 0 && stop.floor_fallback_ok() {
+                   it still has to hold a majority now to be published at all - and only if it has not
+                   ALREADY failed a full confirmation in this search (`floor_refuted`): when the
+                   bisection's answer IS the floor, the floor has had its vote, and re-voting it after
+                   the rungs below it failed would publish a ceiling the evidence does not support. */
+                if winner.is_none() && floor_fallback_due(proven_clean, floor_refuted, stop) {
                     eprintln!(
                         "streams: the ceiling search is out of budget; confirming the floor this cell \
                          already carried (c={proven_clean}) rather than publishing nothing"
@@ -2783,6 +3364,57 @@ pub struct CellResult {
     pub reverify: crate::reverify::Reverified,
 }
 
+/// How long to wait before asking a refuted re-verification once more. One recorder read can be
+/// caught mid-flight (a gateway still settling after the previous cell's relaunch); a second read a
+/// few seconds later separates that moment from a gateway that really emits the wrong dialect.
+pub const REVERIFY_RETRY_PAUSE: Duration = Duration::from_secs(5);
+
+/// Re-verify, and when the first answer is a REFUTATION, pause and ask exactly once more. The
+/// second answer is the verdict. `None` (unchecked) and `Some(true)` are never retried: only a
+/// refutation withholds a cell, so only a refutation is worth a second look.
+pub fn reverify_with_retry(
+    mut check: impl FnMut() -> crate::reverify::Reverified,
+    pause: Duration,
+    id: &CellId,
+) -> crate::reverify::Reverified {
+    let first = check();
+    if first.verified != Some(false) {
+        return first;
+    }
+    eprintln!(
+        "[reverify] {id}: refuted ({}) - asking once more after {}s",
+        first.note.as_deref().unwrap_or("no note"),
+        pause.as_secs()
+    );
+    std::thread::sleep(pause);
+    check()
+}
+
+/// A served cell whose egress re-verification was refuted (after its retry) is NOT served: it is a
+/// failed probe whose evidence is the mock's own record of what arrived upstream. Anything else
+/// passes through unchanged.
+pub fn served_after_reverify(served: Served, reverify: &crate::reverify::Reverified) -> Served {
+    match (served, reverify.verified) {
+        (Served::Yes, Some(false)) => Served::No(
+            Verdict::Failed,
+            crate::cell::Evidence {
+                status: 200,
+                body_snippet: crate::cell::Evidence::snippet_within(
+                    &format!(
+                        "egress not re-verified: {}",
+                        reverify
+                            .note
+                            .as_deref()
+                            .unwrap_or("no evidence was recorded with the refutation")
+                    ),
+                    600,
+                ),
+            },
+        ),
+        (s, _) => s,
+    }
+}
+
 /// Walk the grid: probe every pairing, sweep the ones that are served.
 pub fn run_grid(cfg: &RunConfig, lo: u32, hi: u32) -> Vec<CellResult> {
     run_grid_with(cfg, lo, hi, metric::METRICS)
@@ -2945,7 +3577,7 @@ pub fn run_grid_cells(
             // the budget, bring it back and ask once more. Cheap when it works, and when it does not
             // the cell records exactly what it recorded before.
             if let (Served::Untestable(ref why), Some(spec)) = (&served, cfg.relaunch.as_ref()) {
-                if why.contains("no connection") {
+                if why.contains(NO_CONNECTION_PREFIX) {
                     eprintln!("[cell {done}/{total}] {id}: {why} - restarting the gateway before writing off the rest of the grid");
                     match restart_to_rest(spec, &cfg.relaunch_launcher, &cfg.relaunch_commands) {
                         Ok(()) => {
@@ -2985,10 +3617,18 @@ pub fn run_grid_cells(
             // minute memory window, and the recorder's `body_ok` only ever describes the LAST body it
             // saw. One request, on a cleared recorder, with nothing else in flight.
             let reverify = if served.is_measurable() {
-                crate::reverify::reverify_cell(cfg, &id, *ing)
+                reverify_with_retry(
+                    || crate::reverify::reverify_cell(cfg, &id, *ing),
+                    REVERIFY_RETRY_PAUSE,
+                    &id,
+                )
             } else {
                 Default::default()
             };
+            // A cell whose egress was REFUTED twice is not served: it answered over a wire that is
+            // not this pairing, so it is recorded failed with the refutation as its evidence and is
+            // never measured.
+            served = served_after_reverify(served, &reverify);
             let (metrics, series, timings) = if served.is_measurable() {
                 let ctx = metric::CellCtx {
                     cfg,
@@ -3023,7 +3663,23 @@ pub fn run_grid_cells(
             let outcome = match served {
                 Served::Yes => CellOutcome::served(id),
                 Served::No(v, ev) => {
-                    let n = format!("probed and answered {} (HTTP {})", v.token(), ev.status);
+                    let n = match &reverify {
+                        crate::reverify::Reverified {
+                            verified: Some(false),
+                            note,
+                        } => format!(
+                            "probed and answered HTTP {}, but egress re-verification failed on both \
+                             attempts: {}",
+                            ev.status,
+                            note.as_deref().unwrap_or("no evidence was recorded")
+                        ),
+                        _ if (200..300).contains(&ev.status) => format!(
+                            "probed and answered HTTP {}, but the body is not a usable {} response \
+                             (see body_snippet)",
+                            ev.status, id.ingress
+                        ),
+                        _ => format!("probed and answered {} (HTTP {})", v.token(), ev.status),
+                    };
                     CellOutcome::not_served(id, v, ev, n)
                 }
                 Served::Untestable(r) => CellOutcome::untestable(id, r),
@@ -3048,6 +3704,12 @@ pub fn run_grid_cells(
         }
     }
 }
+
+/// A 2xx body every test fixture can serve that is a valid response for the openai, anthropic,
+/// gemini and cohere ingress dialects at once (each validator reads only its own fields), so a fixture
+/// that stands in for "a gateway that serves" passes `Dialect::nonstream_response_problem`.
+#[cfg(test)]
+pub(crate) const TEST_PROTOCOL_OK: &str = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}],"content":[{"type":"text","text":"ok"}],"candidates":[{"content":{"parts":[{"text":"ok"}]}}],"message":{"content":[{"type":"text","text":"ok"}]}}"#;
 
 /// A minimal `RunConfig` for tests across this crate, mirroring `manifest::test_fixture` (one place
 /// to add a field, not one per call site). `matrix`/`untestable_cells` empty: undeclared, so every
@@ -3161,7 +3823,12 @@ mod tests {
         }
         .floor_fallback_ok());
         assert!(!StreamStop::WindowUnavailable { at: 4096 }.floor_fallback_ok());
-        assert!(!StreamStop::RigContaminated {
+        assert!(!StreamStop::ReconfirmationUnresolved {
+            at: 4096,
+            proven: 4096
+        }
+        .floor_fallback_ok());
+        assert!(!StreamStop::RestartFailed {
             at: 4096,
             proven: 4096
         }
@@ -3684,25 +4351,54 @@ while True:
             Some(1),
             "the stepped-down rung must not publish on the strength of its own failing seed window"
         );
-        /* AND WHAT IT PUBLISHES INSTEAD IS THE FLOOR IT ACTUALLY CARRIED.
-        This asserted `None` - correct while a search out of budget gave up entirely. It no longer
-        does: the rung the cell proved on its own ascent gets the same confirmation the bisected
-        rung got, so a cell that demonstrably carries c=2 publishes 2 rather than an absence
-        claiming nothing is known. This fixture serves every rung at or below 3, so 2 is a true
-        reading, and it is conservative - the real ceiling is somewhere above it.
+        /* This fixture is scripted by ACCEPT ORDER, not by concurrency. The ascent carries c=2,
+        the bisection lands on c=2 (the floor), and both of its confirmation windows fail. Then
+        c=1's seed fails. The floor already lost its full vote (`floor_refuted`), so a second
+        confirmation would only cherry-pick the later healthy connections: nothing is published. */
+        assert!(
+            r.concurrency.value().is_none(),
+            "a refuted floor must not be re-voted into a ceiling"
+        );
+        assert!(r.fps.value().is_none());
+        let floor_votes: Vec<bool> = r
+            .points
+            .iter()
+            .filter(|p| p.concurrency == 2)
+            .map(|p| p.passed)
+            .collect();
+        assert_eq!(floor_votes, vec![true, false, false]);
+        let last = r
+            .points
+            .last()
+            .expect("the failed step-down seed is retained");
+        assert_eq!(last.concurrency, 1);
+        assert!(!last.passed);
+    }
 
-        THE INVARIANT THIS TEST IS NAMED FOR IS UNTOUCHED AND IS THE ASSERTION ABOVE: the stepped
-        rung that could not seed (c=1) never voted for itself. What is published is a rung that held
-        a majority of fresh windows, which is the bar every other rate on this board has to clear. */
-        assert_eq!(
-            r.concurrency.value().copied(),
-            Some(2),
-            "the floor this cell proved on its own ascent is published, not the rung that failed to seed"
+    // THE FLOOR FALLBACK IS A VOTE FOR A RUNG THAT NEVER HAD ONE, NOT A SECOND VOTE.
+    //
+    // When every bisection probe above the ascending prefix failed, the bisected ceiling IS the
+    // proven floor. Its confirmation then fails, the rungs below it fail too, and the fallback used
+    // to re-vote that same rung with its failed windows discarded - publishing a ceiling above rungs
+    // that failed.
+    #[test]
+    fn a_floor_that_already_failed_its_confirmation_gets_no_second_vote() {
+        let stop = StreamStop::SteppedRungFailed { at: 32 };
+        assert!(
+            floor_fallback_due(64, false, stop),
+            "an unvoted floor gets its confirmation"
         );
         assert!(
-            r.fps.value().is_some_and(|v| *v > 0.0),
-            "a published ceiling carries the rate that was measured at it: {:?}",
-            r.fps
+            !floor_fallback_due(64, true, stop),
+            "a floor that already lost a full confirmation must not be re-voted"
+        );
+        assert!(
+            !floor_fallback_due(0, false, stop),
+            "no floor, nothing to confirm"
+        );
+        assert!(
+            !floor_fallback_due(64, false, StreamStop::RestartFailed { at: 32, proven: 64 }),
+            "a host we could not even restart the gateway on is not one to publish from"
         );
     }
 
@@ -3716,7 +4412,11 @@ while True:
                 std::thread::spawn(move || {
                     let mut b = [0u8; 4096];
                     while c.read(&mut b).unwrap_or(0) > 0 {
-                        let r = format!("HTTP/1.1 {status} X\r\ncontent-length: 2\r\n\r\nok");
+                        let body = super::TEST_PROTOCOL_OK;
+                        let r = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
                         if c.write_all(r.as_bytes()).is_err() {
                             return;
                         }
@@ -3735,6 +4435,152 @@ while True:
             probe_cell(&cfg, &CellId::new("openai", "openai"), true),
             Served::Yes
         );
+    }
+
+    /// One 200 with a fixed body, on a fresh listener.
+    fn serve_once(body: &'static str) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(mut c) = c else { continue };
+                let mut b = [0u8; 8192];
+                let _ = c.read(&mut b);
+                let r = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = c.write_all(r.as_bytes());
+            }
+        });
+        addr
+    }
+
+    // A 2xx whose body is not a usable response of the INGRESS dialect is a failed probe, the body
+    // kept as evidence, and it is not retried (a real answer the gateway keeps giving).
+    #[test]
+    fn a_2xx_without_a_usable_ingress_response_is_a_failed_probe_with_evidence() {
+        for (ingress, body) in [
+            // litellm-python anthropic>openai, 2026-11-09: `content: []`.
+            (
+                "anthropic",
+                r#"{"id":"resp_x","type":"message","role":"assistant","model":"gpt-4o-mini","usage":{"input_tokens":10,"output_tokens":2},"content":[],"stop_reason":"end_turn"}"#,
+            ),
+            // higress openai>cohere: the raw cohere v1 body.
+            (
+                "openai",
+                r#"{"response_id":"x","generation_id":"x","text":"ok","finish_reason":"COMPLETE"}"#,
+            ),
+            ("openai", "<!doctype html><html>dashboard</html>"),
+        ] {
+            let gw = serve_once(body);
+            let cfg = cfg_for(gw, gw);
+            let (served, retry) = probe_cell_once(&cfg, &CellId::new(ingress, "openai"), true);
+            assert_eq!(retry, None, "{body}");
+            match served {
+                Served::No(Verdict::Failed, ev) => {
+                    assert_eq!(ev.status, 200);
+                    assert!(
+                        ev.body_snippet
+                            .contains(&format!("not a response of the {ingress} dialect")),
+                        "{}",
+                        ev.body_snippet
+                    );
+                    assert!(ev.body_snippet.contains(&body[..20]), "{}", ev.body_snippet);
+                }
+                other => panic!("{ingress}: {body} -> {other:?}"),
+            }
+        }
+        let gw = serve_once(r#"{"content":[{"type":"text","text":"ok"}]}"#);
+        let cfg = cfg_for(gw, gw);
+        assert_eq!(
+            probe_cell_once(&cfg, &CellId::new("anthropic", "openai"), true).0,
+            Served::Yes
+        );
+    }
+
+    fn refuted() -> crate::reverify::Reverified {
+        crate::reverify::Reverified {
+            verified: Some(false),
+            note: Some("the request landed on openai".into()),
+        }
+    }
+
+    #[test]
+    fn a_refuted_reverify_that_passes_on_retry_stays_served() {
+        let id = CellId::new("openai", "gemini");
+        let mut answers = vec![
+            crate::reverify::Reverified {
+                verified: Some(true),
+                note: None,
+            },
+            refuted(),
+        ];
+        let mut asked = 0;
+        let r = reverify_with_retry(
+            || {
+                asked += 1;
+                answers.pop().unwrap()
+            },
+            Duration::ZERO,
+            &id,
+        );
+        assert_eq!(asked, 2);
+        assert_eq!(r.verified, Some(true));
+        assert_eq!(served_after_reverify(Served::Yes, &r), Served::Yes);
+    }
+
+    #[test]
+    fn a_reverify_refuted_twice_is_not_served_and_says_why() {
+        let id = CellId::new("openai", "gemini");
+        let mut asked = 0;
+        let r = reverify_with_retry(
+            || {
+                asked += 1;
+                refuted()
+            },
+            Duration::ZERO,
+            &id,
+        );
+        assert_eq!(asked, 2, "retried exactly once");
+        match served_after_reverify(Served::Yes, &r) {
+            Served::No(Verdict::Failed, ev) => {
+                assert!(ev
+                    .body_snippet
+                    .contains("egress not re-verified: the request landed on openai"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_proven_or_unchecked_reverify_is_asked_once_and_changes_nothing() {
+        let id = CellId::new("openai", "gemini");
+        for answer in [
+            crate::reverify::Reverified {
+                verified: Some(true),
+                note: None,
+            },
+            crate::reverify::Reverified {
+                verified: None,
+                note: Some("diagonal".into()),
+            },
+        ] {
+            let mut asked = 0;
+            let r = reverify_with_retry(
+                || {
+                    asked += 1;
+                    answer.clone()
+                },
+                Duration::ZERO,
+                &id,
+            );
+            assert_eq!(asked, 1);
+            assert_eq!(served_after_reverify(Served::Yes, &r), Served::Yes);
+        }
+        // A cell that was never served is never promoted by a passing check.
+        let no = Served::Untestable("x".into());
+        assert_eq!(served_after_reverify(no.clone(), &refuted()), no);
     }
 
     // A real error status with a healthy rig is the GATEWAY's own answer about this pairing.
@@ -3768,6 +4614,69 @@ while True:
             matches!(s, Served::No(ref v, ref ev) if *v == crate::probe::Verdict::Failed && ev.status == 401),
             "401 must be Failed with the real status carried as evidence, got {s:?}"
         );
+    }
+
+    // A WINDOW THAT COMPLETED NOTHING HAS NO TAIL LATENCY.
+    //
+    // The child computes its percentiles over successes only and prints 0 for an empty set, so a
+    // rung where every request failed reached the sweep as `p99_us: 0` - the best tail on the
+    // board, published for a collapse.
+    #[test]
+    fn a_child_window_with_no_successes_reports_no_percentile_rather_than_zero() {
+        let line = |ok: i64, p50: i64, p99: i64| crate::loadgen::UgenStats {
+            rps: 0.0,
+            fail: 500,
+            p50_us: p50,
+            p99_us: p99,
+            ok,
+            rig_refused: 0,
+            budget_exceeded: 0,
+            spawn_failed: false,
+            failure_samples: Vec::new(),
+        };
+        let collapsed = gen_stats_from_child(line(0, 0, 0));
+        assert_eq!(collapsed.p50_us, None, "{collapsed:?}");
+        assert_eq!(collapsed.p99_us, None, "{collapsed:?}");
+        assert_eq!((collapsed.ok, collapsed.fail), (0, 500));
+
+        // A window that served carries the child's percentiles through unchanged.
+        let served = gen_stats_from_child(crate::loadgen::UgenStats {
+            rps: 100.0,
+            ..line(400, 1_200, 9_000)
+        });
+        assert_eq!(served.p50_us, Some(1_200));
+        assert_eq!(served.p99_us, Some(9_000));
+    }
+
+    // A pairing the manifest DECLARES supported cannot turn grey by answering 404/501: that is a
+    // broken cell (red), not an absent one. The undeclared case above keeps NotConfigured, and an
+    // unconfirmed rig still makes the observation unattributable whatever the declaration says.
+    #[test]
+    fn a_supported_cell_cannot_turn_grey_when_its_route_rejects_the_request() {
+        for status in [404, 501] {
+            let gw = serve(status);
+            let mut cfg = cfg_for(gw, gw);
+            cfg.matrix = vec!["111111".into(); 6];
+            let id = CellId::new("openai", "bedrock");
+            let served = probe_cell(&cfg, &id, true);
+            assert!(
+                matches!(
+                    served,
+                    Served::No(crate::probe::Verdict::Failed, ref evidence) if evidence.status == status
+                ),
+                "a declared-supported {status} must be Failed with its evidence: {served:?}"
+            );
+            assert!(matches!(
+                probe_cell(&cfg, &id, false),
+                Served::Untestable(_)
+            ));
+            // A '0' declaration is not a support claim: the routing observation stands.
+            cfg.matrix = vec!["000000".into(); 6];
+            assert!(matches!(
+                probe_cell(&cfg, &id, true),
+                Served::No(crate::probe::Verdict::NotConfigured, _)
+            ));
+        }
     }
 
     // THE RED WE WOULD NOT HAVE EARNED. On a dialect whose real clients sign their requests, the
@@ -4121,6 +5030,7 @@ while True:
         // that set content == every event would model the very state RIG-11 was about.
         let content = budget - Dialect::Openai.stream_prelude_frames();
         StreamWindow {
+            http_status_counts: Default::default(),
             concurrency,
             streams,
             errored: 0,
@@ -4509,7 +5419,7 @@ while True:
                         let (status, body) = if n < busy_times {
                             (503, "{\"error\":{\"message\":\"The service is temporarily overloaded.\"}}")
                         } else {
-                            (200, "{\"ok\":true}")
+                            (200, super::TEST_PROTOCOL_OK)
                         };
                         let r = format!(
                             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
@@ -4587,7 +5497,7 @@ while True:
                             std::thread::sleep(std::time::Duration::from_secs(30));
                             return;
                         }
-                        let body = "{\"ok\":true}";
+                        let body = super::TEST_PROTOCOL_OK;
                         let r = format!(
                             "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
                             body.len()
@@ -4809,10 +5719,12 @@ while True:
             let confirmed = persistent_transient_verdict(Observation {
                 status: Some(status),
                 mock_healthy: true,
+                pairing_supported: false,
             });
             let unconfirmed = persistent_transient_verdict(Observation {
                 status: Some(status),
                 mock_healthy: false,
+                pairing_supported: false,
             });
             assert_ne!(
                 confirmed, unconfirmed,
@@ -4829,14 +5741,16 @@ while True:
         assert_eq!(
             persistent_transient_verdict(Observation {
                 status: Some(404),
-                mock_healthy: true
+                mock_healthy: true,
+                pairing_supported: false,
             }),
             Verdict::NotConfigured
         );
         assert_eq!(
             persistent_transient_verdict(Observation {
                 status: Some(503),
-                mock_healthy: true
+                mock_healthy: true,
+                pairing_supported: false,
             }),
             Verdict::Failed
         );
@@ -5398,6 +6312,7 @@ while True:
     #[test]
     fn a_window_delivering_exactly_its_content_budget_is_not_a_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 1024,
             streams: 1024,
             errored: 0,
@@ -5420,6 +6335,7 @@ while True:
     #[test]
     fn counting_more_content_than_the_mock_can_send_is_this_engines_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 1024,
             streams: 1024,
             errored: 0,
@@ -5447,6 +6363,7 @@ while True:
     #[test]
     fn a_gateway_that_adds_its_own_framing_is_not_a_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 256,
             streams: 256,
             errored: 0,
@@ -5473,6 +6390,7 @@ while True:
     #[test]
     fn a_rate_that_is_not_finite_is_this_engines_fault() {
         let w = StreamWindow {
+            http_status_counts: Default::default(),
             concurrency: 8,
             streams: 8,
             errored: 0,
@@ -5598,21 +6516,25 @@ mod contamination_tests {
         );
     }
 
-    /* A RUNG FAILING BELOW ONE THE SAME CELL ALREADY PASSED IS OURS, AND MUST BE FILED AS OURS.
-    This is the whole point of the variant: `Absent::NotMeasured` puts a finding among the
-    GATEWAY's results, which is what happened to 6 cells on the 2026-07-31 board. */
+    // Reconfirmation failure is an observed inconsistency, not proof of a rig fault.
     #[test]
-    fn a_contaminated_rung_is_a_harness_error_and_never_the_gateways_result() {
+    fn inconsistent_reconfirmation_keeps_the_cause_unresolved() {
+        let stop = StreamStop::ReconfirmationUnresolved {
+            at: 3088,
+            proven: 4096,
+        };
         assert_eq!(
-            StreamStop::RigContaminated {
-                at: 3088,
-                proven: 4096
-            }
-            .absent_kind(),
-            Absent::HarnessError,
-            "a rung failing below a proven-clean one is the rig; filing it as NotMeasured charges \
-             the gateway for our own undrained host"
+            stop.absent_kind(),
+            Absent::NotMeasured,
+            "a previously clean rung does not identify the cause of a later failure"
         );
+        assert!(
+            !stop.floor_fallback_ok(),
+            "the host is still a suspect, so no floor is published from it"
+        );
+        let detail = stop.describe(6176, 6);
+        assert!(detail.contains("unresolved"), "{detail}");
+        assert!(!detail.contains("our rig not having drained"), "{detail}");
         // The endings that ARE about the gateway must stay that way, or this variant has just
         // laundered every real failure into a rig excuse.
         assert_eq!(
@@ -5633,7 +6555,7 @@ mod contamination_tests {
     /// between them - either number alone reads like an ordinary failure.
     #[test]
     fn the_contaminated_reason_names_the_rung_and_what_the_cell_had_already_carried() {
-        let d = StreamStop::RigContaminated {
+        let d = StreamStop::ReconfirmationUnresolved {
             at: 3088,
             proven: 4096,
         }
@@ -5727,6 +6649,18 @@ mod stream_error_kind_tests {
             "a non-2xx is a status error, not a frame famine"
         );
 
+        // Connected, but no response head ever came back: the peer never ANSWERED, so this must
+        // not read as a gateway that answered with an error status.
+        for end in [SseEnd::Timeout, SseEnd::StreamClosed] {
+            let mut k = StreamErrorKinds::default();
+            k.add(&outcome(None, 0, end));
+            assert_eq!(
+                (k.no_response, k.status, k.connect_failed),
+                (1, 0, 0),
+                "no response head is its own class, not a status error"
+            );
+        }
+
         let mut k = StreamErrorKinds::default();
         k.add(&outcome(Some(200), 0, SseEnd::StreamClosed));
         assert_eq!(
@@ -5764,6 +6698,7 @@ mod stream_error_kind_tests {
         let outcomes = [
             outcome(None, 0, SseEnd::ConnectionFailed("reset".into())),
             outcome(Some(502), 0, SseEnd::StreamClosed),
+            outcome(None, 0, SseEnd::Timeout),
             outcome(Some(200), 0, SseEnd::Timeout),
             outcome(Some(200), 2, SseEnd::Malformed("x".into())),
         ];
@@ -5781,7 +6716,7 @@ mod stream_error_kind_tests {
             "every counted error must land in exactly one class"
         );
         assert_eq!(
-            errored, 4,
+            errored, 5,
             "this fixture must actually produce errors to be testing anything"
         );
     }
@@ -5899,14 +6834,15 @@ mod gateway_recovery_tests {
             Absent::NotMeasured,
             "a gateway that will not serve again is not a rig fault"
         );
-        // And the rig-side ones must stay rig-side, or this variant has laundered them.
+        // A restart that did not help does not prove whether the gateway, upstream or rig caused
+        // the regression, so it is not filed as ours either.
         assert_eq!(
-            StreamStop::RigContaminated {
+            StreamStop::ReconfirmationUnresolved {
                 at: 3088,
                 proven: 4096
             }
             .absent_kind(),
-            Absent::HarnessError
+            Absent::NotMeasured
         );
     }
 
@@ -5937,6 +6873,24 @@ mod gateway_recovery_tests {
             assert!(d.contains("c=4096"), "must name the rung that failed: {d}");
         }
     }
+
+    // A RESTART THAT FAILS INSIDE THE STREAM SEARCH IS OURS, and it is named as a restart failure,
+    // not as an undrained host.
+    #[test]
+    fn a_failed_stream_restart_is_a_harness_error_named_as_a_restart_failure() {
+        let stop = StreamStop::RestartFailed {
+            at: 3088,
+            proven: 4096,
+        };
+        assert_eq!(stop.absent_kind(), Absent::HarnessError);
+        assert!(!stop.floor_fallback_ok());
+        let d = stop.describe(6176, MAX_CEILING_STEPDOWNS);
+        assert!(
+            d.contains("restart") && d.contains("c=3088") && d.contains("c=4096"),
+            "{d}"
+        );
+        assert!(!d.contains("drained"), "not the rig-drain story: {d}");
+    }
 }
 
 #[cfg(test)]
@@ -5956,21 +6910,24 @@ mod restart_attribution_tests {
                 restart_cleared,
             }
         } else {
-            StreamStop::RigContaminated { at, proven }
+            StreamStop::ReconfirmationUnresolved { at, proven }
         }
     }
 
     #[test]
-    fn a_restart_that_helps_blames_the_gateway_and_one_that_does_not_blames_us() {
+    fn a_restart_that_helps_blames_the_gateway_and_one_that_does_not_stays_unresolved() {
         assert_eq!(
             stop_for(true, 4096, 8192).absent_kind(),
             Absent::NotMeasured,
             "a restart clearing it proves the old process was wedged - that is the gateway's"
         );
         assert_eq!(
-            stop_for(false, 4096, 8192).absent_kind(),
-            Absent::HarnessError,
-            "a FRESH gateway still failing a rung it carried leaves the host as the variable - ours"
+            stop_for(false, 4096, 8192),
+            StreamStop::ReconfirmationUnresolved {
+                at: 4096,
+                proven: 8192
+            },
+            "a FRESH gateway still failing a rung it carried leaves the cause unresolved"
         );
     }
 

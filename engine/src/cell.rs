@@ -91,11 +91,16 @@ pub struct Evidence {
 impl Evidence {
     /// The first `MAX` bytes of a body, on a char boundary so the snippet is always printable.
     pub fn snippet(body: &str) -> String {
-        const MAX: usize = 200;
-        if body.len() <= MAX {
+        Self::snippet_within(body, 200)
+    }
+
+    /// The same, within an explicit cap: a 2xx rejected for its BODY needs the reason and enough of
+    /// the body to show the defect (`"content":[]` sits past 200 bytes behind a long id).
+    pub fn snippet_within(body: &str, max: usize) -> String {
+        if body.len() <= max {
             return body.trim().to_string();
         }
-        let mut end = MAX;
+        let mut end = max;
         while end > 0 && !body.is_char_boundary(end) {
             end -= 1;
         }

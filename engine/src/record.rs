@@ -52,6 +52,13 @@ where
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultSnapshot {
     pub schema_version: u32,
+    /// IDENTITY OF A SOURCE-BUILT GATEWAY BINARY, copied verbatim from the receipt its successful
+    /// build wrote (`<gateway dir>/.build-provenance.json`, e.g. source commit, dirty flag, binary
+    /// sha256). Absent for image gateways and for every older snapshot: nothing is inferred or
+    /// fabricated. A receipt that exists but cannot be read or parsed is recorded as
+    /// `{"error": "..."}` rather than dropped, so the gap is visible in the artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_provenance: Option<serde_json::Value>,
     /// WHAT EACH PUBLISHED METRIC MEANS, keyed by metric, built from the engine's own constants.
     ///
     /// A number a reader cannot check is a number they have to trust, and this project's whole claim is
@@ -139,8 +146,22 @@ pub struct RigProvenance {
     /// The box-qualification verdict this run's box carried, folded in by rig_provenance_json. No
     /// committed snapshot has ever carried a non-null value here, so the stage bodies are passed
     /// through as opaque JSON rather than typed against a shape nothing has confirmed.
+    ///
+    /// The engine's own verdict (suite.rs `qualify_box_with_retry`) may carry an optional
+    /// `attempts: [{outcome, rps, drift_pct}, ...]` when a failed qualification was re-taken; the
+    /// top-level fields are always the deciding attempt, so a reader that ignores `attempts` reads
+    /// the same shape as before.
     #[serde(default)]
     pub box_qualify: Option<serde_json::Value>,
+    /// The box's effective `net.core.somaxconn`, which caps the mock's listen backlog. Read from
+    /// /proc when the snapshot is written; ABSENT (not null, never 0) where it cannot be read, so a
+    /// snapshot from before this field and one from a non-Linux host have the same shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub somaxconn: Option<u64>,
+    /// The box's effective `net.ipv4.tcp_max_syn_backlog`, the half-open queue in front of that
+    /// backlog. Same read and absence rule as `somaxconn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_max_syn_backlog: Option<u64>,
 }
 
 /// Which commit produced this run's harness, and whether the tree was dirty. `null` (not an absent
@@ -355,6 +376,11 @@ pub struct FrontierReading {
     pub p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub first_disqualified_conc: Measurement<i64>,
+    /// THE SAMPLE COUNT BEHIND `p99_us`: the successful requests the winning window completed, which
+    /// are exactly the latencies its p99 was taken over. Absent with the reading's own reason when
+    /// the reading is absent, and on snapshots written before it existed.
+    #[serde(default = "measurement_default")]
+    pub samples: Measurement<i64>,
     /// Did the sweep RUN OUT OF RANGE while still qualifying? Then `rps` is a lower bound, not a
     /// ceiling, and every surface must say so. The retired search published `SearchExhausted` - a null -
     /// for this state, discarding a real measured rate because it could not prove maximality. The rate
@@ -405,6 +431,14 @@ pub struct CellPerf {
     pub gateway_c1_p99_us: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub direct_c1_p99_us: Measurement<i64>,
+    /// THE SAMPLE COUNTS BEHIND THE c=1 PERCENTILES: successful round trips in each leg's clean
+    /// window. `gateway_c1_p99_us` is taken over `gateway_c1_samples`, `direct_c1_p99_us` over
+    /// `direct_c1_samples`, and `added_latency_p50_us`/`_p99_us` difference percentiles of those two
+    /// populations. They used to reach the artifact only as prose in `c1_note`.
+    #[serde(default = "measurement_default")]
+    pub gateway_c1_samples: Measurement<i64>,
+    #[serde(default = "measurement_default")]
+    pub direct_c1_samples: Measurement<i64>,
     /// WHAT A REQUEST COST, in microseconds of gateway CPU.
     ///
     /// The throughput answer stops describing the gateway the moment it saturates its pinned cores;
@@ -502,6 +536,8 @@ impl CellPerf {
             added_latency_p99_us,
             gateway_c1_p99_us,
             direct_c1_p99_us,
+            gateway_c1_samples,
+            direct_c1_samples,
             // THE COST FIELDS, and leaving them out reintroduced the exact bug the comment below
             // describes. They published a bare `null` with the reason nowhere - which for cost is
             // worse than for most fields, because the two most likely reasons are REFUSALS the
@@ -540,10 +576,26 @@ impl CellPerf {
                 .record_absence(&format!("frontier.{at}.concurrency"), &mut out);
             r.p99_us
                 .record_absence(&format!("frontier.{at}.p99_us"), &mut out);
+            r.samples
+                .record_absence(&format!("frontier.{at}.samples"), &mut out);
             // NOT recorded: `first_disqualified_conc`. Its absence is not a hole - it is the positive
             // finding that the sweep ran out of range while this bound still held, which the reading's
             // own `lower_bound: true` states directly. Publishing it as an absence too would put one
             // fact in the artifact twice, in two vocabularies, which is what this map exists to avoid.
+            //
+            // EXCEPT when the boundary is missing for a reason OTHER than running out of range: a
+            // sweep the rig interrupted. Then `lower_bound` says only "floor", and the cause and rung
+            // live nowhere but here. Recorded only on a measured reading, because an absent reading's
+            // `first_disqualified_conc` repeats the `rps` reason already keyed above.
+            if r.rps.is_measured()
+                && !matches!(
+                    r.first_disqualified_conc.reason(),
+                    None | Some(Absent::SearchExhausted)
+                )
+            {
+                r.first_disqualified_conc
+                    .record_absence(&format!("frontier.{at}.first_disqualified_conc"), &mut out);
+            }
         }
         /* AND EVERY RUNG'S OWN ABSENCES, for exactly the reason the frontier's are here.
         `sweep_max_proxy` is a Vec of `SweepPoint`s whose `ok`/`rps`/`p99_us`/`fail` are
@@ -661,6 +713,13 @@ pub struct CellStream {
     pub ttft_gw_samples: Measurement<i64>,
     #[serde(default = "measurement_default")]
     pub ttft_direct_samples: Measurement<i64>,
+    /// THE SAMPLE COUNTS BEHIND `added_gap_p50_us`/`_p99_us`: inter-frame gaps in the one c=1 stream
+    /// each leg took (frames minus one), which are exactly the gaps each leg's percentile was taken
+    /// over.
+    #[serde(default = "measurement_default")]
+    pub gap_gw_samples: Measurement<i64>,
+    #[serde(default = "measurement_default")]
+    pub gap_direct_samples: Measurement<i64>,
 }
 
 impl CellStream {
@@ -673,6 +732,8 @@ impl CellStream {
             added_gap_p99_us,
             ttft_gw_samples,
             ttft_direct_samples,
+            gap_gw_samples,
+            gap_direct_samples,
             streams_sustained,
             streams_sustained_fps,
         );
@@ -949,6 +1010,29 @@ pub struct StreamingProjection {
 
 #[cfg(test)]
 mod tests {
+    // The backlog tunables are additive: a rig block written before them still reads, and an
+    // unreadable value is an ABSENT key, never a null or a 0.
+    #[test]
+    fn rig_backlog_fields_are_absent_when_unknown_and_round_trip_when_known() {
+        let old: RigProvenance =
+            serde_json::from_str(r#"{"arch":"arm64","release_url":null,"box_qualify":null}"#)
+                .unwrap();
+        assert_eq!(old.somaxconn, None);
+        assert_eq!(old.tcp_max_syn_backlog, None);
+        let v = serde_json::to_value(&old).unwrap();
+        assert!(v.get("somaxconn").is_none() && v.get("tcp_max_syn_backlog").is_none());
+
+        let known = RigProvenance {
+            somaxconn: Some(65535),
+            tcp_max_syn_backlog: Some(65535),
+            ..RigProvenance::default()
+        };
+        let v = serde_json::to_value(&known).unwrap();
+        assert_eq!(v["somaxconn"], 65535);
+        assert_eq!(v["tcp_max_syn_backlog"], 65535);
+        assert_eq!(serde_json::from_value::<RigProvenance>(v).unwrap(), known);
+    }
+
     /// EVERY SCALAR MEASUREMENT ON `CellPerf` MUST BE REACHABLE BY `absences()`.
     ///
     /// This is a STRUCTURAL guard, not a list to maintain: it serialises a perf record whose scalars
@@ -976,6 +1060,8 @@ mod tests {
             added_latency_p99_us,
             gateway_c1_p99_us,
             direct_c1_p99_us,
+            gateway_c1_samples,
+            direct_c1_samples,
             cpu_us_per_request,
             rps_per_cpu_second,
             cost_window_conc,
@@ -1018,6 +1104,8 @@ mod tests {
             added_latency_p99_us: Measurement::Measured(40_945),
             gateway_c1_p99_us: Measurement::Measured(41_026),
             direct_c1_p99_us: Measurement::Measured(81),
+            gateway_c1_samples: Measurement::Measured(146),
+            direct_c1_samples: Measurement::Measured(70_000),
             // A cost the fixture can round-trip: the point of this test is that every field survives
             // serialisation, so a field left at its default would pass vacuously.
             cpu_us_per_request: Measurement::Measured(37.5),
@@ -1072,6 +1160,7 @@ mod tests {
                 concurrency: Measurement::Measured(256),
                 p99_us: Measurement::Measured(4_000),
                 first_disqualified_conc: Measurement::Measured(1024),
+                samples: Measurement::Measured(115_704),
                 lower_bound: false,
             })
             .collect();
@@ -1115,6 +1204,7 @@ mod tests {
             concurrency: Measurement::Measured(16_384),
             p99_us: Measurement::Measured(3_000),
             first_disqualified_conc: Measurement::absent(Absent::SearchExhausted),
+            samples: Measurement::Measured(114_000),
             lower_bound: true,
         };
         let back: FrontierReading =
@@ -1137,6 +1227,49 @@ mod tests {
         assert_eq!(back.first_disqualified_conc.copied(), None);
     }
 
+    // A snapshot written before the sample counts existed still parses, with each count absent; a
+    // new one round-trips them.
+    #[test]
+    fn sample_counts_are_optional_on_old_snapshots_and_round_trip_on_new_ones() {
+        let old_perf = r#"{"added_latency_p99_us":480,"gateway_c1_p99_us":2000,"direct_c1_p99_us":1520,
+            "frontier":[{"p99_bound_us":10000,"rps":31000.0,"concurrency":128,"p99_us":4000,
+            "first_disqualified_conc":256,"lower_bound":false}]}"#;
+        let p: CellPerf = serde_json::from_str(old_perf).expect("an old perf block parses");
+        assert_eq!(p.gateway_c1_samples.copied(), None);
+        assert_eq!(p.direct_c1_samples.copied(), None);
+        assert_eq!(p.frontier[0].samples.copied(), None);
+        let s: CellStream = serde_json::from_str(r#"{"stream_served":true,"added_gap_p99_us":12}"#)
+            .expect("an old stream block parses");
+        assert_eq!(s.gap_gw_samples.copied(), None);
+
+        let mut perf = sample_perf();
+        perf.frontier = vec![FrontierReading {
+            p99_bound_us: Some(10_000),
+            rps: Measurement::Measured(31_000.0),
+            concurrency: Measurement::Measured(128),
+            p99_us: Measurement::Measured(4_000),
+            first_disqualified_conc: Measurement::Measured(256),
+            samples: Measurement::Measured(186_000),
+            lower_bound: false,
+        }];
+        let v = serde_json::to_value(&perf).expect("ser");
+        assert_eq!(v["gateway_c1_samples"], 146);
+        assert_eq!(v["direct_c1_samples"], 70_000);
+        assert_eq!(v["frontier"][0]["samples"], 186_000);
+        let back: CellPerf = serde_json::from_value(v).expect("de");
+        assert_eq!(back.gateway_c1_samples.copied(), Some(146));
+        assert_eq!(back.frontier[0].samples.copied(), Some(186_000));
+        let stream = CellStream {
+            gap_gw_samples: Measurement::Measured(63),
+            gap_direct_samples: Measurement::Measured(63),
+            ..CellStream::default()
+        };
+        let back: CellStream =
+            serde_json::from_str(&serde_json::to_string(&stream).expect("ser")).expect("de");
+        assert_eq!(back.gap_gw_samples.copied(), Some(63));
+        assert_eq!(back.gap_direct_samples.copied(), Some(63));
+    }
+
     // THE ABSENCE MAP CARRIES EVERY READING'S REASON, KEYED BY ITS BOUND.
     #[test]
     fn an_absent_frontier_reading_publishes_its_reason_in_the_cells_absence_map() {
@@ -1145,12 +1278,13 @@ mod tests {
             FrontierReading {
                 p99_bound_us: Some(1_000),
                 rps: Measurement::absent_because(
-                    Absent::BelowResolution,
+                    Absent::BoundNotMet,
                     "every cleanly-served rung had a tail at or above 1ms",
                 ),
-                concurrency: Measurement::absent(Absent::BelowResolution),
-                p99_us: Measurement::absent(Absent::BelowResolution),
-                first_disqualified_conc: Measurement::absent(Absent::BelowResolution),
+                concurrency: Measurement::absent(Absent::BoundNotMet),
+                p99_us: Measurement::absent(Absent::BoundNotMet),
+                first_disqualified_conc: Measurement::absent(Absent::BoundNotMet),
+                samples: Measurement::absent(Absent::BoundNotMet),
                 lower_bound: false,
             },
             FrontierReading {
@@ -1159,6 +1293,7 @@ mod tests {
                 concurrency: Measurement::Measured(1024),
                 p99_us: Measurement::Measured(40_000),
                 first_disqualified_conc: Measurement::Measured(2048),
+                samples: Measurement::Measured(115_704),
                 lower_bound: false,
             },
         ];
@@ -1166,10 +1301,11 @@ mod tests {
         let e = abs
             .get("frontier.1ms.rps")
             .expect("keyed by its BOUND, so a reader need not count columns to find it");
-        assert_eq!(e.reason, Absent::BelowResolution);
+        assert_eq!(e.reason, Absent::BoundNotMet);
         assert!(e.detail.as_deref().unwrap_or_default().contains("1ms"));
         assert!(abs.contains_key("frontier.1ms.concurrency"));
         assert!(abs.contains_key("frontier.1ms.p99_us"));
+        assert!(abs.contains_key("frontier.1ms.samples"));
         // The reading that WAS taken contributes no keys at all.
         assert!(!abs.keys().any(|k| k.starts_with("frontier.unbounded")));
     }
@@ -1315,6 +1451,8 @@ mod tests {
                 added_ttft_p99_us: Measurement::absent(Absent::NotMeasured),
                 ttft_gw_samples: Measurement::absent(Absent::NotMeasured),
                 ttft_direct_samples: Measurement::absent(Absent::NotMeasured),
+                gap_gw_samples: Measurement::absent(Absent::NotMeasured),
+                gap_direct_samples: Measurement::absent(Absent::NotMeasured),
                 added_gap_p50_us: Measurement::absent(Absent::NotMeasured),
                 added_gap_p99_us: Measurement::absent(Absent::NotMeasured),
                 streams_sustained: Measurement::absent(Absent::NotMeasured),
@@ -1385,6 +1523,7 @@ mod tests {
     fn sample_record() -> ResultSnapshot {
         ResultSnapshot {
             schema_version: 1,
+            gateway_provenance: None,
             definitions: Default::default(),
             gateway: "gw".to_string(),
             build: "gw:1.0.0".to_string(),
@@ -1494,6 +1633,7 @@ mod tests {
                 Absent::SearchExhausted,
                 Absent::Untestable,
                 Absent::HarnessError,
+                Absent::BoundNotMet,
             ]
             .iter()
             .any(|a| a.token() == reason),

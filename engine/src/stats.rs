@@ -190,7 +190,16 @@ pub fn growth_rate(samples: &[Sample]) -> Measurement<f64> {
     if den <= 0.0 {
         return Measurement::absent(Absent::NotMeasured);
     }
-    Measurement::Measured((num / den) * 60.0)
+    // A NaN or an infinity in the series (a bad /proc read, a division in the sampler) makes the
+    // fitted rate non-finite. That is ours, not the gateway's, and must not publish as a number.
+    let rate = (num / den) * 60.0;
+    if !rate.is_finite() {
+        return Measurement::absent_because(
+            Absent::HarnessError,
+            "the series holds a non-finite sample or timestamp, so no rate can be fitted",
+        );
+    }
+    Measurement::Measured(rate)
 }
 
 /// The steadiness gate. Windows `samples` to the trailing `window_s` seconds, then requires BOTH:
@@ -225,6 +234,11 @@ pub fn plateau_check(samples: &[Sample], window_s: f64, trend_pct: f64, range_pc
     let n = win.len();
     if n < 4 {
         return Verdict::Undecidable(Undecidable::TooFewReadings { got: n, need: 4 });
+    }
+    // CHECKED FIRST: a `-inf` sample used to be classified by the non-positive-mean arm below (a
+    // NotSteady verdict about the gateway's memory) before the min/max refusal could fire.
+    if win.iter().any(|s| !s.mib.is_finite()) {
+        return Verdict::Undecidable(Undecidable::NonFiniteSample);
     }
     let h = n / 2;
     let (first, second) = win.split_at(h);
@@ -860,6 +874,30 @@ mod tests {
     }
 
     // ---- the calibration relationship: the point of the port ---------------------------------------
+
+    // A RIG NaN OR INFINITY IN A MEMORY WINDOW IS OURS. It must come back Undecidable (published as
+    // a harness error), never as a NotSteady or Oscillating verdict about the gateway's memory.
+    #[test]
+    fn a_non_finite_sample_in_the_window_is_undecidable_not_a_verdict_about_the_gateway() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut s = linear_series(100.0, 0.0, 6.0, 12);
+            s[7].mib = bad;
+            let v = plateau_check(&s, 60.0, 1.0, 2.0);
+            assert_eq!(
+                v,
+                Verdict::Undecidable(Undecidable::NonFiniteSample),
+                "a {bad} sample must not be judged"
+            );
+        }
+    }
+
+    // The fitted rate refuses the same input rather than publishing a non-finite number.
+    #[test]
+    fn growth_rate_over_a_non_finite_sample_is_a_harness_error_not_nan() {
+        let mut s = linear_series(100.0, 1.0, 6.0, 12);
+        s[3].mib = f64::NAN;
+        assert_eq!(growth_rate(&s).reason(), Some(&Absent::HarnessError));
+    }
 
     fn linear_series(base: f64, rate_mib_per_min: f64, dt_s: f64, n: usize) -> Vec<Sample> {
         let per_sample = rate_mib_per_min / 60.0 * dt_s;

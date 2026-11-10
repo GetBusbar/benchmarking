@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Public records are a projection of the checked board, never a new measurement.
 import { canonicalCellState } from "./states.mjs";
+import { sampleCounts, PERF_SAMPLE_FIELDS, STREAM_SAMPLE_FIELDS } from "./seal.mjs";
 export const ORIGIN = "https://onthebench.ai";
 export const DISCLOSURE = { operator: "Busbar team", operator_is_entrant: true };
 export const PROTOCOLS = ["openai", "openai-responses", "anthropic", "gemini", "cohere", "bedrock"];
@@ -19,6 +20,31 @@ export function metricRecord(envelope) {
     state: reason === "below_resolution" ? "below_resolution" : available ? "valid" : reason || "not_measured",
     reason,
   };
+}
+// ADDITIVE ENGINE EVIDENCE (v1.1), carried verbatim and ONLY when the run recorded it, so a record from an
+// older engine keeps exactly its old shape. Nothing here is derived: each value is the engine's own field.
+// `sample_counts`: the populations each percentile was taken over (record.rs CellPerf/CellStream).
+// `stream_rung_diagnostics`: per stream-sweep rung, lanes per HTTP status and lanes that got no response
+// (run.rs StreamPoint::to_json `http_status_counts` / `stream_errors_no_response`).
+export function additiveEvidence(cell, rawCell) {
+  const out = {};
+  const samples = { ...sampleCounts(cell?.perf, PERF_SAMPLE_FIELDS), ...sampleCounts(cell?.stream, STREAM_SAMPLE_FIELDS) };
+  if (Object.keys(samples).length) out.sample_counts = samples;
+  const rungs = (Array.isArray(rawCell?.stream?.sweep_streams) ? rawCell.stream.sweep_streams : [])
+    .filter(p => p && typeof p === "object" && ("http_status_counts" in p || "stream_errors_no_response" in p))
+    .map(p => ({ conc: p.conc ?? null,
+      ...("http_status_counts" in p ? { http_status_counts: p.http_status_counts } : {}),
+      ...("stream_errors_no_response" in p ? { stream_errors_no_response: p.stream_errors_no_response } : {}) }));
+  if (rungs.length) out.stream_rung_diagnostics = rungs;
+  return out;
+}
+// The rig and gateway identity the v1.1 engine adds to a run, present only when recorded.
+export function additiveTest(raw) {
+  const rig = raw?.rig ?? null, out = {};
+  if (rig && "somaxconn" in rig) out.somaxconn = rig.somaxconn;
+  if (rig && "tcp_max_syn_backlog" in rig) out.tcp_max_syn_backlog = rig.tcp_max_syn_backlog;
+  if (raw && "gateway_provenance" in raw) out.gateway_provenance = raw.gateway_provenance;
+  return out;
 }
 export function cellStatus(cell) {
   return canonicalCellState(cell);
@@ -72,8 +98,10 @@ export function projectMeasurements(gateway, archivesByFile) {
           memory_concurrency: value(rawCell?.memory?.concurrency) ?? null,
           memory_load_s: value(rawCell?.memory?.load_s) ?? null,
           cost_concurrency: value(rawCell?.perf?.cost_window_conc) ?? null,
+          ...additiveTest(raw),
         },
         metrics, frontier,
+        ...additiveEvidence(cell, rawCell),
         provenance: {
           source_url: `${ORIGIN}/gateways/${gateway.key}`,
           raw_result_url: archive ? `${ORIGIN}/api/v1/runs/${archive.id}/raw.json` : null,
@@ -150,7 +178,7 @@ export function measurementsCsv(measurements) {
   for (const m of measurements) for (const f of m.frontier || []) rows.push([
     m.measurement_id, m.gateway_id, m.gateway_build, m.run_id, m.measured_at,
     m.test.ingress_protocol, m.test.upstream_protocol, `throughput_rps@${f.bound_ms == null ? "unbounded" : f.bound_ms + "ms"}`, f.rps?.value, f.lower_bound ? "lower_bound" : f.rps?.state, f.rps?.reason,
-    `${m.test.definitions?.["perf.frontier"] || "Definition not recorded"}; concurrency=${f.concurrency}; observed_p99_us=${f.p99_us}`, m.provenance.raw_result_url,
+    `${m.test.definitions?.["perf.frontier"] || "Definition not recorded"}; concurrency=${f.concurrency}; observed_p99_us=${f.p99_us}${f.samples != null ? `; samples=${f.samples}` : ""}`, m.provenance.raw_result_url,
   ]);
   return rows.map(r => r.map(quote).join(",")).join("\r\n") + "\r\n";
 }

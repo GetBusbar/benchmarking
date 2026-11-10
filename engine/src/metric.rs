@@ -251,6 +251,132 @@ pub fn process_cell_with(
 /// happened at. One search, two numbers - which is the whole reason a group is the unit.
 pub struct Throughput;
 
+/// The published frontier, read off one sweep's rungs.
+///
+/// AN INTERRUPTED SWEEP KEEPS ITS FRONTIER. When the rig stopped the climb (`CellPerf::interrupted`),
+/// every rung below the stop is still a real observation, so every reading is computed from them as
+/// usual and marked `lower_bound` - the rig, not the gateway, ended the climb, so nothing above the
+/// stop is known. A reading with no boundary rung names the cause and the rung instead of claiming the
+/// sweep ran out of range, and a bound nothing met says the rungs above the stop were never tried.
+/// Erasing these readings (as an earlier revision did) threw away measured rates and filed slow
+/// gateways as rig faults.
+pub(crate) fn frontier_for_perf(
+    perf: &crate::run::CellPerf,
+) -> Vec<crate::record::FrontierReading> {
+    // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
+    // point is that one sweep answers the throughput question at every bound, and the two scalars
+    // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
+    //
+    // A rung with no window reading contributes nothing - not a zero. `ok`/`fail` of 0/0 fails
+    // `served_cleanly`, so such a rung is disqualified from every bound rather than counted as a
+    // clean one, which is the same rule the sweep points below follow when they publish an absent
+    // `fail` rather than a fabricated 0.
+    let rungs: Vec<crate::frontier::Rung> = perf
+        .points
+        .iter()
+        .map(|pt| crate::frontier::Rung {
+            concurrency: pt.concurrency,
+            rps: pt.value,
+            p99_us: pt.reading.and_then(|r| r.p99_us),
+            ok: pt.reading.map(|r| r.ok).unwrap_or(0),
+            fail: pt.reading.map(|r| r.fail).unwrap_or(0),
+        })
+        .collect();
+    let frontier: Vec<crate::record::FrontierReading> = crate::frontier::P99_BOUNDS_US
+        .iter()
+        .map(|b| Some(*b))
+        .chain(std::iter::once(None))
+        .map(|bound| match crate::frontier::read_at(&rungs, bound) {
+            Some(r) => crate::record::FrontierReading {
+                p99_bound_us: bound.map(|b| b as i64),
+                rps: Measurement::Measured(r.rps),
+                concurrency: Measurement::Measured(i64::from(r.concurrency)),
+                // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
+                // latency reading, which only the unbounded reading can select.
+                p99_us: match r.p99_us {
+                    Some(p) => Measurement::Measured(p as i64),
+                    None => Measurement::absent_because(
+                        Absent::NotMeasured,
+                        "no window behind this rung reported a tail latency".to_string(),
+                    ),
+                },
+                first_disqualified_conc: match (r.first_disqualified_conc, &perf.interrupted) {
+                    (Some(c), _) => Measurement::Measured(i64::from(c)),
+                    // The climb did not run out of range: the rig stopped it. Say where and why.
+                    (None, Some(i)) => Measurement::absent_because(
+                        i.reason.clone(),
+                        format!(
+                            "sweep interrupted by the rig at c={}: {}; nothing at or above c={} was \
+                             measured, so this rate is a lower bound",
+                            i.conc, i.cause, i.conc
+                        ),
+                    ),
+                    // Not a hole: the sweep ran out of range while this bound still held, which is
+                    // exactly what `lower_bound` beside it reports.
+                    (None, None) => Measurement::absent_because(
+                        Absent::SearchExhausted,
+                        "every rung above this one also held this bound, so the sweep ran out of \
+                         range rather than finding the boundary"
+                            .to_string(),
+                    ),
+                },
+                samples: Measurement::Measured(r.samples as i64),
+                lower_bound: perf.interrupted.is_some() || r.is_lower_bound(),
+            },
+            // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
+            // entry would make the frontier's length vary per cell and a reader could not tell a
+            // bound that yielded nothing from a bound we forgot to report.
+            None => {
+                let absent = crate::frontier::absence_for(&rungs, bound);
+                // Interrupted: the finding only covers the rungs below the stop, and says so.
+                let absent = match (&perf.interrupted, absent) {
+                    (
+                        Some(i),
+                        Measurement::Absent {
+                            reason,
+                            detail: Some(d),
+                        },
+                    ) => Measurement::absent_because(
+                        reason,
+                        format!(
+                            "{d}; the sweep was interrupted by the rig at c={}: {}, so rungs at and \
+                             above c={} were not tested",
+                            i.conc, i.cause, i.conc
+                        ),
+                    ),
+                    (_, absent) => absent,
+                };
+                // Generic over the measurement's type: `rps` is f64 (fractional below 1/s) while
+                // its siblings are counts, and one absence has to be spellable for both.
+                let carry = |()| -> Measurement<f64> {
+                    match (absent.reason().cloned(), absent.detail()) {
+                        (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                        (Some(rr), None) => Measurement::absent(rr),
+                        (None, _) => Measurement::absent(Absent::NotMeasured),
+                    }
+                };
+                let carry_i = |()| -> Measurement<i64> {
+                    match (absent.reason().cloned(), absent.detail()) {
+                        (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
+                        (Some(rr), None) => Measurement::absent(rr),
+                        (None, _) => Measurement::absent(Absent::NotMeasured),
+                    }
+                };
+                crate::record::FrontierReading {
+                    p99_bound_us: bound.map(|b| b as i64),
+                    rps: carry(()),
+                    concurrency: carry_i(()),
+                    p99_us: carry_i(()),
+                    first_disqualified_conc: carry_i(()),
+                    samples: carry_i(()),
+                    lower_bound: false,
+                }
+            }
+        })
+        .collect();
+    frontier
+}
+
 impl Metric for Throughput {
     fn name(&self) -> &'static str {
         "throughput"
@@ -269,88 +395,7 @@ impl Metric for Throughput {
 
     fn measure(&self, ctx: &CellCtx<'_>) -> Measured {
         let perf = crate::run::sweep_cell(ctx.cfg, ctx.id, ctx.min_conc, ctx.max_conc);
-        // THE FRONTIER, READ OFF THE RUNGS THIS SWEEP ALREADY PROBED. No extra measurement: the whole
-        // point is that one sweep answers the throughput question at every bound, and the two scalars
-        // below were that same sweep collapsed by a chosen ceiling. See `frontier.rs`.
-        //
-        // A rung with no window reading contributes nothing - not a zero. `ok`/`fail` of 0/0 fails
-        // `served_cleanly`, so such a rung is disqualified from every bound rather than counted as a
-        // clean one, which is the same rule the sweep points below follow when they publish an absent
-        // `fail` rather than a fabricated 0.
-        let rungs: Vec<crate::frontier::Rung> = perf
-            .points
-            .iter()
-            .map(|pt| crate::frontier::Rung {
-                concurrency: pt.concurrency,
-                rps: pt.value,
-                p99_us: pt.reading.and_then(|r| r.p99_us),
-                ok: pt.reading.map(|r| r.ok).unwrap_or(0),
-                fail: pt.reading.map(|r| r.fail).unwrap_or(0),
-            })
-            .collect();
-        let frontier: Vec<crate::record::FrontierReading> = crate::frontier::P99_BOUNDS_US
-            .iter()
-            .map(|b| Some(*b))
-            .chain(std::iter::once(None))
-            .map(|bound| match crate::frontier::read_at(&rungs, bound) {
-                Some(r) => crate::record::FrontierReading {
-                    p99_bound_us: bound.map(|b| b as i64),
-                    rps: Measurement::Measured(r.rps),
-                    concurrency: Measurement::Measured(i64::from(r.concurrency)),
-                    // The tail the winning rung ACTUALLY produced. Absent when the rung carried no
-                    // latency reading, which only the unbounded reading can select.
-                    p99_us: match r.p99_us {
-                        Some(p) => Measurement::Measured(p as i64),
-                        None => Measurement::absent_because(
-                            Absent::NotMeasured,
-                            "no window behind this rung reported a tail latency".to_string(),
-                        ),
-                    },
-                    first_disqualified_conc: match r.first_disqualified_conc {
-                        Some(c) => Measurement::Measured(i64::from(c)),
-                        // Not a hole: the sweep ran out of range while this bound still held, which is
-                        // exactly what `lower_bound` beside it reports.
-                        None => Measurement::absent_because(
-                            Absent::SearchExhausted,
-                            "every rung above this one also held this bound, so the sweep ran out of \
-                             range rather than finding the boundary"
-                                .to_string(),
-                        ),
-                    },
-                    lower_bound: r.is_lower_bound(),
-                },
-                // A bound nothing qualified for is still a published column, carrying WHY. Dropping the
-                // entry would make the frontier's length vary per cell and a reader could not tell a
-                // bound that yielded nothing from a bound we forgot to report.
-                None => {
-                    let absent = crate::frontier::absence_for(&rungs, bound);
-                    // Generic over the measurement's type: `rps` is f64 (fractional below 1/s) while
-                    // its siblings are counts, and one absence has to be spellable for both.
-                    let carry = |()| -> Measurement<f64> {
-                        match (absent.reason().cloned(), absent.detail()) {
-                            (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
-                            (Some(rr), None) => Measurement::absent(rr),
-                            (None, _) => Measurement::absent(Absent::NotMeasured),
-                        }
-                    };
-                    let carry_i = |()| -> Measurement<i64> {
-                        match (absent.reason().cloned(), absent.detail()) {
-                            (Some(rr), Some(d)) => Measurement::absent_because(rr, d),
-                            (Some(rr), None) => Measurement::absent(rr),
-                            (None, _) => Measurement::absent(Absent::NotMeasured),
-                        }
-                    };
-                    crate::record::FrontierReading {
-                        p99_bound_us: bound.map(|b| b as i64),
-                        rps: carry(()),
-                        concurrency: carry_i(()),
-                        p99_us: carry_i(()),
-                        first_disqualified_conc: carry_i(()),
-                        lower_bound: false,
-                    }
-                }
-            })
-            .collect();
+        let frontier = frontier_for_perf(&perf);
         // THE SWEEP TRAVELS WITH THE PEAK. Each probed rung becomes a published point, so a reader
         // can see the shape the search walked and re-derive the maximum rather than trusting it.
         //
@@ -646,8 +691,33 @@ impl Metric for Memory {
                 }
                 // Re-resolve the pid: a restart gives the tree a NEW root, and reading the old one
                 // would measure a process that no longer exists.
-                Ok(()) => match crate::rss::root_pid(&ctx.cfg.runtime).copied() {
-                    Some(fresh) => {
+                //
+                // A RESTART THAT LOSES THE TREE ABORTS THE GROUP TOO, exactly like a failed restart:
+                // carrying on ran the load window, the sampler and the high-water mark against the
+                // PRE-restart pid - a process that no longer exists, or a recycled pid that is not
+                // the gateway at all - and published those readings as this gateway's memory.
+                Ok(()) => match crate::rss::root_pid(&ctx.cfg.runtime) {
+                    Measurement::Absent { reason, detail } => {
+                        let detail = format!(
+                            "the gateway restarted but its process tree could not be found \
+                             afterwards, so the memory window did not run: {}",
+                            detail
+                                .as_deref()
+                                .unwrap_or("no process matched its declared identity")
+                        );
+                        let f: Filled = self
+                            .fields()
+                            .iter()
+                            .map(|x| {
+                                (
+                                    *x,
+                                    Measurement::absent_because(reason.clone(), detail.clone()),
+                                )
+                            })
+                            .collect();
+                        return f.into();
+                    }
+                    Measurement::Measured(fresh) => {
                         pid = fresh;
                         // WATCH IT DO NOTHING, FOR AS LONG AS THE RECOVERY WINDOW WATCHES IT REST.
                         //
@@ -681,11 +751,6 @@ impl Metric for Memory {
                             crate::stats::median(&vals)
                         }
                     }
-                    None => Measurement::absent_because(
-                        Absent::NotMeasured,
-                        "the gateway restarted but its process tree could not be found afterwards"
-                            .to_string(),
-                    ),
                 },
             },
         };
@@ -701,11 +766,13 @@ impl Metric for Memory {
         // climbed and plateaued or spiked once is the difference between a leak and a burst, and
         // neither is visible from a single scalar.
         let series = std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::stats::Sample>::new()));
+        // The series' own clock, kept out here so the recovery window can be located on it.
+        let sampler_started = std::time::Instant::now();
         let sampler = {
             let stop = std::sync::Arc::clone(&stop);
             let peak_seen = std::sync::Arc::clone(&peak_seen);
             let series = std::sync::Arc::clone(&series);
-            let started = std::time::Instant::now();
+            let started = sampler_started;
             std::thread::spawn(move || {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(v) = crate::rss::rss_tree_mib(pid).copied() {
@@ -847,6 +914,9 @@ impl Metric for Memory {
         // the loaded process. It survives the load ending, but reading it here keeps it beside the
         // peak it belongs to.
         let hwm = crate::rss::hwm_tree_mib(pid);
+        // Where the recovery window starts on the series' clock: `recovered` may only be read from
+        // samples taken after this point, never from the load phase.
+        let recovery_from_s = sampler_started.elapsed().as_secs_f64();
 
         // ── THEN WATCH IT WITH THE LOAD GONE ─────────────────────────────────────────────────────
         //
@@ -895,6 +965,7 @@ impl Metric for Memory {
             return f.into();
         }
 
+        let ran_load = ran.is_some();
         let peak = match (ran, peak_seen.lock().ok().map(|p| *p)) {
             // A window that never ran means the peak was never put under load. Publishing the idle
             // reading as a peak would be a number taken under a different condition than the one it
@@ -916,14 +987,19 @@ impl Metric for Memory {
 
         // RECOVERED: where the curve ends, after the load has been gone for a minute. Taken from the
         // trailing recovery window rather than the single last reading, so one sample cannot set it.
-        let recovered = {
-            let cut = taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_MEDIAN_S as f64;
-            let tail: Vec<f64> = taken
-                .iter()
-                .filter(|s| s.t_s >= cut)
-                .map(|s| s.mib)
-                .collect();
-            crate::stats::median(&tail)
+        //
+        // NO LOAD, NO RECOVERY. With no load window the high-water mark and the trailing readings are
+        // the idle process under another name, so both carry the same absence as the peak.
+        let no_load = || {
+            Measurement::absent_because(
+                Absent::NotMeasured,
+                "the load window did not run, so there was no load to peak under or recover from",
+            )
+        };
+        let (hwm, recovered) = if ran_load {
+            (hwm, recovered_median(&taken, recovery_from_s))
+        } else {
+            (no_load(), no_load())
         };
         // The plateau verdict, published rather than kept. "Never settled" is a real finding about a
         // gateway and it must arrive WITH the rate it was climbing at, which is what NotSteady
@@ -1074,22 +1150,7 @@ impl Metric for Memory {
                 ),
                 (
                     "memory_time_to_plateau_s",
-                    match settled_at {
-                        Some(t) => Measurement::Measured(t as f64),
-                        None => Measurement::absent_because(
-                            Absent::NotMeasured,
-                            // Reason strings ride into the board's tooltips verbatim, so this one states
-                            // what the window measured and stops there - no verdict on the gateway.
-                            //
-                            // AND IT NAMES THE SHAPE, because "no steady state" describes two opposite
-                            // gateways. busbar openai>openai ends the window at -0.43 MiB/min - still
-                            // RELEASING memory - and read identically to one still climbing. `Shape`
-                            // already exists for exactly this ("the opposite of a leak, and it must
-                            // never be labelled as one") and was being discarded one line before the
-                            // sentence a reader actually sees.
-                            no_plateau_detail(&verdict),
-                        ),
-                    },
+                    time_to_plateau(settled_at, &verdict),
                 ),
             ],
             series: Series {
@@ -1232,6 +1293,25 @@ impl Metric for Streaming {
         // A leg that produced no frame has no time to first token. Subtracting against a missing
         // reference would publish the gateway's own latency as its ADDED latency, which reads as the
         // gateway being slower than it is.
+        //
+        // AN ERROR ANSWER IS NOT A STREAM. A leg that answered non-2xx (a 401, a 429, a 5xx sent
+        // with an event-stream content type or none) still yields frames, and timing them would
+        // publish how fast the gateway REFUSED as how fast it streamed. Worded like the no-frame
+        // case below because it is that case: none of those frames is a stream frame.
+        for (which, o) in [
+            ("the gateway", &through_gateway),
+            ("the mock directly", &direct),
+        ] {
+            if let Some(s) = o.status.filter(|s| !(200..300).contains(s)) {
+                return all(Measurement::absent_because(
+                    Absent::NotMeasured,
+                    format!(
+                        "no stream frame arrived from {which}: it answered HTTP {s}, not 2xx, so \
+                         what it sent is an error response rather than a stream to time"
+                    ),
+                ));
+            }
+        }
         let (Some(&gw_ttft), Some(&direct_ttft)) = (
             through_gateway.frame_offsets_us.first(),
             direct.frame_offsets_us.first(),
@@ -1276,7 +1356,7 @@ impl Metric for Streaming {
             |addr: std::net::SocketAddr, path: &str, headers: &[(String, String)]| -> Vec<u64> {
                 (0..STREAM_TTFT_SAMPLES)
                     .filter_map(|_| {
-                        crate::http::post_json_sse(
+                        let o = crate::http::post_json_sse(
                             addr,
                             path,
                             body.as_bytes(),
@@ -1284,10 +1364,12 @@ impl Metric for Streaming {
                             STREAM_TIMEOUT,
                             1,
                             Some(ctx.dialect),
-                        )
-                        .frame_offsets_us
-                        .first()
-                        .copied()
+                        );
+                        // A non-2xx answer is a lost probe, never a time-to-first-event.
+                        if !answered_2xx(&o) {
+                            return None;
+                        }
+                        o.frame_offsets_us.first().copied()
                     })
                     .collect()
             };
@@ -1813,6 +1895,12 @@ pub struct Cost;
 /// entrant, the column stops being a comparison.
 pub const COST_WINDOW_CONCURRENCY: u32 = 8;
 
+/// Whether a streaming probe was answered with a 2xx. A probe with no status line, or a refusal sent
+/// with an event-stream content type, still carries frames, and none of them is a stream to time.
+fn answered_2xx(o: &crate::http::SseOutcome) -> bool {
+    o.status.is_some_and(|s| (200..300).contains(&s))
+}
+
 /// Why a cell has no time-to-plateau, in the words a reader sees.
 ///
 /// IT NAMES THE SHAPE, because "no steady state" describes two opposite gateways. busbar
@@ -1835,9 +1923,53 @@ fn no_plateau_detail(verdict: &crate::stats::Verdict) -> String {
                     "oscillating with no net trend - it returns to where it was, which is not a leak",
             }
         ),
+        crate::stats::Verdict::Steady { .. } => {
+            "the full load window settled, but no mid-load check had read it flat, so when it \
+             settled is not known"
+                .to_string()
+        }
         _ => "memory reached no steady state inside the load cap, so there is no time-to-plateau"
             .to_string(),
     }
+}
+
+/// `memory_time_to_plateau_s`: WHEN the load window first read flat, published only beside a FINAL
+/// verdict that it settled. The mid-load reading is kept going on purpose (see the load loop), so a
+/// cell that read flat at 90s and climbed for 200 more ends `NotSteady`; publishing its 90s beside
+/// `memory_plateaued = 0` stated two contradictory facts about one window (36 cells on the August
+/// board did exactly that).
+fn time_to_plateau(settled_at: Option<i64>, verdict: &crate::stats::Verdict) -> Measurement<f64> {
+    match settled_at {
+        Some(t) if verdict.is_steady() => Measurement::Measured(t as f64),
+        // Reason strings ride into the board's tooltips verbatim, so this states what the window
+        // measured and names the shape ("no steady state" describes opposite gateways: one still
+        // releasing memory and one still climbing).
+        _ => Measurement::absent_because(Absent::NotMeasured, no_plateau_detail(verdict)),
+    }
+}
+
+/// `memory_recovered_mib`: the median of the trailing `MEMORY_RECOVERY_MEDIAN_S` of the series, and
+/// only of readings taken AFTER the load stopped (`recovery_from_s`, on the series' clock). If no
+/// reading succeeded during recovery the trailing samples are load-phase readings, and publishing
+/// them as "recovered" would label a loaded process as one at rest.
+fn recovered_median(taken: &[crate::stats::Sample], recovery_from_s: f64) -> Measurement<f64> {
+    let cut = (taken.last().map(|s| s.t_s).unwrap_or(0.0) - MEMORY_RECOVERY_MEDIAN_S as f64)
+        .max(recovery_from_s);
+    let tail: Vec<f64> = taken
+        .iter()
+        .filter(|s| s.t_s >= cut)
+        .map(|s| s.mib)
+        .collect();
+    if tail.is_empty() {
+        return Measurement::absent_because(
+            Absent::NotMeasured,
+            format!(
+                "no reading of the process tree succeeded in the {MEMORY_RECOVERY_S}s after the load \
+                 stopped, so there is no recovered figure"
+            ),
+        );
+    }
+    crate::stats::median(&tail)
 }
 
 impl Metric for Cost {
@@ -2004,6 +2136,91 @@ mod tests {
             !undecidable.contains("climbing") && !undecidable.contains("falling"),
             "{undecidable}"
         );
+    }
+
+    // AN ERROR EVENT IS NOT A FIRST TOKEN. A refusal sent with an event-stream content type still
+    // carries frames; its offset must not enter the TTFT sample set.
+    #[test]
+    fn a_ttft_probe_counts_only_when_it_was_answered_2xx() {
+        let probe = |status: Option<u16>| crate::http::SseOutcome {
+            status,
+            frames: vec!["{\"error\":\"rate limited\"}".to_string()],
+            frame_offsets_us: vec![120],
+            content_frames: 1,
+            end: crate::http::SseEnd::FrameBudgetReached,
+        };
+        assert!(answered_2xx(&probe(Some(200))));
+        assert!(answered_2xx(&probe(Some(204))));
+        for s in [Some(401), Some(429), Some(503), Some(302), None] {
+            assert!(!answered_2xx(&probe(s)), "{s:?} is not a stream to time");
+        }
+    }
+
+    /* A TIME-TO-PLATEAU IS ONLY PUBLISHED BESIDE A WINDOW THAT SETTLED. The load loop notes the
+    first flat mid-load reading and keeps loading; a cell that read flat at 90s and then climbed for
+    200 more ends `NotSteady`, and it published `memory_time_to_plateau_s = 90` beside
+    `memory_plateaued = 0` - two contradictory facts about one window. */
+    #[test]
+    fn a_time_to_plateau_needs_the_final_verdict_to_have_settled() {
+        use crate::measurement::{Absent, Measurement};
+        use crate::stats::{Shape, Undecidable, Verdict};
+        let steady = Verdict::Steady {
+            growth_rate_mib_per_min: Measurement::Measured(0.1),
+        };
+        assert_eq!(time_to_plateau(Some(90), &steady).copied(), Some(90.0));
+
+        let climbed_after = Verdict::NotSteady {
+            growth_rate_mib_per_min: Measurement::Measured(2.0),
+            shape: Shape::Climbing,
+        };
+        let t = time_to_plateau(Some(90), &climbed_after);
+        assert_eq!(
+            t.copied(),
+            None,
+            "a mid-load flat reading must not survive a final NotSteady verdict"
+        );
+        assert!(t.detail().is_some_and(|d| d.contains("climbing")), "{t:?}");
+
+        let unjudged =
+            time_to_plateau(Some(90), &Verdict::Undecidable(Undecidable::WindowTooShort));
+        assert_eq!(unjudged.copied(), None);
+        assert_eq!(unjudged.reason(), Some(&Absent::NotMeasured));
+
+        // Settled overall but never read flat mid-load: when it settled is unknown, not zero.
+        let unknown = time_to_plateau(None, &steady);
+        assert_eq!(unknown.copied(), None);
+        assert_eq!(unknown.reason(), Some(&Absent::NotMeasured));
+        assert!(
+            unknown.detail().is_some_and(|d| d.contains("settled")),
+            "{unknown:?}"
+        );
+    }
+
+    /* RECOVERED IS READ FROM THE RECOVERY WINDOW, NEVER FROM THE LOAD. It was the median of the 30s
+    before the series' LAST sample with no check where that sample fell, so a gateway whose tree
+    stopped being readable once the load ended published its loaded readings as "recovered". */
+    #[test]
+    fn recovered_memory_comes_only_from_readings_taken_after_the_load_stopped() {
+        use crate::measurement::Absent;
+        let at = |t_s: f64, mib: f64| crate::stats::Sample { t_s, mib };
+        // Load until t=300 at ~120 MiB, recovery from t=300 settling at ~10 MiB.
+        let mut series: Vec<crate::stats::Sample> =
+            (0..300).map(|t| at(f64::from(t), 120.0)).collect();
+        let load_only = series.clone();
+        series.extend((300..360).map(|t| at(f64::from(t), 10.0)));
+
+        assert_eq!(recovered_median(&series, 300.0).copied(), Some(10.0));
+
+        // No reading succeeded after t=300: the trailing samples are load readings, so there is no
+        // recovered figure - before the fix this published 120 MiB as "recovered".
+        let none = recovered_median(&load_only, 300.0);
+        assert_eq!(none.copied(), None, "load readings published as recovered");
+        assert_eq!(none.reason(), Some(&Absent::NotMeasured));
+
+        // A recovery window with only a few late readings uses those alone, not the load before them.
+        let mut sparse = load_only;
+        sparse.push(at(355.0, 12.0));
+        assert_eq!(recovered_median(&sparse, 300.0).copied(), Some(12.0));
     }
 
     // EVERY `Series` FIELD MUST SURVIVE THE ACCUMULATOR.

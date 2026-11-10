@@ -372,8 +372,10 @@ pub trait Launcher {
     fn is_ready(&mut self, spec: &LaunchSpec) -> bool;
 
     /// Kill whatever a failed attempt left behind, so the next attempt is not racing a half-bound
-    /// listener. Best effort: a stop that cannot confirm release still lets the loop retry, and the
-    /// next readiness check is what actually catches a lingering process.
+    /// listener. Best effort: a stop that cannot confirm release still lets the loop retry, and what
+    /// catches a lingering process is `launch_with`'s check that the port is NOT held before the next
+    /// spawn. The readiness check cannot: it asks only whether something answers on the port, so a
+    /// survivor would satisfy it.
     fn stop(&mut self, spec: &LaunchSpec);
 
     /// A snapshot of the port's state, used only as failure evidence on the final `NeverReady`.
@@ -649,7 +651,15 @@ impl Launcher for RealLauncher {
     }
 
     fn stop(&mut self, spec: &LaunchSpec) {
-        let _ = supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5));
+        // SAID, NOT DISCARDED. A stop that could not confirm release leaves something on the port;
+        // `launch_with` refuses to spawn the next attempt onto a held port, and this line is what
+        // tells the operator why that refusal is coming.
+        if let Err(e) = supervise::stop_and_wait(&spec.runtime, spec.port, Duration::from_secs(5)) {
+            eprintln!(
+                "launch: stopping a failed attempt of {} did not confirm release: {e}",
+                spec.runtime.identity()
+            );
+        }
         // `stop_and_wait` above already confirmed the process is no longer alive (or gave up trying),
         // so a blocking `wait` here reaps a zombie rather than hanging on a live one.
         reap_native_child(&mut self.native_child, true);
@@ -724,11 +734,33 @@ pub fn launch_with(
     let mut last_spawn_error = None;
     let mut last_output = None;
     for attempt in 1..=bounded {
-        let spawned = match launcher.spawn(spec) {
-            Ok(()) => true,
-            Err(why) => {
-                last_spawn_error = Some(why);
-                false
+        // THE PORT MUST BE FREE BEFORE ANYTHING IS SPAWNED ONTO IT. Readiness is "something answers
+        // on the port", so a listener this launch did not start - a container a crashed run left on
+        // the host network, or a previous attempt that outlived its stop - would satisfy it while the
+        // fresh process died on EADDRINUSE, and the whole grid would then be measured against the
+        // survivor and published under this launch's name. Only `Held` is refused: `Unknown` is a
+        // probe that could not tell, and refusing on it would fail launches on our own probe's
+        // account.
+        let spawned = if launcher.port_snapshot(spec) == PortState::Held {
+            last_spawn_error = Some(format!(
+                "port {} was already held before this attempt spawned anything, so a readiness \
+                 check could only have observed a listener this launch did not start; refusing to \
+                 spawn onto it",
+                spec.port
+            ));
+            false
+        } else {
+            match launcher.spawn(spec) {
+                // The reason is the LAST attempt's: an attempt that spawned cleanly clears what an
+                // earlier refusal said, or that refusal would be reported for a later failure.
+                Ok(()) => {
+                    last_spawn_error = None;
+                    true
+                }
+                Err(why) => {
+                    last_spawn_error = Some(why);
+                    false
+                }
             }
         };
         if spawned && launcher.is_ready(spec) {
@@ -1053,6 +1085,8 @@ mod tests {
         pre_launch_calls: u32,
         pre_launch_result: Result<(), String>,
         port_state: PortState,
+        /// Consumed one per `port_snapshot` before falling back to `port_state`.
+        port_script: Vec<PortState>,
     }
 
     impl FakeLauncher {
@@ -1064,6 +1098,7 @@ mod tests {
                 pre_launch_calls: 0,
                 pre_launch_result: Ok(()),
                 port_state: PortState::Unknown,
+                port_script: Vec::new(),
             }
         }
     }
@@ -1088,7 +1123,11 @@ mod tests {
             self.stop_calls += 1;
         }
         fn port_snapshot(&mut self, _spec: &LaunchSpec) -> PortState {
-            self.port_state
+            if self.port_script.is_empty() {
+                self.port_state
+            } else {
+                self.port_script.remove(0)
+            }
         }
     }
 
@@ -1127,6 +1166,71 @@ mod tests {
             sleeps, 2,
             "backoff happens between attempts, not after the final success"
         );
+    }
+
+    // THE DEFECT: readiness is "something answers on the port", and nothing checked the port was
+    // free first. A survivor kept answering, the fresh gateway died on EADDRINUSE, and `launch`
+    // returned `Launched` - so the grid measured the survivor under this launch's name. A port already
+    // held before the spawn is refused, every attempt, and the reason travels in the error.
+    #[test]
+    fn an_attempt_never_spawns_onto_a_port_something_else_already_holds() {
+        let mut fake = FakeLauncher::ready_after(vec![true, true, true]);
+        fake.port_state = PortState::Held;
+        let err = launch_with(&mut fake, &docker_spec(), 3, no_sleep)
+            .expect_err("a port held by something else must never read as this launch being ready");
+        assert_eq!(
+            fake.spawn_calls, 0,
+            "nothing may be spawned onto a held port"
+        );
+        let LaunchError::NeverReady {
+            attempts,
+            last_port_state,
+            last_spawn_error,
+            ..
+        } = &err
+        else {
+            panic!("expected NeverReady, got {err:?}");
+        };
+        assert_eq!(*attempts, 3);
+        assert_eq!(*last_port_state, PortState::Held);
+        assert!(
+            last_spawn_error
+                .as_deref()
+                .is_some_and(|w| w.contains("already held")),
+            "the refusal must say why: {err}"
+        );
+    }
+
+    // The check is per attempt: a survivor that releases the port between attempts lets the next
+    // one spawn and come up normally. `Unknown` is not a refusal.
+    #[test]
+    fn a_port_that_frees_up_between_attempts_is_used() {
+        let mut fake = FakeLauncher::ready_after(vec![true]);
+        fake.port_script = vec![PortState::Held, PortState::Unknown];
+        let launched = launch_with(&mut fake, &docker_spec(), 3, no_sleep).expect("it comes up");
+        assert_eq!(launched.attempts, 2);
+        assert_eq!(
+            fake.spawn_calls, 1,
+            "only the attempt with a free port spawns"
+        );
+    }
+
+    // THE REASON IS THE LAST ATTEMPT'S: a held-port refusal on attempt 1 must not be reported for an
+    // attempt 2 that spawned cleanly and then never came up.
+    #[test]
+    fn a_later_clean_spawn_clears_an_earlier_refusal() {
+        let mut fake = FakeLauncher::ready_after(vec![false]);
+        fake.port_script = vec![PortState::Held, PortState::Free];
+        fake.port_state = PortState::Free;
+        let err = launch_with(&mut fake, &docker_spec(), 2, no_sleep).expect_err("never ready");
+        let LaunchError::NeverReady {
+            last_spawn_error, ..
+        } = &err
+        else {
+            panic!("expected NeverReady, got {err:?}");
+        };
+        assert_eq!(fake.spawn_calls, 1);
+        assert_eq!(last_spawn_error, &None, "{err}");
     }
 
     // ---- required: a gateway never ready exhausts the bound with a typed error, never success -----

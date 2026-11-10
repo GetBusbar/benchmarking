@@ -14,12 +14,9 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 tokio-stream = { version = "0.1", default-features = false }
-
-# TESTS ONLY. The state document this mock serves to the matrix runner is hand-assembled with
-# format!, so the tests that prove it is valid JSON have to actually parse it: a substring assertion
-# would pass on a document a real client cannot read. Not a runtime dependency, so the hot path and
-# the shipped binary are untouched.
-[dev-dependencies]
+# Structural request validation (the Bedrock Converse shape check) runs only while correctness
+# recording is enabled, never on the unrecorded load path. The tests also use it to parse the
+# hand-assembled state document.
 serde_json = "1"
 
 # TESTS ONLY (feature merge into the tokio dep above). The body-cap test drives handle() over a real

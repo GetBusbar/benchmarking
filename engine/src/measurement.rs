@@ -49,6 +49,12 @@ pub enum Absent {
     /// The harness itself is misconfigured or broken. Never publishable as a gateway or rig property:
     /// a bug of ours wearing a rig failure's clothes is the worst shape a defect can take here.
     HarnessError,
+    /// A frontier tail-latency bound that NO rung of the sweep met: every cleanly-served rung that
+    /// reported a tail had it at or above the bound. A measured finding about the gateway at this
+    /// bound - not a rig-resolution limit, which is what `BelowResolution` means, and not a hole.
+    /// It used to share `below_resolution`, so "this rig cannot weigh a difference that small" and
+    /// "this gateway never held a tail this tight" published as one token.
+    BoundNotMet,
 }
 
 impl Absent {
@@ -62,6 +68,7 @@ impl Absent {
             Absent::SearchExhausted => "search_exhausted",
             Absent::Untestable => "untestable",
             Absent::HarnessError => "harness_error",
+            Absent::BoundNotMet => "bound_not_met",
         }
     }
 
@@ -89,22 +96,44 @@ pub struct AbsentEntry {
     pub detail: Option<String>,
 }
 
-impl<T> Measurement<T> {
+impl<T: 'static> Measurement<T> {
     /// If absent, inserts `key` -> this measurement's reason and detail into `out`. A no-op for a
-    /// measured value: there is nothing to explain.
+    /// measured finite value: there is nothing to explain.
+    ///
+    /// A MEASURED NON-FINITE FLOAT is recorded as a `HarnessError`. serde_json writes NaN and the
+    /// infinities as `null`, indistinguishable on the wire from an absence, and every null this
+    /// artifact publishes is supposed to carry a reason. An impossible number is the engine's fault
+    /// by this project's own rule, and saying so beats a silent null.
     pub fn record_absence(
         &self,
         key: &str,
         out: &mut std::collections::BTreeMap<String, AbsentEntry>,
     ) {
-        if let Measurement::Absent { reason, detail } = self {
-            out.insert(
-                key.to_string(),
-                AbsentEntry {
-                    reason: reason.clone(),
-                    detail: detail.clone(),
-                },
-            );
+        match self {
+            Measurement::Absent { reason, detail } => {
+                out.insert(
+                    key.to_string(),
+                    AbsentEntry {
+                        reason: reason.clone(),
+                        detail: detail.clone(),
+                    },
+                );
+            }
+            Measurement::Measured(v) => {
+                if let Some(x) = (v as &dyn std::any::Any).downcast_ref::<f64>() {
+                    if !x.is_finite() {
+                        out.insert(
+                            key.to_string(),
+                            AbsentEntry {
+                                reason: Absent::HarnessError,
+                                detail: Some(format!(
+                                    "the engine computed a non-finite value ({x}), which publishes as null"
+                                )),
+                            },
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -245,6 +274,21 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Measurement<T> {
 mod tests {
     use super::*;
 
+    // A MEASURED NaN IS A NULL WITH NO REASON unless it is recorded: serde_json writes a non-finite
+    // float as null, indistinguishable on the wire from an absence, and the artifact's rule is that
+    // every null carries a reason.
+    #[test]
+    fn a_measured_non_finite_float_is_recorded_as_a_harness_error() {
+        let mut out = std::collections::BTreeMap::new();
+        Measurement::Measured(f64::NAN).record_absence("nan", &mut out);
+        Measurement::Measured(f64::INFINITY).record_absence("inf", &mut out);
+        Measurement::Measured(1.5f64).record_absence("finite", &mut out);
+        Measurement::Measured(7i64).record_absence("integer", &mut out);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out["nan"].reason, Absent::HarnessError);
+        assert_eq!(out["inf"].reason, Absent::HarnessError);
+    }
+
     // The whole point, stated as a test: an absence has no number in it, by any route the API offers.
     #[test]
     fn absent_yields_no_number_on_any_accessor() {
@@ -339,13 +383,14 @@ mod tests {
             Absent::SearchExhausted,
             Absent::Untestable,
             Absent::HarnessError,
+            Absent::BoundNotMet,
         ] {
             assert!(!r.is_about_gateway(), "{r} is not a gateway property");
         }
     }
 
     /// Every reason, so a variant added later cannot quietly escape the invariants below.
-    const ALL: [Absent; 7] = [
+    const ALL: [Absent; 8] = [
         Absent::NotServed,
         Absent::NotMeasured,
         Absent::BelowResolution,
@@ -353,6 +398,7 @@ mod tests {
         Absent::SearchExhausted,
         Absent::Untestable,
         Absent::HarnessError,
+        Absent::BoundNotMet,
     ];
 
     // THE TOKEN AND THE WIRE FORM ARE THE SAME STRING, OR THE BOARD LIES ABOUT ITSELF. `token()` is
@@ -457,6 +503,28 @@ mod tests {
             assert_eq!(m.reason(), Some(&reason));
             assert_eq!(m.detail(), None);
             assert_eq!(serde_json::to_string(&m).ok(), Some("null".to_string()));
+        }
+    }
+
+    // A snapshot written before `bound_not_met` existed carries its frontier absences as
+    // `below_resolution`; it must still read back, and the new token must read as itself.
+    #[test]
+    fn old_below_resolution_entries_and_new_bound_not_met_entries_both_parse() {
+        for (json, want) in [
+            (
+                r#"{"reason":"below_resolution","detail":"old frontier spelling"}"#,
+                Absent::BelowResolution,
+            ),
+            (
+                r#"{"reason":"bound_not_met","detail":"no rung held 1ms"}"#,
+                Absent::BoundNotMet,
+            ),
+        ] {
+            let e: AbsentEntry = match serde_json::from_str(json) {
+                Ok(e) => e,
+                Err(err) => panic!("{json} must parse: {err}"),
+            };
+            assert_eq!(e.reason, want);
         }
     }
 

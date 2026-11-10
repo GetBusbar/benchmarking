@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-export const METRIC_STATES = ["valid", "below_resolution", "not_measured", "not_configured", "untestable", "rig_limited", "search_exhausted", "harness_error", "not_served", "mock_bound", "unverifiable"];
+export const METRIC_STATES = ["valid", "below_resolution", "bound_not_met", "not_measured", "not_configured", "untestable", "rig_limited", "search_exhausted", "harness_error", "not_served", "mock_bound", "unverifiable"];
 export const CELL_STATES = ["served", "not_configured", "not_declared", "untestable", "unprobed_auth", "not_served", "not_verified", "not_measured"];
 export function canonicalCellState(cell) {
   if (cell.perf?.egress_reverified === false) return "not_served";

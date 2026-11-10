@@ -42,6 +42,17 @@ fn require_f64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<f
     }
 }
 
+/// A count an older generator may not print. ABSENT is 0 ("none reported", see `UgenStats`); PRESENT
+/// must be a count like every required field. A malformed value used to read as 0 too, so a garbled
+/// `rigrefused=` stopped the window being discarded as rig-limited and charged the rig's refused
+/// connects to the gateway.
+fn optional_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
+    match fields.get(key) {
+        None => Ok(0),
+        Some(_) => require_i64(fields, key, line),
+    }
+}
+
 fn require_i64(fields: &BTreeMap<&str, &str>, key: &str, line: &str) -> Result<i64, String> {
     match fields.get(key) {
         None => Err(format!("missing field '{key}' in stats line: '{line}'")),
@@ -86,10 +97,15 @@ pub struct UgenStats {
     /// Requests that exhausted the generator's response budget. Optional on the wire for the same
     /// reason as `rig_refused`.
     pub budget_exceeded: i64,
-    /// Whether the CHILD could not spawn the threads for this window - the OS refusing, not the gateway.
-    /// Optional on the wire for the same reason as the two above: an older generator's line simply has
-    /// no such field, and `false` means "none reported".
+    /// Whether the CHILD could not pose this window at the concurrency it reports - its async runtime
+    /// would not build, its request could not be built, or a connection task was lost - the rig
+    /// failing, not the gateway. Optional on the wire for the same reason as the two above: an older
+    /// generator's line simply has no such field, and `false` means "none reported". Present, it must
+    /// be `0` or `1`.
     pub spawn_failed: bool,
+    /// The child's bounded failure evidence (`failure_samples=`). DIAGNOSTICS ONLY: decoded by
+    /// `parse_failure_samples`, which can never fail the line - see there.
+    pub failure_samples: Vec<crate::gen::FailureSample>,
 }
 
 fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
@@ -100,19 +116,78 @@ fn parse_ugen_fields(line: &str) -> Result<UgenStats, String> {
         p50_us: require_i64(&fields, "p50us", line)?,
         p99_us: require_i64(&fields, "p99us", line)?,
         ok: require_i64(&fields, "ok", line)?,
-        rig_refused: fields
-            .get("rigrefused")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
-        budget_exceeded: fields
-            .get("budgetexceeded")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
-        spawn_failed: fields
-            .get("spawnfailed")
-            .map(|v| v.trim() != "0" && !v.trim().is_empty())
-            .unwrap_or(false),
+        rig_refused: optional_i64(&fields, "rigrefused", line)?,
+        budget_exceeded: optional_i64(&fields, "budgetexceeded", line)?,
+        spawn_failed: match fields.get("spawnfailed").copied() {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(v) => {
+                return Err(format!(
+                    "non-flag field 'spawnfailed={v}' in stats line: '{line}'"
+                ))
+            }
+        },
+        failure_samples: parse_failure_samples(fields.get("failure_samples").copied()),
     })
+}
+
+/// Decode the optional `failure_samples=` field (hex of a JSON array of `FailureSample`).
+///
+/// NEVER FATAL. Every other field on this line is a measurement, and refusing a corrupt one is
+/// right; this one is evidence ABOUT a window, and a window's ok/fail/rps must not depend on
+/// whether its diagnostics decoded. A bad or over-limit value is logged (once per process, so a
+/// systematic encoder bug cannot flood the run log) and read as no samples.
+fn parse_failure_samples(hex: Option<&str>) -> Vec<crate::gen::FailureSample> {
+    let Some(hex) = hex else {
+        return Vec::new();
+    };
+    match decode_failure_samples(hex) {
+        Ok(samples) => samples,
+        Err(why) => {
+            static LOGGED: std::sync::Once = std::sync::Once::new();
+            LOGGED.call_once(|| {
+                eprintln!(
+                    "loadgen: ignoring an unreadable failure_samples field ({why}); the window is \
+                     still measured, only its failure evidence is dropped (further such fields are \
+                     not logged)"
+                );
+            });
+            Vec::new()
+        }
+    }
+}
+
+fn decode_failure_samples(hex: &str) -> Result<Vec<crate::gen::FailureSample>, String> {
+    use crate::gen::{FAILURE_RESPONSE_BYTES, FAILURE_SAMPLES_HEX_CAP, FAILURE_SAMPLE_LIMIT};
+    if hex.len() > FAILURE_SAMPLES_HEX_CAP {
+        return Err(format!(
+            "{} hex characters, over the {FAILURE_SAMPLES_HEX_CAP} cap",
+            hex.len()
+        ));
+    }
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("not an even-length hex string".into());
+    }
+    let digit = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
+    let bytes: Vec<u8> = hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[hi, lo]| digit(*hi) << 4 | digit(*lo))
+        .collect();
+    let samples: Vec<crate::gen::FailureSample> =
+        serde_json::from_slice(&bytes).map_err(|e| format!("not a failure-sample list: {e}"))?;
+    if samples.len() > FAILURE_SAMPLE_LIMIT
+        || samples.iter().any(|s| {
+            s.kind.len() > 64
+                || s.response_hex.len() > 2 * FAILURE_RESPONSE_BYTES
+                || s.response_excerpt.len() > 4 * FAILURE_RESPONSE_BYTES
+        })
+    {
+        return Err("samples exceed the capture limits".into());
+    }
+    Ok(samples)
 }
 
 /// Parse one throughput stats line. Empty input is `Absent(NotMeasured)`: nothing printed, which is
@@ -161,13 +236,19 @@ pub fn encode_headers(headers: &[(String, String)]) -> String {
 
 /// Decode what `encode_headers` wrote.
 ///
-/// An unset or unparseable variable yields NO headers, never a default credential. A wrong credential
+/// An unset or empty variable yields NO headers, never a default credential. A wrong credential
 /// is worse than none: no credential is a 401 the operator can read off the stats line as a total
 /// failure, whereas the placeholder that used to be hardcoded here was a wrong credential that looked
 /// exactly like a gateway falling over under load.
-pub fn decode_headers(raw: Option<&str>) -> Vec<(String, String)> {
-    raw.and_then(|s| serde_json::from_str::<Vec<(String, String)>>(s).ok())
-        .unwrap_or_default()
+///
+/// SET BUT UNREADABLE IS AN ERROR, not "no headers": a list that fails to decode used to become an
+/// empty one, so the window ran with no credential and every failure was charged to the gateway.
+pub fn decode_headers(raw: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    match raw.filter(|s| !s.trim().is_empty()) {
+        None => Ok(Vec::new()),
+        Some(s) => serde_json::from_str::<Vec<(String, String)>>(s)
+            .map_err(|e| format!("{HEADERS_ENV} is set but is not a header list ({e})")),
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +288,33 @@ mod tests {
         assert!(!got.spawn_failed);
     }
 
+    // THE RIG'S OWN COUNTS ARE READ, NOT DEFAULTED. A non-zero `rigrefused`/`budgetexceeded` must
+    // reach the parent as itself - it is what discards a rig-limited window - and a PRESENT value
+    // that is not a count is a corrupt line, refused like any required field rather than read as 0.
+    #[test]
+    fn rig_counts_are_read_and_a_malformed_one_is_refused() {
+        let base = "rps=1000 fail=4 p50=1.0 p99=2.0 p50us=1000 p99us=2000 ok=1000";
+        let got = parse_ugen_line(&format!("{base} rigrefused=3 budgetexceeded=1"))
+            .into_value()
+            .expect("a complete line parses");
+        assert_eq!((got.rig_refused, got.budget_exceeded), (3, 1));
+
+        for bad in [
+            "rigrefused=1x",
+            "rigrefused=1.5",
+            "budgetexceeded=-",
+            "spawnfailed=yes",
+            "spawnfailed=",
+        ] {
+            let m = parse_ugen_line(&format!("{base} {bad}"));
+            assert_eq!(
+                m.reason(),
+                Some(&Absent::HarnessError),
+                "{bad} must be refused, not defaulted"
+            );
+        }
+    }
+
     use super::*;
 
     // The exact format `otb loadgen` emits on its own stdout.
@@ -225,7 +333,8 @@ mod tests {
                 ok: 14_808,
                 rig_refused: 0,
                 budget_exceeded: 0,
-                spawn_failed: false
+                spawn_failed: false,
+                failure_samples: Vec::new(),
             })
         );
     }
@@ -269,6 +378,61 @@ mod tests {
         assert_eq!(m.value().map(|s| s.rps), Some(0.0));
     }
 
+    // THE DIAGNOSTICS FIELD CAN NEVER COST A WINDOW. A corrupt, truncated or over-limit
+    // `failure_samples=` must leave every measured field exactly as it would be without it.
+    #[test]
+    fn a_corrupt_failure_samples_field_still_yields_the_parsed_window() {
+        let clean = parse_ugen_line(UGEN_LINE)
+            .into_value()
+            .expect("the clean line parses");
+        let oversized = "0".repeat(crate::gen::FAILURE_SAMPLES_HEX_CAP + 2);
+        let not_samples =
+            crate::gen::failure_samples_field(&[]) + &format!(" failure_samples={}", "5b7b7d5d"); // `[{}]`: JSON, wrong shape
+        for suffix in [
+            " failure_samples=z".to_string(),
+            " failure_samples=0".to_string(),
+            " failure_samples=00".to_string(),
+            " failure_samples=".to_string(),
+            format!(" failure_samples={oversized}"),
+            not_samples,
+        ] {
+            let line = format!("{UGEN_LINE}{suffix}");
+            let got = parse_ugen_line(&line)
+                .into_value()
+                .unwrap_or_else(|| panic!("a bad diagnostics field must not reject: {suffix}"));
+            assert_eq!(got, clean, "{suffix}");
+        }
+    }
+
+    // And a good one crosses the boundary intact, including the producer's 32 KiB cap.
+    #[test]
+    fn failure_samples_round_trip_and_the_producer_caps_the_field() {
+        let capture = crate::gen::FailureCapture::default();
+        for _ in 0..100 {
+            capture.record_parts(
+                "http_failure",
+                b"HTTP/1.1 503 Unavailable\r\n\r\n",
+                &[0xff; 4096],
+            );
+        }
+        let samples = capture.samples();
+        assert_eq!(samples.len(), crate::gen::FAILURE_SAMPLE_LIMIT);
+        let field = crate::gen::failure_samples_field(&samples);
+        assert!(field.len() <= crate::gen::FAILURE_SAMPLES_HEX_CAP + " failure_samples=".len());
+        let got = parse_ugen_line(&format!("{UGEN_LINE}{field}"))
+            .into_value()
+            .expect("parses");
+        assert!(!got.failure_samples.is_empty());
+        assert_eq!(
+            got.failure_samples[..],
+            samples[..got.failure_samples.len()]
+        );
+        assert!(got.failure_samples[0]
+            .response_excerpt
+            .starts_with("HTTP/1.1 503"));
+        assert_eq!((got.ok, got.fail), (14_808, 3));
+    }
+
     #[test]
     fn unknown_extra_fields_are_ignored_not_a_parse_failure() {
         let line = format!("{UGEN_LINE} pad=64 futurefield=x");
@@ -285,7 +449,7 @@ mod tests {
     fn every_dialects_own_header_shape_survives_the_process_boundary() {
         for d in crate::ingress::Dialect::ALL {
             let sent = d.auth_headers("a-real-token");
-            let back = decode_headers(Some(&encode_headers(&sent)));
+            let back = decode_headers(Some(&encode_headers(&sent))).expect("decodes");
             assert_eq!(back, sent, "{d}'s header shape must cross unchanged");
         }
     }
@@ -305,7 +469,7 @@ mod tests {
                 "  spaces and \"quotes\"  ".to_string(),
             ),
         ];
-        assert_eq!(decode_headers(Some(&encode_headers(&hostile))), hostile);
+        assert_eq!(decode_headers(Some(&encode_headers(&hostile))), Ok(hostile));
     }
 
     // Duplicates survive as duplicates: `http::Headers`' own doc says a map would collapse repeated
@@ -316,17 +480,18 @@ mod tests {
             ("x-h".to_string(), "one".to_string()),
             ("x-h".to_string(), "two".to_string()),
         ];
-        assert_eq!(decode_headers(Some(&encode_headers(&dupes))), dupes);
+        assert_eq!(decode_headers(Some(&encode_headers(&dupes))), Ok(dupes));
     }
 
     // NO HEADERS, never a default credential. The placeholder that used to be hardcoded here is
     // precisely what made a credential fault indistinguishable from a gateway collapsing under load.
+    // And a list that is set but does not decode is refused rather than read as "none".
     #[test]
-    fn an_unset_or_broken_header_variable_sends_nothing_rather_than_a_placeholder() {
-        assert!(decode_headers(None).is_empty());
-        assert!(decode_headers(Some("")).is_empty());
-        assert!(decode_headers(Some("not json")).is_empty());
-        assert!(decode_headers(Some("{\"authorization\":\"Bearer dummy\"}")).is_empty());
+    fn an_unset_header_variable_sends_nothing_and_a_broken_one_is_refused() {
+        assert_eq!(decode_headers(None), Ok(Vec::new()));
+        assert_eq!(decode_headers(Some("")), Ok(Vec::new()));
+        assert!(decode_headers(Some("not json")).is_err());
+        assert!(decode_headers(Some("{\"authorization\":\"Bearer dummy\"}")).is_err());
     }
 }
 

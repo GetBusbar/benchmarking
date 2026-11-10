@@ -405,6 +405,24 @@ pub fn nearest_rank_median(sorted: &[f64]) -> Option<f64> {
 /// It also still climbs to `max_conc` when nothing fails, and that is a LOWER BOUND rather than a
 /// ceiling. `frontier::Reading::is_lower_bound` reports it as one instead of throwing the rate away.
 pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec<ProbedPoint> {
+    climb_rungs_report(probe, min_conc, max_conc).points
+}
+
+/// What a climb produced, and whether the RIG stopped it.
+///
+/// `interrupted_at` is the concurrency whose window the probe could not run (`None` from
+/// `Probe::probe`). The rungs below it are real observations and are kept; the climb simply could not
+/// look further, so a reader of the frontier must treat what it found as a floor. A gateway that
+/// answered nothing inside a window is NOT this: the probe reports that as a failed `Sample`, and the
+/// climb ends there normally.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClimbResult {
+    pub points: Vec<ProbedPoint>,
+    pub interrupted_at: Option<u32>,
+}
+
+/// `climb_rungs`, also reporting the rung at which the rig interrupted the climb, if it did.
+pub fn climb_rungs_report<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> ClimbResult {
     // Normalised the same way every other search here normalises, so a reversed range is a caller's
     // typo rather than a silently empty climb.
     let (min_conc, max_conc) = if min_conc <= max_conc {
@@ -431,7 +449,12 @@ pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec
                 Some(sm) => any_clean |= sm.passed,
                 // The RIG could not run this window. Not a finding about the gateway, so the climb
                 // ends with what it has rather than reading the failure as a ceiling.
-                None => return s.points,
+                None => {
+                    return ClimbResult {
+                        points: s.points,
+                        interrupted_at: Some(c),
+                    }
+                }
             }
         }
         if !any_clean {
@@ -442,7 +465,10 @@ pub fn climb_rungs<P: Probe>(probe: &mut P, min_conc: u32, max_conc: u32) -> Vec
             None => break,
         };
     }
-    s.points
+    ClimbResult {
+        points: s.points,
+        interrupted_at: None,
+    }
 }
 
 #[cfg(test)]
