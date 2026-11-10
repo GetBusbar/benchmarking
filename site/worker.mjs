@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { renderDashboard, renderArticle, htmlToMarkdown, ORIGIN } from "./render.mjs";
 import { compareMeasurements, measurementsCsv, compactSummary, PROTOCOLS } from "./public-data.mjs";
-import { historyPoints, historyArticle, historicalComparison, fieldRankings, expandHistorical } from "./history.mjs";
+import { historyPoints, historyArticle, historySummary, historicalComparison, fieldRankings, expandHistorical } from "./history.mjs";
 import { comparisonArticle } from "./evidence.mjs";
 
 import { measurementPage, compactCsv, gatewayFamily } from "./retrieval.mjs";
@@ -103,7 +103,12 @@ async function route(request, env) {
     const archivedRevision = q.catalog && q.catalog !== catalog.catalog_id;
     if (archivedRevision && /^catalog-[a-f0-9]{64}$/.test(q.catalog)) {
       const stored = await env.PUBLICATIONS?.get(`history/catalogs/${q.catalog}`);
-      if (stored) catalog = JSON.parse(stored);
+      if (stored) {
+        // A catalog retained from before a withdrawal still lists the withdrawn runs; drop them here too.
+        const shas = await withdrawnShas(env);
+        catalog = JSON.parse(stored);
+        catalog = { ...catalog, runs: catalog.runs.filter(r => !shas.some(sha => String(r.id).endsWith(sha))) };
+      }
     }
     if (q.catalog && q.catalog !== catalog.catalog_id) return error(409, 'Catalog revision changed. Restart traversal; records from different revisions are never silently mixed.');
     if (!catalog.runs.some(r => r.gateway_family === q.family)) throw new URIError('Unknown gateway family');
@@ -133,7 +138,13 @@ async function route(request, env) {
     const definitions = {};
     for (const p of points) { if (p.definition) { let id=Object.keys(definitions).find(k=>definitions[k]===p.definition); if (!id) {id=`definition-${Object.keys(definitions).length+1}`;definitions[id]=p.definition;} p.definition_id=id;} delete p.definition; }
     const next = new URL(url); next.searchParams.set('offset',String(offset+points.length)); next.searchParams.set('catalog',catalog.catalog_id);
-    const page = { schema_version:'1.0',catalog_id:catalog.catalog_id,projector:catalog.projector,total:runs.length,limit,offset,returned:points.length,next:offset+points.length<runs.length?next.href:null,metrics,definitions,points };
+    // The then → now summary always reads the representative OpenAI → OpenAI cell, whatever pair the table shows.
+    const representative = q.ingress === 'openai' && q.egress === 'openai';
+    const summaryShard = `families/${q.family}/openai--openai`, summaryPlacementKey = `placements/${q.family}/openai--openai`;
+    const summaryRecords = representative ? records : expandHistorical(archivedRevision ? await archivedShard(summaryShard,{measurements:[],definitions:{}}) : await input(`/_publication/history/${summaryShard}.json`));
+    const summaryPlacements = representative ? placements : archivedRevision ? await archivedShard(summaryPlacementKey,[]) : await input(`/_publication/history/${summaryPlacementKey}.json`);
+    const summary = historySummary(summaryRecords, catalog.runs.filter(r=>r.gateway_family === q.family), summaryPlacements);
+    const page = { schema_version:'1.0',catalog_id:catalog.catalog_id,projector:catalog.projector,total:runs.length,limit,offset,returned:points.length,next:offset+points.length<runs.length?next.href:null,metrics,definitions,summary,points };
     let comparisons = [];
     if (q.a || q.b) {
       const pick = id=>records.find(m=>m.run_id===id && m.test.ingress_protocol===q.ingress && m.test.upstream_protocol===q.egress);

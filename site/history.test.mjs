@@ -26,15 +26,16 @@ const artifact=process.env.OTB_TEST_ARTIFACT;
 test('history pagination, schema and snapshot revisions preserve identities',{skip:!artifact},async()=>{
  const env={ASSETS:fileAssets(artifact)};
  const get=async path=>worker.fetch(new Request(new URL(path,'https://onthebench.ai')),env);
- const response=await get('/api/v1/history?family=bifrost&limit=2');assert.equal(response.status,200);
- const first=await response.json();assert.equal(first.returned,2);assert.ok(first.next.includes(first.catalog_id));
- const second=await (await get(first.next)).json();assert.equal(second.offset,2);
+ // kong carries both published runs (August 2026 and the current field), so one-run pages paginate.
+ const response=await get('/api/v1/history?family=kong&limit=1');assert.equal(response.status,200);
+ const first=await response.json();assert.equal(first.returned,1);assert.ok(first.next.includes(first.catalog_id));
+ const second=await (await get(first.next)).json();assert.equal(second.offset,1);
  assert.ok(second.points.every(p=>!first.points.some(old=>old.run_id===p.run_id)));
  const ajv=new Ajv({strict:false});const schema={$ref:'#/components/schemas/HistoryPage',components:{schemas:schemas()}};
  const validate=ajv.compile(schema);assert.ok(validate(first),JSON.stringify(validate.errors));
  assert.equal((await get('/api/v1/history?family=bifrost&catalog=catalog-'+ '0'.repeat(64))).status,409);
  assert.equal((await get('/api/v1/history?family=bifrost&metric=made_up')).status,400);
- const html=await (await get('/gateways/bifrost/history')).text();assert.ok(html.includes('within ±5%'));assert.ok(html.includes('Run evidence'));
+ const html=await (await get('/gateways/kong/history')).text();assert.ok(html.includes('within ±5%'));assert.ok(html.includes('Run evidence'));
 });
 test('saved catalog stays traversable after a newer deployment',{skip:!artifact},async()=>{
  const catalog=JSON.parse(readFileSync(artifact+'/_publication/history/catalog.json'));
