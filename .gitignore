@@ -65,3 +65,4 @@ KICKOFF.md
 
 # Built gateway identity is captured in each new snapshot, never checked in as current state.
 gateways/*/.build-provenance.json
+gateways/plano/venv/

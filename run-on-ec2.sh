@@ -1695,6 +1695,13 @@ if [ "$_mock_up" != 1 ]; then
 fi
 # Refuse the run outright if the setup is wrong, rather than discovering it as a gateway that will
 # not boot after the box-hours are already spent.
+# ENGINE v1.2 PREFETCH. The engine cuts every outbound name over to the mock once the gateway is set
+# up, so a gateway whose own start-up needs the network (a dependency download, not the measurement)
+# fetches it here, while the box still has real DNS. Optional and per gateway: gateways/<gw>/prefetch.sh.
+if [ -f "gateways/$gw/prefetch.sh" ]; then
+  echo "[rig] prefetch: gateways/$gw/prefetch.sh (real DNS, before the engine starts)"
+  bash "gateways/$gw/prefetch.sh" || { echo "RIG FAILURE: gateways/$gw/prefetch.sh failed - refusing to measure"; echo 126 > .run-done; exit 0; }
+fi
 ./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
 OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
   ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots

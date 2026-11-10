@@ -34,6 +34,11 @@
         "container_path": "/app/plano_config.yaml",
         "host_path": "conf/config.yaml",
         "read_only": true
+      },
+      {
+        "container_path": "/app/.venv",
+        "host_path": "venv",
+        "read_only": false
       }
     ]
   },
