@@ -18,6 +18,12 @@ tokio-stream = { version = "0.1", default-features = false }
 # recording is enabled, never on the unrecorded load path. The tests also use it to parse the
 # hand-assembled state document.
 serde_json = "1"
+# HTTPS ON THE MOCK (v1.2, only when started with --tls-port): TLS 1.3 via rustls on the ring
+# provider, and the run's CA plus per-SNI leaves via rcgen. No default features, so no aws-lc and no
+# TLS 1.2.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
 
 # TESTS ONLY (feature merge into the tokio dep above). The body-cap test drives handle() over a real
 # loopback connection and needs the raw read/write helpers to write the request and read the

@@ -56,6 +56,25 @@
         "base_url": "http://127.0.0.1:{MOCK_PORT}"
       }}
     }},
+    "bedrock": {{
+      "keys": [
+        {{
+          "value": "",
+          "models": [
+            "anthropic.claude-3-5-sonnet-20240620-v1:0"
+          ],
+          "weight": 1,
+          "bedrock_key_config": {{
+            "access_key": "AKIAMOCKACCESSKEY",
+            "secret_key": "mock-secret-access-key",
+            "region": "us-east-1"
+          }}
+        }}
+      ],
+      "network_config": {{
+        "allow_private_network": true
+      }}
+    }},
     "bench-chat": {{
       "keys": [
         {{

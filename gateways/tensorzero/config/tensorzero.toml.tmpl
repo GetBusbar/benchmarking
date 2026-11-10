@@ -1,6 +1,6 @@
 # ONE static config, four upstream models. The client selects the upstream per request with the
 # OpenAI-compatible \`model\` field: tensorzero::model_name::mock-openai | mock-openai-responses |
-# mock-anthropic | mock-bedrock. Nothing here changes between egress columns.
+# mock-anthropic | mock-gemini | mock-bedrock. Nothing here changes between egress columns.
 [gateway.observability]
 enabled = false
 
@@ -33,6 +33,16 @@ routing = ["mock"]
 type = "anthropic"
 api_base = "http://127.0.0.1:{MOCK_PORT}/v1/"
 model_name = "claude-3-5-sonnet-20241022"
+
+# google_ai_studio_gemini -> POST https://generativelanguage.googleapis.com/v1beta/models/{{model_name}}:generateContent
+# The provider has no api_base override, so it keeps its default host; engine v1.2's catch-all DNS
+# resolves that host to the mock and the gateway trusts the run's CA. The key is the dummy
+# GOOGLE_AI_STUDIO_API_KEY in env (the provider's default api_key_location).
+[models.mock-gemini]
+routing = ["mock"]
+[models.mock-gemini.providers.mock]
+type = "google_ai_studio_gemini"
+model_name = "gemini-1.5-pro"
 
 # aws_bedrock -> POST {{endpoint_url}}/model/{{urlencoded model_id}}/converse (SigV4-signed with the
 # dummy AWS keys in gw_launch; the mock ignores the signature).

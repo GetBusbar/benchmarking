@@ -394,6 +394,7 @@ mod tests {
             stream: None,
             memory: None,
             timings_s: None,
+            upstream_transport: None,
         }
     }
 

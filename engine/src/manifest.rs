@@ -2327,6 +2327,65 @@ mod real_field_tests {
         out
     }
 
+    // ENGINE v1.2: the gateways that pin a cloud host carry no hand-written untestable list any more.
+    // Their pinned upstreams are declared, configured and probed like every other cell; the
+    // catch-all DNS and the mock's TLS listener are what make them reachable.
+    #[test]
+    fn the_cloud_pinned_gateways_declare_their_cells_instead_of_listing_them_untestable() {
+        let f = field();
+        for (gw, cells) in [
+            (
+                "bifrost",
+                vec![
+                    ("openai", "bedrock"),
+                    ("openai-responses", "bedrock"),
+                    ("anthropic", "bedrock"),
+                    ("gemini", "bedrock"),
+                    ("cohere", "bedrock"),
+                    ("bedrock", "bedrock"),
+                ],
+            ),
+            ("one-api", vec![("openai", "bedrock")]),
+            ("tensorzero", vec![("openai", "gemini")]),
+        ] {
+            let m = f.get(gw).unwrap_or_else(|| panic!("{gw} is in the field"));
+            assert!(
+                m.untestable.is_empty(),
+                "{gw} still lists untestable cells: {:?}",
+                m.untestable
+            );
+            assert!(
+                m.untestable_note.is_empty(),
+                "{gw} keeps an untestable note"
+            );
+            for (ing, eg) in cells {
+                assert_eq!(
+                    m.declared_capable(ing, eg),
+                    Some(true),
+                    "{gw} {ing}>{eg} is declared"
+                );
+                assert!(!m.is_untestable_cell(ing, eg), "{gw} {ing}>{eg} is probed");
+                assert!(
+                    m.egress.iter().any(|e| e == eg),
+                    "{gw} configures egress {eg}"
+                );
+                assert!(
+                    m.egress_models.contains_key(eg),
+                    "{gw} names a model for {eg}"
+                );
+            }
+            assert!(
+                m.problems(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../gateways")
+                        .join(gw)
+                )
+                .is_empty(),
+                "{gw} validates"
+            );
+        }
+    }
+
     #[test]
     fn every_real_manifest_parses_and_validates() {
         let f = field();

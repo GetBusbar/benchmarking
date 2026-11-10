@@ -12,6 +12,8 @@ openai         upstream  # one entry per mock-reachable dialect; Bifrost resolve
 anthropic      upstream  # the request model name, so this is what makes an egress column addressable
 gemini         upstream
 cohere         upstream
+bedrock        upstream  # no base_url: the default bedrock-runtime.us-east-1.amazonaws.com, resolved to the mock by the v1.2 catch-all DNS
+bedrock_key_config boot  # Bifrost signs Bedrock requests with SigV4 and will not register the key without placeholder access/secret keys and a region
 keys           boot      # Bifrost will not register a provider with no key entry (dummy value)
 network_config upstream  # base_url -> the mock
 # Claimed because the dead gateway.sh launcher still passes it and the lint reads that file. The
@@ -19,7 +21,7 @@ network_config upstream  # base_url -> the mock
 # (manifest.rs's pinned_parallelism), so no entrant states its own.
 GOMAXPROCS     bind      # Go pre-1.25 reads the HOST cpu count, not the --cpuset-cpus limit
 
-Native ingress routes require /anthropic, /genai, /cohere and /bedrock prefixes in transports/v2.5.0 (69f4d56d18b9ba00ac5f9cf969b4501a882b9967), transports/bifrost-http/integrations/{anthropic,genai,cohere,bedrock}.go. Bedrock cross-provider ingress uses a URL-encoded provider/model ID; without that prefix Bifrost chooses its unconfigured Bedrock upstream. The whole Bedrock upstream column remains untestable because the plain-HTTP mock cannot replace its HTTPS endpoint. Direct pinned-image probes and observed upstream dialects are retained under results/diagnostics/refresh-configuration/bifrost-native-route-probe-2026-11-08.json. A successful HTTP status alone does not prove the requested upstream dialect; the frozen engine re-verification still withholds mismatches.
+Native ingress routes require /anthropic, /genai, /cohere and /bedrock prefixes in transports/v2.5.0 (69f4d56d18b9ba00ac5f9cf969b4501a882b9967), transports/bifrost-http/integrations/{anthropic,genai,cohere,bedrock}.go. Bedrock cross-provider ingress uses a URL-encoded provider/model ID; without that prefix Bifrost chooses its unconfigured Bedrock upstream. The Bedrock upstream column keeps Bifrost's default HTTPS runtime host; engine v1.2 resolves it to the mock and the gateway trusts the run's CA, so those six cells are probed (upstream_transport "tls"). Direct pinned-image probes and observed upstream dialects are retained under results/diagnostics/refresh-configuration/bifrost-native-route-probe-2026-11-08.json. A successful HTTP status alone does not prove the requested upstream dialect; the frozen engine re-verification still withholds mismatches.
 
 bench-chat upstream # OpenAI-compatible provider restricted to Chat Completions operations, ensuring the openai column actually uses that wire
 bench-responses upstream # Separate Responses-only provider, ensuring the Responses column does not silently reuse Chat Completions
