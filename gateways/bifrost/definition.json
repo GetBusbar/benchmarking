@@ -1,7 +1,30 @@
 {
   "auth": "sk-dummy",
   "cell_paths": {
-    "anthropic>openai-responses": "/anthropic/v1/messages"
+    "anthropic>openai-responses": "/anthropic/v1/messages",
+    "anthropic>openai": "/anthropic/v1/messages",
+    "gemini>openai": "/genai/v1beta/models/bench-chat/gpt-4o-mini:generateContent",
+    "cohere>openai": "/cohere/v2/chat",
+    "bedrock>openai": "/bedrock/model/bench-chat%2Fgpt-4o-mini/converse",
+    "gemini>openai-responses": "/genai/v1beta/models/bench-responses/gpt-4o-mini:generateContent",
+    "cohere>openai-responses": "/cohere/v2/chat",
+    "bedrock>openai-responses": "/bedrock/model/bench-responses%2Fgpt-4o-mini/converse",
+    "anthropic>anthropic": "/anthropic/v1/messages",
+    "gemini>anthropic": "/genai/v1beta/models/claude-3-5-sonnet-20241022:generateContent",
+    "cohere>anthropic": "/cohere/v2/chat",
+    "bedrock>anthropic": "/bedrock/model/anthropic%2Fclaude-3-5-sonnet-20241022/converse",
+    "anthropic>gemini": "/anthropic/v1/messages",
+    "gemini>gemini": "/genai/v1beta/models/gemini-1.5-pro:generateContent",
+    "cohere>gemini": "/cohere/v2/chat",
+    "bedrock>gemini": "/bedrock/model/gemini%2Fgemini-1.5-pro/converse",
+    "anthropic>cohere": "/anthropic/v1/messages",
+    "gemini>cohere": "/genai/v1beta/models/command-r-plus:generateContent",
+    "cohere>cohere": "/cohere/v2/chat",
+    "bedrock>cohere": "/bedrock/model/cohere%2Fcommand-r-plus/converse",
+    "anthropic>bedrock": "/anthropic/v1/messages",
+    "gemini>bedrock": "/genai/v1beta/models/gpt-4o-mini:generateContent",
+    "cohere>bedrock": "/cohere/v2/chat",
+    "bedrock>bedrock": "/bedrock/model/bedrock%2Fgpt-4o-mini/converse"
   },
   "class": "LLM gateway",
   "config": [],
@@ -23,13 +46,13 @@
     "anthropic": "claude-3-5-sonnet-20241022",
     "cohere": "command-r-plus",
     "gemini": "gemini-1.5-pro",
-    "openai": "gpt-4o-mini",
-    "openai-responses": "gpt-4o-mini"
+    "openai": "bench-chat/gpt-4o-mini",
+    "openai-responses": "bench-responses/gpt-4o-mini"
   },
   "lang": "Go",
   "launch": {
     "args": [],
-    "image": "maximhq/bifrost:v1.6.6",
+    "image": "maximhq/bifrost:v2.5.0@sha256:445bc49544bc64971b63581a93c6ca5716a03ccf27a58ced4c285cbafc133e78",
     "kind": "docker",
     "mounts": [
       {
@@ -39,15 +62,6 @@
       }
     ]
   },
-  "matrix": [
-    "101110",
-    "010000",
-    "010000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "Bifrost v1.6.4 has no openai-chat -> responses bridge and no gemini/cohere/bedrock-format ingress; undeclared cells are grey by that capability limit",
   "model": "gpt-4o-mini",
   "name": "bifrost",
   "path": "/v1/chat/completions",
@@ -58,7 +72,24 @@
     "kind": "docker"
   },
   "untestable": [
-    "openai/bedrock"
+    "openai/bedrock",
+    "openai-responses/bedrock",
+    "anthropic/bedrock",
+    "gemini/bedrock",
+    "cohere/bedrock",
+    "bedrock/bedrock"
   ],
-  "untestable_note": "Bifrost v1.6.4 hardcodes the Bedrock host (bedrock-runtime.<region>.amazonaws.com, core/providers/bedrock/bedrock.go; network_config.base_url never overrides it), so the harness mock cannot stand in for the upstream; Bifrost does serve Bedrock Converse in production"
+  "untestable_note": "Bifrost transports/v2.5.0 (69f4d56d18b9ba00ac5f9cf969b4501a882b9967), core/providers/bedrock/bedrock.go, constructs HTTPS Bedrock runtime endpoints. The benchmark mock serves plain HTTP, so this harness cannot measure that upstream. This is a mock limitation, not a claim that Bifrost lacks Bedrock support.",
+  "headers": [
+    "x-bf-vk: sk-bf-benchmark-dummy"
+  ],
+  "matrix": [
+    "101110",
+    "111110",
+    "111110",
+    "111110",
+    "101110",
+    "111110"
+  ],
+  "matrix_note": "Bifrost v2.5.0 source 69f4d56d18b9ba00ac5f9cf969b4501a882b9967. Every upstream uses the field's common model gpt-4o-mini. OpenAI Chat and Cohere ingress into the Responses-only upstream are not enabled: Bifrost only converts them when the model catalog marks the model Responses-only (plugins/compat/main.go::markForConversion), and selecting a different model (o3-pro) to trigger that path also triggers the compat plugin's default parameter dropping (it removed max_completion_tokens in the preflight), which the benchmark's out-of-the-box rule excludes. Six Bedrock upstream cells are separate rig limitations."
 }

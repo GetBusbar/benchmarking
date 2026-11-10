@@ -6,7 +6,7 @@
 # the quota so a throughput run cannot exhaust it, wire each upstream as a channel pointing at the
 # mock, then check that the credential the harness will authenticate with actually works.
 #
-# The channel type selects the native egress dialect: 1 is OpenAI, 14 is Anthropic, 24 is Gemini.
+# The channel type selects the native egress dialect: 1 is OpenAI, 14 is Anthropic, 24 is Gemini, 35 is Cohere v1.
 # The model lists are strictly disjoint on purpose. Routing selects on (group, model) and not on
 # channel type, so overlapping lists would let one model resolve to either channel at random and a
 # column would silently measure an upstream it did not ask for.
@@ -15,6 +15,7 @@ curl -sf -b /tmp/oa.jar -X PUT http://127.0.0.1:3000/api/user/ -H 'content-type:
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-1","type":1,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gpt-4o-mini","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-14","type":14,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"claude-3-5-sonnet-20240620","group":"default","status":1}' -o /dev/null
 curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-24","type":24,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"gemini-1.5-pro","group":"default","status":1}' -o /dev/null
+curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-type: application/json' -d '{"name":"mock-35","type":35,"key":"sk-mock","base_url":"http://127.0.0.1:8000","models":"command-r-plus","group":"default","status":1}' -o /dev/null
 # THE RELAY CREDENTIAL IS A BOOT-TIME ONE, NOT A MINTED ONE. One-API's AddToken handler
 # (controller/token.go) ignores any client-supplied "key" and always writes a random one of its own,
 # and UpdateToken discards "key" too - so no admin-API call can make the manifest's declared auth
@@ -36,18 +37,6 @@ curl -sf -b /tmp/oa.jar -X POST http://127.0.0.1:3000/api/channel/ -H 'content-t
 # retry covers the channel rows this file just inserted not yet being visible to the router. No -f on
 # the curl: the 401 body is exactly what this loop inspects, and -f discards it on any non-2xx.
 #
-# EVERY MODEL, NOT JUST THE FIRST - but only the FIRST is fatal.
-#
-# This checked gpt-4o-mini alone while creating three channels, so a channel that inserted and never
-# became routable was invisible here and surfaced later as the GATEWAY failing.
-#
-# Aborting the whole run on any of the three was the first attempt at fixing that, and it was worse:
-# the anthropic and gemini channels have failed to route in all eight runs of 2026-07-27/28, so it
-# would have turned two red cells into no one-api row at all. Losing a gateway entirely is not a more
-# honest outcome than publishing what it does serve.
-#
-# So: gpt-4o-mini failing is fatal, because nothing this gateway publishes would mean anything
-# without its primary lane. A secondary egress model failing is a loud warning, and those cells are
-# declared UNTESTABLE in definition.json - the harness has not established that it can route them,
-# which is a statement about our setup and not a verdict about one-api.
-for m in gpt-4o-mini claude-3-5-sonnet-20240620 gemini-1.5-pro; do i=1; ok=0; while [ $i -le 20 ]; do curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" -o /tmp/oa-auth-check; if grep -q chat.completion /tmp/oa-auth-check; then ok=1; break; fi; sleep 0.5; i=$((i+1)); done; if [ "$ok" != 1 ]; then if [ "$m" = gpt-4o-mini ]; then echo "one-api: the declared auth never relayed for $m after 20 checks - INITIAL_ROOT_TOKEN may no longer be honoured by this image, and nothing this gateway publishes would mean anything: $(cat /tmp/oa-auth-check)" >&2; exit 1; else echo "one-api: model $m did not relay - its channel is registered but not routable. Its cells are DECLARED UNTESTABLE in definition.json for exactly this, so this is a warning and not a failure: the openai lane still measures and the row still publishes. $(cat /tmp/oa-auth-check)" >&2; fi; fi; done
+# Every declared channel must return actual assistant content before the benchmark begins.
+# An unroutable secondary lane is a setup failure, not permission to publish a partial run.
+for m in gpt-4o-mini claude-3-5-sonnet-20240620 gemini-1.5-pro command-r-plus; do i=1; ok=0; while [ $i -le 20 ]; do curl -s -m 10 -X POST http://127.0.0.1:3000/v1/chat/completions -H 'content-type: application/json' -H 'Authorization: Bearer dummy' -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" -o /tmp/oa-auth-check; if python3 -c 'import json; d=json.load(open("/tmp/oa-auth-check")); assert not d.get("error"); assert any(isinstance(c.get("message",{}).get("content"),str) and c["message"]["content"].strip() for c in d.get("choices",[]))' 2>/dev/null; then ok=1; break; fi; sleep 0.5; i=$((i+1)); done; if [ "$ok" != 1 ]; then echo "one-api: setup failed for declared channel $m; refusing measurement" >&2; cat /tmp/oa-auth-check >&2; exit 1; fi; done

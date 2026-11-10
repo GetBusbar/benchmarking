@@ -27,7 +27,7 @@
       "--config-file",
       "config/tensorzero.toml"
     ],
-    "image": "tensorzero/gateway:2026.6.0",
+    "image": "tensorzero/gateway:2026.6.0@sha256:9133135ccdaa23c0fffc2965f20b2a89b077ea3ad9a86a6f15b2a641bff67c89",
     "kind": "docker",
     "mounts": [
       {
@@ -37,15 +37,6 @@
       }
     ]
   },
-  "matrix": [
-    "111001",
-    "000000",
-    "000000",
-    "000000",
-    "000000",
-    "000000"
-  ],
-  "matrix_note": "TensorZero 2026.6.0 has no Cohere provider type; that cell is grey by that capability limit (model.rs)",
   "model": "tensorzero::model_name::mock-openai",
   "name": "tensorzero",
   "path": "/openai/v1/chat/completions",
@@ -58,5 +49,14 @@
   "untestable": [
     "openai/gemini"
   ],
-  "untestable_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production"
+  "untestable_note": "TensorZero's google_ai_studio_gemini / gcp_vertex_gemini providers hardcode googleapis.com with no api_base override (google_ai_studio_gemini.rs @2026.6.0), so the harness mock cannot stand in for the upstream; TensorZero does serve Gemini in production.",
+  "matrix": [
+    "111001",
+    "000000",
+    "000000",
+    "000000",
+    "000000",
+    "000000"
+  ],
+  "matrix_note": "Pinned 2026.6.0 source 62eb8f63e8ec62018d70420dbf1a8c5d1c026315: crates/tensorzero-core/src/endpoints/openai_compatible/mod.rs exposes Chat Completions ingress; native TensorZero inference is outside this six-wire matrix. Four configured upstream adapters passed response-content and exact upstream-recorder checks: OpenAI Chat Completions, OpenAI Responses, Anthropic and Bedrock Converse. Gemini is separately untestable because its provider hardcodes the public endpoint. Evidence: results/diagnostics/refresh-configuration/tensorzero-protocol-preflight.json"
 }
