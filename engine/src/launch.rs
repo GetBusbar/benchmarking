@@ -595,6 +595,16 @@ impl Launcher for RealLauncher {
     }
 
     fn spawn(&mut self, spec: &LaunchSpec) -> Result<(), String> {
+        // THE RUN'S TRUST BUNDLE (engine v1.2), applied here so the first launch and every restart
+        // through any `RealLauncher` are the same launch. Nothing is added when none was declared.
+        let trusted;
+        let spec = match crate::egress::trust() {
+            Some(t) => {
+                trusted = crate::egress::apply_trust(spec, t);
+                &trusted
+            }
+            None => spec,
+        };
         let inv = build_invocation(spec);
         // A CONTAINER START IS WAITED ON; A NATIVE GATEWAY IS NOT.
         //

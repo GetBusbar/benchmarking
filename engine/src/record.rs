@@ -344,6 +344,11 @@ pub struct Cell {
     /// save" is arithmetic over committed JSON rather than another run with a stopwatch.
     #[serde(default)]
     pub timings_s: Option<std::collections::BTreeMap<String, f64>>,
+    /// HOW THE GATEWAY REACHED THE MOCK (engine v1.2): `"tls"` or `"http"`, or absent when the
+    /// engine could not say. Shown verbatim so a reader can see a cell's numbers include an HTTPS
+    /// hop to the mock; nothing is subtracted for it. See `egress::transport_for`.
+    #[serde(default)]
+    pub upstream_transport: Option<String>,
 }
 
 /// ONE READING OF THE SWEEP, at one declared tail-latency bound: the most throughput the gateway
@@ -972,7 +977,7 @@ impl Serialize for Cell {
             );
         }
 
-        let mut st = s.serialize_struct("Cell", 13)?;
+        let mut st = s.serialize_struct("Cell", 14)?;
         st.serialize_field("served", &self.served)?;
         st.serialize_field("reason", &self.reason)?;
         st.serialize_field("status", &self.status)?;
@@ -987,6 +992,7 @@ impl Serialize for Cell {
         // The suite fills this deliberately ("Cost belongs in the artifact") and this hand-written
         // list silently dropped it: the one field the derive would have carried for free.
         st.serialize_field("timings_s", &self.timings_s)?;
+        st.serialize_field("upstream_transport", &self.upstream_transport)?;
         st.serialize_field("absences", &absences)?;
         st.end()
     }
@@ -1464,6 +1470,7 @@ mod tests {
             }),
             memory: None,
             timings_s: None,
+            upstream_transport: Some("tls".to_string()),
         }
     }
 
@@ -1545,6 +1552,26 @@ mod tests {
     }
 
     // ── round-trip ───────────────────────────────────────────────────────────────────────────────
+
+    // v1.2: a cell says how the gateway reached the mock, verbatim, and a v1.1 snapshot without the
+    // field still reads (as unknown).
+    #[test]
+    fn a_cell_records_its_upstream_transport_and_old_cells_read_as_unknown() {
+        let v = serde_json::to_value(sample_cell()).unwrap();
+        assert_eq!(v["upstream_transport"], "tls");
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("upstream_transport");
+        let back: Cell = serde_json::from_value(old).unwrap();
+        assert_eq!(back.upstream_transport, None);
+        let plain = Cell {
+            upstream_transport: Some("http".into()),
+            ..sample_cell()
+        };
+        assert_eq!(
+            serde_json::to_value(plain).unwrap()["upstream_transport"],
+            "http"
+        );
+    }
 
     #[test]
     fn record_round_trips_through_json() {
