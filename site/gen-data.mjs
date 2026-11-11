@@ -260,6 +260,9 @@ function resolvedSnapshot(key) {
     let snap = readJson(join(SNAP_DIR, f));
     if (snap) snap = applyRunReview(snap, runReviews[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]);
     if (!snap) continue;
+    // A CANDIDATE CHECK (run-field.py --candidate-image; results/candidates/) is never a published result,
+    // even if one is copied here by mistake.
+    if (snap.candidate === true) { console.warn(`gen-data: ignoring candidate-check snapshot ${f} (not a published result)`); continue; }
     snap.__file = f;
     snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
     // An unparseable stamp cannot be ordered: NaN compares false against everything, so a scoped re-run

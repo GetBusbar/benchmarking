@@ -541,7 +541,7 @@ if [[ "${1:-}" == "harvest" ]]; then
   # self-terminating boxes is the one wrong answer this command can give.
   if ! rows=$(bench-aws ec2 describe-instances --filters "Name=tag:purpose,Values=gateway-bench" \
     "Name=instance-state-name,Values=running" \
-    --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress,InstanceId]' \
+    --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress,InstanceId,Tags[?Key==`cell`]|[0].Value]' \
     --output text); then
     echo "HARVEST FAILED: describe-instances failed (see above) - could not look for boxes" >&2
     exit 1
@@ -551,9 +551,13 @@ if [[ "${1:-}" == "harvest" ]]; then
 
   mkdir -p "$HERE/results/snapshots" "$HERE/results/config" "$HERE/results/history"
   found=0; failed=0
-  while read -r tag ip iid; do
+  while read -r tag ip iid celltag; do
     [ -n "$ip" ] || continue
     gw="${tag#gateway-bench-}"
+    # A per-cell box's lone cell must not land in results/snapshots/, where it would layer onto the
+    # board as a scoped re-run: it goes beside its siblings for lib/merge_cells.py instead.
+    snapdest="$HERE/results/snapshots"
+    case "${celltag:-None}" in None|'') ;; *) snapdest="$HERE/results/cells/harvest/$gw/$celltag"; mkdir -p "$snapdest" ;; esac
     # An explicit gateway list narrows it; no list means every box that is up.
     if [ "${#want[@]}" -gt 0 ]; then
       case " ${want[*]} " in *" $gw "*) ;; *) continue ;; esac
@@ -570,7 +574,7 @@ if [[ "${1:-}" == "harvest" ]]; then
     _snap_rc=0
     rsync -az --timeout=60 -e "$RSYNC_SSH" \
       "ubuntu@$ip:~/benchmarking/results/snapshots/result_${gw}_*.json" \
-      "$HERE/results/snapshots/" 2>/dev/null || _snap_rc=$?
+      "$snapdest/" 2>/dev/null || _snap_rc=$?
     rsync -az --timeout=60 -e "$RSYNC_SSH" \
       "ubuntu@$ip:~/benchmarking/results/config/$gw.txt" "$HERE/results/config/" 2>/dev/null || true
     rsync -az --timeout=60 -e "$RSYNC_SSH" \
@@ -578,7 +582,7 @@ if [[ "${1:-}" == "harvest" ]]; then
     # The run log is the only record of WHY a metric came back absent, and it is not in the snapshot.
     rsync -az --timeout=60 -e "$RSYNC_SSH" \
       "ubuntu@$ip:~/benchmarking/.run.log" "$HERE/results/history/${gw}.run.log" 2>/dev/null || true
-    n=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
+    n=$(ls -1 "$snapdest"/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
     # `ssh -n`: this loop reads its box list from stdin, and a plain ssh inherits that stdin and
     # swallows the remaining rows - so harvest rescued the FIRST box and silently skipped every other.
     done_rc=$(ssh -n "${SSHOPT[@]}" ubuntu@"$ip" 'cat ~/benchmarking/.run-done 2>/dev/null' 2>/dev/null || true)
@@ -608,6 +612,21 @@ log(){ echo "[$(date +%H:%M:%S)] $*"; }
 DEFAULT_GATEWAYS=()
 for d in "$HERE"/gateways/*/definition.json; do DEFAULT_GATEWAYS+=("$(basename "$(dirname "$d")")"); done
 if [[ $# -gt 0 ]]; then GATEWAYS=("$@"); else GATEWAYS=("${DEFAULT_GATEWAYS[@]}"); fi
+# PER-CELL UNITS (run-field.py --placement per-cell). An argument `<gw>@<ingress>><egress>[,...]` is one
+# box that walks only those cells (OTB_CELLS for that box alone). Its snapshot is pulled into
+# $BENCH_CELL_OUT/<gw>/<first cell>/ beside a box.json naming the instance - never into
+# results/snapshots/, where a lone cell would layer onto the board as a scoped re-run - and it is not
+# published or appended to history here: run-field.py merges a gateway's cells (lib/merge_cells.py)
+# into the one snapshot that is.
+CELL_MODE=0
+for _u in "${GATEWAYS[@]}"; do [[ "$_u" == *@* ]] && CELL_MODE=1; done
+if [ "$CELL_MODE" = 1 ] && [ "$_NOGATE" != 1 ]; then
+  [ -n "${BENCH_CELL_OUT:-}" ] || { echo "REFUSING: per-cell units need BENCH_CELL_OUT (set by run-field.py --placement per-cell)" >&2; exit 2; }
+  for _u in "${GATEWAYS[@]}"; do [[ "$_u" == *@?* ]] || { echo "REFUSING: mixed per-gateway and per-cell arguments ($_u)" >&2; exit 2; }; done
+  mkdir -p "$BENCH_CELL_OUT"
+fi
+# unit_slug <cells>: the tag- and path-safe name of a unit (its first cell; AWS tags cannot hold '>').
+unit_slug() { local c="${1%%,*}"; printf '%s' "${c//>/--}"; }
 
 # ── shared AWS setup (key + SG), done once ────────────────────────────────────────────────────────
 # The keypair + local private key are created together and then REUSED across invocations. We must
@@ -994,15 +1013,16 @@ qualify_box() {
 # it on return (its RETURN trap), so "launch a replacement" is simply calling it again - the new box
 # gets a fresh instance id under the same run=$RUN_ID tag and no peer box is touched.
 bench_gateway() {
-  local gw="$1" attempt rc
-  local glog="$HERE/results/fanout-$gw.log"
+  local unit="$1" attempt rc gw cells=""
+  gw="${unit%%@*}"; [[ "$unit" == *@* ]] && cells="${unit#*@}"
+  local glog="$HERE/results/fanout-$gw${cells:+--$(unit_slug "$cells")}.log"
   # One log per gateway run holds everything: glog_echo writes the orchestrator narration here and the
   # box's own .run.log is appended before teardown. This subshell also runs with stderr teed into the
   # same file, so bash's own errors (a quoting mistake, an unbound variable, a failed command) land
   # beside the narration instead of going only to the orchestrator's terminal.
   exec 2> >(tee -a "$glog" >&2)
   for attempt in $(seq 1 "$BENCH_QUALIFY_ATTEMPTS"); do
-    bench_gateway_once "$gw" "$attempt"; rc=$?
+    bench_gateway_once "$gw" "$attempt" "$cells"; rc=$?
     [ "$rc" = "$BQ_RC_REPLACE" ] || return "$rc"
     if [ "$attempt" -lt "$BENCH_QUALIFY_ATTEMPTS" ]; then
       echo "[$(date +%H:%M:%S)] [$gw] box FAILED qualification on attempt $attempt/$BENCH_QUALIFY_ATTEMPTS - terminated it, launching a replacement box" | tee -a "$glog"
@@ -1032,9 +1052,15 @@ box_reachable() { # ip
 
 # ── one box, one gateway (runs in the background, self-terminates) ─────────────────────────────────
 bench_gateway_once() {
-  local gw="$1" attempt="${2:-1}" iid="" ip=""
+  local gw="$1" attempt="${2:-1}" cells="${3:-}" iid="" ip=""
   local tag="gateway-bench-$gw"
-  local glog="$HERE/results/fanout-$gw.log"
+  local slug=""; [ -n "$cells" ] && slug="$(unit_slug "$cells")"
+  local glog="$HERE/results/fanout-$gw${slug:+--$slug}.log"
+  # Where this unit's snapshot lands: results/snapshots/ for a whole-gateway box, its own directory
+  # for a per-cell box (so concurrent boxes of one gateway never count each other's files).
+  local snapdir="$HERE/results/snapshots"
+  [ -n "$cells" ] && snapdir="$BENCH_CELL_OUT/$gw/$slug"
+  local celltag=""; [ -n "$slug" ] && celltag=',{"Key":"cell","Value":"'"$slug"'"}'
   [ "$attempt" = 1 ] && : > "$glog"
   glog_echo(){ echo "[$(date +%H:%M:%S)] [$gw] $*" | tee -a "$glog"; }
 
@@ -1057,9 +1083,15 @@ bench_gateway_once() {
     --instance-initiated-shutdown-behavior terminate \
     --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "$BENCH_MAX_MIN")" \
     --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-    --tag-specifications '[{"ResourceType":"instance","Tags":[{"Key":"Name","Value":"'"$tag"'"},{"Key":"purpose","Value":"gateway-bench"},{"Key":"run","Value":"'"$RUN_ID"'"}]}]' \
+    --tag-specifications '[{"ResourceType":"instance","Tags":[{"Key":"Name","Value":"'"$tag"'"},{"Key":"purpose","Value":"gateway-bench"},{"Key":"run","Value":"'"$RUN_ID"'"}'"$celltag"']}]' \
     --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
-  glog_echo "launched $iid"
+  glog_echo "launched $iid${cells:+ for cells $cells}"
+  if [ -n "$cells" ]; then
+    # The box's identity travels with its measurement: lib/merge_cells.py folds this into cell_runs[].box.
+    mkdir -p "$snapdir"
+    python3 -c 'import json,sys;json.dump({"instance_id":sys.argv[1],"run_id":sys.argv[2],"attempt":int(sys.argv[3]),"cells":sys.argv[4].split(","),"region":sys.argv[5],"instance_type":sys.argv[6],"launched_at":sys.argv[7]},open(sys.argv[8],"w"),indent=2)' \
+      "$iid" "$RUN_ID" "$attempt" "$cells" "${AWS_DEFAULT_REGION:-}" "$ITYPE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$snapdir/box.json" || return 1
+  fi
   # self-terminate this box no matter how we exit
   trap 'bench-aws ec2 terminate-instances --instance-ids "'"$iid"'" >/dev/null 2>&1 || true' RETURN
 
@@ -1341,6 +1373,10 @@ bench_gateway_once() {
   ssh "${SSHOPT[@]}" ubuntu@"$ip" 'mkdir -p ~/benchmarking/rig' || return 1
   scp "${SSHOPT[@]}" "$BENCH_RIG_DIR/otb-$ARCH" "$BENCH_RIG_DIR/mock-$ARCH" "$BENCH_RIG_DIR/SHA256SUMS" ubuntu@"$ip":benchmarking/rig/ >>"$glog" 2>&1 || return 1
   ssh "${SSHOPT[@]}" ubuntu@"$ip" 'set -e; cd ~/benchmarking; ln -s rig verification-rig; sed "s@rig/@verification-rig/@g" rig/SHA256SUMS | sha256sum -c -; chmod +x rig/otb-* rig/mock-*; printf "{\"assets\":[]}" > rig/release.json' >>"$glog" 2>&1 || return 1
+  # A candidate built locally (`docker save` archive) travels to the box; a registry ref is pulled there.
+  if [ -n "${BENCH_CANDIDATE_ARCHIVE:-}" ]; then
+    scp "${SSHOPT[@]}" "$BENCH_CANDIDATE_ARCHIVE" ubuntu@"$ip":benchmarking/candidate-image.tar >>"$glog" 2>&1 || { glog_echo "CANDIDATE: archive upload failed"; return 1; }
+  fi
 
   # ── BOX QUALIFICATION, right here: the harness is on the box, nothing has been built or launched
   # yet, and the 6x6 has not started. This is the last moment at which rejecting the box is cheap.
@@ -1418,10 +1454,10 @@ bench_gateway_once() {
   # rc=23 (no snapshot on the box, e.g. MATRIX_MEMORY=0 or an aborted run) is "nothing to pull", not an
   # error, exactly like a missing suite JSON.
   pull_snapshots() {
-    mkdir -p "$HERE/results/snapshots"
+    mkdir -p "$snapdir"
     local attempt rc before after
     # The names already here, so an INCOMPLETE run can set aside exactly the files THIS pull added.
-    _snap_before_list="$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null)"
+    _snap_before_list="$(ls -1 "$snapdir"/result_"$gw"_*.json 2>/dev/null)"
     before=$(printf '%s\n' "$_snap_before_list" | grep -c . | tr -d ' ')
     for attempt in 1 2 3 4; do
       # Filter with rsync's OWN --include/--exclude rather than a wildcard in the remote path: a remote
@@ -1430,10 +1466,10 @@ bench_gateway_once() {
       # way, and it can never pull a sibling gateway's snapshot into this box's publish.
       rsync -az --timeout=60 -e "$RSYNC_SSH" \
         --include="result_${gw}_*.json" --exclude='*' \
-        "ubuntu@$ip:~/benchmarking/results/snapshots/" "$HERE/results/snapshots/" >>"$glog" 2>&1
+        "ubuntu@$ip:~/benchmarking/results/snapshots/" "$snapdir/" >>"$glog" 2>&1
       rc=$?
       if [[ $rc -eq 0 ]]; then
-        after=$(ls -1 "$HERE"/results/snapshots/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
+        after=$(ls -1 "$snapdir"/result_"$gw"_*.json 2>/dev/null | wc -l | tr -d ' ')
         if [[ "${after:-0}" -gt "${before:-0}" ]]; then
           glog_echo "pulled snapshots/result_${gw}_*.json ($(( after - before )) new, ${after} on disk)"; return 0
         fi
@@ -1488,7 +1524,9 @@ bench_gateway_once() {
     # what a field measurement always uses.
     # OTB_CELLS names exact ingress>egress cells (e.g. one cell of a rebuilt gateway); unset walks all.
     printf 'export OTB_DIALECTS=%q OTB_CELLS=%q OTB_MIN_CONC=%q OTB_MAX_CONC=%q\n' \
-      "${OTB_DIALECTS:-}" "${OTB_CELLS:-}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
+      "${OTB_DIALECTS:-}" "${cells:-${OTB_CELLS:-}}" "${OTB_MIN_CONC:-}" "${OTB_MAX_CONC:-}"
+    # CANDIDATE CHECK: an overridden gateway image (a pre-release build) on the same pinned instrument.
+    printf 'export BENCH_CANDIDATE_IMAGE=%q BENCH_CANDIDATE_ARCHIVE=%q\n' "${BENCH_CANDIDATE_IMAGE:-}" "${BENCH_CANDIDATE_ARCHIVE:+candidate-image.tar}"
     # gw is the orchestrator's loop variable and is not otherwise exported to the box, so it must be
     # written literally here (not `\$gw`, which would reach the box as an unset name).
     printf 'gw=%q\n' "$gw"
@@ -1702,6 +1740,27 @@ if [ -f "gateways/$gw/prefetch.sh" ]; then
   echo "[rig] prefetch: gateways/$gw/prefetch.sh (real DNS, before the engine starts)"
   bash "gateways/$gw/prefetch.sh" || { echo "RIG FAILURE: gateways/$gw/prefetch.sh failed - refusing to measure"; echo 126 > .run-done; exit 0; }
 fi
+if [ -n "${BENCH_CANDIDATE_IMAGE:-}" ]; then
+  # The candidate replaces ONLY the image the manifest launches; config, cores, mock and engine are the
+  # pinned field's. Loaded or pulled here so its digest is recorded before anything is measured.
+  if [ -n "${BENCH_CANDIDATE_ARCHIVE:-}" ]; then
+    docker load -i "$BENCH_CANDIDATE_ARCHIVE" || { echo "CANDIDATE: docker load failed"; echo 128 > .run-done; exit 0; }
+  else
+    docker pull "$BENCH_CANDIDATE_IMAGE" || { echo "CANDIDATE: docker pull $BENCH_CANDIDATE_IMAGE failed"; echo 128 > .run-done; exit 0; }
+  fi
+  python3 - "gateways/$gw/definition.json" "$BENCH_CANDIDATE_IMAGE" <<'PY' || { echo "CANDIDATE: manifest has no docker launch image to replace"; echo 128 > .run-done; exit 0; }
+import json, sys
+path, image = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+if (d.get('launch') or {}).get('kind') != 'docker' or not d['launch'].get('image'):
+    sys.exit(1)
+d['launch']['image'] = image
+json.dump(d, open(path, 'w'), indent=2)
+PY
+  docker image inspect "$BENCH_CANDIDATE_IMAGE" --format '{"ref":"'"$BENCH_CANDIDATE_IMAGE"'","id":"{{.Id}}","repo_digests":{{json .RepoDigests}},"architecture":"{{.Architecture}}"}' > candidate-image.json \
+    || { echo "CANDIDATE: cannot inspect $BENCH_CANDIDATE_IMAGE"; echo 128 > .run-done; exit 0; }
+  echo "CANDIDATE image: $(cat candidate-image.json)"
+fi
 ./otb validate "gateways/$gw" || { echo 127 > .run-done; exit 0; }
 OTB_GW_CORES=$CORES LOADCORES=$LOADCORES \
   ./otb run "gateways/$gw" 127.0.0.1:8000 results/snapshots
@@ -1902,7 +1961,7 @@ REMOTE
   # append, the INCOMPLETE branch sets them aside. Anything else on disk is not this run's.
   local _new_snaps="" _sf
   if [ "$snap_fresh" -eq 1 ]; then
-    for _sf in "$HERE"/results/snapshots/result_"$gw"_*.json; do
+    for _sf in "$snapdir"/result_"$gw"_*.json; do
       [ -e "$_sf" ] || continue
       case "$(printf '\n%s\n' "$_snap_before_list")" in *"
 $_sf
@@ -1921,11 +1980,29 @@ $_sf
       glog_echo "NO FRESH SNAPSHOT for $gw - this run measured nothing, so it publishes nothing and the board keeps whatever it already had"
     fi
   fi
+  # THE OPTIONAL TIGHTER QUALIFICATION BAND (BENCH_QUALIFY_BAND_PCT; unset = the engine's own band only).
+  # A box outside it is a failed box job, so the field aborts exactly as for a refused qualification.
+  if [ -n "${BENCH_QUALIFY_BAND_PCT:-}" ] && [ "$snap_fresh" -eq 1 ]; then
+    local _band_files=(); while IFS= read -r _sf; do [ -n "$_sf" ] && _band_files+=("$_sf"); done <<< "$_new_snaps"
+    if ! python3 "$HERE/lib/box_band.py" "$BENCH_QUALIFY_BAND_PCT" "${_band_files[@]}" >>"$glog" 2>&1; then
+      glog_echo "box outside the tighter qualification band (${BENCH_QUALIFY_BAND_PCT}%) - this box job FAILS"
+      run_failed=1
+    fi
+  fi
+  if [ -n "${BENCH_CANDIDATE_IMAGE:-}" ] && [ "$reachable" -eq 1 ] && [ -n "$cells" ]; then
+    scp "${SSHOPT[@]}" ubuntu@"$ip":benchmarking/candidate-image.json "$snapdir/candidate-image.json" >>"$glog" 2>&1 \
+      || { glog_echo "CANDIDATE: could not retrieve the image record - this box job FAILS"; run_failed=1; }
+  fi
   # DONE means a CLEAN run that MEASURED something and was fully pulled. Anything less is INCOMPLETE, so
   # the freshness guard's later hard-fail is never a surprise and the gateway can be re-run.
   local publish_failed=0
   if [[ "$pull_failed" -eq 0 && "$run_failed" -eq 0 && "$snap_fresh" -eq 1 ]]; then
     glog_echo "DONE"
+    if [ -n "$cells" ]; then
+      # A per-cell piece: run-field.py merges and publishes; nothing here may.
+      printf '%s' "$_new_snaps" >> "$QUALIFY_DIR/measured-cells-$RUN_ID.txt"
+      return 0
+    fi
     # Record that at least one gateway measured something this run. The field-wide history + charts
     # publish at the very end reads this: charts.py regenerates from whatever is in results/, so a run
     # where every box died would otherwise rebuild the PREVIOUS run's numbers and push them, which is
@@ -1982,7 +2059,7 @@ $_sf
   return 0
 }
 
-log "fanning out ${#GATEWAYS[@]} boxes (one per gateway): ${GATEWAYS[*]}"
+log "fanning out ${#GATEWAYS[@]} boxes ($([ "$CELL_MODE" = 1 ] && echo "one per cell unit" || echo "one per gateway")): ${GATEWAYS[*]}"
 for gw in "${GATEWAYS[@]}"; do
   bench_gateway "$gw" &
   pids+=($!)
@@ -2012,6 +2089,11 @@ while [ "${#_live[@]}" -gt 0 ]; do
   fi
 done
 log "all boxes done ($fail job(s) reported an issue - check results/fanout-*.log)"
+if [ "$CELL_MODE" = 1 ]; then
+  log "per-cell units: pieces are in $BENCH_CELL_OUT; run-field.py merges them - no history, no publish here"
+  publish_lock_release 2>/dev/null || true
+  exit "$fail"
+fi
 
 # ── gateways that never got a sound box ───────────────────────────────────────────────────────────
 # Say it LOUDLY and by name. A gateway skipped for box qualification is not a silent gap: its committed
