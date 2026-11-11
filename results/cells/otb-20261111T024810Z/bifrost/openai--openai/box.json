@@ -1,0 +1,13 @@
+{
+  "instance_id": "i-0a2d0d4b0eb0d701d",
+  "run_id": "otb-20261111T024810Z-b1",
+  "attempt": 1,
+  "cells": [
+    "openai>openai",
+    "openai>openai-responses",
+    "cohere>openai-responses"
+  ],
+  "region": "ap-south-1",
+  "instance_type": "m7g.4xlarge",
+  "launched_at": "2026-11-11T02:48:45Z"
+}

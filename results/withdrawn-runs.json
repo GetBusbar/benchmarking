@@ -1,5 +1,5 @@
 {
-  "withdrawn_at": "2026-11-09T03:25:47.166172+00:00",
+  "withdrawn_at": "2026-11-10T21:16:46.423Z",
   "runs": {
     "009d8f059eec771b295e9a09029c3d299282c0eafe88315849db78425ba0ebd4": {
       "gateway": "bifrost",
@@ -64,6 +64,2114 @@
     "d2d1e5023702ce6a5f88e6705a0bf5afdbc1e1d8c1e43cbeefd43c5ac77fa932": {
       "gateway": "tensorzero",
       "reason": "Halted provisional field otb-20261109T015651Z on superseded instrument 09547897; replaced by field otb-20261109T052740Z on c4965b2b. Raw file retained in Git."
+    },
+    "f5bdaaaaa23c78e11a589a4d865fd9b18e53c487cd7672a13fd8372be8bbcf5f": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4e4bb2c8e981cc7360989e584b28d955bfbc0828e7832b2913e98a82fe18396d": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3e99d054889a02aa5a4656a99c80db9cc775b86f607fbfddc6a3e9d02fa8a60a": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6a26b9676a430d16b1eb1608950537c3e68d675a284d16b51d05ce36872a2d9f": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e080555dfb6e34fd30771968df743a3d6d45819b30ce81fb584efc77988890a1": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f69943bcc3dab1895785d229887bfda3fd5b4c075fc13e1aa347a3f219f8e071": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "358d0dfbf72479f13ea1dc23c3d16daf7b92dc915a5e3dbb9935ee954ccdc67d": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3e3fccbb6acf29730264a9657fc829792272c75e53ee8b78cae6181371697450": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "744628c769e35d79cc740d4e9973147c2a4b90f1dedefe6a600c2ebbd7b430ed": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "7429c938384d923d223a7bdba4255c9df357d4907a269a883d68b36822490a2c": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "eedae32a26f781c98a4876f61b5e70d90e630e7361d75bea909f306f67da44f8": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0ae29417de11ac7b1269adde41b10158d807f3aac676206ed626ad000db13cb9": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e69428554113f2f87c68584712b170511f12dba38e5bb7b547a914e3b0c9ac4b": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ffc5c6a57af09cccb20890b9f12eb4df8a7851e2e50327eb810ca8299422f7e8": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a1b83d98c40e2ee50775eef4ba6b826179315811c97d64c1f1cd93acd0627468": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d2806ce20de63ca92cefba986dcc25d0d18fda2559b7aada5ada1ba8e5524a55": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ddeb702eeb58e8d48968bf6a6537fd41798d017cab085a9313632eac3794688d": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "15fae6c5c74194951221f2246876153031c1914ac1624ccb5c14161cde454a17": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b0dec28b71224f57453152e7133035a65e5ac63370d8d75fc676c537918f358c": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "159d0ca1cb007a9414bcbd1898dbc55896883ff665a81a6fd5a249a95d938916": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "61798de55eceb4dafed3f885d5dd50021ecb233ebc0b43bfca5b4c7023536fb9": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c63f91ee8a900f0e7c458f4d350aa8678066ea73573ec73786c04c22f71b8502": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0753645057cb43aa01a83337fcc4b92211f6dfba69c0935a18f79c295a9f2fa5": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5daa4437c72cafd669289152b623567ca7f7e62bdec471bf38088b75aeb07b0b": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "9f4ba430cddd1fce9e8882c9bb917a06206c12b0bbe8d4744900922d86782d2c": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "ed5a1ccec0fc6cae97f85a164ece82fe907eac65fa826667d481d1a196693a21": {
+      "gateway": "agentgateway",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "f1e0fe0dbb70f65e46a5e1d21f3b9f1ed7faf7e3ddb0babefbcfd3110504ef48": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "84cd3a30f824c92da8dfc50eec540345183ef574b221951ecb12c427c5ca257c": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "70719de4d27d2b92916f8d1c664cb790f6f1301e7eda00d38cfd5af8e6385a78": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "316b58482af77a5eb7c03c2eb561ae97e1eefe7114e55633e881062271815a00": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c5faf83c998912523cc1ed62033939d5c6669fa4edf0cb28461b90ef207bf7f5": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "513469af7e6a50e77587421080ba2acb44f1b4421198c76c505ac6fa6a45b58d": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5cbdc6a27172f9f437a5ad73f2f6e27566eaba20a6e05783d123e65b213e452c": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "42b568ec9ecafe4dd5121fa2749a624395ddb07117aeccad83ca505f69f88acc": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5922327509f5997ab39818e5625899c1098da091d49c2a6dca191956ec173c39": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a0b1db375f0afa0bd903f2a879b084a0d5b6c97ef038d934903474f527495a83": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d9911ad88bc95c75c1d8e5b3750d17388fa53e61a582345738768d9ef2ccf2d4": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "545292970e5532adb858319eba00cbe7409a7216367e3af32563c352565f6cdf": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e51121c647f32f056aeb9b29b4c8ebee305bdddee528c29e5bb73ab3c3a08677": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a3fbfc7799e5ca056ae745b315c009ad5ef67360535c8fa6b50f96f285189143": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4467e88d6677134d6ed1d6f78b2abf60b55f3af65a4ad0b70f0308430c3c6b55": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "291d00a0adad4b1c38fed3a82bb07f730e8af95f47f1d46c6abbad5a3522b4cb": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1b3d79f0099dcf914a686fd0ee12f9e27a84a8566910993a0160acb397267558": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "da91e3034681ac784d19a329aa688950d10ea9cc3865eaf61fd96300439cd0b4": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a6016d7127e5510c5e56d50b794bf29496da910525eb8db09914170cd3c339aa": {
+      "gateway": "aisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "49b091f53fb86e8f730187c4afaaff51b2f77457dfea4cfc1fd3f6667ec84a74": {
+      "gateway": "aisix",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "128045bffa3f99d7d7ad4a2c1a2eac653e0d6bedcfcdb704ed02cc88fc4fa774": {
+      "gateway": "aisix",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "7be6c771bac6658d3c1c63ced3846085279ff3fba356910847523498ddb91ff9": {
+      "gateway": "aisix",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "dd5952a15d5256f4ddcbb0015017a7a9eb1efa0339614d6fdfb58844a60abac1": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "444805dbb056f0f45008a3441b8a1e355c34647980a2fd3dd4b394f118bc0871": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e5fc0ac9f5f2daddd51e7602533ab38c3fc274a8b194ca940b09440aea30b4ec": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b527a9aaeafe4a06ffb3578c0e125266020717d22b6d073241493e350d18dce6": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f9eacfadff1a47e046eec51a6d6f46d8b55c5e6b1d9288666ec1931b28b337b0": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2621e9d060ffa696f20e58fc15396cf81042701908b378369e0eea9af3fd8221": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f0425d528854614a7f3e849f9f7ea06021b27bc2b9aa0064c99d637a354e5dc6": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4565f2cf1a2e34b4dfa9bd8e4459e8ec9eb524f712bfbd197265f1db9d26ce53": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "fabec9a1ff4b3e83f99fab6779cf5ea34795fa2e0c666e7d7b6275f5d111785c": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4a051e1641ce4b43a29cff490fd456391e9852ef2154ee95445150e4b08895e0": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "7356cfaa71e324cd40dcb91b86db69b9c32e63063685cc23979afecb5a214623": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c4cfed1c51cb0e186de9097806eba7c0d1c1a7db54be11ad798e089e243e8382": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ceab16bc43ba78e2bbd0f50856131877c27054152e32822254d97d1ebaf4ab76": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "80f3a112f1cf80afbcb5ed368903e18304fa24919fc3661c9a3628f4be51e1c3": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b6c4d7a99cac8fdfdca4adbe6dfadb355df9c159c71ba017bb5cbd1fa4ff5f6a": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "91eb2c428fcfac5f36e426bab0d395fd410e3539fb91d0e1dc355e4f9b03cd14": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1cde9df53df1201100d02497fa578021170c263d0ce57db073385fa41959417a": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "49990303006312a7ca5ca68f9424bcfac4bf14c3f43a382a77c4e5b8a0c99d91": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "731ac1edeaf611a11e21040a66ffb06c1f44f9c37aaf7b2a0f250372eeef43cf": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "760330b5805dc05b54fd31951d7e2562b0cf4a76b85ffa87abd14d679d53fd20": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "00ba49bb0d393dd51994cfde382ea461d1c23f3d9716295d9a9996379698d5e5": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ef592134da6ece636dac93d2162ce9f7835a937d6023cbb3c5c391f740f0eceb": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "66281aa537b316f23746c654edd3283c0957c3099e0c8b6eb120d664a854cbad": {
+      "gateway": "apisix",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2d608c954c8147b8559b39fd619fa092a1f1f2c2efedd2765364e8c9c69ab292": {
+      "gateway": "apisix",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "b40f6dc0a1703743d7a3fd5ded3b33eec693cef1557b5272dbfc0087409d4462": {
+      "gateway": "apisix",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "299e9b0f9c8d26670a653dd486dcc77a6655dbeeee3ae37e7dc0ee3e068dc9cd": {
+      "gateway": "apisix",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "2cc14b84c5942ad4b330ac3d4ca95f162a7bcc94f78c4784b2f8bf3e1245131f": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2c8df4438c962f83499e5862d0a456d6baa1735e117f88b960fd88c719c62e69": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "95766fd39dd6d62b01c4978304d5fe3d675f028ca79d5c19ce7efca658dee436": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a5c9d0180f60f67040fb541e4bcb5e7e107120aebcb6c1f7655b3f0350688756": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "49fedd2eda9ca9d2b4f40bde48e331c5d1483a9d6c035dd9104a723f024bccd4": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "67f1989ce7a067ec60719605a279d46dbe7bcad2b289f088015c0c97290d5e1e": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b9d8c43921511646294731b298e0bd93965ba8176f6a43f183672a5c1be4fc8b": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "31ad7eaf98a42b218457f02c21c7bdbf5dbb36356a6f21eb1083484b1b140380": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ef4d0ebc3582506e247bc61a650b2e6c010d55711cfb03eb50e16adf4fad40a8": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3b10e551360411bf1738b92c672d22a53198ff15b47c5dd47fd5b9258b3be24f": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1fa70e23efcf5fe2e913efc723fc727e72149e1925ae89c236a2ef343b772bcb": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4a6f2d27fd2f5ae2c8a5c792fc8f781e49e4bc84b851564a01146f6a9e1a78cf": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ed2319fe84773efba76b493c70a64d2eca76ac4217138798fec13e166fdfdfab": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a492846cc3d3bd68f23e3dce50d86f022970d1d403c8d86b2797d331363b1b90": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "00641c2b66f9de82b292b220cb4d2b38a0a724824121cd697cd689e013d7d9da": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4621538e347246c7f4830a8d3e7c15a80b40f8b48106070e75ae0e17c42bbc30": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4f3f3240ece8f61c454cf2b4ae96e492c7bc19cecb44d5641387bb1530771bd1": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b5d2cf49fc20395276bc97d82aae7b962d2569243c275768e723dd11e1cab303": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "16cc94f93a88165fe61d435c01a376b702607c084b09fde36b5d6897e40a5aa4": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ba1dd69e8b5ae07cddf6caffb06ac78f8fce60b08156f18f3acc6e13658f3edd": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "8bf7ce75c005c69706196ad29996a73be1626c3eb1cfdfbdda6a22017f460f46": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "13c8a27cf6921d80045294a9409c1e394cbdbf79e351f6d495d949220db9a6ec": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "b86965914cfa10bdc3f17c82bc814b94f1403558b522a634cd2a481b31c0aa1e": {
+      "gateway": "bifrost",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "4c4fd9096e69e3affa88e0fa1ef4c4f959142ad57479a555423aed4af9455574": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ea654d403d1dbe6b5cfe0213b5b989f5ff959ab9119ab3fe23a498e06ce30f0d": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "96bdebd2ebf76a4586b9952070e4a1e77a4bea8b7444ed2e0fb764e5175694ae": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1cf5344a7db181d36d85fb1516b0058678c9d4378eb67a5a96552f44c96af82d": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "baa35136dbc73789db1b9c41e75608e6d97f3f76f02064edc8deddcdff972148": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e0c912419ed68f16371bc34e2103277eb0271a9ea8d4a8fa1368dc2f6639fe11": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c7e221670600769c4f70f16b924705b961c6c7e1c1d3fc59928ad95ef696b965": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "38ba48e3e577b800e896114909932cbc991aad07624028b2d040a26b191a5235": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f47f76ff95c4f1d07ece017c6556dc12ea0c00c395058a092e8a193dfeb5035f": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f565eaf41ade6b857498f1f2c991a6295a924ae3fe50ac7bd3ebb8dc48d3b509": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "204634af441b281821998ac85d3231fa812f4931cef0ddb86b1bee8cfa9d4b5f": {
+      "gateway": "busbar",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "9722dead079ecef1cc4ea90d09fcfaf09d0a4edb45f275784428765152fc5128": {
+      "gateway": "busbar",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "72854792b86f210a5e9803eadc25a748e431e1d3485dad09729b4f93b9a01a67": {
+      "gateway": "busbar",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "e44494ebc26ca92b1b869206cc9e0e4c9f835d857851500fd26f7c0c2c76e3d0": {
+      "gateway": "busbar",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "0749bba0c4e62956cc94308905d12b2f5d834a79bc543afb04dde38b6ff436bb": {
+      "gateway": "busbar-150",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b6fee6c619e4904afbcc2ab141bec93a7335d89dbb83f0c0e5095545c9ce5bc1": {
+      "gateway": "busbar-150",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "bb99add214449e00df13b4c2a0ca6df74109c3450f908f324139dd3db6762662": {
+      "gateway": "busbar-150",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ef6b00353c84105607b6aeab66f8a96d8ac4f15bf383e6a165a6b31d4fa562c1": {
+      "gateway": "busbar-151",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "57bddf63d1c14bc64f849037d9033226bb79dc6d18463a1aead0a8721d698291": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5b4a5252eaffb7a7fb35dd6527d4834befd83903629b23b73f740cafb074903e": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b6a568a7f8db4e9b3141115b7ef97d81d8fb5df10cb0f7e70b23472220deb8a8": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b795054f176c595a1e1e3db6b63824839bf4a799df18145f812d60c2c0bf080c": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5cf34e0b953293e8d476ca8f1b844167de69cc583b5519242f43081f1a3061e4": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d4e5e9a1c981f02870bd73b9a57ed69a463d030e5063d96f54119d1087e2b9b3": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "fdeb78459ff4d855848bd55e2b93f3a7f46916d57d5aae90ae05177f6f99fddd": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "cc7c9799c55e31e263639caa238cb58572f10816008a72eacbd8391e5606614c": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "eaeaa09564749184c27e768f360f5d198e965dbd17582061cab3105ca48ea6e3": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "547be3733fd621e44cd847f256b3a030514337704afae8c31175ac24f738604b": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "690c1d88ddc44ff630ae701316bc8a68f0046e2419ecf528bd2a99563caf0df2": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c0710e57c88c02c556ef995843e5d245776410c60fcf445c244d2b35d57c1e1d": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e8584a5cd7edf62caaa2a01adf0c086bcdc64ac1f9cac044008175bf3599881b": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b229d5b754cc3db150f492b7e156584f9bf7d621ddd9bbb0a961f79e21ecd435": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ef0364802863df8bf4ead10d9f4b821000f21000535d85874dc09d18eed6fe3a": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "688500116c3aaa87d655943c64914b2ee7cf2dfde565259fd85224d70c0e33d6": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4860bb30c450aa2fed169e6b1169f45afedc18f9bc179f412fcb504ff8fa2ce7": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "de494286d64af25cc294aeee555a85c3a33d3fb1fe059bf15b57b199b3234eec": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "23b89a91cd4f6c76a4f11cebe0db81b3886ad30740bc71cb6c4e5fc7bbcc05b7": {
+      "gateway": "gomodel",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "e9f5240b74d5091a9719b980c92d828e31eab41fe574defc937d54ce8e1b0872": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "40c7712425957af3966004b672403c040c70e36c0c5e8cba0022023dd1863e42": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4a9cfbe6d37cd5cbd3c9a1de146ed2831c4c7f02aad52925649711353ddc94ce": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6bbc87d1037693e28318d72e2189eb09dba88058c4c18d6d586b172c7aac1857": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "36ab412154c22a8252db957033876a44a886c8db342e264a1c141de68aa8ff6e": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "7205ad3f9ff2c332c33999a13725451a40e6ccc5c6087c7bd5965f64cb09040f": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4c71c232f3b0348cf11d6d494e04987d6986492035912df5770e2f2a0d8d4b73": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5827bef0fcee664ab35ad655a5ced065fef116028dd324f695ce7a4b3e1f5d7f": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "254575bde7892eb53fcf3209c3cd61782d607773cecd8597ef7116db87903129": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a7a4104fb88e621b99813ebd4b181de1c4a93c833ffc24b0b4b121ab20608821": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "184ebd3bd0f5cef2a50bffd8d89350101512625878b81f17bc045d16a7f3f3b1": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a0beb0aebed6c510ede0d7b27b4a6b0c9d566fe402441d9f8161537f93cb394a": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "9c2b997cc79a9e6ccfd7dac5b55ee8752fea163f99213a1184d2f44a4df792bb": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "456319a7d0c91748ead7bbf00e76155ff2e0d7dc161214885863096b0f0040d4": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e80297deaf3c610b8478166f6bc1cb077bd7909d26082e24944346e077deb016": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d1536b20e9906ab043626e9d00c9b40bd920274eb9194bb033f9a93e9c24fe2c": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "114c3c44f50b6562cf91b97c6d4d9ab883bb78aec95edeb2e5441f166b15a0c8": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "690454c8f70c6a0a6356327a9322044f4e2ff58192176dc75d3f28374deb2bf1": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a6f806ef04115115e063b3fe81dd8a078eb6eafc8198a322bb4593ae346ee117": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3f7d1a47539362c038a6512e92fc52fdad9a67c6e343ac513910421e451966e5": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3ba21bbb74677fc560809bd942fcfcf2067b392a179b9b0551e5ac6c1ab5ae09": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1d8b867135a456fdd05d8834c5ac5486891f74b0b222ff569b57694680717dfa": {
+      "gateway": "helicone",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "346799d2d3f0959ffe9de8ea01747f9099fac68b29d3406d73de2e26d01ae304": {
+      "gateway": "helicone",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "448027704288f6e6b219b1a8c04dd613c9ef63fa0398176e2367ea8010d42544": {
+      "gateway": "helicone",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "22107801c8561dbf9e018b8204bb5375c6fd16dee337d88b31ff42504d06b2f6": {
+      "gateway": "helicone",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "0ee59b597030e7c46d43ad3e23d343628b5d9633346698e69a3392b27efc9fc5": {
+      "gateway": "higress",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "ec66a2c440e0ec1ecba109f4e4bb8371d9a660280fb68736329166cddac43964": {
+      "gateway": "higress",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "fded4b082f8d10ca2cde599850fe921494890b1b33dee8db3543ceaca9451e83": {
+      "gateway": "higress",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "5b3240c44252477dbc9f6757675d85281149fc3ce16526bb0965db5f616010d7": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "bb33cf286f71e2c66d1a255a58d10b248ad0148874c140a2ad24b8ecbdf1c42b": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ca2e07367d89c7bfe29007f1295147c6edf6f949e760d3969d9bc4389fb01752": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "07ae76bc497a62bab1e1296cfc8b32c4e793668888cff41795f25038150d3325": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6d6544fe46c0c47510b3922c4fa22327f64c66da5fd99050b317cd73fca27c41": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1aca7aca821ff340705bf6e5108f19f421ff7c40eb1f52f0c6d0920987869708": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "83c7d9aad2b4c4a2b399158cd32961c20a7addbb147ea8c6dfa2da826815b829": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "25faa83c18428e548e14d0e444cdc018e112c29bc98085d291c2d987de4a52f2": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "074e0abdad2938b97bbb8c9c95bb14cd4d4f1613c9e5bf44f8b58554d2f0b89c": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4d53958b7afdc216e850f0b15d7d8e662a31750a7d88af0053ac20b4353cb957": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ca71a753cc76f34b96be7438f9b0147b5b834531f704b2819f2560d9bc484b16": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "50e2dbb6b20f178c3fd435a01be0eea3650528dc20330354e4424fad16358b90": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3008ada54875e63b632a944677aea0dd34933df3f74cada8b6c885f785d3edbf": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "369f197c337ed1ab4874dbabd0780ee059d96a82c035a16f9080a4defc746e19": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e162091381aa1b3e8d418c15fd7bcc40fa7588e0b3d822b9a3c96c1a2078031a": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ecc896898290d4be75fb42b243ea936bc5a8f160832b6c675e32f2ab2be23791": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b1b2df5ed20f49a9fd28ac5992fa4f3bc66da3d9229e47c0cd2306b5d3e6fee0": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "19d86b0794af8e45fd273cba3b54edc54814562c1f4967d486d4c5818373b87f": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "43360b6f7caa52729db60ab196249b60239e2232db19cee15cd2cbe9af3a57fe": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "7fc52e5fb9fbeb8a0904db3daf79c8cbd9c89a5854ce7df8353c6b20669064dd": {
+      "gateway": "kong",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b8326cb27c36649eac6ba3d7232c9ba20f7790577e85cff82b8c262346c69063": {
+      "gateway": "kong",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "d86a8e51e246abd3fc38e8a7e263eb4d837aba50a9a74ec33b369e6e91752062": {
+      "gateway": "kong",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "4bd22a619c785195e0da7894c3eee454f4ce229423c19b4489b8abafe7d2aec7": {
+      "gateway": "kong",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "fc6e428dec0ad88d2107d2f9e13601e88ec05295db82b2f67d6803c6408239d3": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "90e15a00d34e1cddd8ce26dfad0ab7ca527192da2cff0cbfb31d2ccfc3c8e636": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f1f672b15304d873f8068267f291493ecc4b167387e81dc37b81562b24b0aa2d": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "959c1fc23755689f8550c80425c2ebd1131e209fb882a18dbadbf3983c717899": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "7cf9a2fa6b47b4e26d2e67e7b51b70610a7cc5d153cf963307f29fd0d51bb097": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "8ef9453ee167dc8591fbd76681554f6ab99016f20ccd501ca0c33d4bf7aa9bd2": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "aa97e8eff181d3ada1bc917d20666a35bef25d9ad00ad791911bc838ff49d6b7": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d92070bd218156770c8252a386e5fd53557669340a6b8404b2974a50b0ff38aa": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a5f626fd5b455d012e618a10af134aeafbdebecb0e08fd3a257f2b9abc761401": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "01daba5a1ccae6e41a8938b4f1321f6e9c69a461473367fc4cfb70e147eac3b9": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "47f4d43cc41ea6a75584b50eb6ec03dc6c020386e3176e8325f82baac96f9b73": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0fb1989df3f8115195c06bb2a2a7ab3bcbb8ac15edf1b2a5e143dad0b95b5dec": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6d13e43dda8a4c57f01b85c724f92fd406629a12afbf689e0d49b76482402d94": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "532022f45f612d086b47afac3a72d5fff947c94629d2901acb07b9cae43ba57c": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "15e0de98752230e1cedd8d7156c6d8e04990e8d37e31c168ca754bcec0a64d56": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "daa75fb6cef09597d638736e6676b660e4cc5ee7ea229e78796829d350d2c97f": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2761f7157c7fd097beee509ec9940fc4e7f50f52be00bcf37db77994b28b595a": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "077a306915b393a1fc6012bd43f4e2930a8bd530f6a38744ea236fe115a5ad47": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "a68059626e7ac5c91eef0312ede92b40bbd39808d37a58dc207f9a93e684f0f7": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "2ffd83468e8df1f025fb3df7026b0b77c1ba35a86799cc9872021835619e8ef2": {
+      "gateway": "litellm-python",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "f5e76d29af5fba6f70f5cc7838b13d31605cccc1b525860b6a09eebd4d23ee77": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5beaf27c6c35f789ce55a55d918497f437ec66e269b6b76a4c3435d470110aed": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "71f3a94d6840786c68766b5b03c0d96d9e49f747f52a74233a637cb97209bf81": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2a07ee37968a23ab3abdef43c5b161f12a53c4766b79ba80a84d6808ec008aeb": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "bc2da375d9cafa9c7bee61a42bc18e4cc1de538f6a1a1bedc7f879bfc265a144": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "cc4e7fe5b5584a02074d504dbaf1365ac2c11652c7b7f29fe6fa587ceb0bb312": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "fd5c6daed0f94162aad49eee85dbbf662e24388c5951b42bb17ef55693647d12": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "8c300ee7f8bff7227644cc2f1ad3e908f1f81e4431db668ecd869d1d44e0bc83": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b6ccb645360f14df655c0f7e7cc806f5eae5761b586d8939417e1ac2ff2513f6": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3e9af9109dc76297fa68224d24f1550312293c151944d23d1539b7a2980bb2e6": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b9c0d6652b801a7641a3215b5983290845bdaf665844c974a7d9dbc50ab83b6b": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6d3699e3321bbf3bdbdfbebadf4cf8aaf811ef6c52ed71ffb2bfe5c3026fe051": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "dc90ab24757b8a02dfdcb3b75e2b5e6b67aef8b6663a6303fbf68aa16885498d": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "beb79bb3b1e8a9fc50bf38c4923da95cd5df9145efc6d0482a79a8e1352f6b4e": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "406be6cab90f3e3eef4dd7a170f33e28621a3c6c012c6988e44b553f90b8aee1": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0506f7370c20bd8e435e29a1cb4f20bcc31df7305a16d619eeeae09f64b0bd54": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "18e2adec3c945e0aa81e75b3af5444428c2d617c080a25d94c3bac799f1aa83e": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f48d24b9a7bcf8c778ca1953925aae64aad9c1c809714e0a30072d123803dc1b": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b3f31dcbb9e38d0ba754e9860ada37ac6dacbffdfea74c50e155eb2f3dc53a83": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1f62fc204d935b840dbef50d2c4b2b10f1fa5fb2956e32674109c5d18f4d3100": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ced52ebd2bb9b09265e26cee0abd5f46d12421802f11f4d53a81ecdae2f3fd1e": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0f5ea69c6f763d04804efc200e679c403969e1922bc5a7bcf0fc7e834fb78886": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "53cb5c36c7c0506b4ca32fa56c845640ba95b6c9aeaf85cfa8edcd58eb83c223": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c4530009d266b21d661727355a4803d23b3ededa01c9cc151107516cd1c1e8a0": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "95deae743b2cace5379789c450773e8a6bb593eb242607ecbf1e57ec2a15127f": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b63421aa6e3cab9d5a3e42a1bdf52c46420cdaf5074ff9a05862800478e26bbe": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "649aeee6e49f66183da6d211d312f356ea755460c7637b9b489cc960cc4230aa": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "354a4f4dc8b9cde98fffbf4a6726acff597da01b632684da102eef0359c78474": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "9219571c6302d645198dcc680a173217aed7a0b35c63afe00256b4a435da5f6d": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "44f58e26a78f248834e60140964e35c0e62540e167dc95156f9edf4fb28455ff": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "dba05df4a98d2bd1b8c76bce3a3bd7f9ab446bd9d7bed22f401b7d2b5c2215d4": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "c7209cdfe847293838fecc3cb0278e0ea62bbdf1bd748d1b5cbd610a52a27d64": {
+      "gateway": "litellm-rust",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "43e64ae20ce5685eb9feed0c0c6c1a896c17c208faad6c0769c8153d29dccfa2": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0e105f3b9abae9aa04d523cfd0f34806bdb1cd9449c38e545489bea924f386eb": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "db4c7d73f427ce6ddb57ada63284819990d068f09f0154975297f73fd4f81bf8": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "66168a13d29977d0474a82c4c04ddba1f93eb739ac4921cc44645bb85d0f4f8f": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e0026e1672582c5ad20a1cb25c82fbe815301403724fb03308eebcc797399f0b": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e2401291a1b63e5faedf385115b3336a1c75d1c13eaf724ac493df7593b081dc": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5c58c8a93816de24aa283536e9e5751f29c021d63fee6482de5581dbfa9abb96": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3f8d2bf811c3aecbefcf23e705a93b09213497cef87f3b4efab558cdafdd4bbe": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f39a73ef5db489c6733f79bfb9d7893cee9b9a65596c28bfd6b603a793e9f561": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "9bdb6f2fcaec5b8778ae91be3063dc89f51b194170e79499a746edaa956515b6": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "107cffba429a509822a596018f2809eefc75a42fef6cc888de75f1bb9c45b222": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5926b71e87ca317ef28ad52cfff3a698f5166a8f60573b401059835d866ba962": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a62443997e3c1e74268c4898c86ce21df35ad01e49963ad445c88fc8594e9910": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "686a42c12c2bebaf4fbc9b865e2f23afbcc4570bccd245edc260075e2b63172c": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "06a7e0bf130dfbc3bf5bbebb398b251be34d9dc64fe2cfe255c14e1e3e81ede9": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "32c98071dbd65d01de24fc3f19614231a2e4a39c87d645afe0864e9cfd06ea57": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3ee10f27637ca3412a0b6799008b1f6947a564b3e4798c79279a2a49201682c5": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d9d56262fef173acd6c3676709db132ddad49da9c7a2c4d37603be5622d29948": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1007298304c73f124b81b8ae28362507419e3a4994a36c26ff3a3252158ee29c": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2c12b7c0eae4e3cae22d647e5d69ce627c70af1620c3e8938b188ca146c0c267": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5a2941d96b7cf67106dbfd1209faa84ea02d0dc56b31ebd556886699ec554ef8": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5206c0cd15b3ff632eb17bab34db1e6a768924833494af3d08d0c20b7e673a11": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "9c84a713060cc1eaa8dd77e31acf56c992edb43b236c39b8a816a4a76e443017": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4fe51b244e98f491b0860c83e5409498dfa8028b290b63c86c267b55490ad8d1": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "54b6e0802c4d5ba9baf38f59f0ce734003279150e5b650d5d0a881061fc00075": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2a8031b76151f6e509729fe81fbc9406fb966419b588511e83379214cc735735": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "92a54b33073cd47f593a5a4a447bcf510f14bbfc9cf2d456bdfa6c50901bbb11": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ecef125ecf2c503f0a425d905608d5e77da3e94ad60825e1d3cd666a62ebc44a": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "25083c770411689581967b4142b590006533dd0187364c232fcc359e3ebb3a72": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b0cbc7b22068613312013a3da7b49620791e5a999e4f8f9f3307ee9ada54ad63": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "462e3781a1ada465ee7f07ca4631632375a5f5a3f0c356326d2143d853c463f1": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d3c65cab783eda0efd20043e9b1e9f0414a4c63053d1a41106556b6325e1ab7d": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "87563cbcf6184d123f18b1be61b2b6d31748a817043320a2797b3b428371ac64": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "43699ef719c043339bc8cb96fe9ab1f5d667f9d8b57d6625851f448f57f9ca5c": {
+      "gateway": "one-api",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1eaf0523b206020a00b042ddd6ff18da3cf9a77a8d58734f1f3f4b50b725331d": {
+      "gateway": "one-api",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "eecf485145e88e171256307f52bf3a145cb041a012078f2233bb9f8f024d9c37": {
+      "gateway": "one-api",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "4b091b8e487e1ade87d329c17c9ac82e849f645a2d3d892789b80de76b81d26c": {
+      "gateway": "one-api",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "2c5a28b56e35eb6f29fe8b7cfca5e2bb5502e92cb4b31775fd069c36f0198e78": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6f8077602f58a8596a19f893b06a4b8f0494147cf02771f5c9c2ddc830fe3173": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "77e8c5893733e279419fc33ddd05a7948969351b492e1142baf9a3fd221339f4": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "74b2638b810a8670f2494123d9deb8421073e389ffc65590ce77411f3eb7a467": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "6d092476bccf605be44bbdf4d3abcddb6124bbb0a3c142d64158c30869996105": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ea2029e715fc36cc606dafb1d7d599f96caf0e68407249c80ec73180317a77f0": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "689230aa2113c80fa1e19e93a6c20ae0aa08e892bce109a0b102b1c40c7dd75f": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "aff4884697e6ae992fa6e3c92ff871ab9c1610ea31a3312cb0cad071847ec22f": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "904b49cda2022b4211bf4aa64c21d3aa5d9f5fe250802b5e87a42caa4056b3f7": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ab6658f30f868ebffe05ab4f74968538500804430d4d105ddaf7d6e4c981f275": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b6f8f2c090b8d04e26eed15347a3861c1c5b4c285daac419f2f1af14ea7ec788": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "687f27d683acf699ef410ab46c5e2c64ec15f6b49386a01481e51e0d224af6b3": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ddc93bae430f0b08115af9411e59435980a70614dc4ca830c9064ade15738753": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c5b3f24d741e1c793445d1f23e4dbd5ee3bfc98372d9cbd41513ce4feec2fe6a": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "7e323da3181db4ce159105d136f08a966019d7cda0277c4c8df2a81b65b12fde": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ccba49d273a27609596e45b7a43cf9503d3b96d97e8fc71cf3ddd6bf7b79f859": {
+      "gateway": "plano",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f020835d431be4a3ce956d9f950ed44389f17667620ba72f9e56c67b8cdffee3": {
+      "gateway": "plano",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "40fba30e21ddcef46f631ebf5126c818fb7299d3450b657dcd1c5ae491b1a1f7": {
+      "gateway": "plano",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "628b944d359a10afbb80ed89326c80aaf03e50e7dc934e9a0a7ce985e9c34a2e": {
+      "gateway": "plano",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "2de1d0a50969f92761cb8de17a21bbb2110df9fc11ba6834c79b516607031124": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f71d08fe0bb43ca6c9a5dd1a66e52c5d4bc8d5a8300134397fe37c59bf3d46e5": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "511790b2002c555a88f7de290b81668c60266066a2ea6045c29a8013a3b9815e": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1ed2d18b3c7f3e2da204f2fd96fa51dbad8a3f4a28f448fce1cac43d72f2d59b": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "98a180c8a3c41a2e9c6e7848c0a926a11791ea726dc2e6f7b02622f66e2db262": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "34323ec46562f46f0e50b442ca23117514de13815042d0ee8d711bd4ba1f4020": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "00a3a4842b580a025ec26479b815bff19e28327582153a08702c58fedb23a06a": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e7442116ae1487e922a7caeebdda42cc8e070c33845ab62182effb7890ebaa5d": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "3340d3d35310c77ebe5317a4cdb315a636e8f6dfa2adae36fa89d8de23fb2fd1": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "dc96442f26976958cf0edbaaf5a47b5d86841fb8e386545a307c1a0493cf8ab9": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "e6fa2784bc18b017a03d3f18c59b3e5f0de78c586f90f76d4d892becd73fe30d": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "0f42d1b272dc06d9f3a2bee87dc164cde675747c5398b07def76229b84d78ec2": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "aa966b1099b2c56cc33ec21d713cb9366e1e3cb6b8abb28e27bbc6346432763a": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b92db1addcdaa3d89d80c0a4357ad326ed2b44b9dbb91442a6a558f12d0100dc": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "d898bdca396080b57cfd582abb57fa180a749fdb90c806ad89585f22d8b20ac5": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "49cba09d668aa6b7138f6e627f7598f667f0939f17027545c12b1bb72c95fa8e": {
+      "gateway": "portkey",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "409be251a54428e53ec337f0550c0ba864952bf502367b58f3d62363a943e705": {
+      "gateway": "portkey",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "cecf6c555855440ebdb7e9a00dda4ac8b714922cfa09f2d0b82f0103acfdc4b6": {
+      "gateway": "portkey",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "97ac8ea97de055cf17f1af9e900239a99695894dfeca29b5c28a820d4bc7b564": {
+      "gateway": "portkey",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "a13f71f3e26b3bcdee3e17399b4a4bd5e173e3bc92dd66e65179b5e099d2115d": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1bb7137408ab80d1c932f97b19eea0b98ef492177b721eba818e2a1bceae70b0": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "2089dbe212063bb76ce5585d087aabeee1e7c556ff91d274baadf1f5857ecd96": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "aa13825bb0426ca020a308d845d1bc4578ea5dd5a424482646db7a5cc400ec6a": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "03bdba456d92b6567228d91d383ff5892ba9cdf345705f89b075859afe5cbe50": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f4b5013ef91e3eaf67af90ab061ef62658b780f136e1983e4afc4150db06744b": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a7e1005ff8d413ef5f4c5ae1af46cffc37819aed33478c26fd42a4a74c7dfb17": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "519149ba4a631bff36518fc04d4a01edb173377bc42f7253401a31f565de3f89": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "dc4084a45ce7a1673b24592e1c676256142a44b53c82592aee6621b4423673c8": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "c0d2ce67dd4bfbbda36a08e484c71f5653bf23bbccbfefa300b72ec8b6729da8": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "9c86c42fc9459d41e1e6cf997a1c9941d423d2903cf87fb8a193d0df847bf668": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "b0b5581c3cc5d9bef87ccb30bea21362f1ac79e1acae1439621f0a1451218888": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a88cf9fbb9bfa1f19d4ba7092ffb63c7f91e382dff8b9b2af4ac2cee6b4819f9": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "00dc402705861eb26bd4b2bf2755c35c9644b49cbca5603b7e501dfb17214d79": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "f678a33b6b267fbbeaa841441759173aa2f35df8f8f56f852e302dfaf522b723": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "a992c045fd461dfd5ea6310beabff75afa081809e878c5d759f7e762e4675743": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "ec7563816918ab8e869d7e194873884a847094588af569f7834c6393ba3fc586": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "5f17753b398c940941c3a02002c32a51d056a16cc65540f28706ca17702a4457": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "4e15c445ea81e193604d6b35ad196687fcb81700cb42dcb1deb67d1751b0560c": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "df72d351f588f9c1886afdfe5b1f0b7334c437db7674ffff83e4a5d89f82cc12": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (July–August 2026), not part of the published history; superseded by the published August 2026 field."
+    },
+    "1609c1bc7f6cd4b6dbea8bafbe283b509ec0709c40d4f6a9c62fc4fa286fad75": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "ff00f5e0f36f562e638653a021138fb2381f5b94948285736952a1ebfea3d2b5": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "d4edf61a866721d17dcd249fe0f614299e207015c766c433758dce50540253ad": {
+      "gateway": "tensorzero",
+      "reason": "Engine development run (November 2026), superseded by the engine v1.2.1 field otb-20261110T173446Z."
+    },
+    "95764f663f99c95bd7b8caf0f9bf847b18aaa393c45c8f3ab89bcc0373584b04": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "60819411a48d7091e2bc7f45a4b7cfe69d6f339d95c2b493ce3709e5c213e339": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b5d45b1d7538914c3caa2e5c0c88879cdb68a673508231098e769edb55441cf1": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1c0cf4b0773da644df47edb6364dddaf45b9edf1ffc8f33fcf4313d8eb158c7d": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "4a43e08aa14d8f5ebaa62f96efa4ec3a83cb5a1637e2a91469ff4d3f69727d68": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "49c4d3b8ea33499660244193ab54d6df937ecebece67549c7ff7bbe3873ed797": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a551a51bef0eab716148175f6b2d6dcf71abcb4b4e7da915b5abd4bbab4538f6": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "8eadbb800578340301170c3d7e91a72e16df70f05f8b6c42db487a214de853c3": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3d52ec185c19bd766939fbd7313a6e7381a04b66cda61372baa0832e9f498bae": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1faf9759deaef472eb2e28cf996e6ef52f498a4743ef03661f0c19afd27a1132": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "d6819ac043cca3762fb6e8f242827fbce3473396ef8d22f0b02ca0997dae6a15": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "519aeb903e75508813bf3b2f1298fd4b308ca3bb88cebc7cc5b63def6e6b9273": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "accbedcf441c38ab6caa5e6d689aa5d2734f88984a6be482b20df4237ea6cf82": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "200a2845287f83a14da25451b804fb98d6aa00577a009e9eb7920c32719270ba": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "db7b2296a7e33e408e83e5f93e70610e5801460b3480320cb4a17198206ec00a": {
+      "gateway": "agentgateway",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3309a574c3f70a43c904d77ad4dc30fcaa343e996360bc9e5ebe16eb3d4a1d26": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2d8d3795b627f6f9aa4d34d73b564981f38082c28424bf2183c5c856a4a27411": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "9800a0d51ad5803fd933dcb3a057fabe14c4899454fd1b1d634da5f080967c34": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a27e0070bfa5f4fb336d8294b4c6fda47344205d35876a6a1e46cecbdc9d9184": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e142cb0c8295680dab13b64e76e569fd1eb08889a7bc45ac96743b67f3074db8": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "0bf095aea3bf9c389dac6cab309a2a03dffead30459cc07d6234105c687eba5d": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ee9c4ff8be5088314effe28e557480887b471baa04ffe604103e53fc185949eb": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "866cc7bbd2bdc2c25ae5098ed255e6b3163fd9f9707ca494e76335f35118ddf1": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3f15f1550838c09d7b8c77c9438600025d351fcc94b5d14604e974bb460d36e2": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f81166c736c2ac96d162824211acffb914a6fb6460a37a041337a793a6e90906": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "8318c8bc34798ddd6d1f85912aa9fe600a34b11d367d18183d03b657472ca830": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "162558565a7838f4e024e6c304a394722d3bea17291273a0202daba04a3066b5": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b623df961dd279fe606a349858598ab7bdf93ff4aec219f513a4791fcc06eb21": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2157084aa395a2b4e0417f5a52619c6331e54f366da39303d458d93be9a21d43": {
+      "gateway": "aisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "32d622e1a4680a43caaf7f338a15c1ce342d99b0a93f74074223eb6aebdaf578": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "27c7f1add16350c829f0ebda2be0cf92f379ba792cdce92558e491530b2f6938": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "006629129987fdc53e0a8c4ee1951f36d2c7fc821617a413807416e2c8f62ac6": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "259f803ee9ec72b2f59b4480aacdb2027b996b05434d3e3e9c07058243524c48": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "c3b238983e99f770627e51c575cb38c4d0c45d6b63764874c734fa940e3e0fc1": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a662e7856a6065848d266640d13f3388c1b299f9bf81ca1147fc734bfb1eccd4": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5061de176dabe06a679d23cebabb1ff46bd116e1c57d992ea18df324863320b0": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "59e2b167e598523fe0d4498accd39b9869153928bd599e88c35bc09a5d3eb215": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e0fd106b9dfb4c393988eb007b6e89f2265a4f6111ed67a0cfbb72a71696cb66": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "c42d4fe00f4a2e6ed0419e89e2e35a0f2d076ab05929a7810810b55d69689909": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2100be9304c9e4d092dd25eddc980fef62c5ef879f66a24e7459670029fb6610": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "61e97370f74aa21e2230234a7c85d0ad388e252bfd029efbadab51b2d654b32c": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2d986174f776131e07370ce274cf7983207909bc399b2a986205dbd11a8c9382": {
+      "gateway": "apisix",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f111dd109432a2edd3489189c8aff0ba7a0df4a1e8a1af8d6d04e39c6b61b7b3": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3aa01b54a88d66721def53a5cf9fd25bd4351d40a3f40328d42f993624f20e65": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2a4bc5ac650a42a83225ed2c36168655e0dbeb24cbd866046e388e682a290343": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "36eaaa0da4e0751ab932330bb7e26e052508e6753fda44001dd2b783d46c604f": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "9da12fec56f3e909306f2e52d085645670f017a1dc25e5d3a388a764a5c452fa": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3fd902962e3783f3f648cab282dfcc9661a72623ca50ba982209fa801edae0d8": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "16fb8f8a254a725781eba24cbf27bcf6006fd3720b5e30ef0a453dc72b91cb92": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "6a671d0c9bf4f0099a9d0531f547edf724e386dfb5a40230ceaa92e7e0327f02": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "9cb5636398c9d09d28805c03147d6ae50d5585ef35de83aa403199ab3e575173": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "88991b955fed49d699fb32d3a3c64354fdeee3f0907f5ec22c794d9928b95224": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2c857b1ae1ff15e602e3628bc811553765cf2afe2e15c484cdafee03994c99e0": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b5c8251753086d5fb3c80e6dd5a16541e9b84f87f3b134657f5e827e1dfffe98": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "d3eb0fa01b1369d620f1a2b558887896def5bbf9145004bd040921f85134a0a7": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2026e99076079dbf478d453f86f8dd8d36921aef2661b2f3f3a713374d8f4a45": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "379a2d17489a5a00318c51829bf19458c4580d2b483e38085bebae81b7e5600b": {
+      "gateway": "bifrost",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "30e7c03fdcba29c00e12b5725f988f7a6fe91a76cf71cc46d4c5f4c981b322bd": {
+      "gateway": "busbar-150",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b4417715775dade0c853996c31f0597356518e8fa06618d56cf37072a8b1e7c5": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "cf4b4fd2e60db4403702b5e81437dda71387b8079d2f84352dc47ae7030ffee9": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1beda989456693ef281dcc53d3b1e17c00101b86c1ef217741da5f20e4b67ac1": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "eb7534677b562e3e3d91bf0f229d07ace0aa4491c37b34a4f3342315afc27d03": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "90f6bb5c65e09286eb9a5a4378aa8a8321575a613a20a4fe807dff227612d6ea": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f39b471ae256218caeeb198bf9b965131614d221ba09b5dda7d7c144bf36ee8f": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "cc7b66def5801d3db54f22bac23a35dcf5120304e0a02d1361eb9d82cd12a1ea": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f2a1b5fe8f125b5d9351e445459b33062b23e85c692f8fed9faefe65106068ad": {
+      "gateway": "busbar",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "33c6f0a977f68e29af63d526e45fb74102d700804911f33f2142845548572c4a": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3ea177219ffb44b9a709c11ef1c3a40e81ab51054ce5a2c03f4c5287fe79421a": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "d7ad5bcbe13406cde6c33e4cef084c90a58752b09adf419bc60d13ef7f800060": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "cf0a5b492505de989d0ce590ffbae3da71bd3f3e0e84c67747688d02e62e781a": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3a87e5c0e149ec16995f5ab3483580cfd49772bb60fed6b1ab8df678cbfabf13": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "7ce9ec684b4721634693c3cfa684ae6c0aedc1dd9ef1daef991e09b38c4cd78f": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "0900c852043e3d4e0680b4201bd16017313bfc0d779646104a04b2f8be97ae74": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "8abf8055717eea0f7db4c1276e9d4564b707d2c46a45508b83134ec4dddca45f": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "4bb9443ffb08ea2ec91044e720d7dea335a567440760ba4661be384598b47dd9": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a8ac72d9d6aa6a0b1f2454d429f062b0f4125c84f697b1e92a3d941897aa6fbf": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "158c52e213148ee723721670667f382a972502dccd87a8434594415f7008a498": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "87ae7f78a8dd12f4da12f2ec47a5a1e1d1e6618d7b4c2ffa38ace9a260ba9123": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "23ccaf5cae3f390012d6625217f0d6970c8c1a35f80a169176a8d9292c4f2e54": {
+      "gateway": "gomodel",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "d939031acec2d1f0a607f57f98b6ff859989416f409178a7c8406b09a3a3425d": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a394f5d4ef72baa33a364985fda25a92e84ac917538b339fed011d01fa5e4845": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "de9fd4d9252a7f50014a8cd3b8a15b9766f2bc3963778e516212cfe484049ace": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "989036c3da5694908f5a28b6f98f682201ea026b454d5698fa5018e91d4e606e": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "6088130b0236b7b879c7c90d9a637ed2183bc0ed7ed66f7980756b3778838c10": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "7fe9fa85c0305fb944372793b3610ac4bf3e68052939ab5958bcb5c90d895274": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5f5b46772a4738a0a6cef293be0f1db19cf2d8b333920c41571db39700a25b5a": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "276b48217de86a503f31b2b242d6ce2b2b3dbdb77e297924e702103284e2bde1": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "6a3647d872bd6d10ed6a220573c4699fd9c39d65305ada60ce2d64e1a93144a6": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b0595408ebd3d43f5883d22c244e4bb79f2caca5ce52466ba23e1b660d99dcd5": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "515263057a6f7ef25ae304d796621dc0d380ba02d6e17c3b873fbf7ba2dd380b": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "53e30e6ff0fec63c61639420223ad28157dbfcb89d826e0a0f0bc17c0254b1bb": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2f67303b6ee65ce72fdaca8c77183bcabee1052c5a409715d181ae37e93e306a": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "db73383e967ec594bb7db041be8b0e14848d8a288936b2c0f5bf86baa0759fc1": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5e0f4a84ca21c9e75808a605a7975050d20b60c94fb2aac7a21097270f025857": {
+      "gateway": "helicone",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3c6cea1f2b755c399386fa447c63de0e936205692777e41db3f5bd04629c3411": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "adc148c6030b38fd24135d39750dea15832abf8386546f6f5df894db89161a61": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a77fc977d679e42af8925cd2b65afc9108c1ca30a9084eb2c0bf9cfd9c4bf1ac": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "210dcd5e6680914e37d6c899da1bdb055c878ae0334cd2f2e4a47b98f2e7261b": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3f12b2a5b672e9e6027386c825357d177e54c5fd0cf261eb94068d102fbde8a3": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "43c33003d16588dd0edeb16b20f25a4fab6868f9b3a792b4f5fe14cf13358b7f": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1af7cb80ecbaa214755e6393a938d56fd8df4a3b5f8e3cecf444bde253a5de45": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ed08ebba1b6fc2bc8d6a110d1c7b4c855fa9d4059bf16556a793efb1c280d8a3": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1fdfb087ed83c50cd60542f6cd48c37876ba8ad67a64cac3ed6ba5852bd8f9d1": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ec662e099cf0dbd538e3e12acb9bc3cca708a314b6cf0e4e3c6a4ca09b915748": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "bf8aea53ae0eddc925a6c712d260668e730c07f0b633e61e2b20be8fac6f90a3": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "753c36a6ad9486bf2ff78b075840d810231dde14a6b181599ec7a7df37d609ac": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ec8db234d38b5e89d0b71f7a88b1213d842b46c2be3081cfe59a2f0f407637e2": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "cb58beb908d74ea0a0a2b820e66f113b8035b45aeb71132507dbf62761bd85c1": {
+      "gateway": "kong",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "31f2116219d43764cfb44a179ede0299e3ef3810e0f25432143a9dae3d3bd040": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "688e4c4ba0c086de3b9d1c58586bad7cc1590ed32daf99b520b7d56f31b8f53e": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "c58b2541296529d7c50fc0729b4a858be4202b0bd050128019928da641e74d52": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5414ee732d6d5fa60da314cf6c9350e73b8eb040d86e28e584f0bfbd33db6dd5": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ec49fc74acf88f23e50710962835e77912edd52a5e18ae9efe1c14406047c55f": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "c95c5f9212ad35527301b1b8ae15a6521297ef2731967607c64ccd93de7aae5e": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "31905cc39c207116e536fa5be87c3a54af944b4d1e7a9a0c93f7a8b28a72b3cc": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b37873df3934a09a66f5d9d764b6e6cc14863ce24e4983ecd7eb0765c6d6ed05": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "59fe6d07db7b958177d94f31f9f3f55f5d77f8ad137ca4dee64d555a7ac8ff36": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ba82d367b0f2584474ddaf3919b723a45701c12ec030e6032ab7f85a9200cdbc": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "9ba14ab09672fa5220da9d7968a7e646cb5791c4259414dd13dfe00438c052e6": {
+      "gateway": "litellm-python",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "d0b0cd05c56a5e24b3d1f7eb953bf513ab484c89ea9122d8a7ca625307eccf4f": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "513097742ed6e6d3e5e265997f812814af94c903a50a6c75dd6e2ce662cbef93": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ea16b28f8bb3d1c20210a7746ac462236a85a2519b232b1086e0816283f57422": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "9b6d7f5eb92f61a596111dc9e600772047ed1ff451596e3d6982c6459dfea3b0": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "cce9265a8233af692723d68e04463a49fdabaa6dc9607e3a98c56ad981e064d5": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "75d3eef582601bddb18667f849f986de5a5a5984c7b71ce2a571a6e49d5d6fe7": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5dcecbb5861ec84cb2f6ae35ae34e30f75b361826a39f18bc6adc2c2f0a2354e": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e74f5607f705870c9ee3b05120b04ee84436bdd9ec0fa0d45b2035fd07286d8c": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "79f71a79ea07a40f220bd54ac846067c9eec1f60f745bb8a8aec044e3bdd8e1a": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "010fbb8f8e1ab83a363737ab14d5df87ba9a9b83df12981ab705f2d207baae3a": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3405d93090623ecfdccbb5bfb811ecdb1981a34729a6c625e9f777648709868d": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "968fb529d324054d52dc4cf830ce7f193949ceb34efb528162029d342ccdad5d": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "419f496fdbdf040616c1a50cfeaa7972bb02feeaab2994bddea46c4a07402e87": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "7f6e68cdf1dd65277584d11a3a58e63d2230b5bda6d88d69e6ddeed549fc792c": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "bf24c62c44344eefa02e9a2b63bc07ddb8f823083eb586bd6763a4be92df7942": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f66bb63b7b9fe03a8c302c591e80693c1417eee8d10c5dafd3ea58c317fdfe3c": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "0ac0e7249d935a6658ed6117fad273cf41c0a2c09eac0aa8e8499c678d060678": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f5a5a5d504fdfe1dcf20612c90df16b2adc9053bb048e73cadf64e5ca58cef21": {
+      "gateway": "litellm-rust",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e62267b4f8c25c4abd0f8e5bffc675c0a0063a14d88a4fdabdadbef6096ea04f": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e84c0e1a441e69ce13535fa164080bc1d938f3e06745930cbab2f8dc77e92a0e": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a2bb420cf2528209159a8fd5f26834b0588ab2e9498803508a480de769496891": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "488b89206eed7e6576ea09baa06c76bcc6c291955ecdd8c8886ae09076cc8b3e": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "bd9fc9fca5758b145128f757714ad7a3b52985167c7513e7e2abaae9177ddc30": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "306920781c482931ec4e49aceb23b76c7425c35ea06a042e2073815da1708d3f": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3b6baebc0c014e17b5b7bb6d00ab68191b2b3031e935075dcc0d39906d07a1ea": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "4c29f07e373620151fd97150132b52d4c6d974540f279b799e277b3c24b0a971": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b65968c595f6b92a9917b07c34edd95f79115c8449206ec3a1815a6b7de06ad8": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e67ab2149b392df2b03e2664d10649698907d665f8371f44ddfba97e9a57e364": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "7bbddba47164ec744297bf8b4f846ed3c99605bb2b682a979e3a720b8b5f87d4": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "883b783798e2724b454856bf531937d482a14ee0c8e08d735ad1414b42818ad7": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "2aa0517749837a1ca1d01e834f9b33b5478ebeb5c9d3a3a64c0594ecfed124c6": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "bb5bfcc39755e192567ece5d85b2ca606aa0b82f793928687038884b7d9ee944": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "d42045748386b583fb9a595bf12953f05796a820604eb69898ec2f58a49e25a7": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ddde76c2e5c458565c7c48acf7006ae4eb27a69b1b9a2fb66ed90814ef6879cf": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "572cf6cf33392f8cd28aa80897d8b699be602a7d18f0ec35ba59712235f60900": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "7c58c42721cf4c88622182d122253a04c6e51c640c5e0bf9101c39bfc4704d8d": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "fd79c7c3cc3e4aa727d6db538e7b63aeca4a6b616b582f9a022cd119988a9f87": {
+      "gateway": "one-api",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "c19b5bacfcd7877a0949b6c253a7120390947903a1518ae13d9158912176ccdc": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5d21e39b355bd30d6e523c6ffb864442e60cba2c54c095a53e6b95049a72c478": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "0ddd78153cc1a06a7ad17a38774abf1951faa902a876249f246cc704b22c01c6": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "6326bfc3190556725e001afd16a460d595d8413d92f4c8aa6067b1fd142941a4": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5d32294822e8d05a1dfbf48d8ea95f5f63b413254e39c73380877e974ebf5cdf": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "8cb317b2ac2ede4c5049974c7b11e1365cb6ee953651bcbaf9f966ffdb774923": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1b2ea96f9efa48c56c6e4d3b906c3e84e9653597cdca10c2d5a3653c51624f3f": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "f28ce4448ade2b3b9cf754c82ba7902e8131e978258d1b1ea52d3bb078a10a69": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "7e048193cc4de51af9545bfe05f62ef9d52728add37ea680f869ddb0f06028f4": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "93596037cbe0a6307263f99d88fb93a2a0b60366a3faae566a585a00282a8ca5": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "939e9d75810c1629c69e1b719dd11829733574dc69fb02610ef7f1812f738122": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "dafcea1d1d13ce091fe3de3d210f12dfe89f07fe432b8ce627d6e0247b65442b": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "c251a9ee0953010aa2c0c339bd46d780588729959af6001ff174143f293bdff0": {
+      "gateway": "plano",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "e1123e1b5309e4e6fa0cc7b36d9e318993bc69cea7b6e972e28031074447fc2d": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "55ca36591743ca73d1d8bc8816feed90404588cefddcce0270fb612cd306faf6": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "48e6abb2ba832519ad64304f8a2abb23989f6fd3d5cec7c436604ecc81f325c5": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "6e5b28eb07e9aaebff55505f9c9c258f177bf67874d06cb4ea00f29722acca99": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "326c5fc7fda5f6a3a9e9a1035ab0ce2cd273b7dca7c8f54be5f1d4bbc0fe4427": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "609bbaa2d248d24738870e9e7f5bdca251f99fa54d9e8f467256671d1f823d62": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "cb60355d0b0426aa40d4ef1d8abe50a8be8abe169059c302f133c78fdbdc3c0f": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "920f13cfa5c2a6cddd643e110d86ee68a5064de4915783290f8fa7fe91153038": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "3dacde90d6e1375ed9da19c2fa85f101ff9513437d5cf39eaf22b11bf28b268d": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "569dc36ed22ed81d3716c1fc2cd8d46fa78e3985395e2ae0d013fbbb97b38568": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "5915217fcabedaa30e75a46a2b01a5528b92e2c1d9803571f7bc755cd492e204": {
+      "gateway": "portkey",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "817d6befd404fe13a9bcb4718fdd3e1294006431827e5369663f782b87069551": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "13b4d4bee07fa95222e450420262c7e7f79cb7725a8a195930fb46e8aeea6ec5": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "97684c3a44749beb92819ce8b4f7315b3e8bfb70f84e0edf5b267b9a328e8ed2": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b53fedefbf73e0f4a7ff6cd89bd82b33b8ce2405349194f224d8020560a585a1": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "0b93f4ce46123d63f60b4ecf9467207940cc88c507e6a6c7f4628220b6daa264": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "b78f7a71056cd7b24d111e7f1c11cdaaaf87110179a2925f6dbe3b67a1681cf7": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "caa6820569504670c2045a46465f758eea19f240d600fa832e710fea17b581cd": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "fda3c9921c77f67fd732851095ac3f37677a11dc0356df2263d653401476f381": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "1a437d3d12418be8f762071c6d959b4088c706312c0d2cea28ab51ca0aabbfb8": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "a7e980fab5eacb3412746e32066bd68e4fdbfd350c6d133f46a88efb4eb02189": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "ec01f4fce78d93195c6543ae6494ff8e73b89f7000c93ad8fff79cdbcae8cdf0": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
+    },
+    "058478a7bee3a3c7f7dbaf624804289b714611f0bbc439f25c763d511df49267": {
+      "gateway": "tensorzero",
+      "reason": "Metadata-only record of an engine development run (July–August 2026), not part of the published history."
     }
   }
 }

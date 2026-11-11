@@ -1,0 +1,55 @@
+Linux ip-10-241-0-57 7.0.0-1014-aws #14~24.04.1-Ubuntu SMP PREEMPT Fri Sep 18 21:50:22 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+Architecture:                            aarch64
+CPU op-mode(s):                          32-bit, 64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  16
+On-line CPU(s) list:                     0-15
+Vendor ID:                               ARM
+Model name:                              Neoverse-V1
+Model:                                   1
+Thread(s) per core:                      1
+Core(s) per socket:                      16
+Socket(s):                               1
+Stepping:                                r1p1
+BogoMIPS:                                2100.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng
+L1d cache:                               1 MiB (16 instances)
+L1i cache:                               1 MiB (16 instances)
+L2 cache:                                16 MiB (16 instances)
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-15
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; CSV2, BHB
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+37acc682f17bfb742966ea066f7389f537cee4f081232cda3eb2c4e4fff60e8d  otb-arm64
+99d01f709d8d9c1f49055aa265d5eb7475264d6b513911fe317aee74a71190f8  mock-arm64
+d240badd966933fa19eec0606b2d1f3945f18ad2
+$ setsid taskset -c 10-15 ./mock-arm64 --port 8000 --tls-port 443 --dns 127.0.0.1:53
+$ taskset -c 4-9 ./otb-arm64 loadgen 127.0.0.1:8000 /v1/chat/completions 32 8   (x3)
+loadgen: OTB_LOADGEN_HEADERS is unset or empty, so this window sends no credential; every request will fail against a gateway that requires one
+rps=96199 fail=0 p50=0.33 p99=0.61 p50us=334 p99us=608 ok=769630 rigrefused=0 budgetexceeded=0 spawnfailed=0
+loadgen: OTB_LOADGEN_HEADERS is unset or empty, so this window sends no credential; every request will fail against a gateway that requires one
+rps=92075 fail=0 p50=0.35 p99=0.64 p50us=349 p99us=637 ok=736637 rigrefused=0 budgetexceeded=0 spawnfailed=0
+loadgen: OTB_LOADGEN_HEADERS is unset or empty, so this window sends no credential; every request will fail against a gateway that requires one
+rps=99835 fail=0 p50=0.32 p99=0.58 p50us=322 p99us=582 ok=798734 rigrefused=0 budgetexceeded=0 spawnfailed=0
+--- mock.log
+mock listening on 0.0.0.0:8000 (ttft=0ms, proto=h1+h2c, stream=64x16B@20ms on stream:true) - OpenAI/Responses/Anthropic/Gemini/Bedrock/Cohere
+mock dns listening on 127.0.0.1:53 (udp+tcp): every A query -> 127.0.0.1, AAAA -> no records
+mock tls listening on 0.0.0.0:443 (TLS 1.3, per-SNI certificates from this run's CA, same routes)

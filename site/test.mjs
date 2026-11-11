@@ -575,6 +575,38 @@ test("freshness guard HARD-FAILS a wholesale-stale board (absolute age floor kep
   assert.ok(/FRESHNESS FAILURE \(stale board\)/.test(msg), `expected the stale-board failure, got: ${msg}`);
 });
 
+test("a candidate check never reaches the board, from results/candidates/ or copied into results/snapshots/", () => {
+  const root = buildSyntheticRepo({ alpha: { matrix: isoAgo(3) } });
+  const snapDir = join(root, "results", "snapshots");
+  const [published] = readdirSync(snapDir);
+  const candidate = JSON.parse(readFileSync(join(snapDir, published), "utf8"));
+  const iso = isoAgo(1);
+  Object.assign(candidate, { candidate: true, build: "CANDIDATE-MARKER-1.6.0", measured_at: iso });
+  candidate.matrix.measured_at = iso;
+  candidate.matrix.upstreams.openai.cells.openai.perf.added_latency_p99_us = 987654;
+  const name = `result_alpha_${iso.replace(/[:.]/g, "-")}.json`;
+  mkdirSync(join(root, "results", "candidates", "alpha", "otb-x"), { recursive: true });
+  writeFileSync(join(root, "results", "candidates", "alpha", "otb-x", name), JSON.stringify(candidate));
+  writeFileSync(join(snapDir, name), JSON.stringify(candidate));
+  const outDir = mkdtempSync(join(tmpdir(), "site-candidate-out-"));
+  try {
+    execFileSync(process.execPath, [join(HERE, "gen-data.mjs"), root, outDir], { stdio: "pipe" });
+    const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+    const files = walk(outDir);
+    assert.ok(files.length > 0, "gen-data must have written its output");
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      assert.ok(!text.includes("CANDIDATE-MARKER-1.6.0") && !text.includes("987654"), `candidate data leaked into ${f}`);
+    }
+    const data = JSON.parse(readFileSync(join(outDir, "data.json"), "utf8"));
+    const alpha = data.gateways.find((g) => g.key === "alpha");
+    assert.notEqual(alpha.measured_at, iso, "the board must date alpha by its published run, not the candidate");
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("freshness guard PASSES a board with MIXED per-gateway ages (independent cadences are honest)", () => {
   // The core relaxation: one gateway measured today, another 3 weeks ago. Under the OLD lag guard the
   // 3-week-old row would hard-fail (it "lags the board-newest"); now that is honest and expected on a
