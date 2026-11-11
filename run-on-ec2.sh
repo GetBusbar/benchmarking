@@ -1806,7 +1806,10 @@ REMOTE
         grep -o "\[cell [0-9]*/[0-9]*\][^\$]*" .run.log 2>/dev/null | tail -1' 2>/dev/null)"
       _st="${_poll%%$'\n'*}"
       case "$_st" in
-        "DONE "?*) sentinel="${_st#DONE }"; break ;;
+        # An EMPTY sentinel is a run that died while writing its own exit code (2026-11-10: bifrost
+        # filled the disk mid-cell and left a zero-byte .run-done). It used to match neither arm, so the
+        # poll treated a dead run as a live one and waited silently; record it as a failed run instead.
+        DONE*) sentinel="${_st#DONE}"; sentinel="${sentinel# }"; [ -n "$sentinel" ] || sentinel="empty (the run died while writing its exit code)"; break ;;
         RUNNING) _norun=0 ;;
         NORUN)
           _norun=$((_norun+1))
