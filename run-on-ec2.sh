@@ -1056,7 +1056,7 @@ bench_gateway_once() {
     --security-group-ids "$SG" ${BENCH_SUBNET_ID:+--subnet-id "$BENCH_SUBNET_ID"} \
     --instance-initiated-shutdown-behavior terminate \
     --user-data "$(printf '#!/bin/bash\nshutdown -h +%s\n' "$BENCH_MAX_MIN")" \
-    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":60,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
     --tag-specifications '[{"ResourceType":"instance","Tags":[{"Key":"Name","Value":"'"$tag"'"},{"Key":"purpose","Value":"gateway-bench"},{"Key":"run","Value":"'"$RUN_ID"'"}]}]' \
     --query 'Instances[0].InstanceId' --output text 2>>"$glog") || { glog_echo "run-instances FAILED: $(tail -1 "$glog" | sed 's/.*: //' | cut -c1-140)"; return 1; }
   glog_echo "launched $iid"
