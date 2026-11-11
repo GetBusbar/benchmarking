@@ -1,0 +1,11 @@
+{
+  "instance_id": "i-03c46131af2a45764",
+  "run_id": "otb-20261111T024810Z-b1",
+  "attempt": 1,
+  "cells": [
+    "gemini>bedrock"
+  ],
+  "region": "ap-south-1",
+  "instance_type": "m7g.4xlarge",
+  "launched_at": "2026-11-11T02:49:30Z"
+}

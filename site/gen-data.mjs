@@ -21,7 +21,10 @@
 // Absent suites, absent gateways and absent charts are all handled cleanly: the site reads
 // whatever this emits and renders "not measured" for the gaps.
 
-import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, copyFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { gunzipSync } from "node:zlib";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -35,7 +38,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.argv[2] || join(HERE, "..");
 const OUT = process.argv[3] || HERE;
 const activeFieldPath = join(ROOT, "results", "active-field.json");
-const activeField = existsSync(activeFieldPath) ? JSON.parse(readFileSync(activeFieldPath, "utf8")) : null;
+/* RANK BASELINE MODE. The board's rank-movement marker compares today's rows with the published
+   August 2026 field. Rather than re-deriving August numbers by hand, gen-data runs ITSELF a second time
+   with OTB_BASELINE_RUNS naming the exact sha256s of that field's raw runs, so the baseline rows are
+   built by the same projection the board uses and the browser reads them with the same cell readers.
+   That run has no active field (its engine is not the active one) and reads only the named snapshots. */
+const BASELINE_RUNS = process.env.OTB_BASELINE_RUNS ? new Set(process.env.OTB_BASELINE_RUNS.split(",")) : null;
+const activeField = BASELINE_RUNS ? null : existsSync(activeFieldPath) ? JSON.parse(readFileSync(activeFieldPath, "utf8")) : null;
 if (activeField && (!/^[a-f0-9]{40}$/.test(activeField.engine_commit) || !Number.isFinite(Date.parse(activeField.started_at)))) {
   throw new Error("Invalid active field engine or start timestamp");
 }
@@ -246,10 +255,14 @@ function resolvedSnapshot(key) {
   const snaps = [];
   for (const f of readdirSync(SNAP_DIR)) {
     if (!f.startsWith(`result_${key}_`) || !f.endsWith(".json")) continue;
-    if (withdrawnRuns[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]) continue;
+    const sha = createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex");
+    if (BASELINE_RUNS ? !BASELINE_RUNS.has(sha) : withdrawnRuns[sha]) continue;
     let snap = readJson(join(SNAP_DIR, f));
     if (snap) snap = applyRunReview(snap, runReviews[createHash("sha256").update(readFileSync(join(SNAP_DIR, f))).digest("hex")]);
     if (!snap) continue;
+    // A CANDIDATE CHECK (run-field.py --candidate-image; results/candidates/) is never a published result,
+    // even if one is copied here by mistake.
+    if (snap.candidate === true) { console.warn(`gen-data: ignoring candidate-check snapshot ${f} (not a published result)`); continue; }
     snap.__file = f;
     snap.__ms = snap.measured_at ? Date.parse(snap.measured_at) : 0;
     // An unparseable stamp cannot be ordered: NaN compares false against everything, so a scoped re-run
@@ -1232,6 +1245,35 @@ let thinnedFrom = 0, thinnedTo = 0;
     } else thinAll(v);
   }
 })(data);
+
+// THE RANK BASELINE (results/rank-baseline.json): the published August 2026 field's rows, built by a
+// nested baseline-mode run of this file, embedded so the board can say how far each row moved since then.
+// Only identity and measurement fields the table reads are kept; drawing series are dropped.
+const rankBaselinePath = join(ROOT, "results", "rank-baseline.json");
+if (!BASELINE_RUNS && existsSync(rankBaselinePath)) {
+  const spec = JSON.parse(readFileSync(rankBaselinePath, "utf8"));
+  const collection = JSON.parse(gunzipSync(readFileSync(join(ROOT, "results", "baselines", spec.baseline, "collection.json.gz"))));
+  const shas = [...new Set(collection.measurements.map((m) => String(m.run_id).slice(-64)))].filter((h) => /^[a-f0-9]{64}$/.test(h));
+  const tmp = mkdtempSync(join(tmpdir(), "otb-rank-baseline-"));
+  try {
+    execFileSync(process.execPath, [fileURLToPath(import.meta.url), ROOT, tmp], { stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, OTB_BASELINE_RUNS: shas.join(",") } });
+    const base = JSON.parse(readFileSync(join(tmp, "data.json"), "utf8"));
+    // Chart and evidence payloads no sortable column reads; the full rows stay in the raw runs.
+    const BASELINE_DROP = new Set(["rss_series", "idle_rss_series", "absences", "timings_s", "ootb_config", "body_snippet"]);
+    const strip = (o) => {
+      if (Array.isArray(o)) return o.map(strip);
+      if (!o || typeof o !== "object") return o;
+      return Object.fromEntries(Object.entries(o).filter(([k, v]) => !BASELINE_DROP.has(k) && !(k === "sweep" && Array.isArray(v))).map(([k, v]) => [k, strip(v)]));
+    };
+    const rows = Object.fromEntries(base.gateways.filter((g) => g.matrix || g.snapshot_file).map((g) => [g.key, strip(g)]));
+    const dates = Object.values(rows).map((g) => g.measured_at).filter(Boolean).sort();
+    data.rank_baseline = {
+      label: spec.label, field: spec.baseline, engine: base.benchmark_version ?? null,
+      measured_range: { earliest: dates[0] ?? null, latest: dates.at(-1) ?? null },
+      note: spec.note ?? null, gateways: rows,
+    };
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+}
 
 // Compact, not indented. The indentation was one space per level on a 14 MB document - megabytes of
 // whitespace shipped to every reader for a file no human opens by hand.
