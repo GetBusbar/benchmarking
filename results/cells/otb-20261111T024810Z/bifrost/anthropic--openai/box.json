@@ -1,0 +1,11 @@
+{
+  "instance_id": "i-056b93df290989b5f",
+  "run_id": "otb-20261111T024810Z-b1",
+  "attempt": 1,
+  "cells": [
+    "anthropic>openai"
+  ],
+  "region": "ap-south-1",
+  "instance_type": "m7g.4xlarge",
+  "launched_at": "2026-11-11T02:48:48Z"
+}
