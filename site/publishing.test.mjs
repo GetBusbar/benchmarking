@@ -342,19 +342,18 @@ test('sorted metric cells no longer carry an in-cell rank marker', async () => {
  assert.doesNotMatch(app.metricTd({v:100,text:'100',historyTrend:trend}),/metric-trend|rank-move/);
 });
 
-test('rank movement vs the August baseline: up, down, flat within 5%, and no baseline reading', async () => {
+test('rank movement vs the August baseline: places moved, always adding up, and no baseline reading', async () => {
  const {default:app}=await import('./app.js');
  const col={id:'rps',get:g=>({v:g.v})};
  const row=(key,v,extra={})=>({key,display:key,v,measured_at:'2026-11-10T17:40:00Z',...extra});
- // August order (higher is better): a 100, b 90, c 80, d 70. Today: c jumps to 120 (1st), a slips to 85 (+/-15%),
+ // August order (higher is better): a 100, b 90, c 80, d 70. Today: c jumps to 120 (1st), a slips to 85 (-15%),
  // b moves 3% only, d has no August reading, e is not measured today.
  const now=[row('a',85),row('b',92.7),row('c',120),row('d',60),row('e',null)];
  const base={a:row('a',100,{measured_at:'2026-08-26T19:08:42Z'}),b:row('b',90),c:row('c',80),d:row('d',null)};
  const m=app.rankMovements(now,base,col,true);
  assert.deepEqual([m.get('c').before,m.get('c').after,m.get('c').change,m.get('c').state],[3,1,2,'up']);
  assert.deepEqual([m.get('a').before,m.get('a').after,m.get('a').change,m.get('a').state],[1,3,-2,'down']);
- // b went 2 -> 2 here, and even if its place had changed, a 3% move is inside the tolerance.
- assert.equal(m.get('b').state,'flat'); assert.equal(m.get('b').within_tolerance,true);
+ assert.deepEqual([m.get('b').before,m.get('b').after,m.get('b').state],[2,2,'flat']);
  assert.equal(m.get('d').state,'no_baseline');
  assert.equal(m.has('e'),false);
  const html=k=>app.rankMoveMarkup(m.get(k),{label:'August 2026 run'});
@@ -363,15 +362,14 @@ test('rank movement vs the August baseline: up, down, flat within 5%, and no bas
  assert.match(html('a'),/Position 1 → 3; value change -15\.0% since August 2026 \(2026-08-26\)/);
  assert.match(html('b'),/>–</);
  assert.match(html('d'),/No August 2026 run reading for this column[^>]*>–</);
- // A place change inside the ±5% band is not a movement.
- const tight=app.rankMovements([row('x',101),row('y',99)],{x:row('x',99),y:row('y',100)},col,true);
- assert.equal(tight.get('x').change,0); assert.equal(tight.get('x').before,2); assert.equal(tight.get('x').after,1);
+ // A row passed by another reads as down even when its own value barely moved: the markers add up.
+ const passed=app.rankMovements([row('x',101),row('y',99)],{x:row('x',99),y:row('y',100)},col,true);
+ assert.deepEqual([passed.get('x').change,passed.get('y').change],[1,-1]);
  // Text columns (gateway name, tested-on) claim no movement.
  assert.equal(app.rankMovements(now,base,{id:'name',get:g=>({v:g.display})},false).size,0);
- assert.equal(app.RANK_TOLERANCE_PERCENT,5);
 });
 
- test("refuted upstream verification cannot appear as a served matrix pairing", async () => {
+test("refuted upstream verification cannot appear as a served matrix pairing", async () => {
   const { default: app } = await import("./app.js");
   const { canonicalCellState } = await import("./states.mjs");
   const cell = {served:true,perf:{egress_reverified:false,reverify_note:"Observed a different upstream dialect"}};
