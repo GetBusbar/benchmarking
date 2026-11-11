@@ -481,11 +481,10 @@ function withHistoryTrend(cell, g, record, key, bound) {
 /* RANK MOVEMENT SINCE THE AUGUST 2026 FIELD (data.rank_baseline).
    The table's own sort decides the ranking: the rows that have a reading in the sorted column today AND in
    the baseline are ranked twice with the same comparator - once on today's rows, once on the baseline rows
-   built by the same projection - and a row's movement is the difference in place. A row counts as moved only
-   when its value changed by more than RANK_TOLERANCE_PERCENT (the history pages' ±5% display tolerance);
-   otherwise it reads "–". The two runs were measured by different engines, so this is a descriptive
-   comparison with the published August field, not a statistical claim. */
-const RANK_TOLERANCE_PERCENT = 5;
+   built by the same projection - and a row's movement is the difference in place, always: the markers add
+   up, so a row passed by another reads as down even when its own value held. Its own value change travels
+   in the hover text. The two runs were measured by different engines, so this is a descriptive comparison
+   with the published August field, not a statistical claim. */
 function rankMovements(rows, baselineRows, col, desc, tiebreak) {
   const out = new Map();
   if (!col || col.sortable === false || !baselineRows) return out;
@@ -505,16 +504,15 @@ function rankMovements(rows, baselineRows, col, desc, tiebreak) {
     const is = value(g);
     const a = before.indexOf(g.key) + 1, b = after.indexOf(g.key) + 1;
     const pct = was === 0 ? (is === 0 ? 0 : null) : (is - was) / Math.abs(was) * 100;
-    const flat = Math.abs(is - was) <= Math.abs(was) * RANK_TOLERANCE_PERCENT / 100 + Number.EPSILON * Math.max(Math.abs(was), Math.abs(is), 1);
-    const change = flat ? 0 : a - b;
+    const change = a - b;
     out.set(g.key, { state: change > 0 ? "up" : change < 0 ? "down" : "flat", change, before: a, after: b, change_percent: pct,
-      within_tolerance: flat, baseline_measured_at: base.measured_at || null });
+      baseline_measured_at: base.measured_at || null });
   }
   return out;
 }
 function rankBaselineNote(baseline) {
   const label = baseline.label || "August 2026 run";
-  return `Beside each name: places moved on the sorted column vs the ${label} (+ up, − down, – no movement or within ±${RANK_TOLERANCE_PERCENT}%). Different engines measured the two runs; this is descriptive, not a statistical result.`;
+  return `Beside each name: places moved on the sorted column vs the ${label} (+ up, − down, – same place). Different engines measured the two runs; this is descriptive, not a statistical result.`;
 }
 function rankMoveMarkup(move, baseline) {
   if (!move) return "";
@@ -526,7 +524,7 @@ function rankMoveMarkup(move, baseline) {
   } else {
     const pct = move.change_percent == null ? "no percentage baseline" : `${move.change_percent > 0 ? "+" : ""}${move.change_percent.toFixed(1)}%`;
     title = `Position ${move.before} → ${move.after}; value change ${pct} ${since(move.baseline_measured_at)}` +
-      (move.within_tolerance ? `. Within ±${RANK_TOLERANCE_PERCENT}%, counted as no movement.` : ".") + ` Compared with the ${label}; the engine changed between the runs.`;
+"." + ` Compared with the ${label}; the engine changed between the runs.`;
     if (move.change > 0) text = `+${move.change}`;
     else if (move.change < 0) text = `\u2212${-move.change}`;
   }
@@ -5902,7 +5900,7 @@ if (NODE) {
     canonicalPerf, canonicalXlate, canonicalStreaming, canonicalMemory, metric, mval, mcode, samplesNote, isEnvelope, caption, SWEEP_CAPTION, gatewayResultsJson, DEFAULT_VIEW, VIEW_LABELS, rosterRows, fmtStars,
     configCorrectionUrl, BENCH_REPO, fmtInt, fmtAdded,
     HOME_VIEW, homeCardsHtml,
-    metricTd, rankMovements, rankMoveMarkup, rankBaselineNote, RANK_TOLERANCE_PERCENT,
+    metricTd, rankMovements, rankMoveMarkup, rankBaselineNote,
     // The roster's row order, the compare row's tied-best set, the lane served predicate and the
     // memory-tab dialect seed: pure functions the suite drives directly, because each of them was a
     // defect that no DOM-free test could reach while it lived inside a renderer.
