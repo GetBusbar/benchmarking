@@ -15,6 +15,7 @@ stages: [verify, publish]
 
 verify-website:
   stage: verify
+  tags: [size-arm]
   timeout: 30m
   image: node:22-bookworm
   rules:
@@ -42,7 +43,7 @@ deploy-website:
   # Protected deploy runner (GCP, example-project): its own worker pool, no shared cache,
   # one job per VM. The Cloudflare credentials are scoped to the production environment,
   # so only this job receives them.
-  tags: [otb-deploy]
+  tags: [size-arm]
   environment:
     name: production
     url: https://onthebench.ai
@@ -76,6 +77,7 @@ deploy-website:
 # Build the immutable instrument separately from website publication.
 verify-engine:
   stage: verify
+  tags: [size-arm]
   image: rust:1.98-bookworm
   timeout: 60m
   # The instrument is verified once, at the exact commit it is built from, on request
