@@ -40,7 +40,7 @@ verify-website:
 
 deploy-website:
   stage: publish
-  # Protected deploy runner (GCP, example-project): its own worker pool, no shared cache,
+  # Protected deploy runner: its own worker pool, no shared cache,
   # one job per VM. The Cloudflare credentials are scoped to the production environment,
   # so only this job receives them.
   tags: [size-arm]

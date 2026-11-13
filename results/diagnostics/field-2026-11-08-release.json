@@ -1,8 +1,8 @@
 {
   "engine_commit": "0954789764947f1f51f9af86687f88499b9a9d77",
   "source_commit": "f389a8879882a04db169f1df4caadcdab667c043",
-  "ci_pipeline": "https://github.com/GetBusbar/benchmarking/-/pipelines/412",
-  "ci_job": "https://github.com/GetBusbar/benchmarking/-/jobs/552",
+  "ci_pipeline": 412,
+  "ci_job": 552,
   "engine_sha256": "c5ddd560011cc82569ec4816299f40ded520168e4a4712dd040888027daee6c0",
   "mock_sha256": "7150734b700340a9031720299d3bfa50b0a0ac746c87360c623831db48187d54",
   "calibration": "results/calibrations/2026-11-08-09547897-arm64.json",
